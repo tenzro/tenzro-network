@@ -767,6 +767,17 @@ impl HotStuff2Engine {
         self.mempool.set_admission(admission)
     }
 
+    /// Wires a live account state reader into the engine's mempool for
+    /// stateful admission (nonce ordering + balance coverage). Forwards to
+    /// [`Mempool::set_state_reader`]; same at-most-once contract as
+    /// [`Self::set_admission`].
+    pub fn set_state_reader(
+        &self,
+        reader: Arc<dyn crate::mempool::AccountStateReader>,
+    ) -> crate::Result<()> {
+        self.mempool.set_state_reader(reader)
+    }
+
     /// Read-only access to the mempool — exposed so node startup can hand
     /// the same `Arc<Mempool>` to RPC handlers (`tenzro_getMempoolStats`,
     /// `tenzro_getMempoolLane`) without going through this engine.

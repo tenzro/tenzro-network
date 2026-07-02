@@ -199,6 +199,12 @@ Usage:
     python tenzro_rpc.py summarize_controller did:tenzro:human:...
     python tenzro_rpc.py get_provider_reputation 0x<provider>
     python tenzro_rpc.py list_disputes_by_channel <channel_id>
+    python tenzro_rpc.py treasury_add_withdrawer 0x<address>
+    python tenzro_rpc.py treasury_remove_withdrawer 0x<address>
+    python tenzro_rpc.py treasury_set_withdrawal_threshold 2
+    python tenzro_rpc.py treasury_approve_withdrawal <withdrawal_id> TNZO 1000000000000000000 0x<approver> <pubkey_hex> <sig_hex> [ed25519|secp256k1]
+    python tenzro_rpc.py treasury_execute_withdrawal <withdrawal_id> TNZO 1000000000000000000
+    python tenzro_rpc.py treasury_get_pending_withdrawal <withdrawal_id>
 """
 
 import json
@@ -1757,21 +1763,32 @@ def debridge_same_chain_swap(chain_id, token_in, token_out, amount):
 # ── ERC-7802 Crosschain Token ───────────────────────────────────
 
 
-def crosschain_mint(bridge: str, to: str, amount: int,
-                    sender: str) -> dict:
+def crosschain_mint(bridge: str, adapter: str, source_chain: str,
+                    payload: str, to: str = None, amount: int = None) -> dict:
     """Mint tokens via an authorized crosschain bridge (ERC-7802).
 
+    The node dispatches the payload through its bridge router for quorum
+    verification; the verified message inside is the sole authority for
+    recipient and amount.
+
     bridge: authorized bridge address
-    to: recipient address
-    amount: amount in wei to mint
-    sender: address initiating the crosschain mint
+    adapter: bridge router adapter name (e.g. wormhole, hyperlane, axelar)
+    source_chain: chain the payload arrived from
+    payload: hex-encoded inbound bridge payload
+    to: expected recipient address (cross-check, optional)
+    amount: expected amount in wei (cross-check, optional)
     """
-    return _rpc("tenzro_crosschainMint", {
+    params = {
         "bridge": bridge,
-        "to": to,
-        "amount": amount,
-        "sender": sender,
-    })
+        "adapter": adapter,
+        "source_chain": source_chain,
+        "payload": payload,
+    }
+    if to is not None:
+        params["to"] = to
+    if amount is not None:
+        params["amount"] = amount
+    return _rpc("tenzro_crosschainMint", params)
 
 
 def crosschain_burn(bridge: str, from_addr: str, amount: int,
@@ -1815,6 +1832,88 @@ def authorize_bridge(bridge: str, name: str,
 def list_authorized_bridges() -> dict:
     """List all authorized crosschain bridges (ERC-7802)."""
     return _rpc("tenzro_listAuthorizedBridges")
+
+
+# ── Treasury Multisig Withdrawals ───────────────────────────────
+#
+# Withdrawer/threshold configuration requires the operator admin
+# token (TENZRO_ADMIN_TOKEN). Approval and execution are authorized
+# by the approver's signature over the domain-separated preimage
+# "tenzro/treasury/withdrawal-approval" || withdrawal_id || asset_id
+# || amount_le and the configured threshold.
+
+
+def treasury_add_withdrawer(address: str) -> dict:
+    """Authorize a treasury withdrawer address (admin token required).
+
+    address: withdrawer address (0x-prefixed hex)
+    """
+    return _rpc("tenzro_treasuryAddWithdrawer", {"address": address})
+
+
+def treasury_remove_withdrawer(address: str) -> dict:
+    """Remove an authorized treasury withdrawer (admin token required).
+
+    address: withdrawer address (0x-prefixed hex)
+    """
+    return _rpc("tenzro_treasuryRemoveWithdrawer", {"address": address})
+
+
+def treasury_set_withdrawal_threshold(threshold: int) -> dict:
+    """Set the treasury withdrawal approval threshold (admin token required).
+
+    threshold: distinct approvals required per withdrawal
+    """
+    return _rpc("tenzro_treasurySetWithdrawalThreshold",
+                {"threshold": threshold})
+
+
+def treasury_approve_withdrawal(withdrawal_id: str, asset_id: str,
+                                amount: str, approver: str,
+                                public_key: str, signature: str,
+                                key_type: str = "ed25519") -> dict:
+    """Approve a treasury withdrawal with a signed approval.
+
+    withdrawal_id: identifier shared by all approvers
+    asset_id: asset identifier (e.g. TNZO)
+    amount: amount in base units (decimal string)
+    approver: approver address (0x-prefixed hex, authorized withdrawer)
+    public_key: approver public key (hex)
+    signature: hex signature over the withdrawal-approval preimage
+    key_type: ed25519 (default) or secp256k1
+    """
+    return _rpc("tenzro_treasuryApproveWithdrawal", {
+        "withdrawal_id": withdrawal_id,
+        "asset_id": asset_id,
+        "amount": amount,
+        "approver": approver,
+        "key_type": key_type,
+        "public_key": public_key,
+        "signature": signature,
+    })
+
+
+def treasury_execute_withdrawal(withdrawal_id: str, asset_id: str,
+                                amount: str) -> dict:
+    """Execute a treasury withdrawal once the threshold is reached.
+
+    The (withdrawal_id, asset_id, amount) triple must match the
+    approved withdrawal exactly.
+    """
+    return _rpc("tenzro_treasuryExecuteWithdrawal", {
+        "withdrawal_id": withdrawal_id,
+        "asset_id": asset_id,
+        "amount": amount,
+    })
+
+
+def treasury_get_pending_withdrawal(withdrawal_id: str) -> dict:
+    """Get a pending treasury withdrawal's approval state.
+
+    Returns null when no pending withdrawal matches.
+    """
+    return _rpc("tenzro_treasuryGetPendingWithdrawal",
+                {"withdrawal_id": withdrawal_id})
 
 
 # ── ERC-3643 Compliance ─────────────────────────────────────────
@@ -7452,7 +7551,9 @@ COMMANDS = {
     ),
     # ERC-7802 Crosschain
     "crosschain_mint": lambda args: crosschain_mint(
-        args[0], args[1], int(args[2]), args[3],
+        args[0], args[1], args[2], args[3],
+        args[4] if len(args) > 4 else None,
+        int(args[5]) if len(args) > 5 else None,
     ),
     "crosschain_burn": lambda args: crosschain_burn(
         args[0], args[1], int(args[2]), args[3],
@@ -7463,6 +7564,22 @@ COMMANDS = {
         int(args[3]) if len(args) > 3 else None,
     ),
     "list_authorized_bridges": lambda args: list_authorized_bridges(),
+    # Treasury multisig
+    "treasury_add_withdrawer": lambda args: treasury_add_withdrawer(args[0]),
+    "treasury_remove_withdrawer": lambda args: treasury_remove_withdrawer(args[0]),
+    "treasury_set_withdrawal_threshold": lambda args: treasury_set_withdrawal_threshold(
+        int(args[0]),
+    ),
+    "treasury_approve_withdrawal": lambda args: treasury_approve_withdrawal(
+        args[0], args[1], args[2], args[3], args[4], args[5],
+        args[6] if len(args) > 6 else "ed25519",
+    ),
+    "treasury_execute_withdrawal": lambda args: treasury_execute_withdrawal(
+        args[0], args[1], args[2],
+    ),
+    "treasury_get_pending_withdrawal": lambda args: treasury_get_pending_withdrawal(
+        args[0],
+    ),
     # ERC-3643 Compliance
     "check_compliance": lambda args: check_compliance(
         args[0], args[1], args[2], int(args[3]),

@@ -57,6 +57,7 @@ LayerZero is an omnichain interoperability protocol enabling cross-chain messagi
 | Story | 30364 | rpc.story.foundation |
 | Monad | 30390 | rpc.monad.xyz |
 | MegaETH | 30398 | rpc.megaeth.com |
+| Robinhood Chain | 30416 | rpc.mainnet.chain.robinhood.com |
 | Tron | 30420 | api.trongrid.io/jsonrpc |
 
 ## Tools (21)

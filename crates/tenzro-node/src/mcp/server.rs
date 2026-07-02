@@ -1458,12 +1458,16 @@ pub struct BridgeWithHookParams {
 pub struct CrosschainMintParams {
     #[schemars(description = "Hex-encoded authorized bridge address")]
     pub bridge: String,
-    #[schemars(description = "Hex-encoded recipient address")]
-    pub to: String,
-    #[schemars(description = "Amount to mint in base units")]
-    pub amount: u128,
-    #[schemars(description = "Hex-encoded sender address on the source chain (for event attribution)")]
-    pub sender: String,
+    #[schemars(description = "Bridge router adapter name that verifies the inbound payload (e.g. wormhole, hyperlane, axelar)")]
+    pub adapter: String,
+    #[schemars(description = "Source chain identifier the payload arrived from")]
+    pub source_chain: String,
+    #[schemars(description = "Hex-encoded inbound bridge payload; the quorum-verified TenzroMessage inside is the sole authority for recipient and amount")]
+    pub payload: String,
+    #[schemars(description = "Expected recipient address (hex) — cross-checked against the verified message")]
+    pub to: Option<String>,
+    #[schemars(description = "Expected amount in base units — cross-checked against the verified message")]
+    pub amount: Option<u128>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1530,6 +1534,42 @@ pub struct FreezeAddressParams {
     pub address: String,
     #[schemars(description = "Reason for freezing the address")]
     pub reason: String,
+}
+
+// ─── Treasury Multisig Params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TreasuryApproveWithdrawalParams {
+    #[schemars(description = "Withdrawal identifier shared by all approvers")]
+    pub withdrawal_id: String,
+    #[schemars(description = "Asset identifier (e.g. 'TNZO')")]
+    pub asset_id: String,
+    #[schemars(description = "Amount in base units (decimal string)")]
+    pub amount: String,
+    #[schemars(description = "Approver address (0x-prefixed hex) — must be an authorized withdrawer")]
+    pub approver: String,
+    #[schemars(description = "Signature key type: 'ed25519' (default) or 'secp256k1'")]
+    pub key_type: Option<String>,
+    #[schemars(description = "Approver public key (hex)")]
+    pub public_key: String,
+    #[schemars(description = "Hex signature over 'tenzro/treasury/withdrawal-approval' || withdrawal_id || asset_id || amount_le")]
+    pub signature: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TreasuryExecuteWithdrawalParams {
+    #[schemars(description = "Withdrawal identifier")]
+    pub withdrawal_id: String,
+    #[schemars(description = "Asset identifier (e.g. 'TNZO')")]
+    pub asset_id: String,
+    #[schemars(description = "Amount in base units (decimal string) — must match the approved amount")]
+    pub amount: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TreasuryGetPendingWithdrawalParams {
+    #[schemars(description = "Withdrawal identifier")]
+    pub withdrawal_id: String,
 }
 
 // ─── Events Params ───
@@ -10019,7 +10059,7 @@ impl TenzroMcpServer {
 
     // ─── ERC-7802 Crosschain Tools ───
 
-    #[tool(description = "Mint tokens via an authorized crosschain bridge (ERC-7802 crosschainMint). Only pre-authorized bridges can call this. Tokens are minted on the local chain after being burned on the source chain. Returns the mint event and nonce.")]
+    #[tool(description = "Mint tokens via an authorized crosschain bridge (ERC-7802 crosschainMint). Only pre-authorized bridges can call this. The hex-encoded inbound bridge payload is dispatched through the bridge router for quorum verification; the verified TenzroMessage inside is the sole authority for recipient and amount. Returns the mint event and nonce.")]
     async fn crosschain_mint(
         &self,
         Parameters(params): Parameters<CrosschainMintParams>,
@@ -10044,14 +10084,49 @@ impl TenzroMcpServer {
             )));
         }
 
-        let to_hex = params.to.strip_prefix("0x").unwrap_or(&params.to);
-        let to_bytes = hex::decode(to_hex).map_err(|e| err_internal_data(format!("Invalid recipient address: {}", e)))?;
+        // The verified inbound message is the sole authority for recipient + amount.
+        let (message, transfer) = crate::rpc::verify_inbound_transfer_message(
+            &self.node,
+            &params.adapter,
+            &params.source_chain,
+            &params.payload,
+        )
+        .await
+        .map_err(|e| err_internal_data(e.message))?;
+
+        if !transfer.asset_id.eq_ignore_ascii_case("TNZO") {
+            return Err(err_internal_data(format!(
+                "Inbound transfer asset '{}' is not TNZO",
+                transfer.asset_id
+            )));
+        }
+        let amount = transfer.amount;
+
+        let to_hex = crate::rpc::normalize_hex_addr(&message.receiver);
+        let to_bytes = hex::decode(&to_hex)
+            .map_err(|e| err_internal_data(format!("Inbound message receiver is not a valid address: {}", e)))?;
         let to_addr = bytes_to_address(&to_bytes);
+
+        // Cross-check caller-supplied expectations against the verified message.
+        if let Some(ref expected_to) = params.to
+            && crate::rpc::normalize_hex_addr(expected_to) != to_hex {
+            return Err(err_internal_data(format!(
+                "Caller 'to' {} does not match verified message receiver 0x{}",
+                expected_to, to_hex
+            )));
+        }
+        if let Some(expected_amount) = params.amount
+            && expected_amount != amount {
+            return Err(err_internal_data(format!(
+                "Caller 'amount' {} does not match verified message amount {}",
+                expected_amount, amount
+            )));
+        }
 
         // Mint tokens via TnzoToken (caller must be treasury)
         let treasury = token.treasury_address_ref()
             .ok_or_else(|| err_internal_data("Treasury address not configured — cannot mint"))?;
-        token.mint(&to_addr, params.amount, &treasury)
+        token.mint(&to_addr, amount, &treasury)
             .map_err(|e| err_internal_data(format!("Mint failed: {}", e)))?;
 
         // Increment nonce
@@ -10067,8 +10142,11 @@ impl TenzroMcpServer {
         json_result(serde_json::json!({
             "bridge": format!("0x{}", bridge_hex),
             "to": format!("0x{}", to_hex),
-            "amount": params.amount.to_string(),
-            "sender": params.sender,
+            "amount": amount.to_string(),
+            "sender": message.sender,
+            "source_chain": params.source_chain,
+            "adapter": params.adapter,
+            "message_hash": format!("0x{}", hex::encode(message.message_hash)),
             "nonce": nonce,
             "event": "CrosschainMint",
             "status": "minted",
@@ -10321,6 +10399,99 @@ impl TenzroMcpServer {
             "reason": params.reason,
             "status": "frozen",
         }))
+    }
+
+    // ─── Treasury Multisig Tools ───
+    //
+    // Withdrawer/threshold configuration is admin-token-gated at the RPC
+    // layer and intentionally not exposed here; the approver signature plus
+    // the configured threshold authorize these operations.
+
+    #[tool(description = "Approve a treasury withdrawal with a signed approval. The signature covers 'tenzro/treasury/withdrawal-approval' || withdrawal_id || asset_id || amount_le and must come from an authorized withdrawer. Returns the approval count and whether the threshold is reached.")]
+    async fn treasury_approve_withdrawal(
+        &self,
+        Parameters(params): Parameters<TreasuryApproveWithdrawalParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        use tenzro_crypto::KeyType;
+
+        let treasury = self.node.treasury().ok_or_else(|| err_internal("Treasury not initialized"))?;
+
+        let asset_id = tenzro_types::asset::AssetId::new(&params.asset_id);
+        let amount: u128 = params.amount.parse()
+            .map_err(|_| err_internal_data("Invalid amount (decimal string in base units)"))?;
+
+        let addr_hex = params.approver.strip_prefix("0x").unwrap_or(&params.approver);
+        let addr_bytes = hex::decode(addr_hex)
+            .map_err(|e| err_internal_data(format!("Invalid approver address: {}", e)))?;
+        let approver = tenzro_types::Address::from_bytes(&addr_bytes)
+            .ok_or_else(|| err_internal_data("Invalid approver address length"))?;
+
+        let key_type = match params.key_type.as_deref().unwrap_or("ed25519") {
+            "secp256k1" => KeyType::Secp256k1,
+            _ => KeyType::Ed25519,
+        };
+        let public_key = tenzro_crypto::PublicKey::from_hex(key_type, &params.public_key)
+            .map_err(|e| err_internal_data(format!("Invalid public_key hex: {}", e)))?;
+        let signature = tenzro_crypto::Signature::from_hex(key_type, &params.signature)
+            .map_err(|e| err_internal_data(format!("Invalid signature hex: {}", e)))?;
+
+        let threshold_reached = treasury
+            .approve_withdrawal(&params.withdrawal_id, &asset_id, amount, &approver, &public_key, &signature)
+            .map_err(|e| err_internal_data(e.to_string()))?;
+
+        let pending = treasury.pending_withdrawal(&params.withdrawal_id);
+        json_result(serde_json::json!({
+            "withdrawal_id": params.withdrawal_id,
+            "asset_id": asset_id.as_str(),
+            "amount": amount.to_string(),
+            "approvals": pending.as_ref().map(|p| p.approvers.len()).unwrap_or(0),
+            "threshold": treasury.withdrawal_threshold(),
+            "threshold_reached": threshold_reached,
+        }))
+    }
+
+    #[tool(description = "Execute a treasury withdrawal after the approval threshold is reached. The (withdrawal_id, asset_id, amount) triple must match the approved withdrawal exactly.")]
+    async fn treasury_execute_withdrawal(
+        &self,
+        Parameters(params): Parameters<TreasuryExecuteWithdrawalParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let treasury = self.node.treasury().ok_or_else(|| err_internal("Treasury not initialized"))?;
+
+        let asset_id = tenzro_types::asset::AssetId::new(&params.asset_id);
+        let amount: u128 = params.amount.parse()
+            .map_err(|_| err_internal_data("Invalid amount (decimal string in base units)"))?;
+
+        treasury
+            .execute_withdrawal(&params.withdrawal_id, &asset_id, amount)
+            .map_err(|e| err_internal_data(e.to_string()))?;
+
+        json_result(serde_json::json!({
+            "withdrawal_id": params.withdrawal_id,
+            "asset_id": asset_id.as_str(),
+            "amount": amount.to_string(),
+            "executed": true,
+            "remaining_balance": treasury.balance(&asset_id).to_string(),
+        }))
+    }
+
+    #[tool(description = "Get a pending treasury withdrawal's approval state: asset, amount, approver addresses, approval count, and the configured threshold. Returns null when no pending withdrawal matches.")]
+    async fn treasury_get_pending_withdrawal(
+        &self,
+        Parameters(params): Parameters<TreasuryGetPendingWithdrawalParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let treasury = self.node.treasury().ok_or_else(|| err_internal("Treasury not initialized"))?;
+
+        match treasury.pending_withdrawal(&params.withdrawal_id) {
+            Some(p) => json_result(serde_json::json!({
+                "withdrawal_id": params.withdrawal_id,
+                "asset_id": p.asset_id.as_str(),
+                "amount": p.amount.to_string(),
+                "approvers": p.approvers.iter().map(|a| format!("0x{}", hex::encode(a.as_bytes()))).collect::<Vec<_>>(),
+                "approvals": p.approvers.len(),
+                "threshold": treasury.withdrawal_threshold(),
+            })),
+            None => json_result(serde_json::Value::Null),
+        }
     }
 
     // ─── Events Tools ───

@@ -1,6 +1,8 @@
 [package]
 name = "tenzro-device-key"
-version.workspace = true
+# Own version (overrides the workspace 0.1.0): the Secure-Enclave key now
+# persists in the legacy file keychain, fixing cross-restart wallet unlock.
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -23,9 +25,10 @@ hex = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
 
-# OSX_10_15 enables `Location::DataProtectionKeychain` + `ignore_legacy_keychains`,
-# which a Secure Enclave key MUST use to persist across restarts (requires the
-# app to ship a keychain-access-groups entitlement + provisioning profile).
+# OSX_10_15 gates the `Location` API used to persist the Secure-Enclave key in
+# the legacy file (login) keychain via `Location::DefaultFileKeychain`. That
+# path needs no keychain-access-groups entitlement or provisioning profile —
+# only the data-protection keychain does. See src/lib.rs / Apple TN3137.
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3", features = ["OSX_10_15"] }
 

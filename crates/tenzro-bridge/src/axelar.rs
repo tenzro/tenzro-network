@@ -245,6 +245,8 @@ pub struct AxelarAdapter {
     signer: Arc<RwLock<Option<Arc<EvmTransactionSigner>>>>,
     /// Pinned Axelar validator set for inbound GMP verification.
     validator_set: Arc<RwLock<Option<AxelarValidatorSet>>>,
+    /// Optional write-through persistence for the replay cache.
+    seen_storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl AxelarAdapter {
@@ -263,7 +265,24 @@ impl AxelarAdapter {
             transfers: Arc::new(DashMap::new()),
             signer: Arc::new(RwLock::new(None)),
             validator_set: Arc::new(RwLock::new(None)),
+            seen_storage: None,
         }
+    }
+
+    /// Attach RocksDB persistence: hydrates the replay cache from
+    /// `CF_SETTLEMENTS / bridge_seen:axelar:*` and swaps the inbound
+    /// nonce tracker to its persistent variant.
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        for key in crate::message_format::load_seen_keys(&storage, "axelar") {
+            self.seen_commands.insert(key, ());
+        }
+        self.inbound_nonce_tracker =
+            Arc::new(NonceTracker::with_storage("axelar", storage.clone()));
+        self.seen_storage = Some(storage);
+        self
     }
 
     /// Attach an EVM signer for live on-chain dispatch.
@@ -354,7 +373,11 @@ impl BridgeAdapter for AxelarAdapter {
         Ok(format!("0x{}", hex::encode(hash.as_bytes())))
     }
 
-    async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+    async fn receive_message(
+        &self,
+        source_chain: &str,
+        payload: Vec<u8>,
+    ) -> Result<Option<TenzroMessage>> {
         let canonical = self.config.canonical_chain(source_chain);
         if payload.is_empty() {
             return Err(BridgeError::InvalidParameter("empty payload".into()));
@@ -403,26 +426,15 @@ impl BridgeAdapter for AxelarAdapter {
         set.verify_quorum(&body_digest, &signatures)?;
 
         // Inner Tenzro-side check operates on the verified `body`.
-        if let Ok(message) = TenzroMessage::decode(body) {
-            message.validate()?;
-            if !message.verify_hash() {
-                return Err(BridgeError::InvalidParameter(
-                    "inbound TenzroMessage hash mismatch".into(),
-                ));
-            }
-            if message.signature.is_some()
-                && !message.verify_signature().unwrap_or(false)
-            {
-                return Err(BridgeError::InvalidParameter(
-                    "inbound TenzroMessage signature verification failed".into(),
-                ));
-            }
-            self.inbound_nonce_tracker
-                .check_and_update(&message.sender, message.nonce)
-                .map_err(|e| BridgeError::ReplayAttack(format!("nonce: {e}")))?;
+        let verified = crate::message_format::verify_inner_message(
+            body,
+            Some(self.inbound_nonce_tracker.as_ref()),
+        )?;
+        if let Some(ref storage) = self.seen_storage {
+            crate::message_format::persist_seen_key(storage, "axelar", &command_key);
         }
         self.seen_commands.insert(command_key, ());
-        Ok(())
+        Ok(verified)
     }
 
     async fn bridge_tokens(&self, request: BridgeTokenRequest) -> Result<BridgeTokenReceipt> {

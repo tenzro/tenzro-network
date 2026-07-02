@@ -21,13 +21,14 @@
 //! - **Create:** generate a fresh ML-DSA-65 seed, `wrap_secret` it to the SE key
 //!   (no biometric prompt — encryption only needs the public key), persist the
 //!   ciphertext, return the verifying key for on-chain enrollment.
-//! - **Open / sign:** read the ciphertext, [`crate::open`] the SE key (only
-//!   succeeds across restarts when the app is provisioned — see crate docs),
-//!   `unwrap_secret` (Touch ID) to recover the seed, rebuild the signing key.
+//! - **Open / sign:** read the ciphertext, [`crate::open`] the SE key (reopened
+//!   by label from the file keychain — see crate docs), `unwrap_secret` (Touch
+//!   ID) to recover the seed, rebuild the signing key.
 //!
-//! The provisioning constraint is identical to [`SecureEnclaveUnlocker`]: an
-//! un-provisioned build can create+sign within a session but cannot reopen the
-//! SE key after a restart, so a later `open` returns [`DeviceKeyError::NotFound`].
+//! Persistence matches [`SecureEnclaveUnlocker`]: a plain Developer-ID build
+//! persists the SE key in the file keychain and reopens it across restarts. If
+//! the key is gone (different machine / reset login keychain), a later `open`
+//! returns [`DeviceKeyError::NotFound`].
 
 use std::path::{Path, PathBuf};
 
@@ -79,8 +80,8 @@ impl PqCompanion {
 
     /// Reopen a previously-created companion by unsealing its seed. Triggers the
     /// Touch ID prompt (the unwrap is a private-key operation). Fails with
-    /// [`DeviceKeyError::NotFound`] if no ciphertext exists or the SE key can't
-    /// be reopened across a restart on an un-provisioned build.
+    /// [`DeviceKeyError::NotFound`] if no ciphertext exists or the SE key is no
+    /// longer in the keychain (e.g. a different machine or a reset login keychain).
     pub fn open(label: impl Into<String>, ciphertext_path: impl Into<PathBuf>) -> Result<Self> {
         let label = label.into();
         let ciphertext_path = ciphertext_path.into();

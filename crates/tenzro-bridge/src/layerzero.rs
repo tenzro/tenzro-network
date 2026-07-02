@@ -51,6 +51,10 @@ pub struct LayerZeroAdapter {
     /// threshold-many DVN signatures over the LayerZero V2 ULN payload
     /// hash. Absent set → `receive_message` refuses (no fail-open).
     dvn_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u32, crate::secp256k1_multisig::ValidatorSet>>>,
+    /// Replay cache for inbound packets keyed `{src_eid}:{guid_hex}`.
+    seen_guids: Arc<DashMap<String, ()>>,
+    /// Optional write-through persistence for the replay cache.
+    seen_storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl LayerZeroAdapter {
@@ -69,7 +73,22 @@ impl LayerZeroAdapter {
             transfers: Arc::new(DashMap::new()),
             signer: None,
             dvn_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            seen_guids: Arc::new(DashMap::new()),
+            seen_storage: None,
         }
+    }
+
+    /// Attach RocksDB persistence: hydrates the inbound-packet replay
+    /// cache from `CF_SETTLEMENTS / bridge_seen:layerzero:*`.
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        for key in crate::message_format::load_seen_keys(&storage, "layerzero") {
+            self.seen_guids.insert(key, ());
+        }
+        self.seen_storage = Some(storage);
+        self
     }
 
     /// Install the DVN attestation set for a source EID. Inbound
@@ -222,6 +241,7 @@ impl LayerZeroAdapter {
             ChainInfo::new("avalanche", "Avalanche C-Chain", "AVAX", 5),
             ChainInfo::new("base", "Base", "ETH", 5),
             ChainInfo::new("solana", "Solana", "SOL", 1),
+            ChainInfo::new("robinhood", "Robinhood Chain", "ETH", 15),
         ]
     }
 
@@ -245,6 +265,7 @@ impl LayerZeroAdapter {
             "story" => Ok(30364),
             "monad" => Ok(30390),
             "megaeth" => Ok(30398),
+            "robinhood" => Ok(30416),
             "tron" => Ok(30420),
             _ => Err(BridgeError::ChainNotSupported(chain_id.to_string())),
         }
@@ -504,7 +525,11 @@ impl BridgeAdapter for LayerZeroAdapter {
         ))
     }
 
-    async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+    async fn receive_message(
+        &self,
+        source_chain: &str,
+        payload: Vec<u8>,
+    ) -> Result<Option<crate::message_format::TenzroMessage>> {
         // Real LayerZero V2 Uln302-class verifier. The cross-chain
         // authority is the DVN attestation set installed for the
         // source EID via `install_dvn_set`. Without an installed set
@@ -553,6 +578,15 @@ impl BridgeAdapter for LayerZeroAdapter {
         // packet_header_size is 81 (version..receiver). The guid begins at 81.
         let header_81 = &body[..81];
         let guid_and_message = &body[81..];
+        // Replay protection keyed on the LZ V2 packet guid, which is
+        // globally unique per (nonce, path). Checked before quorum
+        // verification so replays are rejected cheaply; recorded only
+        // after the DVN quorum verifies so attackers cannot poison the
+        // cache with unverified guids.
+        let guid_key = format!("{}:{}", src_eid, hex::encode(&body[81..113]));
+        if self.seen_guids.contains_key(&guid_key) {
+            return Err(BridgeError::ReplayAttack(guid_key));
+        }
         use sha3::{Digest as Sha3Digest, Keccak256};
         let mut k = Keccak256::new();
         Sha3Digest::update(&mut k, header_81);
@@ -565,11 +599,21 @@ impl BridgeAdapter for LayerZeroAdapter {
         Sha3Digest::update(&mut k, &payload_hash);
         let prehash: [u8; 32] = k.finalize().into();
         set.verify_quorum(&prehash, &signatures)?;
+        // Inner Tenzro-side check operates on the message bytes after
+        // the packet header (81) + guid (32). Guid replay protection
+        // above covers per-message dedup, so no per-sender nonce
+        // tracker is layered here.
+        let verified =
+            crate::message_format::verify_inner_message(&body[113..], None)?;
+        if let Some(ref storage) = self.seen_storage {
+            crate::message_format::persist_seen_key(storage, "layerzero", &guid_key);
+        }
+        self.seen_guids.insert(guid_key, ());
         info!(
             "LayerZero ULN: DVN quorum verified ({} sigs, threshold {}, src_eid {})",
             signatures.len(), set.threshold, src_eid
         );
-        Ok(())
+        Ok(verified)
     }
 
     async fn bridge_tokens(&self, request: BridgeTokenRequest) -> Result<BridgeTokenReceipt> {

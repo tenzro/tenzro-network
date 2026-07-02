@@ -36,15 +36,17 @@ let unlocker = Arc::new(SecureEnclaveUnlocker::under_data_dir(&node_config.data_
 let handle = tenzro_node::spawn_in_background_with_unlocker(node_config, unlocker).await?;
 ```
 
-## Provisioning requirement
+## Persistence
 
-Cross-restart unlock requires the embedding app to ship a
-`keychain-access-groups` entitlement + an embedded provisioning profile so the
-SE key persists in the data-protection keychain. This is an **app-deployment**
-responsibility (the operator shipping the desktop app), not a node concern. On
-an un-provisioned build, first-run create+wrap+unwrap works within the session,
-but a restart cannot reopen the key — the unlocker reports the wallet as
-unavailable and the node treats it as ephemeral (recreated each launch).
+Cross-restart unlock works on a plain Developer-ID build with no extra
+entitlements: the Secure-Enclave key is persisted in the legacy file (login)
+keychain via `Location::DefaultFileKeychain`, which sets `kSecAttrIsPermanent`
+without requiring the `keychain-access-groups` entitlement or a provisioning
+profile (those are needed only by the data-protection keychain — see Apple
+TN3137). Touch ID / Face ID still gates every signing operation. A later run
+reopens the key by label and unwraps the on-disk ciphertext to recover the same
+password. If the key is gone (a different machine, or a reset login keychain),
+the unlocker reports the wallet as unavailable and the node recreates it.
 
 Non-Apple platforms currently compile to a stub backend.
 

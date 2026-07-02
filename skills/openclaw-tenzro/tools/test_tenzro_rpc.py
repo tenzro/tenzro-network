@@ -766,7 +766,8 @@ class TestCrosschainERC7802(unittest.TestCase):
             "amount": "1000000000000000000",
         })
         result = tenzro_rpc.crosschain_mint(
-            "0xbridge", "0xrecipient", 10**18, "0xsender"
+            "0xbridge", "wormhole", "ethereum", "0xdeadbeef",
+            to="0xrecipient", amount=10**18,
         )
         self.assertIn("tx_hash", result)
 
@@ -801,6 +802,77 @@ class TestCrosschainERC7802(unittest.TestCase):
         ])
         result = tenzro_rpc.list_authorized_bridges()
         self.assertEqual(len(result), 2)
+
+
+class TestTreasuryMultisig(unittest.TestCase):
+    @patch("tenzro_rpc.requests.post")
+    def test_treasury_add_withdrawer(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "added": "0xabc",
+            "withdrawers": ["0xabc"],
+            "threshold": 1,
+        })
+        result = tenzro_rpc.treasury_add_withdrawer("0xabc")
+        self.assertEqual(result["added"], "0xabc")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_treasury_remove_withdrawer(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "removed": "0xabc",
+            "withdrawers": [],
+            "threshold": 1,
+        })
+        result = tenzro_rpc.treasury_remove_withdrawer("0xabc")
+        self.assertEqual(result["removed"], "0xabc")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_treasury_set_withdrawal_threshold(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "threshold": 2,
+            "withdrawers": ["0xabc", "0xdef"],
+        })
+        result = tenzro_rpc.treasury_set_withdrawal_threshold(2)
+        self.assertEqual(result["threshold"], 2)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_treasury_approve_withdrawal(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "withdrawal_id": "wd-1",
+            "approvals": 1,
+            "threshold": 2,
+            "threshold_reached": False,
+        })
+        result = tenzro_rpc.treasury_approve_withdrawal(
+            "wd-1", "TNZO", "1000000000000000000",
+            "0xapprover", "aabb", "ccdd",
+        )
+        self.assertEqual(result["withdrawal_id"], "wd-1")
+        self.assertFalse(result["threshold_reached"])
+        body = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1]["json"]
+        self.assertEqual(body["params"]["key_type"], "ed25519")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_treasury_execute_withdrawal(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "withdrawal_id": "wd-1",
+            "executed": True,
+            "remaining_balance": "0",
+        })
+        result = tenzro_rpc.treasury_execute_withdrawal(
+            "wd-1", "TNZO", "1000000000000000000"
+        )
+        self.assertTrue(result["executed"])
+
+    @patch("tenzro_rpc.requests.post")
+    def test_treasury_get_pending_withdrawal(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "withdrawal_id": "wd-1",
+            "approvals": 1,
+            "threshold": 2,
+            "approvers": ["0xapprover"],
+        })
+        result = tenzro_rpc.treasury_get_pending_withdrawal("wd-1")
+        self.assertEqual(result["approvals"], 1)
 
 
 class TestComplianceERC3643(unittest.TestCase):
@@ -1020,6 +1092,10 @@ class TestCLIDispatch(unittest.TestCase):
             # ERC-7802 Crosschain
             "crosschain_mint", "crosschain_burn",
             "authorize_bridge", "list_authorized_bridges",
+            # Treasury multisig
+            "treasury_add_withdrawer", "treasury_remove_withdrawer",
+            "treasury_set_withdrawal_threshold", "treasury_approve_withdrawal",
+            "treasury_execute_withdrawal", "treasury_get_pending_withdrawal",
             # ERC-3643 Compliance
             "check_compliance", "register_compliance",
             "freeze_address", "unfreeze_address", "recover_tokens",

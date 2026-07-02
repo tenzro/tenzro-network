@@ -10,7 +10,7 @@ The official [Model Context Protocol](https://modelcontextprotocol.io) server fo
 
 The Tenzro MCP server is an installable Python package that exposes blockchain and multi-modal AI tools across 19+ categories to any MCP-compatible AI agent (Claude, GPT, Cursor, Windsurf, etc.) via **stdio** or **Streamable HTTP** transport. Install with `pip install tenzro-mcp-server` and run locally, or connect directly to the live testnet endpoint. Agents can query balances, send transactions, mint NFTs, bridge tokens, check compliance, subscribe to events, run timeseries forecasts, embed images and text, segment and detect objects, transcribe audio, and interact with AI models — all through the standard MCP tool interface.
 
-The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **331 tools** (Tenzro Ledger + multi-modal AI + AgentBond/insurance + agent memory) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
+The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **414 tools** (Tenzro Ledger + multi-modal AI + AgentBond/insurance + agent memory) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
 
 **Testnet endpoint:** `https://mcp.tenzro.network/mcp`
 **Local:** `http://localhost:3001/mcp`
@@ -497,6 +497,14 @@ Per-tenant analytics:
 - `moe_replication_policy` — Read the governance-tuned replication policy
 - `moe_catalog_shape` — Read the catalog-side MoE topology for a model
 
+### Treasury Multisig (3 tools)
+
+- `treasury_approve_withdrawal` — Approve a treasury withdrawal with a signed approval (Ed25519 or Secp256k1 over the `tenzro/treasury/withdrawal-approval` preimage)
+- `treasury_execute_withdrawal` — Execute a withdrawal once approvals reach the threshold
+- `treasury_get_pending_withdrawal` — Read a pending withdrawal: approvers, approvals, threshold
+
+Treasury config mutations (add/remove withdrawer, threshold) are admin-token-gated RPCs reserved for the node operator and are not exposed as MCP tools.
+
 ### Local Discovery & LAN Clustering (4 tools)
 
 - `local_peers` — Peers discovered on this node's local segment via mDNS
@@ -510,7 +518,7 @@ In addition to the main Tenzro MCP server, the node runs specialized servers for
 
 | Server | Port | Endpoint | Description |
 |--------|------|----------|-------------|
-| **Tenzro** | 3001 | `/mcp` | 331 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + AgentBond/insurance + agent memory |
+| **Tenzro** | 3001 | `/mcp` | 414 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + AgentBond/insurance + agent memory |
 | **Solana** | 3003 | `/mcp` | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking |
 | **Ethereum** | 3004 | `/mcp` | 17 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
 | **Canton** | 3005 | `/mcp` | 15 tools — Canton 3.5+ JSON Ledger API (active-contracts queries with live offset + FQ party id, party / package / connected-synchronizer / version / health reads, CIP-56 Canton Coin balance, AmuletRules fee schedule, DAR upload via `/v2/packages`, submit-and-wait DAML commands, DvP settlement) |

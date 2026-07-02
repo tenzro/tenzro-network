@@ -229,3 +229,30 @@ impl LaneResolver for NodeLaneResolver {
         }
     }
 }
+
+/// Live execution-state reader consulted by the mempool for stateful
+/// admission (nonce ordering + balance coverage). Reads go through a fresh
+/// [`tenzro_vm::StateAdapter`] per call — construction is a handful of empty
+/// `DashMap`s, and a fresh adapter guarantees the mempool never serves a
+/// nonce/balance cached from before the last block's execution.
+pub struct NodeAccountStateReader {
+    storage: Arc<dyn tenzro_storage::KvStore>,
+}
+
+impl NodeAccountStateReader {
+    pub fn new(storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
+        Self { storage }
+    }
+}
+
+impl tenzro_consensus::mempool::AccountStateReader for NodeAccountStateReader {
+    fn account_nonce(&self, address: &Address) -> u64 {
+        use tenzro_vm::traits::VmState as _;
+        tenzro_vm::StateAdapter::with_storage(self.storage.clone()).get_nonce(address.as_bytes())
+    }
+
+    fn account_balance(&self, address: &Address) -> u128 {
+        use tenzro_vm::traits::VmState as _;
+        tenzro_vm::StateAdapter::with_storage(self.storage.clone()).get_balance(address.as_bytes())
+    }
+}

@@ -28,7 +28,7 @@ check_prerequisites() {
     command -v gcloud >/dev/null 2>&1 || error "gcloud CLI not installed"
     command -v kubectl >/dev/null 2>&1 || error "kubectl not installed"
     command -v terraform >/dev/null 2>&1 || error "terraform not installed"
-    command -v docker >/dev/null 2>&1 || error "docker not installed"
+    # Image build runs on Cloud Build (see cloudbuild-image.yaml) — no local docker needed.
 
     # Verify authenticated
     gcloud auth print-access-token >/dev/null 2>&1 || error "Not authenticated. Run: gcloud auth login"
@@ -93,31 +93,28 @@ configure_kubectl() {
     log "kubectl configured for cluster $CLUSTER_NAME"
 }
 
-# Build and push Docker image
+# Build and push Docker image via Cloud Build.
+#
+# Runs on Google's build infrastructure (n1-highcpu-32, 200 GB disk) — no
+# local Docker daemon, disk, or CPU is consumed. The Cloud Build config is
+# `cloudbuild-image.yaml`; this function only submits the source and threads
+# through the git SHA as the image tag.
 build_and_push() {
-    log "Building Docker image..."
+    log "Submitting image build to Cloud Build..."
 
-    # Configure Docker for Artifact Registry (explicit project)
-    gcloud auth configure-docker us-central1-docker.pkg.dev --quiet --project="$PROJECT_ID"
-
-    # Build
-    docker build -t "${REGISTRY}/${IMAGE_NAME}:latest" .
-
-    # Tag with git SHA if available
+    local tag="latest"
     if command -v git >/dev/null 2>&1 && git rev-parse HEAD >/dev/null 2>&1; then
-        GIT_SHA=$(git rev-parse --short HEAD)
-        docker tag "${REGISTRY}/${IMAGE_NAME}:latest" "${REGISTRY}/${IMAGE_NAME}:${GIT_SHA}"
-        log "Tagged image with SHA: ${GIT_SHA}"
+        tag=$(git rev-parse --short HEAD)
+        log "Tagging image with SHA: ${tag}"
     fi
 
-    # Push
-    log "Pushing Docker image..."
-    docker push "${REGISTRY}/${IMAGE_NAME}:latest"
-    if [ -n "${GIT_SHA:-}" ]; then
-        docker push "${REGISTRY}/${IMAGE_NAME}:${GIT_SHA}"
-    fi
+    gcloud builds submit \
+        --config=cloudbuild-image.yaml \
+        --project="$PROJECT_ID" \
+        --substitutions="_REGISTRY=${REGISTRY},_IMAGE=${IMAGE_NAME},_TAG=${tag}" \
+        .
 
-    log "Docker image pushed to ${REGISTRY}/${IMAGE_NAME}"
+    log "Image built and pushed to ${REGISTRY}/${IMAGE_NAME}:${tag} (and :latest)"
 }
 
 # Deploy Kubernetes manifests

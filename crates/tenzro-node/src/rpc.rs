@@ -690,6 +690,13 @@ fn requires_admin_token(method: &str) -> bool {
             // Delegation scope tweaks alter spend ceilings for
             // identities — must be operator-controlled or signed.
             | "tenzro_setDelegationScope"
+            // Treasury multisig configuration: withdrawer-set and
+            // threshold mutations define who can sign withdrawals.
+            // Approvals + execution are NOT gated — the approver
+            // signatures and the threshold are the authorization.
+            | "tenzro_treasuryAddWithdrawer"
+            | "tenzro_treasuryRemoveWithdrawer"
+            | "tenzro_treasurySetWithdrawalThreshold"
             // Bridge fee-in-TNZO oracle + sponsorship-pool mutations.
             // Rate-table writes feed the cross-chain fee abstraction
             // path; refill-threshold tweaks govern when the network
@@ -1336,6 +1343,15 @@ async fn dispatch_request(
         "tenzro_refillSeedAgent" => handle_refill_seed_agent(node, request.params).await,
         "tenzro_getSeedAgentDaemonStatus" => handle_get_seed_agent_daemon_status(node).await,
         "tenzro_getNetworkActivity" => handle_get_network_activity(node, request.params).await,
+
+        // Treasury multisig: config mutations are admin-token-gated;
+        // approve/execute are authorized by approver signatures + threshold.
+        "tenzro_treasuryAddWithdrawer" => handle_treasury_add_withdrawer(node, request.params).await,
+        "tenzro_treasuryRemoveWithdrawer" => handle_treasury_remove_withdrawer(node, request.params).await,
+        "tenzro_treasurySetWithdrawalThreshold" => handle_treasury_set_withdrawal_threshold(node, request.params).await,
+        "tenzro_treasuryApproveWithdrawal" => handle_treasury_approve_withdrawal(node, request.params).await,
+        "tenzro_treasuryExecuteWithdrawal" => handle_treasury_execute_withdrawal(node, request.params).await,
+        "tenzro_treasuryGetPendingWithdrawal" => handle_treasury_get_pending_withdrawal(node, request.params).await,
 
         "tenzro_openPaymentChannel" => handle_open_payment_channel(node, request.params).await,
         "tenzro_updatePaymentChannel" => handle_update_payment_channel(node, request.params).await,
@@ -2508,6 +2524,15 @@ async fn handle_get_block(
 /// want larger batches can pass `maxResults` up to 256.
 const BLOCK_RANGE_DEFAULT: u64 = 64;
 const BLOCK_RANGE_MAX: u64 = 256;
+
+/// Hard ceiling on the number of entries any list-returning RPC will put in
+/// a single response. Collections that grow with user activity (identities,
+/// accounts, agents, tokens, orders, …) must never be serialized unbounded —
+/// a large registry would otherwise let one call allocate an arbitrarily
+/// large JSON body. Client-supplied `limit` params are clamped to this cap;
+/// handlers without a `limit` param truncate at the cap and report
+/// `truncated: true` alongside the total count.
+const LIST_RESPONSE_CAP: usize = 1000;
 
 /// `tenzro_getBlockRange` — paginated batch fetch of finalized blocks by height.
 ///
@@ -4683,8 +4708,10 @@ async fn handle_list_capabilities(
     let registry = agent_runtime.capability_registry();
     let capabilities = registry.list_capabilities();
 
+    let truncated = capabilities.len() > LIST_RESPONSE_CAP;
     let result: Vec<Value> = capabilities
         .iter()
+        .take(LIST_RESPONSE_CAP)
         .map(|cap| {
             serde_json::json!({
                 "capability": cap,
@@ -4698,6 +4725,7 @@ async fn handle_list_capabilities(
     Ok(serde_json::json!({
         "capabilities": result,
         "total": capabilities.len(),
+        "truncated": truncated,
         "rejected_attestation_count": registry.rejected_attestation_count(),
     }))
 }
@@ -4863,6 +4891,9 @@ async fn handle_list_agents(
 
     // Merge network agents discovered via gossipsub (dedup by agent_id; local takes precedence)
     for entry in node.network_agents_snapshot() {
+        if result.len() >= LIST_RESPONSE_CAP {
+            break;
+        }
         if !seen_ids.contains(&entry.announcement.agent_id) {
             seen_ids.insert(entry.announcement.agent_id.clone());
             result.push(serde_json::json!({
@@ -4880,6 +4911,7 @@ async fn handle_list_agents(
         }
     }
 
+    result.truncate(LIST_RESPONSE_CAP);
     Ok(serde_json::to_value(result).unwrap_or(serde_json::json!([])))
 }
 
@@ -5080,8 +5112,9 @@ async fn handle_list_swarms(
         data: None,
     })?;
 
-    Ok(serde_json::to_value(swarm_mgr.list_swarms())
-        .unwrap_or(serde_json::json!([])))
+    let mut swarms = swarm_mgr.list_swarms();
+    swarms.truncate(LIST_RESPONSE_CAP);
+    Ok(serde_json::to_value(swarms).unwrap_or(serde_json::json!([])))
 }
 
 /// Look up a single registered agent by `agent_id`.
@@ -5907,7 +5940,8 @@ async fn handle_list_escrows_by_payer(
     Ok(serde_json::json!({
         "payer": payer_hex,
         "count": escrows.len(),
-        "escrows": escrows.iter().map(escrow_to_json).collect::<Vec<_>>(),
+        "truncated": escrows.len() > LIST_RESPONSE_CAP,
+        "escrows": escrows.iter().take(LIST_RESPONSE_CAP).map(escrow_to_json).collect::<Vec<_>>(),
     }))
 }
 
@@ -5941,7 +5975,8 @@ async fn handle_list_escrows_by_payee(
     Ok(serde_json::json!({
         "payee": payee_hex,
         "count": escrows.len(),
-        "escrows": escrows.iter().map(escrow_to_json).collect::<Vec<_>>(),
+        "truncated": escrows.len() > LIST_RESPONSE_CAP,
+        "escrows": escrows.iter().take(LIST_RESPONSE_CAP).map(escrow_to_json).collect::<Vec<_>>(),
     }))
 }
 
@@ -6238,10 +6273,11 @@ async fn handle_list_memory_records(
         })?
         .to_string();
     enforce_memory_access(node, auth_ctx, &agent_did).await?;
-    let limit = params
+    let limit = (params
         .get("limit")
         .and_then(|v| v.as_u64())
-        .unwrap_or(50) as usize;
+        .unwrap_or(50) as usize)
+        .min(LIST_RESPONSE_CAP);
     let mgr = require_memory_manager(node)?;
     let records = mgr.list(agent_did, limit).map_err(|e| JsonRpcError {
         code: -32000,
@@ -6614,10 +6650,13 @@ async fn handle_list_workflows_by_creator(
             data: None,
         })?;
     let rt = workflow_runtime_or_err(node)?;
-    let ids = rt.manager().list_by_creator(creator);
+    let mut ids = rt.manager().list_by_creator(creator);
+    let total = ids.len();
+    ids.truncate(LIST_RESPONSE_CAP);
     Ok(serde_json::json!({
         "creator_did": creator,
-        "count": ids.len(),
+        "count": total,
+        "truncated": total > LIST_RESPONSE_CAP,
         "workflow_ids": ids_to_hex_array(ids),
     }))
 }
@@ -6641,10 +6680,13 @@ async fn handle_list_workflows_by_participant(
             data: None,
         })?;
     let rt = workflow_runtime_or_err(node)?;
-    let ids = rt.manager().list_by_participant(did);
+    let mut ids = rt.manager().list_by_participant(did);
+    let total = ids.len();
+    ids.truncate(LIST_RESPONSE_CAP);
     Ok(serde_json::json!({
         "did": did,
-        "count": ids.len(),
+        "count": total,
+        "truncated": total > LIST_RESPONSE_CAP,
         "workflow_ids": ids_to_hex_array(ids),
     }))
 }
@@ -6669,10 +6711,13 @@ async fn handle_list_workflows_by_status(
         })?;
     let status = workflow_status_from_str(status_str)?;
     let rt = workflow_runtime_or_err(node)?;
-    let ids = rt.manager().list_by_status(status);
+    let mut ids = rt.manager().list_by_status(status);
+    let total = ids.len();
+    ids.truncate(LIST_RESPONSE_CAP);
     Ok(serde_json::json!({
         "status": status_str,
-        "count": ids.len(),
+        "count": total,
+        "truncated": total > LIST_RESPONSE_CAP,
         "workflow_ids": ids_to_hex_array(ids),
     }))
 }
@@ -8994,11 +9039,12 @@ async fn handle_list_7683_orders(
         data: None,
     })?;
 
-    let limit = params
+    let limit = (params
         .as_ref()
         .and_then(|p| p.get("limit"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(50) as usize;
+        .unwrap_or(50) as usize)
+        .min(LIST_RESPONSE_CAP);
 
     let state_filter = params
         .as_ref()
@@ -9405,16 +9451,18 @@ async fn handle_list_fills_7683(
         data: None,
     })?;
 
-    let fills: Vec<Value> = registry
-        .list_fills()
+    let all_fills = registry.list_fills();
+    let count = all_fills.len();
+    let fills: Vec<Value> = all_fills
         .iter()
+        .take(LIST_RESPONSE_CAP)
         .map(tenzro_7683_fill_to_json)
         .collect();
-    let count = fills.len();
 
     Ok(serde_json::json!({
         "fills": fills,
         "count": count,
+        "truncated": count > LIST_RESPONSE_CAP,
     }))
 }
 
@@ -9694,6 +9742,223 @@ async fn handle_list_seed_agent_charters(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Treasury multisig withdrawals
+//
+// Config mutations (add/remove withdrawer, threshold) are admin-token-gated.
+// Approvals and execution are NOT admin-gated: the approver's signature over
+// the domain-separated preimage and the configured threshold are the
+// authorization.
+// ---------------------------------------------------------------------------
+
+fn treasury_or_err(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<&Arc<tenzro_token::NetworkTreasury>, JsonRpcError> {
+    node.treasury().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Treasury not initialized".to_string(),
+        data: None,
+    })
+}
+
+fn treasury_params(params: Option<Value>) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    Ok(if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(Value::Null)
+    } else {
+        params
+    })
+}
+
+fn treasury_str_param<'a>(
+    params: &'a Value,
+    key: &str,
+) -> std::result::Result<&'a str, JsonRpcError> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Missing {}", key),
+            data: None,
+        })
+}
+
+/// Parses the shared `(withdrawal_id, asset_id, amount)` triple used by both
+/// the approve and execute paths.
+fn treasury_withdrawal_triple(
+    params: &Value,
+) -> std::result::Result<(String, tenzro_types::asset::AssetId, u128), JsonRpcError> {
+    let withdrawal_id = treasury_str_param(params, "withdrawal_id")?.to_string();
+    let asset_id = tenzro_types::asset::AssetId::new(treasury_str_param(params, "asset_id")?);
+    let amount = parse_u128_amount(params, "amount").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing or invalid amount (decimal string in base units)".to_string(),
+        data: None,
+    })?;
+    Ok((withdrawal_id, asset_id, amount))
+}
+
+async fn handle_treasury_add_withdrawer(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let treasury = treasury_or_err(node)?;
+    let params = treasury_params(params)?;
+    let address = parse_address(treasury_str_param(&params, "address")?)?;
+    treasury.add_authorized_withdrawer(address);
+    Ok(serde_json::json!({
+        "added": format!("0x{}", hex::encode(address.as_bytes())),
+        "withdrawers": treasury.authorized_withdrawers().iter().map(|a| format!("0x{}", hex::encode(a.as_bytes()))).collect::<Vec<_>>(),
+        "threshold": treasury.withdrawal_threshold(),
+    }))
+}
+
+async fn handle_treasury_remove_withdrawer(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let treasury = treasury_or_err(node)?;
+    let params = treasury_params(params)?;
+    let address = parse_address(treasury_str_param(&params, "address")?)?;
+    treasury.remove_authorized_withdrawer(&address);
+    Ok(serde_json::json!({
+        "removed": format!("0x{}", hex::encode(address.as_bytes())),
+        "withdrawers": treasury.authorized_withdrawers().iter().map(|a| format!("0x{}", hex::encode(a.as_bytes()))).collect::<Vec<_>>(),
+        "threshold": treasury.withdrawal_threshold(),
+    }))
+}
+
+async fn handle_treasury_set_withdrawal_threshold(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let treasury = treasury_or_err(node)?;
+    let params = treasury_params(params)?;
+    let threshold = params
+        .get("threshold")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing threshold".to_string(),
+            data: None,
+        })? as usize;
+    treasury
+        .set_withdrawal_threshold(threshold)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+            data: None,
+        })?;
+    Ok(serde_json::json!({
+        "threshold": threshold,
+        "withdrawers": treasury.authorized_withdrawers().iter().map(|a| format!("0x{}", hex::encode(a.as_bytes()))).collect::<Vec<_>>(),
+    }))
+}
+
+async fn handle_treasury_approve_withdrawal(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let treasury = treasury_or_err(node)?;
+    let params = treasury_params(params)?;
+    let (withdrawal_id, asset_id, amount) = treasury_withdrawal_triple(&params)?;
+    let approver = parse_address(treasury_str_param(&params, "approver")?)?;
+
+    let key_type = match params
+        .get("key_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ed25519")
+    {
+        "secp256k1" => KeyType::Secp256k1,
+        _ => KeyType::Ed25519,
+    };
+    let public_key =
+        tenzro_crypto::PublicKey::from_hex(key_type, treasury_str_param(&params, "public_key")?)
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid public_key hex: {}", e),
+                data: None,
+            })?;
+    let signature = tenzro_crypto::Signature::from_hex(
+        key_type,
+        treasury_str_param(&params, "signature")?,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid signature hex: {}", e),
+        data: None,
+    })?;
+
+    let threshold_reached = treasury
+        .approve_withdrawal(&withdrawal_id, &asset_id, amount, &approver, &public_key, &signature)
+        .map_err(|e| JsonRpcError {
+            code: -32001,
+            message: e.to_string(),
+            data: None,
+        })?;
+
+    let pending = treasury.pending_withdrawal(&withdrawal_id);
+    Ok(serde_json::json!({
+        "withdrawal_id": withdrawal_id,
+        "asset_id": asset_id.as_str(),
+        "amount": amount.to_string(),
+        "approvals": pending.as_ref().map(|p| p.approvers.len()).unwrap_or(0),
+        "threshold": treasury.withdrawal_threshold(),
+        "threshold_reached": threshold_reached,
+        "signing_preimage_domain": "tenzro/treasury/withdrawal-approval",
+    }))
+}
+
+async fn handle_treasury_execute_withdrawal(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let treasury = treasury_or_err(node)?;
+    let params = treasury_params(params)?;
+    let (withdrawal_id, asset_id, amount) = treasury_withdrawal_triple(&params)?;
+
+    treasury
+        .execute_withdrawal(&withdrawal_id, &asset_id, amount)
+        .map_err(|e| JsonRpcError {
+            code: -32001,
+            message: e.to_string(),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "withdrawal_id": withdrawal_id,
+        "asset_id": asset_id.as_str(),
+        "amount": amount.to_string(),
+        "executed": true,
+        "remaining_balance": treasury.balance(&asset_id).to_string(),
+    }))
+}
+
+async fn handle_treasury_get_pending_withdrawal(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let treasury = treasury_or_err(node)?;
+    let params = treasury_params(params)?;
+    let withdrawal_id = treasury_str_param(&params, "withdrawal_id")?;
+    match treasury.pending_withdrawal(withdrawal_id) {
+        Some(p) => Ok(serde_json::json!({
+            "withdrawal_id": withdrawal_id,
+            "asset_id": p.asset_id.as_str(),
+            "amount": p.amount.to_string(),
+            "approvers": p.approvers.iter().map(|a| format!("0x{}", hex::encode(a.as_bytes()))).collect::<Vec<_>>(),
+            "approvals": p.approvers.len(),
+            "threshold": treasury.withdrawal_threshold(),
+        })),
+        None => Ok(Value::Null),
+    }
+}
+
 async fn handle_list_seed_agents(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -9714,15 +9979,17 @@ async fn handle_list_seed_agents(
         None
     };
 
-    let agents: Vec<Value> = manager
-        .list_agents(charter_id.as_ref())
+    let records = manager.list_agents(charter_id.as_ref());
+    let count = records.len();
+    let agents: Vec<Value> = records
         .iter()
+        .take(LIST_RESPONSE_CAP)
         .map(seed_agent_record_to_json)
         .collect();
-    let count = agents.len();
     Ok(serde_json::json!({
         "agents": agents,
         "count": count,
+        "truncated": count > LIST_RESPONSE_CAP,
     }))
 }
 
@@ -10538,8 +10805,9 @@ async fn handle_list_identities(
 
     let (human_count, machine_count) = registry.count();
     let all_identities = registry.list_all();
+    let truncated = all_identities.len() > LIST_RESPONSE_CAP;
 
-    let identities: Vec<Value> = all_identities.iter().map(|(did, identity)| {
+    let identities: Vec<Value> = all_identities.iter().take(LIST_RESPONSE_CAP).map(|(did, identity)| {
         let identity_type = match &identity.identity_data {
             tenzro_identity::IdentityData::Human { display_name, kyc_tier, controlled_machines } => {
                 serde_json::json!({
@@ -10587,6 +10855,7 @@ async fn handle_list_identities(
         "machine_count": machine_count,
         "total_count": human_count + machine_count,
         "identities": identities,
+        "truncated": truncated,
     }))
 }
 
@@ -10604,7 +10873,8 @@ async fn handle_list_agent_jwks(
 
     let agent_registry =
         tenzro_payments::rfc9421::TenzroAgentRegistry::new(registry.clone());
-    let agents = agent_registry.list_all_agents();
+    let mut agents = agent_registry.list_all_agents();
+    agents.truncate(LIST_RESPONSE_CAP);
     let set = tenzro_payments::rfc9421::JwkSet::from_agents(&agents);
 
     serde_json::to_value(&set).map_err(|e| JsonRpcError {
@@ -11352,7 +11622,8 @@ async fn handle_list_agent_transactions(
     let limit = params
         .get("limit")
         .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
+        .map(|n| (n as usize).min(LIST_RESPONSE_CAP))
+        .unwrap_or(LIST_RESPONSE_CAP);
 
     let runtime = node.agent_runtime().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -11361,7 +11632,7 @@ async fn handle_list_agent_transactions(
     })?;
 
     let records = runtime
-        .list_agent_transactions(agent_did, limit)
+        .list_agent_transactions(agent_did, Some(limit))
         .map_err(|e| JsonRpcError {
             code: -32603,
             message: format!("Failed to list agent transactions: {}", e),
@@ -21505,7 +21776,8 @@ async fn handle_list_proposals(
         data: None,
     })?;
 
-    let proposals = governance.list_proposals();
+    let mut proposals = governance.list_proposals();
+    proposals.truncate(LIST_RESPONSE_CAP);
     Ok(serde_json::to_value(&proposals).unwrap_or(serde_json::json!([])))
 }
 
@@ -25036,6 +25308,7 @@ async fn handle_liquid_staking_stats(
     Ok(serde_json::json!({
         "total_sttnzo_supply": stats.total_sttnzo_supply.to_string(),
         "total_underlying_wei": stats.total_underlying_wei.to_string(),
+        "pending_withdrawal_wei": stats.pending_withdrawal_wei.to_string(),
         "exchange_rate": stats.exchange_rate.to_string(),
         "total_protocol_fees": stats.total_protocol_fees.to_string(),
         "total_rewards_distributed": stats.total_rewards_distributed.to_string(),
@@ -25164,6 +25437,7 @@ async fn handle_list_accounts(
     // Collect all identity info into owned data first (no borrows held across await)
     let identity_info: Vec<(String, String, String, String, Address)> = all_identities
         .iter()
+        .take(LIST_RESPONSE_CAP)
         .map(|(did, identity)| {
             let name = match &identity.identity_data {
                 tenzro_identity::IdentityData::Human { display_name, .. } => display_name.clone(),
@@ -26553,10 +26827,11 @@ async fn handle_list_tasks(
         data: None,
     })?;
 
-    let limit = params.as_ref()
+    let limit = (params.as_ref()
         .and_then(|p| p.get("limit"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(50) as usize;
+        .unwrap_or(50) as usize)
+        .min(LIST_RESPONSE_CAP);
 
     let status_filter = params.as_ref()
         .and_then(|p| p.get("status"))
@@ -28670,10 +28945,11 @@ async fn handle_list_agent_templates(
         data: None,
     })?;
 
-    let limit = params.as_ref()
+    let limit = (params.as_ref()
         .and_then(|p| p.get("limit"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(50) as usize;
+        .unwrap_or(50) as usize)
+        .min(LIST_RESPONSE_CAP);
 
     let tag_filter = params.as_ref()
         .and_then(|p| p.get("tag"))
@@ -29382,7 +29658,7 @@ async fn handle_list_skills(
     }
 
     let offset = filter.offset.unwrap_or(0);
-    let limit = filter.limit.unwrap_or(50);
+    let limit = filter.limit.unwrap_or(50).min(LIST_RESPONSE_CAP);
     let paged: Vec<_> = skills.into_iter().skip(offset).take(limit).collect();
 
     Ok(serde_json::to_value(&paged).unwrap_or_else(|_| serde_json::json!([])))
@@ -29439,7 +29715,7 @@ async fn handle_search_skills(
     }
 
     let offset = filter.offset.unwrap_or(0);
-    let limit = filter.limit.unwrap_or(50);
+    let limit = filter.limit.unwrap_or(50).min(LIST_RESPONSE_CAP);
     let paged: Vec<_> = skills.into_iter().skip(offset).take(limit).collect();
 
     Ok(serde_json::to_value(&paged).unwrap_or_else(|_| serde_json::json!([])))
@@ -29857,7 +30133,7 @@ async fn handle_list_tools(
 
     // Pagination
     let offset = filter.offset.unwrap_or(0);
-    let limit = filter.limit.unwrap_or(50);
+    let limit = filter.limit.unwrap_or(50).min(LIST_RESPONSE_CAP);
     let paginated: Vec<_> = tools.into_iter().skip(offset).take(limit).collect();
 
     Ok(serde_json::to_value(&paginated).unwrap_or_else(|_| serde_json::json!([])))
@@ -29901,7 +30177,7 @@ async fn handle_search_tools(
     }
 
     let offset = filter.offset.unwrap_or(0);
-    let limit = filter.limit.unwrap_or(50);
+    let limit = filter.limit.unwrap_or(50).min(LIST_RESPONSE_CAP);
     let paginated: Vec<_> = tools.into_iter().skip(offset).take(limit).collect();
 
     Ok(serde_json::to_value(&paginated).unwrap_or_else(|_| serde_json::json!([])))
@@ -30585,7 +30861,7 @@ async fn handle_list_knowledge(
         }
     }
     let offset = filter.offset.unwrap_or(0);
-    let limit = filter.limit.unwrap_or(50);
+    let limit = filter.limit.unwrap_or(50).min(LIST_RESPONSE_CAP);
     let paginated: Vec<_> = out.into_iter().skip(offset).take(limit).collect();
     Ok(serde_json::to_value(&paginated).unwrap_or_default())
 }
@@ -31043,7 +31319,7 @@ async fn handle_list_workflow_templates(
         }
     }
     let offset = filter.offset.unwrap_or(0);
-    let limit = filter.limit.unwrap_or(50);
+    let limit = filter.limit.unwrap_or(50).min(LIST_RESPONSE_CAP);
     let paginated: Vec<_> = out.into_iter().skip(offset).take(limit).collect();
     Ok(serde_json::to_value(&paginated).unwrap_or_default())
 }
@@ -31817,7 +32093,7 @@ async fn handle_list_resources(
     }
 
     let offset = filter.offset.unwrap_or(0);
-    let limit = filter.limit.unwrap_or(100);
+    let limit = filter.limit.unwrap_or(100).min(LIST_RESPONSE_CAP);
     let paginated: Vec<_> = out.into_iter().skip(offset).take(limit).collect();
     Ok(serde_json::to_value(&paginated).unwrap_or_default())
 }
@@ -32399,7 +32675,8 @@ async fn handle_search_agent_templates(
     }
 
     let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let limit = (params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize)
+        .min(LIST_RESPONSE_CAP);
     let paged: Vec<_> = templates.into_iter().skip(offset).take(limit).collect();
 
     Ok(serde_json::to_value(&paged).unwrap_or_else(|_| serde_json::json!([])))
@@ -35537,6 +35814,77 @@ async fn handle_bridge_status(
     Ok(record)
 }
 
+/// Dispatch an inbound bridge payload through the BridgeRouter and require a
+/// quorum-verified TokenTransfer TenzroMessage addressed to this chain.
+///
+/// Every mint authorized by an inbound bridge message MUST flow through this
+/// check — the returned message is the sole authority for recipient and amount.
+pub(crate) async fn verify_inbound_transfer_message(
+    node: &Arc<TenzroNode>,
+    adapter: &str,
+    source_chain: &str,
+    payload_hex: &str,
+) -> std::result::Result<
+    (
+        tenzro_bridge::message_format::TenzroMessage,
+        tenzro_bridge::message_format::TokenTransferPayload,
+    ),
+    JsonRpcError,
+> {
+    let router = node.bridge_router().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Bridge router not initialized".to_string(), data: None,
+    })?;
+
+    let payload_bytes = hex::decode(payload_hex.strip_prefix("0x").unwrap_or(payload_hex))
+        .map_err(|e| JsonRpcError {
+            code: -32602, message: format!("Invalid payload hex: {}", e), data: None,
+        })?;
+
+    let message = router
+        .receive_message(adapter, source_chain, payload_bytes)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32003, message: format!("Inbound bridge verification failed: {}", e), data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32003,
+            message: "Inbound payload carries no TenzroMessage — cannot authorize a mint".to_string(),
+            data: None,
+        })?;
+
+    if message.message_type != tenzro_bridge::message_format::MessageType::TokenTransfer {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!("Inbound message type {:?} is not TokenTransfer", message.message_type),
+            data: None,
+        });
+    }
+
+    let chain_id = node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
+    if message.dest_chain_id != chain_id {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!(
+                "Inbound message dest_chain_id {} does not match this chain ({})",
+                message.dest_chain_id, chain_id
+            ),
+            data: None,
+        });
+    }
+
+    let transfer = tenzro_bridge::message_format::TokenTransferPayload::decode(&message.payload)
+        .map_err(|e| JsonRpcError {
+            code: -32003, message: format!("Invalid TokenTransfer payload: {}", e), data: None,
+        })?;
+
+    Ok((message, transfer))
+}
+
+/// Normalize a hex address string for comparison (strip 0x, lowercase).
+pub(crate) fn normalize_hex_addr(s: &str) -> String {
+    s.strip_prefix("0x").unwrap_or(s).to_lowercase()
+}
+
 async fn handle_crosschain_mint(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -35558,15 +35906,15 @@ async fn handle_crosschain_mint(
     let bridge = params.get("bridge").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
         code: -32602, message: "Missing bridge".to_string(), data: None,
     })?;
-    let to = params.get("to").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing to".to_string(), data: None,
+    let adapter = params.get("adapter").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing adapter (bridge router adapter name, e.g. 'wormhole')".to_string(), data: None,
     })?;
-    let amount: u128 = params.get("amount").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
-        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
-        .ok_or_else(|| JsonRpcError {
-            code: -32602, message: "Missing or invalid amount".to_string(), data: None,
-        })?;
-    let sender = params.get("sender").and_then(|v| v.as_str()).unwrap_or("");
+    let source_chain = params.get("source_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing source_chain".to_string(), data: None,
+    })?;
+    let payload_hex = params.get("payload").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing payload (hex-encoded inbound bridge payload)".to_string(), data: None,
+    })?;
 
     let bridge_hex = bridge.strip_prefix("0x").unwrap_or(bridge);
     let _ = hex::decode(bridge_hex).map_err(|e| JsonRpcError {
@@ -35583,11 +35931,45 @@ async fn handle_crosschain_mint(
         });
     }
 
-    let to_hex = to.strip_prefix("0x").unwrap_or(to);
-    let to_bytes = hex::decode(to_hex).map_err(|e| JsonRpcError {
-        code: -32602, message: format!("Invalid recipient address: {}", e), data: None,
+    // The verified inbound message is the sole authority for recipient + amount.
+    let (message, transfer) =
+        verify_inbound_transfer_message(node, adapter, source_chain, payload_hex).await?;
+
+    if !transfer.asset_id.eq_ignore_ascii_case("TNZO") {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!("Inbound transfer asset '{}' is not TNZO", transfer.asset_id),
+            data: None,
+        });
+    }
+    let amount = transfer.amount;
+    let sender = message.sender.clone();
+
+    let to_hex = normalize_hex_addr(&message.receiver);
+    let to_bytes = hex::decode(&to_hex).map_err(|e| JsonRpcError {
+        code: -32003, message: format!("Inbound message receiver is not a valid address: {}", e), data: None,
     })?;
     let to_addr = rpc_bytes_to_address(&to_bytes);
+
+    // If the caller supplied expected values, cross-check them against the
+    // verified message so relayer-side mismatches surface loudly.
+    if let Some(expected_to) = params.get("to").and_then(|v| v.as_str())
+        && normalize_hex_addr(expected_to) != to_hex {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!("Caller 'to' {} does not match verified message receiver 0x{}", expected_to, to_hex),
+            data: None,
+        });
+    }
+    if let Some(expected_amount) = params.get("amount").and_then(|v| v.as_str()).and_then(|s| s.parse::<u128>().ok())
+        .or_else(|| params.get("amount").and_then(|v| v.as_u64()).map(|n| n as u128))
+        && expected_amount != amount {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!("Caller 'amount' {} does not match verified message amount {}", expected_amount, amount),
+            data: None,
+        });
+    }
 
     let treasury = token.treasury_address_ref().ok_or_else(|| JsonRpcError {
         code: -32603, message: "Treasury address not configured".to_string(), data: None,
@@ -35610,6 +35992,9 @@ async fn handle_crosschain_mint(
         "to": format!("0x{}", to_hex),
         "amount": amount.to_string(),
         "sender": sender,
+        "source_chain": source_chain,
+        "adapter": adapter,
+        "message_hash": format!("0x{}", hex::encode(message.message_hash)),
         "nonce": nonce,
         "event": "CrosschainMint",
         "status": "minted",
@@ -35697,7 +36082,11 @@ async fn handle_crosschain_burn(
 // Match the `tenzro-sdk` `Erc7802Client` wire shape:
 //
 //   tenzro_erc7802CrosschainMint
-//     params:  { token, recipient, amount, source_chain, bridge? }
+//     params:  { token, source_chain, adapter, payload, bridge?, recipient?, amount? }
+//              `payload` is the hex-encoded inbound bridge payload; the
+//              quorum-verified TenzroMessage inside it is the sole authority
+//              for recipient + amount. Caller-supplied recipient/amount are
+//              cross-checks only.
 //     returns: MintResult { tx_hash, token, recipient, amount, source_chain, status }
 //
 //   tenzro_erc7802CrosschainBurn
@@ -35775,16 +36164,15 @@ async fn handle_erc7802_crosschain_mint(
     let token_id = p.get("token").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
         code: -32602, message: "Missing 'token'".to_string(), data: None,
     })?.to_string();
-    let recipient = p.get("recipient").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing 'recipient'".to_string(), data: None,
+    let source_chain = p.get("source_chain").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'source_chain'".to_string(), data: None,
     })?.to_string();
-    let amount_str = p.get("amount").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing 'amount' (decimal string expected)".to_string(), data: None,
+    let adapter = p.get("adapter").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'adapter' (bridge router adapter name, e.g. 'wormhole')".to_string(), data: None,
     })?.to_string();
-    let amount: u128 = amount_str.parse().map_err(|e| JsonRpcError {
-        code: -32602, message: format!("Invalid amount: {}", e), data: None,
-    })?;
-    let source_chain = p.get("source_chain").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let payload_hex = p.get("payload").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing 'payload' (hex-encoded inbound bridge payload)".to_string(), data: None,
+    })?.to_string();
 
     let token = node.token().ok_or_else(|| JsonRpcError {
         code: -32603, message: "TNZO token not initialized".to_string(), data: None,
@@ -35796,11 +36184,44 @@ async fn handle_erc7802_crosschain_mint(
     let bridge = resolve_authorized_bridge(storage, p.get("bridge").and_then(|v| v.as_str()))?;
     let bridge_hex = bridge.strip_prefix("0x").unwrap_or(&bridge).to_lowercase();
 
-    let recipient_hex = recipient.strip_prefix("0x").unwrap_or(&recipient);
-    let recipient_bytes = hex::decode(recipient_hex).map_err(|e| JsonRpcError {
-        code: -32602, message: format!("Invalid recipient address: {}", e), data: None,
+    // The verified inbound message is the sole authority for recipient + amount.
+    let (message, transfer) =
+        verify_inbound_transfer_message(node, &adapter, &source_chain, &payload_hex).await?;
+
+    if !transfer.asset_id.eq_ignore_ascii_case(&token_id) {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!("Inbound transfer asset '{}' does not match 'token' {}", transfer.asset_id, token_id),
+            data: None,
+        });
+    }
+    let amount = transfer.amount;
+    let amount_str = amount.to_string();
+
+    let recipient_hex = normalize_hex_addr(&message.receiver);
+    let recipient_bytes = hex::decode(&recipient_hex).map_err(|e| JsonRpcError {
+        code: -32003, message: format!("Inbound message receiver is not a valid address: {}", e), data: None,
     })?;
     let recipient_addr = rpc_bytes_to_address(&recipient_bytes);
+    let recipient = format!("0x{}", recipient_hex);
+
+    // Cross-check caller-supplied expectations against the verified message.
+    if let Some(expected_recipient) = p.get("recipient").and_then(|v| v.as_str())
+        && normalize_hex_addr(expected_recipient) != recipient_hex {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!("Caller 'recipient' {} does not match verified message receiver {}", expected_recipient, recipient),
+            data: None,
+        });
+    }
+    if let Some(expected_amount) = p.get("amount").and_then(|v| v.as_str()).and_then(|s| s.parse::<u128>().ok())
+        && expected_amount != amount {
+        return Err(JsonRpcError {
+            code: -32003,
+            message: format!("Caller 'amount' {} does not match verified message amount {}", expected_amount, amount),
+            data: None,
+        });
+    }
 
     let treasury = token.treasury_address_ref().ok_or_else(|| JsonRpcError {
         code: -32603, message: "Treasury address not configured".to_string(), data: None,
@@ -36734,8 +37155,11 @@ async fn handle_list_webhooks(
         code: -32603, message: format!("Storage error: {}", e), data: None,
     })?;
 
-    let mut webhooks: Vec<Value> = Vec::with_capacity(keys.len());
+    let mut webhooks: Vec<Value> = Vec::with_capacity(keys.len().min(LIST_RESPONSE_CAP));
     for key in keys {
+        if webhooks.len() >= LIST_RESPONSE_CAP {
+            break;
+        }
         if let Ok(Some(raw)) = storage.get(CF_WEBHOOKS, &key)
             && let Ok(wh) = serde_json::from_slice::<Value>(&raw) {
                 // Project into the shape the CLI expects.
@@ -36766,6 +37190,7 @@ async fn handle_list_webhooks(
     Ok(serde_json::json!({
         "webhooks": webhooks,
         "total": webhooks.len(),
+        "truncated": webhooks.len() >= LIST_RESPONSE_CAP,
     }))
 }
 
@@ -37730,8 +38155,11 @@ async fn handle_list_subscriptions(
         code: -32603, message: format!("Storage error: {}", e), data: None,
     })?;
 
-    let mut subscriptions = Vec::with_capacity(keys.len());
+    let mut subscriptions = Vec::with_capacity(keys.len().min(LIST_RESPONSE_CAP));
     for key in &keys {
+        if subscriptions.len() >= LIST_RESPONSE_CAP {
+            break;
+        }
         if let Ok(Some(bytes)) = storage.get(CF_METADATA, key)
             && let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
                 subscriptions.push(value);
@@ -37740,7 +38168,8 @@ async fn handle_list_subscriptions(
 
     Ok(serde_json::json!({
         "subscriptions": subscriptions,
-        "total": subscriptions.len(),
+        "total": keys.len(),
+        "truncated": keys.len() > LIST_RESPONSE_CAP,
     }))
 }
 

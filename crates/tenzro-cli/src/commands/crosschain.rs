@@ -42,15 +42,21 @@ pub struct CrosschainMintCmd {
     /// Bridge address (hex) performing the mint
     #[arg(long)]
     bridge: String,
-    /// Recipient address (hex)
+    /// Bridge router adapter name that verifies the inbound payload (e.g. wormhole, hyperlane, axelar)
     #[arg(long)]
-    to: String,
-    /// Amount to mint (in smallest units)
+    adapter: String,
+    /// Source chain identifier the payload arrived from
     #[arg(long)]
-    amount: String,
-    /// Sender identifier on the source chain (hex or string)
+    source_chain: String,
+    /// Hex-encoded inbound bridge payload (quorum-verified; sole authority for recipient + amount)
     #[arg(long)]
-    sender: String,
+    payload: String,
+    /// Expected recipient address (hex) — cross-checked against the verified message
+    #[arg(long)]
+    to: Option<String>,
+    /// Expected amount in smallest units — cross-checked against the verified message
+    #[arg(long)]
+    amount: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -66,9 +72,11 @@ impl CrosschainMintCmd {
 
         let result: serde_json::Value = rpc.call("tenzro_crosschainMint", serde_json::json!({
             "bridge": self.bridge,
+            "adapter": self.adapter,
+            "source_chain": self.source_chain,
+            "payload": self.payload,
             "to": self.to,
             "amount": self.amount,
-            "sender": self.sender,
         })).await?;
 
         spinner.finish_and_clear();
@@ -78,6 +86,8 @@ impl CrosschainMintCmd {
         output::print_field("To", result.get("to").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("Amount", result.get("amount").and_then(|v| v.as_str()).unwrap_or(""));
         output::print_field("Bridge", result.get("bridge").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Source Chain", result.get("source_chain").and_then(|v| v.as_str()).unwrap_or(""));
+        output::print_field("Message Hash", result.get("message_hash").and_then(|v| v.as_str()).unwrap_or(""));
 
         Ok(())
     }

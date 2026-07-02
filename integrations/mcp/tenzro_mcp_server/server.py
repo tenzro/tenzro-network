@@ -3837,6 +3837,74 @@ async def moe_catalog_shape(model_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Treasury Multisig (3 tools)
+#
+# Config mutations (add/remove withdrawer, threshold) are intentionally not
+# exposed here: they are admin-token-gated on the RPC surface and belong to
+# the node operator, not MCP clients.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def treasury_approve_withdrawal(
+    withdrawal_id: str,
+    asset_id: str,
+    amount: str,
+    approver: str,
+    public_key: str,
+    signature: str,
+    key_type: str = "ed25519",
+) -> dict:
+    """Approve a treasury withdrawal with a signed approval.
+
+    The signature covers the preimage
+    "tenzro/treasury/withdrawal-approval" || withdrawal_id || asset_id ||
+    amount (little-endian u128), signed with the approver's Ed25519
+    (default) or Secp256k1 key. The key must derive the authorized
+    withdrawer address given in `approver`. `amount` is base units as a
+    decimal string.
+    """
+    return await rpc_call(
+        "tenzro_treasuryApproveWithdrawal",
+        {
+            "withdrawal_id": withdrawal_id,
+            "asset_id": asset_id,
+            "amount": amount,
+            "approver": approver,
+            "key_type": key_type,
+            "public_key": public_key,
+            "signature": signature,
+        },
+    )
+
+
+@mcp.tool
+async def treasury_execute_withdrawal(
+    withdrawal_id: str,
+    asset_id: str,
+    amount: str,
+) -> dict:
+    """Execute a treasury withdrawal once approvals reach the threshold."""
+    return await rpc_call(
+        "tenzro_treasuryExecuteWithdrawal",
+        {
+            "withdrawal_id": withdrawal_id,
+            "asset_id": asset_id,
+            "amount": amount,
+        },
+    )
+
+
+@mcp.tool
+async def treasury_get_pending_withdrawal(withdrawal_id: str) -> dict:
+    """Get a pending treasury withdrawal: approvers, approvals, threshold."""
+    return await rpc_call(
+        "tenzro_treasuryGetPendingWithdrawal",
+        {"withdrawal_id": withdrawal_id},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Local Discovery & Cluster (4 tools)
 # ---------------------------------------------------------------------------
 

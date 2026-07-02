@@ -185,7 +185,7 @@ The node exposes 4 protocol servers, plus 6 ecosystem MCP servers:
 |--------|------|----------|-----------|
 | **JSON-RPC** | 8545 | HTTP | 490+ methods across 26+ namespaces (EVM-compatible + Tenzro extensions, incl. multi-modal AI: forecast, vision, text-embed, segmentation, detection, audio, video; CAIP discovery; EIP-7702 delegation; Permit2; Secure-Mint; Capital Intent; Workflow) |
 | **Web API** | 8080 | REST | Verification, status, faucet, health |
-| **MCP** | 3001 | Streamable HTTP | 331 tools + OAuth 2.1 |
+| **MCP** | 3001 | Streamable HTTP | 414 tools + OAuth 2.1 |
 | **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 42 skills, task streaming |
 
 ### Ecosystem MCP Servers

@@ -41,6 +41,11 @@ pub struct DeBridgeAdapter {
     /// requires `threshold`-many DLN-validator signatures over the
     /// submission prehash `keccak256(submissionId || dst_chain_id)`.
     validator_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>>>,
+    /// Replay cache for inbound submissions keyed
+    /// `{src_chain_id}:{submission_id_hex}`.
+    seen_submissions: Arc<DashMap<String, ()>>,
+    /// Optional write-through persistence for the replay cache.
+    seen_storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl DeBridgeAdapter {
@@ -59,6 +64,8 @@ impl DeBridgeAdapter {
             order_counter: Arc::new(DashMap::new()),
             signer: None,
             validator_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            seen_submissions: Arc::new(DashMap::new()),
+            seen_storage: None,
         }
     }
 
@@ -72,7 +79,22 @@ impl DeBridgeAdapter {
             order_counter: Arc::new(DashMap::new()),
             signer: None,
             validator_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            seen_submissions: Arc::new(DashMap::new()),
+            seen_storage: None,
         }
+    }
+
+    /// Attach RocksDB persistence: hydrates the inbound-submission
+    /// replay cache from `CF_SETTLEMENTS / bridge_seen:debridge:*`.
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        for key in crate::message_format::load_seen_keys(&storage, "debridge") {
+            self.seen_submissions.insert(key, ());
+        }
+        self.seen_storage = Some(storage);
+        self
     }
 
     /// Install the DLN validator set for a source chain id. Inbound
@@ -673,7 +695,11 @@ impl BridgeAdapter for DeBridgeAdapter {
         Ok(message_id)
     }
 
-    async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+    async fn receive_message(
+        &self,
+        source_chain: &str,
+        payload: Vec<u8>,
+    ) -> Result<Option<crate::message_format::TenzroMessage>> {
         // Real deBridge DLN verifier. The cross-chain authority is the
         // DLN validator set installed for the source chain via
         // `install_validator_set`. Without an installed set the
@@ -708,6 +734,14 @@ impl BridgeAdapter for DeBridgeAdapter {
             ));
         }
         let submission_id: &[u8] = &body[..32];
+        // Replay protection keyed on the DLN submission id (globally
+        // unique per submission). Checked before quorum verification;
+        // recorded only after the quorum verifies.
+        let submission_key =
+            format!("{}:{}", src_chain_id, hex::encode(submission_id));
+        if self.seen_submissions.contains_key(&submission_key) {
+            return Err(BridgeError::ReplayAttack(submission_key));
+        }
         // The adapter's own chain id is the destination chain for inbound
         // delivery; that's the value the source-side DLN gate signed against.
         let dst_chain_id: u64 = self.config.chain_id;
@@ -717,11 +751,20 @@ impl BridgeAdapter for DeBridgeAdapter {
         Sha3Digest::update(&mut k, &dst_chain_id.to_le_bytes());
         let prehash: [u8; 32] = k.finalize().into();
         set.verify_quorum(&prehash, &signatures)?;
+        // Inner Tenzro-side check on the submission body after the
+        // 32-byte submission id. Submission-id replay protection above
+        // covers dedup.
+        let verified =
+            crate::message_format::verify_inner_message(&body[32..], None)?;
+        if let Some(ref storage) = self.seen_storage {
+            crate::message_format::persist_seen_key(storage, "debridge", &submission_key);
+        }
+        self.seen_submissions.insert(submission_key, ());
         info!(
             "deBridge DLN: validator quorum verified ({} sigs, threshold {}, src {})",
             signatures.len(), set.threshold, src_chain_id
         );
-        Ok(())
+        Ok(verified)
     }
 
     async fn bridge_tokens(&self, request: BridgeTokenRequest) -> Result<BridgeTokenReceipt> {

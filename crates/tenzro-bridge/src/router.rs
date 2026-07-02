@@ -165,6 +165,30 @@ impl BridgeRouter {
         self.adapters.write().await.insert(name, adapter);
     }
 
+    /// Dispatches an inbound cross-chain payload to the named adapter's
+    /// verifier and returns the quorum-verified inner [`TenzroMessage`],
+    /// when the payload carries one.
+    ///
+    /// This is the single admission point for inbound bridge traffic:
+    /// the adapter runs its provider-native authority check (Guardian
+    /// quorum, ISM multisig, DVN set, commit-store + RMN, DLN set) plus
+    /// replay protection before any message content is trusted.
+    pub async fn receive_message(
+        &self,
+        adapter_name: &str,
+        source_chain: &str,
+        payload: Vec<u8>,
+    ) -> Result<Option<crate::message_format::TenzroMessage>> {
+        let adapters = self.adapters.read().await;
+        let adapter = adapters.get(adapter_name).ok_or_else(|| {
+            BridgeError::AdapterError(format!(
+                "adapter '{}' not registered with router",
+                adapter_name
+            ))
+        })?;
+        adapter.receive_message(source_chain, payload).await
+    }
+
     /// Prunes expired entries from the replay protection cache
     async fn prune_replay_cache(&self) {
         let now = Instant::now();

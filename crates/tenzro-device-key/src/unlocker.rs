@@ -11,21 +11,20 @@
 //! - **First run:** no ciphertext on disk. Create the SE key, generate a random
 //!   password, [`DeviceKey::wrap_secret`] it (no prompt), persist the
 //!   ciphertext. Return the password.
-//! - **Later runs:** ciphertext exists. [`open`](crate::open) the SE key (only
-//!   succeeds if the app is provisioned — see crate docs), then
+//! - **Later runs:** ciphertext exists. [`open`](crate::open) the SE key by
+//!   label (persisted in the file keychain — see crate docs), then
 //!   [`DeviceKey::unwrap_secret`] the ciphertext (Touch ID prompt) to recover
 //!   the SAME password.
 //!
-//! ## Provisioning requirement
+//! ## Persistence
 //!
-//! Cross-restart unlock requires the embedding app to ship a
-//! `keychain-access-groups` entitlement + an embedded provisioning profile so
-//! the SE key persists in the data-protection keychain. This is an
-//! app-DEPLOYMENT responsibility (the operator shipping the desktop app), NOT a
-//! node concern. On an un-provisioned build, first-run create+wrap+unwrap works
-//! within the session, but a restart cannot reopen the key — `unlock_password`
-//! returns [`UnlockError::Unavailable`] and the caller should treat the wallet
-//! as needing re-creation.
+//! Cross-restart unlock works on a plain Developer-ID build: the SE key is
+//! persisted in the legacy file-based (login) keychain, which needs neither a
+//! `keychain-access-groups` entitlement nor a provisioning profile (see crate
+//! docs / Apple TN3137). If the SE key cannot be reopened (e.g. a different
+//! machine, a wiped login keychain, or a sandboxed context where persistence
+//! failed), `unlock_password` returns [`UnlockError::Unavailable`] and the
+//! caller should treat the wallet as needing re-creation.
 
 use std::path::{Path, PathBuf};
 
@@ -92,8 +91,9 @@ impl KeystoreUnlocker for SecureEnclaveUnlocker {
             Some(ct) => {
                 let key = crate::open(&self.label).map_err(|e| match e {
                     crate::DeviceKeyError::NotFound(_) => UnlockError::Unavailable(format!(
-                        "Secure Enclave key '{}' not reopenable across restart — app likely \
-                         lacks the keychain-access-groups entitlement + provisioning profile",
+                        "Secure Enclave key '{}' not found in the keychain — it may have been \
+                         created on another machine or the login keychain was reset; the wallet \
+                         needs re-creation",
                         self.label
                     )),
                     other => UnlockError::Backend(other.to_string()),

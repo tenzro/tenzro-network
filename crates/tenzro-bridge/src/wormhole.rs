@@ -659,20 +659,8 @@ impl WormholeAdapter {
     /// across node restart are rejected as if the original delivery
     /// had just happened.
     pub fn with_storage(mut self, storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
-        // Hydrate seen_messages.
-        if let Ok(entries) = storage.scan_prefix(
-            tenzro_storage::CF_SETTLEMENTS,
-            b"bridge_seen:wormhole:",
-        ) {
-            let prefix_len = "bridge_seen:wormhole:".len();
-            for (key, _) in entries {
-                if key.len() <= prefix_len {
-                    continue;
-                }
-                if let Ok(k) = std::str::from_utf8(&key[prefix_len..]) {
-                    self.seen_messages.insert(k.to_string(), ());
-                }
-            }
+        for key in crate::message_format::load_seen_keys(&storage, "wormhole") {
+            self.seen_messages.insert(key, ());
         }
         self.seen_storage = Some(storage.clone());
         self.inbound_nonce_tracker = Arc::new(
@@ -925,7 +913,11 @@ impl BridgeAdapter for WormholeAdapter {
         Ok(vaa_id)
     }
 
-    async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+    async fn receive_message(
+        &self,
+        source_chain: &str,
+        payload: Vec<u8>,
+    ) -> Result<Option<crate::message_format::TenzroMessage>> {
         let chain_id = self.config.chain_id(source_chain).ok_or_else(|| {
             BridgeError::ChainNotSupported(source_chain.to_string())
         })?;
@@ -974,32 +966,16 @@ impl BridgeAdapter for WormholeAdapter {
         // outer VAA quorum above is the authority gate; this inner
         // check guards against malformed/replayed Tenzro-native payloads
         // that the destination-side Core Bridge would otherwise accept.
-        if let Ok(message) = crate::message_format::TenzroMessage::decode(&vaa.payload) {
-            message.validate()?;
-            if !message.verify_hash() {
-                return Err(BridgeError::InvalidParameter(
-                    "inbound TenzroMessage hash mismatch".into(),
-                ));
-            }
-            if message.signature.is_some()
-                && !message.verify_signature().unwrap_or(false)
-            {
-                return Err(BridgeError::InvalidParameter(
-                    "inbound TenzroMessage signature verification failed".into(),
-                ));
-            }
-            self.inbound_nonce_tracker
-                .check_and_update(&message.sender, message.nonce)
-                .map_err(|e| BridgeError::ReplayAttack(format!("nonce: {e}")))?;
-        }
+        let verified = crate::message_format::verify_inner_message(
+            &vaa.payload,
+            Some(self.inbound_nonce_tracker.as_ref()),
+        )?;
 
         self.seen_messages.insert(dedup_key.clone(), ());
         if let Some(ref storage) = self.seen_storage {
-            let mut k = b"bridge_seen:wormhole:".to_vec();
-            k.extend_from_slice(dedup_key.as_bytes());
-            let _ = storage.put(tenzro_storage::CF_SETTLEMENTS, &k, b"");
+            crate::message_format::persist_seen_key(storage, "wormhole", &dedup_key);
         }
-        Ok(())
+        Ok(verified)
     }
 
     async fn bridge_tokens(&self, request: BridgeTokenRequest) -> Result<BridgeTokenReceipt> {
