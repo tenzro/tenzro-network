@@ -65,6 +65,28 @@ pub enum ModelError {
     #[error("Capacity exceeded for provider")]
     CapacityExceeded,
 
+    /// The node does not have enough free memory to load the model. Raised by
+    /// the load-time admission check before `LlamaModel::load_from_file`, so a
+    /// provider fails cleanly with a typed error instead of OOM-killing the
+    /// process mid-load.
+    #[error("Insufficient memory to load '{model_id}': need ~{required_mb} MB, {available_mb} MB available")]
+    InsufficientMemory {
+        model_id: String,
+        required_mb: u64,
+        available_mb: u64,
+    },
+
+    /// A model's local inference queue is saturated. llama.cpp serializes
+    /// decode on a single model context, so requests wait behind the one in
+    /// flight. Past a bound we shed load with this typed error instead of
+    /// letting the wait queue grow without limit and time every caller out.
+    #[error("Inference queue full for '{model_id}': {waiting} requests already waiting (max {max})")]
+    QueueFull {
+        model_id: String,
+        waiting: usize,
+        max: usize,
+    },
+
     /// Invalid model configuration
     #[error("Invalid model: {0}")]
     InvalidModel(String),

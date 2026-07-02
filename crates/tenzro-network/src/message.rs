@@ -371,6 +371,92 @@ pub struct ModelRegistrationMessage {
     /// RFC-0007: Execution modes this provider can serve for this model
     #[serde(default)]
     pub execution_support: ExecutionSupport,
+    /// SHA-256 (hex) of the served GGUF weights, computed by the provider at
+    /// load time. Lets any peer that serves the same `model_id` — or a
+    /// verifier — detect a provider serving substituted/poisoned weights by
+    /// comparing hashes across announcements. Empty when the provider did not
+    /// compute it (e.g. clustered load spanning multiple files).
+    #[serde(default)]
+    pub weights_sha256: String,
+    /// Ed25519 public key (raw 32B) of the announcing provider. Empty on
+    /// legacy/unsigned announcements, which consumers reject.
+    #[serde(default)]
+    pub pubkey: Vec<u8>,
+    /// Ed25519 signature over the canonical preimage. Empty on unsigned
+    /// announcements, which consumers reject.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+/// Canonical signing preimage for a [`ModelRegistrationMessage`]. Covers the
+/// fields that route traffic or money (endpoint, pricing, weights hash) plus
+/// the identity binding (`pubkey`) so a signed announcement can't be replayed
+/// with a swapped endpoint or price.
+#[derive(Serialize)]
+struct ModelRegPreimage<'a> {
+    model_id: &'a str,
+    provider: &'a str,
+    peer_id: &'a str,
+    rpc_endpoint: &'a str,
+    weights_sha256: &'a str,
+    per_token: Option<u64>,
+    per_request: u64,
+    withdrawn: bool,
+    pubkey: &'a [u8],
+}
+
+impl ModelRegistrationMessage {
+    /// Sign this announcement with the provider's Ed25519 key, populating
+    /// `pubkey` + `signature`. Call after all routable fields are set.
+    pub fn sign(
+        &mut self,
+        signer: &dyn tenzro_crypto::signatures::Signer,
+    ) -> Result<(), String> {
+        let pubkey = signer.public_key().as_bytes().to_vec();
+        let preimage = serde_json::to_vec(&ModelRegPreimage {
+            model_id: &self.model_id,
+            provider: &self.provider,
+            peer_id: &self.peer_id,
+            rpc_endpoint: &self.rpc_endpoint,
+            weights_sha256: &self.weights_sha256,
+            per_token: self.pricing.per_token,
+            per_request: self.pricing.per_request,
+            withdrawn: self.withdrawn,
+            pubkey: &pubkey,
+        })
+        .map_err(|e| e.to_string())?;
+        let sig = signer.sign(&preimage).map_err(|e| e.to_string())?;
+        self.signature = sig.as_bytes().to_vec();
+        self.pubkey = pubkey;
+        Ok(())
+    }
+
+    /// Verify the embedded signature over the canonical preimage. Returns an
+    /// error for unsigned (empty `pubkey`/`signature`) or tampered messages.
+    pub fn verify(&self) -> Result<(), String> {
+        use tenzro_crypto::{
+            keys::{KeyType, PublicKey},
+            signatures::{verify, Signature},
+        };
+        if self.pubkey.is_empty() || self.signature.is_empty() {
+            return Err("unsigned model announcement".to_string());
+        }
+        let preimage = serde_json::to_vec(&ModelRegPreimage {
+            model_id: &self.model_id,
+            provider: &self.provider,
+            peer_id: &self.peer_id,
+            rpc_endpoint: &self.rpc_endpoint,
+            weights_sha256: &self.weights_sha256,
+            per_token: self.pricing.per_token,
+            per_request: self.pricing.per_request,
+            withdrawn: self.withdrawn,
+            pubkey: &self.pubkey,
+        })
+        .map_err(|e| e.to_string())?;
+        let pk = PublicKey::new(KeyType::Ed25519, self.pubkey.clone());
+        let sig = Signature::new(KeyType::Ed25519, self.signature.clone());
+        verify(&pk, &preimage, &sig).map_err(|e| e.to_string())
+    }
 }
 
 fn default_visibility() -> String {
@@ -482,6 +568,76 @@ pub struct ProviderAnnouncementMessage {
     /// serving only — the node will not be auto-clustered.
     #[serde(default)]
     pub cluster_profile: Option<tenzro_types::ClusterProfile>,
+    /// Ed25519 public key (raw 32B) of the announcing provider. Empty on
+    /// legacy/unsigned announcements, which consumers reject.
+    #[serde(default)]
+    pub pubkey: Vec<u8>,
+    /// Ed25519 signature over the canonical preimage. Empty on unsigned
+    /// announcements, which consumers reject.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+/// Canonical signing preimage for a [`ProviderAnnouncementMessage`]. Covers the
+/// routing-relevant identity fields (peer id, address, endpoint, served models)
+/// plus the `pubkey` binding so a signed announcement can't be replayed with a
+/// swapped endpoint or served-model set.
+#[derive(Serialize)]
+struct ProviderRegPreimage<'a> {
+    peer_id: &'a str,
+    provider_address: &'a str,
+    provider_type: &'a str,
+    rpc_endpoint: &'a str,
+    served_models: &'a [String],
+    pubkey: &'a [u8],
+}
+
+impl ProviderAnnouncementMessage {
+    /// Sign this announcement with the provider's Ed25519 key, populating
+    /// `pubkey` + `signature`. Call after all routable fields are set.
+    pub fn sign(
+        &mut self,
+        signer: &dyn tenzro_crypto::signatures::Signer,
+    ) -> Result<(), String> {
+        let pubkey = signer.public_key().as_bytes().to_vec();
+        let preimage = serde_json::to_vec(&ProviderRegPreimage {
+            peer_id: &self.peer_id,
+            provider_address: &self.provider_address,
+            provider_type: &self.provider_type,
+            rpc_endpoint: &self.rpc_endpoint,
+            served_models: &self.served_models,
+            pubkey: &pubkey,
+        })
+        .map_err(|e| e.to_string())?;
+        let sig = signer.sign(&preimage).map_err(|e| e.to_string())?;
+        self.signature = sig.as_bytes().to_vec();
+        self.pubkey = pubkey;
+        Ok(())
+    }
+
+    /// Verify the embedded signature over the canonical preimage. Returns an
+    /// error for unsigned (empty `pubkey`/`signature`) or tampered messages.
+    pub fn verify(&self) -> Result<(), String> {
+        use tenzro_crypto::{
+            keys::{KeyType, PublicKey},
+            signatures::{verify, Signature},
+        };
+        if self.pubkey.is_empty() || self.signature.is_empty() {
+            return Err("unsigned provider announcement".to_string());
+        }
+        let preimage = serde_json::to_vec(&ProviderRegPreimage {
+            peer_id: &self.peer_id,
+            provider_address: &self.provider_address,
+            provider_type: &self.provider_type,
+            rpc_endpoint: &self.rpc_endpoint,
+            served_models: &self.served_models,
+            pubkey: &self.pubkey,
+        })
+        .map_err(|e| e.to_string())?;
+        let pk = PublicKey::new(KeyType::Ed25519, self.pubkey.clone());
+        let sig = Signature::new(KeyType::Ed25519, self.signature.clone());
+        verify(&pk, &preimage, &sig).map_err(|e| e.to_string())
+    }
 }
 
 /// Schedule for when a model is available for serving

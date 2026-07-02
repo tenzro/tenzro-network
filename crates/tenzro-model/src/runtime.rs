@@ -22,6 +22,7 @@
 
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -214,6 +215,21 @@ const MAX_CONTEXT_LENGTH: u32 = 131_072;
 /// Default context length used when no catalog entry is available.
 const DEFAULT_CONTEXT_LENGTH: u32 = 8192;
 
+/// Headroom multiplier applied to the GGUF file size when estimating the
+/// memory a model needs at load. Covers the KV cache, activation buffers, and
+/// llama.cpp bookkeeping on top of the resident weights. 1.35× is deliberately
+/// conservative for consumer hardware; larger contexts push the real KV cost
+/// higher but the check is a floor, not an exact accounting.
+const MODEL_LOAD_HEADROOM_NUM: u64 = 135;
+const MODEL_LOAD_HEADROOM_DEN: u64 = 100;
+
+/// Maximum number of concurrent requests (in flight + waiting) permitted per
+/// loaded model. llama.cpp serializes decode on a single model context, so
+/// requests queue behind the one holding the lock. Past this bound we shed
+/// load with `ModelError::QueueFull` rather than letting the queue grow
+/// unbounded and time every caller out under a thundering herd.
+const MAX_INFLIGHT_PER_MODEL: usize = 64;
+
 /// Internal representation of a loaded model
 struct LoadedModel {
     model: LlamaModel,
@@ -265,8 +281,25 @@ pub struct ModelRuntime {
     /// [`Self::load_model`] to make speculative decoding available
     /// for that target.
     loaded_drafters: Arc<DashMap<String, Arc<tokio::sync::Mutex<LoadedDrafter>>>>,
+    /// Per-model count of requests currently in flight or waiting on the
+    /// model mutex. Gates admission at [`MAX_INFLIGHT_PER_MODEL`] so an
+    /// overloaded model sheds load instead of queueing unboundedly.
+    inflight: Arc<DashMap<String, Arc<AtomicUsize>>>,
     backend: Arc<LlamaBackend>,
     hardware: HardwareInfo,
+}
+
+/// RAII guard that decrements a model's in-flight counter on drop, so the
+/// slot is released whether generation succeeds, errors, or the task is
+/// cancelled (client disconnect).
+struct InflightGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Default for ModelRuntime {
@@ -297,9 +330,34 @@ impl ModelRuntime {
         Self {
             loaded_models: Arc::new(DashMap::new()),
             loaded_drafters: Arc::new(DashMap::new()),
+            inflight: Arc::new(DashMap::new()),
             backend,
             hardware,
         }
+    }
+
+    /// Reserve an in-flight slot for `model_id`, returning an RAII guard that
+    /// releases the slot on drop. Returns `ModelError::QueueFull` when the
+    /// per-model bound is already reached so the caller sheds load instead of
+    /// queueing behind a saturated model context.
+    fn acquire_inflight(&self, model_id: &str) -> Result<InflightGuard> {
+        let counter = self
+            .inflight
+            .entry(model_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .value()
+            .clone();
+        // Reserve optimistically, then roll back if we exceeded the bound.
+        let prior = counter.fetch_add(1, Ordering::SeqCst);
+        if prior >= MAX_INFLIGHT_PER_MODEL {
+            counter.fetch_sub(1, Ordering::SeqCst);
+            return Err(ModelError::QueueFull {
+                model_id: model_id.to_string(),
+                waiting: prior,
+                max: MAX_INFLIGHT_PER_MODEL,
+            });
+        }
+        Ok(InflightGuard { counter })
     }
 
     /// Get detected hardware information for this runtime.
@@ -308,6 +366,38 @@ impl ModelRuntime {
     /// is available, and what backend is actively being used.
     pub fn hardware_info(&self) -> &HardwareInfo {
         &self.hardware
+    }
+
+    /// Load-time memory admission check.
+    ///
+    /// Estimates the resident footprint as `file_len × headroom` and rejects
+    /// the load if available system memory can't cover it. On unified-memory
+    /// (Apple Metal) and GPU-offload builds, weights land in shared or device
+    /// memory backed by system RAM, so available RAM is the safe proxy — the
+    /// check is a floor that prevents a mid-load OOM kill, not exact VRAM
+    /// accounting. `TENZRO_SKIP_MODEL_ADMISSION=1` bypasses it for operators who
+    /// pin memory out-of-band.
+    fn check_memory_admission(model_id: &str, file_len: u64) -> Result<()> {
+        if std::env::var("TENZRO_SKIP_MODEL_ADMISSION").as_deref() == Ok("1") {
+            return Ok(());
+        }
+
+        let required = file_len
+            .saturating_mul(MODEL_LOAD_HEADROOM_NUM)
+            / MODEL_LOAD_HEADROOM_DEN;
+
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let available = sys.available_memory(); // bytes
+
+        if available < required {
+            return Err(ModelError::InsufficientMemory {
+                model_id: model_id.to_string(),
+                required_mb: required / 1_048_576,
+                available_mb: available / 1_048_576,
+            });
+        }
+        Ok(())
     }
 
     /// Load a GGUF model into memory.
@@ -346,6 +436,13 @@ impl ModelRuntime {
             info!("Model {} already loaded", model_id);
             return Ok(());
         }
+
+        // Admission control: refuse to load a model that won't fit in memory
+        // rather than let llama.cpp OOM-kill the process mid-load. Uses the
+        // GGUF file size (≈ resident weight footprint) plus a headroom margin
+        // for the KV cache and activation buffers.
+        let file_len = std::fs::metadata(gguf_path)?.len();
+        Self::check_memory_admission(model_id, file_len)?;
 
         info!("Loading model {} from {}", model_id, gguf_path.display());
         let start = Instant::now();
@@ -575,6 +672,9 @@ impl ModelRuntime {
             return Ok(());
         }
 
+        let file_len = std::fs::metadata(drafter_gguf_path)?.len();
+        Self::check_memory_admission(target_model_id, file_len)?;
+
         info!(
             "Loading MTP drafter for {} from {}",
             target_model_id,
@@ -655,16 +755,20 @@ impl ModelRuntime {
             .get(model_id)
             .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
 
+        let _guard = self.acquire_inflight(model_id)?;
         let model_mutex = model_entry.value().clone();
         let prompt = prompt.to_string();
         let config = config.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             let loaded = model_mutex.blocking_lock();
             Self::generate_sync(&loaded, &prompt, &config)
-        })
-        .await
-        .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+        });
+        let out = handle
+            .await
+            .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?;
+        drop(_guard);
+        out
     }
 
     /// Generate text from structured chat messages.
@@ -683,11 +787,12 @@ impl ModelRuntime {
             .get(model_id)
             .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
 
+        let _guard = self.acquire_inflight(model_id)?;
         let model_mutex = model_entry.value().clone();
         let messages = messages.to_vec();
         let config = config.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             let loaded = model_mutex.blocking_lock();
 
             // Convert ChatMessage to LlamaChatMessage
@@ -713,9 +818,12 @@ impl ModelRuntime {
                 })?;
 
             Self::generate_sync(&loaded, &prompt, &config)
-        })
-        .await
-        .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+        });
+        let out = handle
+            .await
+            .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?;
+        drop(_guard);
+        out
     }
 
     /// Generate a chat completion with tool-use awareness.
@@ -745,6 +853,7 @@ impl ModelRuntime {
             .get(model_id)
             .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?;
 
+        let _guard = self.acquire_inflight(model_id)?;
         let model_mutex = model_entry.value().clone();
         let mut messages = messages.to_vec();
         let tools = tools.to_vec();
@@ -858,7 +967,8 @@ impl ModelRuntime {
         let messages = messages.to_vec();
         let config = config.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let _guard = self.acquire_inflight(model_id)?;
+        let handle = tokio::task::spawn_blocking(move || {
             let loaded = model_mutex.blocking_lock();
             let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
 
@@ -891,9 +1001,12 @@ impl ModelRuntime {
                 &config,
                 Some(&token_tx),
             )
-        })
-        .await
-        .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+        });
+        let out = handle
+            .await
+            .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?;
+        drop(_guard);
+        out
     }
 
     /// Stream text generation token-by-token from a raw prompt.
@@ -924,7 +1037,8 @@ impl ModelRuntime {
         let prompt = prompt.to_string();
         let config = config.clone();
 
-        tokio::task::spawn_blocking(move || {
+        let _guard = self.acquire_inflight(model_id)?;
+        let handle = tokio::task::spawn_blocking(move || {
             let loaded = model_mutex.blocking_lock();
             let drafter_guard = drafter_mutex.as_ref().map(|d| d.blocking_lock());
             Self::generate_sync_streaming(
@@ -934,9 +1048,12 @@ impl ModelRuntime {
                 &config,
                 Some(&token_tx),
             )
-        })
-        .await
-        .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+        });
+        let out = handle
+            .await
+            .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?;
+        drop(_guard);
+        out
     }
 
     /// Synchronous text generation using llama.cpp.

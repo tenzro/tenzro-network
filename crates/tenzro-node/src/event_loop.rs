@@ -43,7 +43,7 @@ use crate::metrics::MetricsCollector;
 /// `provider_type`, `capabilities`, `rpc_endpoint` are captured once at node
 /// startup. Per-tick we still re-read `served_models` from the live
 /// `Arc<DashMap>` so additions / withdrawals propagate without a node restart.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderAnnouncementContext {
     /// `tenzro_types::HardwareCapabilities::detect()` evaluated once at startup.
     pub hardware: tenzro_types::HardwareCapabilities,
@@ -69,6 +69,26 @@ pub struct ProviderAnnouncementContext {
     /// serving only — peers will not auto-cluster this node. Captured once at
     /// startup from the local ggml device profile + linked llama.cpp commit.
     pub cluster_profile: Option<tenzro_types::ClusterProfile>,
+    /// Node Ed25519 signer, byte-shared with the validator identity that
+    /// derives this node's `peer_id`. Signs outbound model + provider
+    /// announcements so peers can reject spoofed or replayed announcements.
+    pub signer: std::sync::Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>,
+}
+
+impl std::fmt::Debug for ProviderAnnouncementContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderAnnouncementContext")
+            .field("hardware", &self.hardware)
+            .field("geography", &self.geography)
+            .field("provider_address", &self.provider_address)
+            .field("provider_type", &self.provider_type)
+            .field("capabilities", &self.capabilities)
+            .field("rpc_endpoint", &self.rpc_endpoint)
+            .field("ttl_secs", &self.ttl_secs)
+            .field("cluster_profile", &self.cluster_profile)
+            .field("signer", &"<signer>")
+            .finish()
+    }
 }
 
 /// Event types flowing through the node
@@ -1358,8 +1378,23 @@ impl EventLoop {
                         }
                     }
 
-                    // 2. Re-announce locally served models via gossipsub
-                    if let (Some(network), Some(served)) = (&self.network, &self.served_models) {
+                    // 2. Re-announce locally served models via gossipsub.
+                    // Requires the provider-announcement context (provider address +
+                    // signer) so the heartbeat carries the same `provider` key and
+                    // signature that consumers require — an unsigned or provider-empty
+                    // heartbeat is dropped on ingest and never refreshes the TTL.
+                    if let (Some(network), Some(served), Some(ctx)) =
+                        (&self.network, &self.served_models, &self.provider_announcement_ctx)
+                    {
+                        let local_peer_id = match network.local_peer_id().await {
+                            Ok(pid) => pid.to_string(),
+                            Err(e) => {
+                                debug!(error = %e, "Skipping model heartbeat: local_peer_id unavailable");
+                                continue;
+                            }
+                        };
+                        let provider_address = ctx.provider_address.clone();
+                        let signer = ctx.signer.clone();
                         let pricing = self.provider_pricing.as_ref().map(|p| p.read().clone());
                         let schedule = self.provider_schedule.as_ref().map(|s| s.read().clone());
                         let rpc_addr = self.rpc_addr.clone();
@@ -1389,7 +1424,7 @@ impl EventLoop {
                                     None
                                 }
                             });
-                            let reg = tenzro_network::ModelRegistrationMessage {
+                            let mut reg = tenzro_network::ModelRegistrationMessage {
                                 model_id: model_id.clone(),
                                 name: model_id.clone(),
                                 description: String::new(),
@@ -1397,8 +1432,8 @@ impl EventLoop {
                                 category: String::new(),
                                 parameters: String::new(),
                                 context_length: 0,
-                                provider: String::new(),
-                                peer_id: String::new(),
+                                provider: provider_address.clone(),
+                                peer_id: local_peer_id.clone(),
                                 pricing: pricing_info,
                                 schedule: msg_schedule,
                                 visibility: "network".to_string(),
@@ -1407,6 +1442,10 @@ impl EventLoop {
                                 rpc_endpoint: format!("http://{}", rpc_addr),
                                 ..Default::default()
                             };
+                            if let Err(e) = reg.sign(signer.as_ref()) {
+                                warn!(error = %e, model_id = %model_id, "Skipping model heartbeat: signing failed");
+                                continue;
+                            }
                             let broadcast_msg = tenzro_network::NetworkMessage::new(
                                 tenzro_network::MessagePayload::ModelRegistration(reg),
                             );
@@ -1516,7 +1555,7 @@ impl EventLoop {
                             }
                         };
 
-                        let ann = tenzro_network::ProviderAnnouncementMessage {
+                        let mut ann = tenzro_network::ProviderAnnouncementMessage {
                             peer_id: local_peer_id,
                             provider_address: ctx.provider_address.clone(),
                             provider_type: ctx.provider_type.clone(),
@@ -1536,7 +1575,13 @@ impl EventLoop {
                             hardware: ctx.hardware.clone(),
                             geography: ctx.geography.clone(),
                             cluster_profile: ctx.cluster_profile.clone(),
+                            pubkey: Vec::new(),
+                            signature: Vec::new(),
                         };
+                        if let Err(e) = ann.sign(ctx.signer.as_ref()) {
+                            warn!(error = %e, "Skipping provider announcement: signing failed");
+                            continue;
+                        }
                         let broadcast_msg = tenzro_network::NetworkMessage::new(
                             tenzro_network::MessagePayload::ProviderAnnouncement(ann),
                         );
@@ -1832,7 +1877,14 @@ impl EventLoop {
                             }
                         }
                         NodeEvent::ModelAnnouncement(reg) => {
-                            if let Some(ref nm) = self.network_models {
+                            if let Err(e) = reg.verify() {
+                                warn!(
+                                    model_id = %reg.model_id,
+                                    provider = %reg.provider,
+                                    error = %e,
+                                    "Rejecting model announcement (signature verification failed)"
+                                );
+                            } else if let Some(ref nm) = self.network_models {
                                 let key = format!("{}:{}", reg.model_id, reg.provider);
                                 if reg.withdrawn {
                                     nm.remove(&key);
@@ -1882,7 +1934,14 @@ impl EventLoop {
                             }
                         }
                         NodeEvent::ProviderAnnouncement(ann) => {
-                            if let Some(ref np) = self.network_providers {
+                            if let Err(e) = ann.verify() {
+                                warn!(
+                                    peer_id = %ann.peer_id,
+                                    provider_type = %ann.provider_type,
+                                    error = %e,
+                                    "Rejecting provider announcement (signature verification failed)"
+                                );
+                            } else if let Some(ref np) = self.network_providers {
                                 np.insert(ann.peer_id.clone(), crate::node::NetworkProviderEntry {
                                     announcement: ann.clone(),
                                     last_seen: std::time::Instant::now(),

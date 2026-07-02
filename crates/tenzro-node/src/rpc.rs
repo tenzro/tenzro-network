@@ -944,6 +944,65 @@ async fn dispatch_embedded_single(
 /// "Missing X" errors even though the field is present inside the array's
 /// first element. This helper unwraps the single-element-array case so the
 /// rest of the handler tree only has to support the object form.
+/// Map a runtime `ModelError` to a caller-safe message.
+///
+/// The `Display` impl of several `ModelError` variants embeds internal
+/// detail — local file paths (`Io`, `DownloadError`), host memory figures
+/// (`InsufficientMemory`), and arbitrary upstream strings (`Other`,
+/// `InferenceError`). Returning those verbatim to a JSON-RPC/HTTP caller
+/// leaks node internals. This projects the error onto a small, stable set
+/// of caller-facing categories while the full error is logged for the
+/// operator by the caller (`tracing::warn!`/`error!`).
+fn sanitize_model_error(e: &tenzro_model::ModelError) -> String {
+    use tenzro_model::ModelError;
+    match e {
+        ModelError::ModelNotFound(_) => "model not found".to_string(),
+        ModelError::NoProvidersAvailable(_) | ModelError::ProviderNotAvailable(_) => {
+            "no provider available for model".to_string()
+        }
+        ModelError::CapacityExceeded | ModelError::QueueFull { .. } => {
+            "provider at capacity, retry later".to_string()
+        }
+        ModelError::InsufficientMemory { .. } => {
+            "provider at capacity, retry later".to_string()
+        }
+        ModelError::ModalityMismatch { .. } => "request modality not supported by model".to_string(),
+        ModelError::MtpUnavailable { .. } => "requested decoding mode unavailable".to_string(),
+        ModelError::InvalidModel(_) => "invalid model request".to_string(),
+        _ => "inference failed".to_string(),
+    }
+}
+
+/// Compute the SHA-256 (hex) of an on-disk file by streaming it in 1 MiB
+/// chunks so a multi-GB GGUF never lands fully in memory. Returns `None`
+/// (with a `warn!`) if the file can't be opened or read — the caller then
+/// broadcasts an empty `weights_sha256`, which is a soft integrity signal,
+/// not a hard failure.
+fn sha256_file_hex(path: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(path = %path, error = %e, "Failed to open weights for SHA-256");
+            return None;
+        }
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(e) => {
+                tracing::warn!(path = %path, error = %e, "Failed to read weights for SHA-256");
+                return None;
+            }
+        }
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
 fn normalize_params(params: Option<Value>) -> Option<Value> {
     match params {
         Some(Value::Array(mut arr)) if arr.len() == 1 => {
@@ -3462,9 +3521,10 @@ async fn handle_inference_request(
                 }));
             }
             Err(e) => {
+                tracing::warn!(model = %model_id, error = %e, "Local inference failed");
                 return Err(JsonRpcError {
                     code: -32000,
-                    message: format!("Inference failed: {}", e),
+                    message: sanitize_model_error(&e),
                     data: None,
                 });
             }
@@ -17678,48 +17738,95 @@ async fn handle_serve_model(
     if visibility == "network" {
     if let Some(network) = node.network() {
         let network = network.clone();
-        let pricing = node.provider_pricing.read();
-        let schedule = node.provider_schedule.read();
-        let msg_schedule = if schedule.enabled {
-            let days: Vec<u8> = schedule.days_of_week.iter()
-                .enumerate()
-                .filter_map(|(i, &enabled)| if enabled { Some(i as u8) } else { None })
-                .collect();
-            Some(tenzro_network::ModelSchedule {
-                enabled: true,
-                start_hour: schedule.start_hour,
-                end_hour: schedule.end_hour,
-                timezone: schedule.timezone.clone(),
-                days_of_week: days,
-            })
-        } else {
-            None
+        // Snapshot pricing + schedule and drop the parking_lot guards before
+        // any `.await` — the guards are `!Send` and must not cross an await.
+        let (msg_schedule, per_token) = {
+            let pricing = node.provider_pricing.read();
+            let schedule = node.provider_schedule.read();
+            let msg_schedule = if schedule.enabled {
+                let days: Vec<u8> = schedule.days_of_week.iter()
+                    .enumerate()
+                    .filter_map(|(i, &enabled)| if enabled { Some(i as u8) } else { None })
+                    .collect();
+                Some(tenzro_network::ModelSchedule {
+                    enabled: true,
+                    start_hour: schedule.start_hour,
+                    end_hour: schedule.end_hour,
+                    timezone: schedule.timezone.clone(),
+                    days_of_week: days,
+                })
+            } else {
+                None
+            };
+            let per_token = pricing.input_price_per_token_wei.min(u64::MAX as u128) as u64;
+            (msg_schedule, per_token)
         };
-        let reg = tenzro_network::ModelRegistrationMessage {
-            model_id: model_id.to_string(),
-            name: entry.name.clone(),
-            description: entry.description.clone(),
-            modality: "text".to_string(),
-            category: entry.family.clone(),
-            parameters: entry.parameters.clone(),
-            context_length: entry.context_length,
-            provider: String::new(),
-            peer_id: String::new(),
-            pricing: tenzro_network::PricingInfo {
-                per_request: 0,
-                per_token: Some(pricing.input_price_per_token_wei.min(u64::MAX as u128) as u64),
-            },
-            schedule: msg_schedule,
-            visibility: visibility.clone(),
-            ttl_secs: 120,
-            withdrawn: false,
-            rpc_endpoint: api_endpoint.clone(),
-            ..Default::default()
-        };
-        let broadcast_msg = NetworkMessage::new(
-            MessagePayload::ModelRegistration(reg),
-        );
+        // Node identity for the signed announcement: peer_id from the network
+        // service, provider address from the local identity registry (matches
+        // the provider announcement's `provider_address`). The signature binds
+        // both plus the endpoint, pricing, and weights hash.
+        let provider_address = node
+            .identity_registry()
+            .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+            .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
+            .unwrap_or_default();
+        let peer_id = network
+            .local_peer_id()
+            .await
+            .ok()
+            .map(|p| p.to_string())
+            .unwrap_or_default();
+        let signer = node.announce_signer().cloned();
+        let name = entry.name.clone();
+        let description = entry.description.clone();
+        let category = entry.family.clone();
+        let parameters = entry.parameters.clone();
+        let context_length = entry.context_length;
+        let visibility_c = visibility.clone();
+        let api_endpoint_c = api_endpoint.clone();
+        let model_id_c = model_id.to_string();
+        let gguf_path_c = gguf_path.clone();
         tokio::spawn(async move {
+            // Hash the served weights off the async executor — a GGUF can be
+            // multiple GB. Empty hash on failure is a soft signal (peers can
+            // still route; they just can't cross-check integrity).
+            let weights_sha256 = tokio::task::spawn_blocking(move || {
+                sha256_file_hex(&gguf_path_c).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+
+            let mut reg = tenzro_network::ModelRegistrationMessage {
+                model_id: model_id_c,
+                name,
+                description,
+                modality: "text".to_string(),
+                category,
+                parameters,
+                context_length,
+                provider: provider_address,
+                peer_id,
+                pricing: tenzro_network::PricingInfo {
+                    per_request: 0,
+                    per_token: Some(per_token),
+                },
+                schedule: msg_schedule,
+                visibility: visibility_c,
+                ttl_secs: 120,
+                withdrawn: false,
+                rpc_endpoint: api_endpoint_c,
+                weights_sha256,
+                ..Default::default()
+            };
+            let Some(signer) = signer else {
+                tracing::warn!("Skipping model announcement: announce signer unavailable");
+                return;
+            };
+            if let Err(e) = reg.sign(signer.as_ref()) {
+                tracing::warn!(error = %e, "Skipping model announcement: signing failed");
+                return;
+            }
+            let broadcast_msg = NetworkMessage::new(MessagePayload::ModelRegistration(reg));
             if let Err(e) = network.broadcast("tenzro/models", broadcast_msg).await {
                 tracing::warn!(error = %e, "Failed to broadcast model serving announcement");
             }
@@ -17778,31 +17885,53 @@ async fn handle_stop_model(
         tracing::info!(model_id = %model_id, "Removed served model from RocksDB CF_MODELS");
     }
 
-    // Publish gossipsub withdrawal so peers remove this model
+    // Publish gossipsub withdrawal so peers remove this model. The withdrawal
+    // must carry the same `provider` the serve announcement did (the consumer
+    // keys entries by `model_id:provider`) and be signed, or peers reject it
+    // as unauthenticated and never evict the entry.
     if let Some(network) = node.network() {
         let network = network.clone();
-        let reg = tenzro_network::ModelRegistrationMessage {
-            model_id: model_id.to_string(),
-            name: String::new(),
-            description: String::new(),
-            modality: String::new(),
-            category: String::new(),
-            parameters: String::new(),
-            context_length: 0,
-            provider: String::new(),
-            peer_id: String::new(),
-            pricing: tenzro_network::PricingInfo { per_request: 0, per_token: None },
-            schedule: None,
-            visibility: "network".to_string(),
-            ttl_secs: 120,
-            withdrawn: true,
-            rpc_endpoint: String::new(),
-            ..Default::default()
-        };
-        let broadcast_msg = NetworkMessage::new(
-            MessagePayload::ModelRegistration(reg),
-        );
+        let provider_address = node
+            .identity_registry()
+            .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+            .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
+            .unwrap_or_default();
+        let signer = node.announce_signer().cloned();
+        let peer_id = network
+            .local_peer_id()
+            .await
+            .ok()
+            .map(|p| p.to_string())
+            .unwrap_or_default();
+        let model_id_c = model_id.to_string();
         tokio::spawn(async move {
+            let mut reg = tenzro_network::ModelRegistrationMessage {
+                model_id: model_id_c,
+                name: String::new(),
+                description: String::new(),
+                modality: String::new(),
+                category: String::new(),
+                parameters: String::new(),
+                context_length: 0,
+                provider: provider_address,
+                peer_id,
+                pricing: tenzro_network::PricingInfo { per_request: 0, per_token: None },
+                schedule: None,
+                visibility: "network".to_string(),
+                ttl_secs: 120,
+                withdrawn: true,
+                rpc_endpoint: String::new(),
+                ..Default::default()
+            };
+            let Some(signer) = signer else {
+                tracing::warn!("Skipping model withdrawal: announce signer unavailable");
+                return;
+            };
+            if let Err(e) = reg.sign(signer.as_ref()) {
+                tracing::warn!(error = %e, "Skipping model withdrawal: signing failed");
+                return;
+            }
+            let broadcast_msg = NetworkMessage::new(MessagePayload::ModelRegistration(reg));
             if let Err(e) = network.broadcast("tenzro/models", broadcast_msg).await {
                 tracing::warn!(error = %e, "Failed to broadcast model withdrawal");
             }
@@ -19301,6 +19430,11 @@ async fn handle_chat_simple(
             data: None,
         })?;
 
+    // Bound the message so a single request cannot pin a provider's context.
+    tenzro_types::validation::validate_string_len(
+        message, "message", tenzro_types::validation::MAX_CHAT_MESSAGE_LEN,
+    ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+
     // Resolve model: try service registry, then local served_models, then
     // gossip-discovered network models. This ensures non-provider nodes (e.g.
     // the public RPC tier) can forward chat requests to any validator that
@@ -19354,10 +19488,19 @@ async fn handle_chat_simple(
     };
 
     // Parse optional generation config
+    let temperature = params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7);
+    tenzro_types::validation::validate_temperature(temperature)
+        .map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+
+    let max_tokens = params.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(512);
+    tenzro_types::validation::validate_numeric_bound(
+        max_tokens, "max_tokens", tenzro_types::validation::MAX_INFERENCE_TOKENS,
+    ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+
     let config = GenerationConfig {
-        temperature: params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7),
+        temperature,
         top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
-        max_tokens: params.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(512) as u32,
+        max_tokens: max_tokens as u32,
         repeat_penalty: params.get("repeat_penalty").and_then(|v| v.as_f64()).unwrap_or(1.1) as f32,
         // Optional Multi-Token-Prediction draft count (1..=6). When set
         // and the target's catalog entry pairs a drafter, the runtime
@@ -19412,10 +19555,13 @@ async fn handle_chat_simple(
         let result = model_runtime
             .generate_chat(&model_id, &chat_messages, &config)
             .await
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Inference failed: {}", e),
-                data: None,
+            .map_err(|e| {
+                tracing::warn!(model = %model_id, error = %e, "Local inference failed");
+                JsonRpcError {
+                    code: -32000,
+                    message: sanitize_model_error(&e),
+                    data: None,
+                }
             })?;
 
         // Record Prometheus inference counter for observability
@@ -19608,6 +19754,16 @@ async fn handle_chat_rich(
             data: None,
         });
     }
+    tenzro_types::validation::validate_vec_len(
+        &messages, "messages", tenzro_types::validation::MAX_CHAT_MESSAGES,
+    ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+    for (i, m) in messages.iter().enumerate() {
+        tenzro_types::validation::validate_numeric_bound(
+            m.payload_len(),
+            &format!("message[{}] content", i),
+            tenzro_types::validation::MAX_CHAT_MESSAGE_LEN,
+        ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+    }
 
     // ── parse optional system prompt ─────────────────────────────────
     let system: Option<SystemPrompt> = match params.get("system") {
@@ -19706,9 +19862,16 @@ async fn handle_chat_rich(
     let max_tokens = params
         .get("max_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(1024) as u32;
+        .unwrap_or(1024);
+    tenzro_types::validation::validate_numeric_bound(
+        max_tokens, "max_tokens", tenzro_types::validation::MAX_INFERENCE_TOKENS,
+    ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+    let max_tokens = max_tokens as u32;
+    let temperature = params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7);
+    tenzro_types::validation::validate_temperature(temperature)
+        .map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
     let config = GenerationConfig {
-        temperature: params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7),
+        temperature,
         top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
         max_tokens,
         repeat_penalty: params
@@ -19799,10 +19962,13 @@ async fn handle_chat_rich(
             let r = model_runtime
                 .generate_chat_with_tools(&model_id, &chat_messages, &runtime_tools, &config)
                 .await
-                .map_err(|e| JsonRpcError {
-                    code: -32000,
-                    message: format!("Inference failed: {}", e),
-                    data: None,
+                .map_err(|e| {
+                    tracing::warn!(model = %model_id, error = %e, "Local inference failed");
+                    JsonRpcError {
+                        code: -32000,
+                        message: sanitize_model_error(&e),
+                        data: None,
+                    }
                 })?;
             (
                 r.text,
@@ -19815,10 +19981,13 @@ async fn handle_chat_rich(
             let r = model_runtime
                 .generate_chat(&model_id, &chat_messages, &config)
                 .await
-                .map_err(|e| JsonRpcError {
-                    code: -32000,
-                    message: format!("Inference failed: {}", e),
-                    data: None,
+                .map_err(|e| {
+                    tracing::warn!(model = %model_id, error = %e, "Local inference failed");
+                    JsonRpcError {
+                        code: -32000,
+                        message: sanitize_model_error(&e),
+                        data: None,
+                    }
                 })?;
             let stop = if r.output_tokens >= max_tokens {
                 "max_tokens".to_string()
@@ -20750,12 +20919,15 @@ async fn handle_openai_chat_completions(
                     }))
                     .into_response()
                 }
-                Err(e) => json_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Inference failed: {}", e),
-                    "server_error",
-                    "inference_error",
-                ),
+                Err(e) => {
+                    tracing::warn!(model = %model_id, error = %e, "Local inference failed");
+                    json_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &sanitize_model_error(&e),
+                        "server_error",
+                        "inference_error",
+                    )
+                }
             }
         }
     } else if let Some(ref svc) = service {
@@ -21135,6 +21307,32 @@ pub async fn handle_chat_stream_rich(
             "empty_messages",
         );
     }
+    if messages.len() > tenzro_types::validation::MAX_CHAT_MESSAGES {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "'messages' too many items: {} (max {})",
+                messages.len(),
+                tenzro_types::validation::MAX_CHAT_MESSAGES
+            ),
+            "invalid_request_error",
+            "too_many_messages",
+        );
+    }
+    for (i, m) in messages.iter().enumerate() {
+        let len = m.payload_len();
+        if len > tenzro_types::validation::MAX_CHAT_MESSAGE_LEN {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "message[{}] content too long: {} bytes (max {})",
+                    i, len, tenzro_types::validation::MAX_CHAT_MESSAGE_LEN
+                ),
+                "invalid_request_error",
+                "message_too_long",
+            );
+        }
+    }
 
     // Optional system + tools.
     let system: Option<SystemPrompt> = match params.get("system") {
@@ -21278,9 +21476,32 @@ pub async fn handle_chat_stream_rich(
     let max_tokens = params
         .get("max_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(1024) as u32;
+        .unwrap_or(1024);
+    if tenzro_types::validation::validate_numeric_bound(
+        max_tokens, "max_tokens", tenzro_types::validation::MAX_INFERENCE_TOKENS,
+    ).is_err() {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "max_tokens exceeds maximum: {} (max {})",
+                max_tokens, tenzro_types::validation::MAX_INFERENCE_TOKENS
+            ),
+            "invalid_request_error",
+            "max_tokens_too_large",
+        );
+    }
+    let max_tokens = max_tokens as u32;
+    let temperature = params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7);
+    if tenzro_types::validation::validate_temperature(temperature).is_err() {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("temperature out of range: {} (must be 0.0..=2.0)", temperature),
+            "invalid_request_error",
+            "invalid_temperature",
+        );
+    }
     let config = GenerationConfig {
-        temperature: params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7),
+        temperature,
         top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
         max_tokens,
         repeat_penalty: params
@@ -21369,11 +21590,12 @@ pub async fn handle_chat_stream_rich(
         let result = match gen_result {
             Ok(r) => r,
             Err(e) => {
+                tracing::warn!(model = %model_id_for_stream, error = %e, "Local inference failed");
                 // Emit a synthetic error message_delta + message_stop so
                 // the client can finalize cleanly.
                 let err_payload = serde_json::json!({
                     "delta": { "stop_reason": "error", "stop_sequence": null },
-                    "error": { "message": format!("Inference failed: {}", e), "type": "server_error" },
+                    "error": { "message": sanitize_model_error(&e), "type": "server_error" },
                     "usage": { "output_tokens": 0 },
                 });
                 yield sse_event!("message_delta", err_payload);
@@ -33483,10 +33705,13 @@ async fn handle_agent_payment_pipeline(
         let result = model_runtime
             .generate_chat(&model_id, &chat_messages, &config)
             .await
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Inference failed: {}", e),
-                data: None,
+            .map_err(|e| {
+                tracing::warn!(model = %model_id, error = %e, "Local inference failed");
+                JsonRpcError {
+                    code: -32000,
+                    message: sanitize_model_error(&e),
+                    data: None,
+                }
             })?;
 
         (result.text.clone(), result.input_tokens, result.output_tokens)
@@ -33506,16 +33731,22 @@ async fn handle_agent_payment_pipeline(
             .timeout(std::time::Duration::from_secs(120))
             .send()
             .await
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Remote inference request failed: {}", e),
-                data: None,
+            .map_err(|e| {
+                tracing::warn!(model = %model_id, endpoint = %svc.api_endpoint, error = %e, "Remote inference request failed");
+                JsonRpcError {
+                    code: -32000,
+                    message: "remote provider unavailable".to_string(),
+                    data: None,
+                }
             })?;
 
-        let resp_json: Value = resp.json().await.map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Failed to parse inference response: {}", e),
-            data: None,
+        let resp_json: Value = resp.json().await.map_err(|e| {
+            tracing::warn!(model = %model_id, endpoint = %svc.api_endpoint, error = %e, "Failed to parse remote inference response");
+            JsonRpcError {
+                code: -32000,
+                message: "remote provider returned an invalid response".to_string(),
+                data: None,
+            }
         })?;
 
         let text = resp_json["choices"][0]["message"]["content"]
