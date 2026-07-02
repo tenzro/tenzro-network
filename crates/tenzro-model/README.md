@@ -24,6 +24,7 @@ The `tenzro-model` crate provides the core infrastructure for managing AI models
 - Health monitoring with heartbeat mechanism and circuit breaker integration
 - Provider ranking and scoring
 - TEE provider tracking
+- Authenticated gossip announcements: model and provider registrations are Ed25519-signed and verified on ingest; a model announcement advertises `weights_sha256` (a streaming SHA-256 of the served on-disk weights) inside the signed payload so consumers can detect weight substitution
 
 ### Inference Routing
 

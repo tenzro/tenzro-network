@@ -37,6 +37,8 @@ The crates that implement this:
 
 A node runs as a model provider with `--roles ai`, registers each model it can serve through `tenzro_serveModel` (or `tenzro model serve` on the CLI), and the registration writes through to `CF_MODEL_SERVICES`. The provider's TDIP identity is bound at registration; payments route to its MPC wallet.
 
+Registration and provider announcements are authenticated over gossip. Each announcement on `tenzro/models` and `tenzro/providers` is Ed25519-signed by the node's key over a canonical preimage of its routable fields and carries the signing public key; consumers verify on ingest and drop anything unsigned or tampered. A model announcement also advertises `weights_sha256` — a streaming SHA-256 of the served on-disk weights — inside the signed payload, so a consumer can detect weight substitution before routing inference to that provider.
+
 Provider economics:
 
 - **Reputation tracking** mutates on success (+1, saturating at 1000) and on failure (−5, saturating at 0). The asymmetry against failure is intentional. `record_success` is gated to "settled-success only" so providers cannot game reputation without taking a real payment.

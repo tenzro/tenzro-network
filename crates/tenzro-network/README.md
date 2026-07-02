@@ -144,7 +144,7 @@ The network uses different topics for different message types (8 topics):
 | `tenzro/transactions` | Transaction broadcasting |
 | `tenzro/consensus` | Consensus messages (proposals, votes) - **validator-only** |
 | `tenzro/attestations` | TEE attestation reports |
-| `tenzro/models` | Model registration announcements |
+| `tenzro/models` | Model registration announcements — Ed25519-signed, verified on ingest |
 | `tenzro/inference` | Inference requests and responses |
 | `tenzro/status` | Node status and health checks |
 | `tenzro/agents` | Agent-to-agent messages |
@@ -273,10 +273,10 @@ Validators are authenticated for consensus-critical topics via `ValidatorRegistr
 - `Block(Block)` / `BlockRequest(Hash)` / `BlockResponse(Option<Block>)` - Block propagation + targeted fetch
 - `Transaction(SignedTransaction)` / `TransactionRequest(Hash)` / `TransactionResponse(Option<SignedTransaction>)` - Transaction broadcast + targeted fetch
 - `Attestation(AttestationMessage)` - TEE attestations
-- `ModelRegistration(ModelRegistrationMessage)` - Model announcements
+- `ModelRegistration(ModelRegistrationMessage)` - Model announcements (Ed25519-signed over a canonical preimage, carries `pubkey` + `signature` + `weights_sha256`; verified on ingest)
 - `InferenceRequest(InferenceRequestMessage)` / `InferenceResponse(InferenceResponseMessage)` - Inference operations
 - `Status(StatusMessage)` - Node status
-- `ProviderAnnouncement(ProviderAnnouncementMessage)` - Provider registration
+- `ProviderAnnouncement(ProviderAnnouncementMessage)` - Provider registration (Ed25519-signed over a canonical preimage, carries `pubkey` + `signature`; verified on ingest)
 - `AgentAnnouncement(AgentAnnouncementMessage)` - Agent discovery
 
 ## Dependencies
