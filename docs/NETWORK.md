@@ -71,6 +71,8 @@ The control plane carries thirteen topics built on top of `gossipsub` with a har
 
 Validator-only topics enforce origin on the receive side: `ValidatorRegistry::is_validator(peer_id)` is consulted before a `tenzro/blocks` or `tenzro/consensus` message is admitted. Non-validators that publish on these topics get their messages dropped.
 
+Model and provider announcements are authenticated independently of the validator gate. Messages on `tenzro/models` and `tenzro/providers` carry the announcing node's Ed25519 public key and a signature over a canonical preimage of their routable fields. Each message is verified on ingest against the embedded key; unsigned or tampered announcements are dropped before they reach the discovery index. Model announcements additionally advertise `weights_sha256`, a streaming SHA-256 of the served on-disk weights, so consumers can detect weight substitution before routing inference to a provider.
+
 ---
 
 ## 3. NAT traversal

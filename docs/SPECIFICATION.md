@@ -503,7 +503,7 @@ Tenzro implements the 1:1 reserve-attestation invariant for tokenized assets in 
 - **`check_and_mint(token, amount, now)`** — atomic invariant `circulating + amount ≤ reserve` plus attestation-freshness check (`now − attested_at ≤ ttl_secs`).
 - **`would_mint_succeed`** — read-only check.
 - **`record_burn`** — saturating decrement on redemption.
-- **`TokenizedEquityProfile`** — sidecar carrying CCT pool address, underlying CAIP-19, ISIN, CUSIP, per-share ratio (numerator, denominator), and the latest corporate-action event hash. Used by the unified token registry for xStocks-class assets.
+- **`TokenizedEquityProfile`** — sidecar carrying CCT pool address, underlying CAIP-19, ISIN, CUSIP, per-share ratio (numerator, denominator), and the latest corporate-action event hash. Used by the unified token registry for tokenized-equity-class assets.
 - **RPC surface.** `tenzro_setSecureMintPolicy`, `tenzro_getSecureMintPolicy`, `tenzro_clearSecureMintPolicy`, `tenzro_secureMintCheck`, `tenzro_secureMintApply`, `tenzro_secureMintRecordBurn`. EVM precompile slot reserved at `0x0000…00001024`.
 
 ### 4.8d Stable-Asset Issuance

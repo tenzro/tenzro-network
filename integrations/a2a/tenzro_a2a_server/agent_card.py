@@ -1099,8 +1099,8 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "name": "Secure-Mint Registry",
                 "description": (
                     "Per-token 1:1 reserve-attestation invariant for "
-                    "tokenized real-world assets (xStocks-class "
-                    "equities, treasuries, stablecoins). Enforces "
+                    "tokenized real-world assets (tokenized-equity-class "
+                    "assets, treasuries, stablecoins). Enforces "
                     "`circulating + amount ≤ reserve` at every mint. "
                     "Policies carry the PoR feed id, attester DID, "
                     "attestation hash, attested_at timestamp, and "
@@ -1110,7 +1110,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 ),
                 "tags": [
                     "secure-mint", "rwa", "tokenized-assets",
-                    "reserve-attestation", "1-to-1", "xstocks", "por",
+                    "reserve-attestation", "1-to-1", "tokenized-equities", "por",
                 ],
                 "examples": [
                     "Set a Secure-Mint policy for asset_id=0x… (reserve, por_feed_id, attester_did, …)",
