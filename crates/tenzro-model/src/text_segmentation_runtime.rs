@@ -177,7 +177,7 @@ mod onnx_backend {
     use super::*;
     use image::imageops::FilterType;
     use ndarray::{Array2, Array3, Array4};
-    use ort::session::{Session, SessionInputValue, builder::GraphOptimizationLevel};
+    use ort::session::{Session, SessionInputValue};
     use ort::value::Tensor;
     use std::time::Instant;
     use tokenizers::Tokenizer;
@@ -212,32 +212,18 @@ mod onnx_backend {
             decoder_path: impl AsRef<Path>,
             tokenizer_path: impl AsRef<Path>,
         ) -> Result<Self> {
-            let image_encoder = Session::builder()
-                .map_err(|e| ModelError::InvalidModel(format!("ORT session builder: {}", e)))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| ModelError::InvalidModel(format!("ORT optimization level: {}", e)))?
-                .commit_from_file(image_encoder_path.as_ref())
-                .map_err(|e| {
-                    ModelError::ProviderNotAvailable(format!("ORT load image encoder: {}", e))
-                })?;
+            let image_encoder = crate::onnx_session::build_onnx_session(
+                image_encoder_path.as_ref(),
+                "image encoder",
+            )?;
 
-            let language_encoder = Session::builder()
-                .map_err(|e| ModelError::InvalidModel(format!("ORT session builder: {}", e)))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| ModelError::InvalidModel(format!("ORT optimization level: {}", e)))?
-                .commit_from_file(language_encoder_path.as_ref())
-                .map_err(|e| {
-                    ModelError::ProviderNotAvailable(format!("ORT load language encoder: {}", e))
-                })?;
+            let language_encoder = crate::onnx_session::build_onnx_session(
+                language_encoder_path.as_ref(),
+                "language encoder",
+            )?;
 
-            let decoder = Session::builder()
-                .map_err(|e| ModelError::InvalidModel(format!("ORT session builder: {}", e)))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| ModelError::InvalidModel(format!("ORT optimization level: {}", e)))?
-                .commit_from_file(decoder_path.as_ref())
-                .map_err(|e| {
-                    ModelError::ProviderNotAvailable(format!("ORT load decoder: {}", e))
-                })?;
+            let decoder =
+                crate::onnx_session::build_onnx_session(decoder_path.as_ref(), "decoder")?;
 
             let tokenizer = Tokenizer::from_file(tokenizer_path.as_ref())
                 .map_err(|e| ModelError::InvalidModel(format!("tokenizer load: {}", e)))?;

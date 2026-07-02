@@ -25,6 +25,8 @@ except ImportError:  # pragma: no cover
     nn = None  # type: ignore[assignment]
 
 
+from tenzro_trainer.muon import build_inner_optimizer
+
 log = logging.getLogger(__name__)
 
 
@@ -181,7 +183,9 @@ def build_adapter(
 
     Hyperparams override training-time choices: ``learning_rate`` (default 1e-4),
     ``batch_size`` (default 8), ``context_patches`` (default 16),
-    ``horizon_patches`` (default 4).
+    ``horizon_patches`` (default 4). The inner optimizer is selected by
+    ``inner_optimizer`` (``muon`` | ``adamw`` | ``sgd``) via
+    :func:`tenzro_trainer.muon.build_inner_optimizer`.
     """
     if torch is None:
         raise RuntimeError("PyTorch is required")
@@ -194,12 +198,7 @@ def build_adapter(
         patch_size=int(md.get("patch_size", 32)),
         max_patches=int(md.get("max_patches", 64)),
     )
-    opt = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(hp.get("learning_rate", 1e-4)),
-        betas=(0.9, 0.95),
-        weight_decay=float(hp.get("weight_decay", 0.0)),
-    )
+    opt = build_inner_optimizer(model, md, hp, default_lr=1e-4)
     log.info(
         "built timeseries adapter: %d params",
         sum(p.numel() for p in model.parameters()),

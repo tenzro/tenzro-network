@@ -37,6 +37,7 @@ parking_lot = { workspace = true }
 governor = { workspace = true }
 lru = { workspace = true }
 rand = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

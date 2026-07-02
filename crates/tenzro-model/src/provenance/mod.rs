@@ -156,6 +156,23 @@ pub enum ProvenanceError {
     /// (`ed25519`, `secp256k1`).
     #[error("Unsupported signature algorithm: {0}")]
     UnsupportedAlgorithm(String),
+    /// The manifest's `content_hash` does not match the SHA-256 of the
+    /// actual response output bytes.
+    #[error("Provenance content hash does not match response output")]
+    ContentHashMismatch,
+    /// The manifest's `model_id` does not match the model the request
+    /// was routed for.
+    #[error("Provenance model mismatch: manifest says {manifest}, request was {requested}")]
+    ModelMismatch {
+        /// Model id embedded in the manifest.
+        manifest: String,
+        /// Model id the request was routed for.
+        requested: String,
+    },
+    /// The manifest's embedded `signer_public_key` does not match the
+    /// provider's registered signing key.
+    #[error("Provenance signer key does not match the provider's registered signing key")]
+    KeyMismatch,
 }
 
 /// Verify a provenance manifest's signature against its embedded public key
@@ -176,6 +193,36 @@ pub fn verify_manifest(manifest: &ProvenanceManifest) -> Result<(), ProvenanceEr
     let preimage = manifest.canonical_preimage();
     verify(&public_key, &preimage, &signature)
         .map_err(|_| ProvenanceError::VerificationFailed)
+}
+
+/// Verify a provider-attached response manifest end-to-end: the content
+/// hash must match the actual output bytes, the model id must match the
+/// routed request, the signature must verify against the embedded public
+/// key, and — when the provider has a registered signing key — the
+/// embedded key must equal the registered one. Providers without a
+/// registered key pass the key check trivially (self-attested manifest,
+/// verified best-effort only).
+pub fn verify_response_manifest(
+    manifest: &ProvenanceManifest,
+    output: &[u8],
+    model_id: &str,
+    registered_pubkey: Option<&[u8]>,
+) -> Result<(), ProvenanceError> {
+    if manifest.content_hash != hash_content(output) {
+        return Err(ProvenanceError::ContentHashMismatch);
+    }
+    if manifest.model_id != model_id {
+        return Err(ProvenanceError::ModelMismatch {
+            manifest: manifest.model_id.clone(),
+            requested: model_id.to_string(),
+        });
+    }
+    if let Some(registered) = registered_pubkey {
+        if manifest.signer_public_key != registered {
+            return Err(ProvenanceError::KeyMismatch);
+        }
+    }
+    verify_manifest(manifest)
 }
 
 /// Re-export the in-process Ed25519 signer.

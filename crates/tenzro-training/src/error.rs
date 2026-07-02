@@ -82,6 +82,39 @@ pub enum TrainingError {
         actual: tenzro_types::training::TrainingTier,
     },
 
+    #[error(
+        "fragment {fragment} is not in the active shard for round {round} (fragment shard \
+         {shard}, active shard {active_shard})"
+    )]
+    FragmentNotInActiveShard {
+        fragment: u32,
+        shard: u32,
+        active_shard: u32,
+        round: u32,
+    },
+
+    #[error(
+        "fragment {fragment} belongs to pipeline stage {fragment_stage}, but trainer \
+         {trainer_did} is assigned stage {trainer_stage}"
+    )]
+    PipelineStageMismatch {
+        fragment: u32,
+        fragment_stage: u32,
+        trainer_did: String,
+        trainer_stage: u32,
+    },
+
+    #[error(
+        "quantization mismatch: task spec requires {expected}, submission declares {got}"
+    )]
+    QuantizationMismatch {
+        expected: tenzro_types::training::GradientQuantization,
+        got: tenzro_types::training::GradientQuantization,
+    },
+
+    #[error("malformed quantized payload: {0}")]
+    QuantizedPayloadMalformed(String),
+
     #[error("payload size mismatch: header says {header}, got {actual}")]
     PayloadSizeMismatch { header: u64, actual: u64 },
 

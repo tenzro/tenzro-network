@@ -3164,9 +3164,10 @@ async def handle_compute(text: str, metadata: dict = None) -> str:
 # ---------------------------------------------------------------------------
 
 async def handle_moe(text: str, metadata: dict = None) -> str:
-    """MoE expert-shard map, dispatch planning, replication policy, and
-    catalog topology. The model id reads from `metadata` or free text; the
-    dispatch routings read from `metadata`.
+    """MoE expert-shard map, dispatch planning, replication policy, catalog
+    topology, expert/gate weight loading, runtime status, and distributed
+    layer forwards. The model id reads from `metadata` or free text; blob
+    sources, layer/expert indices, and hidden states read from `metadata`.
     """
     t = text.lower()
     md = metadata or {}
@@ -3175,9 +3176,51 @@ async def handle_moe(text: str, metadata: dict = None) -> str:
         m = re.search(r"[\w./-]+", text.split()[-1]) if text.split() else None
         model_id = m.group(0) if m else None
 
+    if "status" in t:
+        result = await rpc_call("tenzro_moeExpertStatus", [])
+        return f"MoE expert runtime status:\n{json.dumps(result, indent=2)}"
+
     if "policy" in t or "replication" in t:
         result = await rpc_call("tenzro_moeReplicationPolicy", [])
         return f"MoE replication policy:\n{json.dumps(result, indent=2)}"
+
+    if (
+        "load" in t
+        and "unload" not in t
+        and model_id
+        and md.get("layer") is not None
+    ):
+        params = {"model_id": model_id, "layer": md["layer"]}
+        if md.get("blob_base64"):
+            params["blob_base64"] = md["blob_base64"]
+        elif md.get("uri"):
+            params["uri"] = md["uri"]
+        if "gate" in t:
+            result = await rpc_call("tenzro_moeGateLoad", params)
+            return f"MoE gate load:\n{json.dumps(result, indent=2)}"
+        if md.get("expert") is not None:
+            params["expert"] = md["expert"]
+            result = await rpc_call("tenzro_moeExpertLoad", params)
+            return f"MoE expert load:\n{json.dumps(result, indent=2)}"
+
+    if (
+        "forward" in t
+        and model_id
+        and md.get("layer") is not None
+        and md.get("d_model")
+        and md.get("hidden_states")
+    ):
+        params = {
+            "model_id": model_id,
+            "layer": md["layer"],
+            "d_model": md["d_model"],
+            "hidden_states": md["hidden_states"],
+            "allow_cold": md.get("allow_cold", False),
+        }
+        if md.get("top_k") is not None:
+            params["top_k"] = md["top_k"]
+        result = await rpc_call("tenzro_moeForward", params)
+        return f"MoE distributed forward:\n{json.dumps(result, indent=2)}"
 
     if ("dispatch" in t or "plan" in t) and model_id and md.get("routings"):
         result = await rpc_call("tenzro_moePlanDispatch", {
@@ -3200,7 +3243,103 @@ async def handle_moe(text: str, metadata: dict = None) -> str:
         "  - 'MoE shard map <model_id>'\n"
         "  - 'MoE catalog shape <model_id>'\n"
         "  - 'MoE replication policy'\n"
-        "  - 'MoE plan dispatch <model_id>' (metadata: routings, allow_cold?)"
+        "  - 'MoE plan dispatch <model_id>' (metadata: routings, allow_cold?)\n"
+        "  - 'MoE expert status'\n"
+        "  - 'MoE load expert' (metadata: model_id, layer, expert, blob_base64 | uri)\n"
+        "  - 'MoE load gate' (metadata: model_id, layer, blob_base64 | uri)\n"
+        "  - 'MoE forward' (metadata: model_id, layer, d_model, hidden_states, top_k?, allow_cold?)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Operability Inspection
+# ---------------------------------------------------------------------------
+
+async def handle_operability(text: str, metadata: dict = None) -> str:
+    """Read-only operability surface: Tenzro Train run/receipt/manifest
+    inspection, SLA fault-detector parameters and probes, and state-sync
+    snapshot inspection. Validator-registry reads route to the
+    validator-lifecycle handler. Identifiers read from `metadata` or free
+    text.
+    """
+    t = text.lower()
+    md = metadata or {}
+    task_id = md.get("task_id")
+    if not task_id:
+        m = re.search(r"task-[\w.-]+", text)
+        task_id = m.group(0) if m else None
+
+    # --- SLA fault detector ---
+    if "probe" in t:
+        if (
+            "issue" in t
+            and md.get("provider_did")
+            and md.get("epoch") is not None
+            and md.get("round") is not None
+        ):
+            result = await rpc_call("tenzro_slaIssueProbe", {
+                "provider_did": md["provider_did"],
+                "epoch": md["epoch"],
+                "round": md["round"],
+                "deadline_ms": md.get("deadline_ms", 5000),
+            })
+            return f"SLA probe issued:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_slaListOutstandingProbes", [])
+        return f"Outstanding SLA probes:\n{json.dumps(result, indent=2)}"
+
+    if "sla" in t:
+        result = await rpc_call("tenzro_slaGetParams", [])
+        return f"SLA fault-detector parameters:\n{json.dumps(result, indent=2)}"
+
+    # --- state-sync snapshots ---
+    if "snapshot" in t or "state-sync" in t:
+        if "chunk" in t and md.get("height") is not None:
+            result = await rpc_call("tenzro_getSnapshotChunk", {
+                "height": md["height"],
+                "chunk_index": md.get("chunk_index", 0),
+            })
+            return f"Snapshot chunk:\n{json.dumps(result, indent=2)}"
+        if "manifest" in t and md.get("height") is not None:
+            result = await rpc_call(
+                "tenzro_getSnapshotManifest", {"height": md["height"]}
+            )
+            return f"Snapshot manifest:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_listSnapshots", [])
+        return f"Local snapshots:\n{json.dumps(result, indent=2)}"
+
+    # --- Tenzro Train inspection ---
+    if "receipt" in t and task_id:
+        result = await rpc_call("tenzro_training_getReceipt", {"task_id": task_id})
+        return f"Training receipt for {task_id}:\n{json.dumps(result, indent=2)}"
+
+    if ("manifest" in t or "sealed" in t) and task_id:
+        result = await rpc_call(
+            "tenzro_training_getSealedManifest", {"task_id": task_id}
+        )
+        return f"Sealed-shard manifest for {task_id}:\n{json.dumps(result, indent=2)}"
+
+    if task_id:
+        result = await rpc_call("tenzro_training_getRun", {"task_id": task_id})
+        return f"Training run {task_id}:\n{json.dumps(result, indent=2)}"
+
+    if "train" in t and ("run" in t or "list" in t):
+        result = await rpc_call("tenzro_training_listRuns", [])
+        return f"Tenzro Train runs:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Operability inspection operations:\n"
+        "  - 'List Tenzro Train runs'\n"
+        "  - 'Get training run task-…' (metadata: task_id)\n"
+        "  - 'Get training receipt task-…' (metadata: task_id)\n"
+        "  - 'Get sealed manifest task-…' (metadata: task_id)\n"
+        "  - 'Show SLA fault-detector parameters'\n"
+        "  - 'List outstanding SLA probes'\n"
+        "  - 'Issue SLA probe' (metadata: provider_did, epoch, round, deadline_ms?)\n"
+        "  - 'List snapshots'\n"
+        "  - 'Get snapshot manifest' (metadata: height)\n"
+        "  - 'Get snapshot chunk' (metadata: height, chunk_index)\n"
+        "Validator-registry reads ('List active validators', 'Get validator "
+        "state 0x…') route to the validator-lifecycle skill."
     )
 
 
@@ -3315,6 +3454,7 @@ HANDLERS: dict[str, callable] = {
     "storage": handle_storage,
     "compute": handle_compute,
     "moe": handle_moe,
+    "operability": handle_operability,
     "discovery": handle_discovery,
     "help": handle_help,
 }

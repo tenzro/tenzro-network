@@ -1,5 +1,7 @@
 """4-tier keyword routing for natural language messages to handler skills."""
 
+import re
+
 
 def route_message(text: str) -> str:
     """Route a natural language message to the appropriate handler skill.
@@ -163,11 +165,21 @@ def route_message(text: str) -> str:
         return "caip"
 
     # ------------------------------------------------------------------
-    # Tier 2e: Storage market, compute rental, MoE sharding, local discovery
+    # Tier 2e: Operability inspection, storage market, compute rental,
+    # MoE sharding, local discovery
     #
-    # MoE and local-discovery phrases must precede the broad Tier 3 "model"
-    # and "network" routes because both share keywords.
+    # Operability phrases must precede the MoE route ("sealed-shard
+    # manifest" contains "shard") and the broad Tier 3 routes. MoE and
+    # local-discovery phrases must precede the broad Tier 3 "model" and
+    # "network" routes because both share keywords.
     # ------------------------------------------------------------------
+    if any(k in t for k in [
+        "tenzro train", "training run", "training receipt", "sealed receipt",
+        "sealed manifest", "sealed-shard manifest", "sla probe", "sla fault",
+        "sla param", "liveness probe", "outstanding probe", "snapshot",
+        "state-sync",
+    ]):
+        return "operability"
     if any(k in t for k in [
         "expert", "moe", "shard map", "shard", "expert-shard",
         "dispatch plan", "plan dispatch", "replication policy",
@@ -185,8 +197,8 @@ def route_message(text: str) -> str:
         return "storage"
     if any(k in t for k in [
         "compute rental", "compute provider", "book rental",
-        "settle epoch", "rent compute", "rental", "rent ",
-    ]):
+        "settle epoch", "rent compute", "rental",
+    ]) or re.search(r"\brent\b", t):
         return "compute"
 
     # ------------------------------------------------------------------

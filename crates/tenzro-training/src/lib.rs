@@ -47,6 +47,7 @@ pub mod error;
 pub mod gossip;
 pub mod outer_optimizer;
 pub mod payload_store;
+pub mod quantization;
 pub mod runtime;
 
 pub use aggregation::{
@@ -68,10 +69,13 @@ pub use gossip::{
     decode_for_topic, encode_install_sealed_manifest, encode_outer_gradient, encode_sync_round,
     TrainingGossipMessage, TRAINING_SYNCER_TOPIC, TRAINING_TOPIC,
 };
-pub use outer_optimizer::{NesterovSgdConfig, NesterovSgdState};
+pub use outer_optimizer::{
+    gradient_agreement, AdaptiveLrConfig, NesterovSgdConfig, NesterovSgdState,
+};
 pub use payload_store::{
     compute_payload_hash, verify_payload, GradientPayloadStore, InMemoryGradientStore,
 };
+pub use quantization::{dequantize, encoded_len, quantize};
 pub use runtime::{
     min_tier_for_rule, validate_aggregation_for_tier, FragmentBuffer, SyncerState, TrainingRuntime,
 };
@@ -80,7 +84,8 @@ pub use runtime::{
 // downstream crates can `use tenzro_training::TrainingTaskSpec` instead of
 // `use tenzro_types::training::TrainingTaskSpec`.
 pub use tenzro_types::training::{
-    AggregationRule, ArchitectureSpec, FragmentQuorumStatus, OuterGradient,
-    SealedDatasetManifest, SealedShardEnvelope, SyncRound, TrainingAttestation, TrainingModality,
-    TrainingReceipt, TrainingRun, TrainingRunStatus, TrainingTaskSpec, TrainingTier,
+    AggregationRule, ArchitectureSpec, FragmentQuorumStatus, GradientQuantization, OuterGradient,
+    PipelineAssignment, PipelineConfig, SealedDatasetManifest, SealedShardEnvelope, SyncRound,
+    SyncStrategy, TrainingAttestation, TrainingModality, TrainingReceipt, TrainingRun,
+    TrainingRunStatus, TrainingTaskSpec, TrainingTier,
 };

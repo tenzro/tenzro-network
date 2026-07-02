@@ -11,9 +11,14 @@ See :mod:`tenzro_trainer.types` for the wire formats and
 from tenzro_trainer.types import (
     AggregationRule,
     ArchitectureSpec,
+    GradientQuantization,
     OuterGradient,
+    PipelineAssignment,
+    PipelineConfig,
+    SyncStrategy,
     TrainingAttestation,
     TrainingModality,
+    TrainingTaskSpec,
     TrainingTier,
 )
 
@@ -23,8 +28,13 @@ __all__ = [
     "__version__",
     "AggregationRule",
     "ArchitectureSpec",
+    "GradientQuantization",
     "OuterGradient",
+    "PipelineAssignment",
+    "PipelineConfig",
+    "SyncStrategy",
     "TrainingAttestation",
     "TrainingModality",
+    "TrainingTaskSpec",
     "TrainingTier",
 ]

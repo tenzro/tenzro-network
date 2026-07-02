@@ -5,7 +5,7 @@ use crate::validator::{ValidatorInfo, ValidatorSet};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tenzro_types::primitives::{BlockHeight, Hash, Timestamp};
+use tenzro_types::primitives::{Address, BlockHeight, Hash, Timestamp};
 
 /// Persistence backend for epoch state.
 ///
@@ -115,12 +115,18 @@ pub struct EpochManager {
     ///
     /// Each entry is upserted into the next epoch's validator set on
     /// transition: a matching address is replaced; new addresses are added.
+    /// New entrants are subject to the per-transition churn budget — see
+    /// `transition_epoch`. Entries beyond the budget stay queued (FIFO)
+    /// and apply at subsequent transitions.
     pending_validators: Arc<RwLock<Vec<ValidatorInfo>>>,
 
     /// Pending validator removals for next epoch (e.g. unstake or slashing).
     ///
-    /// On transition, every address in this list is dropped from the next
-    /// epoch's validator set before pending_validators is upserted in.
+    /// On transition, addresses in this list are dropped from the next
+    /// epoch's validator set before pending_validators is upserted in,
+    /// subject to the per-transition churn budget — see `transition_epoch`.
+    /// Entries beyond the budget stay queued (FIFO) and apply at
+    /// subsequent transitions.
     pending_removals: Arc<RwLock<Vec<tenzro_types::primitives::Address>>>,
 
     /// History of past epochs (protected by RwLock)
@@ -343,6 +349,34 @@ impl EpochManager {
     /// History and pending validators are updated atomically within the same
     /// critical section to prevent split-brain scenarios.
     ///
+    /// # Churn budget (set-continuity safety)
+    ///
+    /// BFT safety across epoch boundaries relies on set continuity: a
+    /// client (or catching-up node) that trusts epoch N's validator set
+    /// extends that trust to epoch N+1 only if a quorum of the stake it
+    /// already holds accountable is still present in the new set. Unbounded
+    /// churn lets a single transition replace the entire set, severing that
+    /// chain of trust (long-range / posterior-corruption attacks). Each
+    /// transition therefore bounds both directions:
+    ///
+    /// - **Removals**: at most 1/3 of the outgoing epoch's total stake may
+    ///   leave per transition, so ≥ 2/3 of previously-accountable stake
+    ///   remains in the new set.
+    /// - **Entrants**: newly-joining stake is capped at half the continuing
+    ///   stake, so continuing validators hold ≥ 2/3 of the NEW set's total
+    ///   voting power and a fresh entrant cannot immediately own a blocking
+    ///   minority.
+    ///
+    /// Stake updates for continuing validators (upserts of addresses
+    /// already in the set) are not churn and are never deferred. Entries
+    /// beyond the budget stay queued (FIFO) and apply at subsequent
+    /// transitions, so admission remains permissionless — large joins and
+    /// exits are spread across epochs, never censored. Progress guarantee:
+    /// the first queued removal and the first queued entrant always apply
+    /// even when they alone exceed the budget (a slashed validator holding
+    /// more than the budget must still be removable; a bootstrap-size set
+    /// must still be joinable), with a warning logged.
+    ///
     /// Returns `Ok(None)` when the canonical epoch index for `height`
     /// (`height / epoch_duration`) is not ahead of the current epoch
     /// number — including the case where a concurrent caller won the
@@ -381,31 +415,97 @@ impl EpochManager {
 
         let next_epoch_number = current.number + 1;
 
-        // Compute next validator set as: current set, with pending_removals
-        // dropped, then pending_validators upserted (matching address replaces;
-        // new address appends). This makes pending entries deltas rather than
-        // a full replacement, so a single stake event doesn't reset the set.
-        let next_validators: Vec<ValidatorInfo> = {
-            let pending_adds = self.pending_validators.read();
-            let pending_drops = self.pending_removals.read();
+        // Compute next validator set as: current set, with churn-budgeted
+        // pending_removals dropped, then pending_validators upserted
+        // (matching address replaces; new address appends subject to the
+        // entrant budget). Pending entries are deltas rather than a full
+        // replacement, so a single stake event doesn't reset the set.
+        let pending_adds: Vec<ValidatorInfo> = self.pending_validators.read().clone();
+        let pending_drops: Vec<Address> = self.pending_removals.read().clone();
 
-            let mut next: Vec<ValidatorInfo> = current
-                .validator_set
-                .iter()
-                .filter(|v| !pending_drops.iter().any(|addr| addr == &v.address))
-                .cloned()
-                .collect();
+        let old_set = &current.validator_set;
+        let old_total_stake = old_set.total_stake();
 
-            for upsert in pending_adds.iter() {
-                if let Some(existing) = next.iter_mut().find(|v| v.address == upsert.address) {
-                    *existing = upsert.clone();
-                } else {
-                    next.push(upsert.clone());
+        // Phase 1 — removals, FIFO, capped at 1/3 of outgoing stake so
+        // ≥ 2/3 of previously-accountable stake persists into the new set.
+        let removal_budget = old_total_stake / 3;
+        let mut removed_stake: u128 = 0;
+        let mut real_removals = 0usize;
+        let mut applied_drops: Vec<Address> = Vec::new();
+        let mut deferred_drop_count = 0usize;
+        for addr in &pending_drops {
+            let Some(member) = old_set.get_by_address(addr) else {
+                // Address is not in the set — nothing to remove. Consume
+                // the entry so it doesn't sit in the queue forever.
+                applied_drops.push(*addr);
+                continue;
+            };
+            let cumulative = removed_stake.saturating_add(member.stake);
+            if cumulative <= removal_budget || real_removals == 0 {
+                if cumulative > removal_budget {
+                    tracing::warn!(
+                        address = %addr,
+                        stake = member.stake,
+                        removal_budget,
+                        "Validator removal exceeds the per-epoch churn budget on its own; applying for progress (slashing/unstake must not be censorable)"
+                    );
                 }
+                removed_stake = cumulative;
+                real_removals += 1;
+                applied_drops.push(*addr);
+            } else {
+                deferred_drop_count += 1;
             }
+        }
 
-            next
-        };
+        // Phase 2 — survivors, then upserts of continuing members. Stake
+        // updates for addresses already in the set are not churn.
+        let mut next_validators: Vec<ValidatorInfo> = old_set
+            .iter()
+            .filter(|v| !applied_drops.iter().any(|a| a == &v.address))
+            .cloned()
+            .collect();
+
+        let mut applied_add_addrs: Vec<Address> = Vec::new();
+        let mut entrant_candidates: Vec<ValidatorInfo> = Vec::new();
+        for upsert in pending_adds {
+            if let Some(existing) = next_validators
+                .iter_mut()
+                .find(|v| v.address == upsert.address)
+            {
+                applied_add_addrs.push(upsert.address);
+                *existing = upsert;
+            } else {
+                entrant_candidates.push(upsert);
+            }
+        }
+
+        // Phase 3 — new entrants, FIFO, capped at half the continuing
+        // stake so continuing validators hold ≥ 2/3 of the new total.
+        let continuing_stake: u128 = next_validators.iter().map(|v| v.stake).sum();
+        let entrant_budget = continuing_stake / 2;
+        let mut entrant_stake: u128 = 0;
+        let mut admitted_entrants = 0usize;
+        let mut deferred_add_count = 0usize;
+        for entrant in entrant_candidates {
+            let cumulative = entrant_stake.saturating_add(entrant.stake);
+            if cumulative <= entrant_budget || admitted_entrants == 0 {
+                if cumulative > entrant_budget {
+                    tracing::warn!(
+                        address = %entrant.address,
+                        stake = entrant.stake,
+                        entrant_budget,
+                        "Entrant stake exceeds the per-epoch churn budget on its own; admitting for progress (admission must not be censorable)"
+                    );
+                }
+                entrant_stake = cumulative;
+                admitted_entrants += 1;
+                applied_add_addrs.push(entrant.address);
+                next_validators.push(entrant);
+            } else {
+                deferred_add_count += 1;
+            }
+        }
 
         // Create new validator set - this can fail, so we do it before modifying state
         let validator_set = ValidatorSet::new(next_epoch_number, next_validators)?;
@@ -456,10 +556,17 @@ impl EpochManager {
             // history lock is released here
         }
 
-        // 2. Clear pending validator deltas (both adds and removals)
+        // 2. Consume the applied pending deltas. Deferred entries (beyond
+        //    this transition's churn budget) stay queued FIFO for the next
+        //    epoch. Retain-by-applied (rather than overwrite) also preserves
+        //    entries queued concurrently while this transition ran.
         {
-            self.pending_validators.write().clear();
-            self.pending_removals.write().clear();
+            self.pending_validators
+                .write()
+                .retain(|v| !applied_add_addrs.iter().any(|a| a == &v.address));
+            self.pending_removals
+                .write()
+                .retain(|addr| !applied_drops.iter().any(|a| a == addr));
             // pending_validators / pending_removals locks are released here
         }
 
@@ -534,6 +641,8 @@ impl EpochManager {
             start_height = %start_height,
             end_height = %end_height,
             validator_count = validator_set.len(),
+            deferred_adds = deferred_add_count,
+            deferred_removals = deferred_drop_count,
             persisted = self.store.is_some(),
             "Epoch transition completed atomically"
         );
@@ -946,6 +1055,157 @@ mod tests {
             .expect("transition due");
         assert_eq!(next.len(), 1);
         assert_eq!(next.get(0).unwrap().stake, 7777);
+    }
+
+    #[test]
+    fn test_removal_churn_capped_and_deferred() {
+        // 6 validators × 1000 stake (total 6000, removal budget 2000).
+        // Queueing 4 removals must apply exactly 2 per transition and
+        // defer the rest, so ≥ 2/3 of outgoing stake persists each epoch.
+        let validators: Vec<ValidatorInfo> =
+            (0..6).map(|_| create_test_validator(1000)).collect();
+        let manager = EpochManager::new(validators.clone(), 100).unwrap();
+
+        for v in validators.iter().take(4) {
+            manager.remove_pending_validator(&v.address);
+        }
+        assert_eq!(manager.pending_removals().len(), 4);
+
+        let next = manager
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap()
+            .expect("transition due");
+        assert_eq!(next.len(), 4, "budget admits 2 removals of 1000 each");
+        assert_eq!(manager.pending_removals().len(), 2, "excess removals deferred");
+
+        // Next transition: total 4000, budget 1333 → exactly 1 more removal.
+        let next = manager
+            .transition_epoch(BlockHeight::from(200), |_| None)
+            .unwrap()
+            .expect("transition due");
+        assert_eq!(next.len(), 3);
+        assert_eq!(manager.pending_removals().len(), 1);
+
+        // Next: total 3000, budget 1000 → last removal applies, queue drains.
+        let next = manager
+            .transition_epoch(BlockHeight::from(300), |_| None)
+            .unwrap()
+            .expect("transition due");
+        assert_eq!(next.len(), 2);
+        assert!(manager.pending_removals().is_empty());
+    }
+
+    #[test]
+    fn test_oversized_removal_applies_for_progress() {
+        // A validator holding more stake than the whole budget must still
+        // be removable in one transition (slashing is not censorable).
+        let whale = create_test_validator(5000);
+        let small = create_test_validator(1000);
+        let manager = EpochManager::new(vec![whale.clone(), small.clone()], 100).unwrap();
+
+        manager.remove_pending_validator(&whale.address);
+
+        let next = manager
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap()
+            .expect("transition due");
+        assert_eq!(next.len(), 1);
+        assert!(!next.is_validator(&whale.address));
+        assert!(manager.pending_removals().is_empty());
+    }
+
+    #[test]
+    fn test_entrant_churn_capped_and_deferred() {
+        // 3 validators × 1000 (continuing 3000, entrant budget 1500).
+        // First 1000-stake entrant fits; the second would push entrant
+        // stake to 2000 > 1500 and is deferred to the next epoch.
+        let validators: Vec<ValidatorInfo> =
+            (0..3).map(|_| create_test_validator(1000)).collect();
+        let manager = EpochManager::new(validators, 100).unwrap();
+
+        let a = create_test_validator(1000);
+        let b = create_test_validator(1000);
+        manager.add_pending_validator(a.clone());
+        manager.add_pending_validator(b.clone());
+
+        let next = manager
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap()
+            .expect("transition due");
+        assert_eq!(next.len(), 4);
+        assert!(next.is_validator(&a.address));
+        assert!(!next.is_validator(&b.address));
+        assert_eq!(manager.pending_validators().len(), 1, "excess entrant deferred");
+
+        // Next epoch: continuing 4000, budget 2000 → deferred entrant joins.
+        let next = manager
+            .transition_epoch(BlockHeight::from(200), |_| None)
+            .unwrap()
+            .expect("transition due");
+        assert_eq!(next.len(), 5);
+        assert!(next.is_validator(&b.address));
+        assert!(manager.pending_validators().is_empty());
+    }
+
+    #[test]
+    fn test_oversized_entrant_admitted_for_progress() {
+        // A bootstrap-size set must remain joinable: the first entrant is
+        // admitted even when its stake alone exceeds the budget.
+        let genesis = create_test_validator(1000);
+        let manager = EpochManager::new(vec![genesis], 100).unwrap();
+
+        let whale = create_test_validator(100_000);
+        manager.add_pending_validator(whale.clone());
+
+        let next = manager
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap()
+            .expect("transition due");
+        assert_eq!(next.len(), 2);
+        assert!(next.is_validator(&whale.address));
+        assert!(manager.pending_validators().is_empty());
+    }
+
+    #[test]
+    fn test_upsert_does_not_consume_entrant_budget() {
+        // A stake update for a continuing member is not churn: it applies
+        // unconditionally and its raised stake widens the entrant budget.
+        let v0 = create_test_validator(1000);
+        let v1 = create_test_validator(1000);
+        let manager = EpochManager::new(vec![v0.clone(), v1], 100).unwrap();
+
+        let v0_restaked = ValidatorInfo::new(
+            v0.address,
+            v0.public_key.clone(),
+            v0.pq_public_key.clone(),
+            v0.bls_public_key.clone(),
+            9000,
+        );
+        manager.add_pending_validator(v0_restaked);
+
+        // Two entrants totalling 5000. Without the upsert, continuing
+        // stake is 2000 (budget 1000): the first entrant would only get in
+        // via the progress guarantee and the second would be deferred.
+        // With the upsert applied first, continuing stake is 10000
+        // (budget 5000) and BOTH entrants fit within the budget.
+        let e1 = create_test_validator(3000);
+        let e2 = create_test_validator(2000);
+        manager.add_pending_validator(e1.clone());
+        manager.add_pending_validator(e2.clone());
+
+        let next = manager
+            .transition_epoch(BlockHeight::from(100), |_| None)
+            .unwrap()
+            .expect("transition due");
+        assert_eq!(next.len(), 4);
+        assert_eq!(
+            next.get_by_address(&v0.address).unwrap().stake,
+            9000,
+            "upsert applied"
+        );
+        assert!(next.is_validator(&e1.address));
+        assert!(next.is_validator(&e2.address));
+        assert!(manager.pending_validators().is_empty());
     }
 
     #[test]

@@ -180,6 +180,7 @@ pub struct ChatRequest {
     pub stream: Option<bool>,    // default true
     pub max_tokens: Option<u64>,
     pub temperature: Option<f64>,
+    pub require_signed: Option<bool>, // default false — opt-in verified response
 }
 
 #[derive(Deserialize, Serialize, Clone)]

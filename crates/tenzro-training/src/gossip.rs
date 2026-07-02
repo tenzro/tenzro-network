@@ -146,6 +146,7 @@ mod tests {
             trainer_address: Address::new([0u8; 32]),
             safetensors_hash: h(1),
             payload_bytes: 1024,
+            quantization: tenzro_types::training::GradientQuantization::None,
             inner_step_count: 32,
             submitted_at: Timestamp::now(),
             signature: Signature::default(),

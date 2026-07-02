@@ -72,6 +72,12 @@ pub const ALPN_A2A: &[u8] = b"tenzro/a2a";
 /// ALPN for MCP JSON-RPC 2.0 over iroh.
 pub const ALPN_MCP: &[u8] = b"tenzro/mcp";
 
+/// ALPN for MoE expert-host execution JSON-RPC 2.0 over iroh.
+///
+/// Router peers fan hidden-state batches out to expert holders on this
+/// ALPN (`moe/execute`) and probe resident experts (`moe/status`).
+pub const ALPN_MOE: &[u8] = b"tenzro/moe";
+
 /// Hard cap on a single JSON-RPC frame (request or response).
 ///
 /// 4 MiB matches the per-message ceiling used by the libp2p gossipsub
@@ -195,6 +201,14 @@ impl JsonRpcProtocol {
         Self {
             dispatcher,
             alpn_label: "mcp",
+        }
+    }
+
+    /// Wrap a dispatcher for the MoE expert-host ALPN.
+    pub fn moe(dispatcher: Arc<dyn JsonRpcDispatcher>) -> Self {
+        Self {
+            dispatcher,
+            alpn_label: "moe",
         }
     }
 }

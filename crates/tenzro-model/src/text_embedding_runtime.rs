@@ -129,7 +129,7 @@ impl TextEncoder for StubTextEncoder {
 mod onnx_backend {
     use super::*;
     use ndarray::Array2;
-    use ort::session::{Session, builder::GraphOptimizationLevel};
+    use ort::session::Session;
     use ort::value::Tensor;
     use std::time::Instant;
     use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
@@ -176,12 +176,7 @@ mod onnx_backend {
             embedding_dim: usize,
             max_sequence_length: usize,
         ) -> Result<Self> {
-            let session = Session::builder()
-                .map_err(|e| ModelError::InvalidModel(format!("ORT session builder: {}", e)))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| ModelError::InvalidModel(format!("ORT optimization level: {}", e)))?
-                .commit_from_file(onnx_path.as_ref())
-                .map_err(|e| ModelError::ProviderNotAvailable(format!("ORT load failed: {}", e)))?;
+            let session = crate::onnx_session::build_onnx_session(onnx_path.as_ref(), "model")?;
 
             // Introspect inputs.
             let input_names: Vec<String> = session.inputs.iter().map(|i| i.name.clone()).collect();

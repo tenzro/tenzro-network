@@ -49,6 +49,13 @@ ort = { workspace = true }
 ndarray = { workspace = true }
 image = { workspace = true }
 
+# MoE expert-host execution: per-expert safetensors weight blobs
+# (gate/up/down projections) and gating-network extraction. base64
+# carries hidden-state batches on the tenzro/moe wire (f32 LE bytes).
+safetensors = { workspace = true }
+half = { workspace = true }
+base64 = { workspace = true }
+
 # Text-embedding tokenizer (Qwen3, BGE-M3, EmbeddingGemma, Snowflake Arctic)
 # and Whisper/Moonshine BPE.
 tokenizers = { workspace = true }
@@ -81,6 +88,15 @@ rocm = ["llama-cpp-2/rocm"]
 vulkan = ["llama-cpp-2/vulkan"]
 # Apple Metal — explicit opt-in (auto-linked on macOS ARM64 regardless)
 metal = ["llama-cpp-2/metal"]
+# ONNX Runtime GPU execution providers for the non-LLM modalities. The ONNX
+# runtimes are always compiled (ort is an unconditional dependency); these
+# features additionally link the corresponding execution provider into the
+# bundled ONNX Runtime. Session-time provider priority is resolved in
+# src/onnx_session.rs (TENZRO_ONNX_EP override; CPU is always the final
+# fallback).
+onnx-cuda = ["ort/cuda"]
+onnx-tensorrt = ["ort/tensorrt"]
+onnx-coreml = ["ort/coreml"]
 
 [dev-dependencies]
 tempfile = "3"

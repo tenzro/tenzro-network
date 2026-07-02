@@ -46,7 +46,15 @@ pub trait ConsensusEngine: Send + Sync {
     /// `proposer_high_qc_view` is the proposer's local highest-Prepare-QC view
     /// at the moment of proposing (#171, Aptos SyncInfo). The receiver adopts
     /// it if higher than its own (and `< proposal_view`) so a lagging replica
-    /// can fast-forward on the happy path.
+    /// can fast-forward on the happy path. The value is bound into the
+    /// proposer signature payload, so adoption is authenticated.
+    ///
+    /// `proposer_signature` is the leader's hybrid (Ed25519 + ML-DSA-65)
+    /// signature over `crate::validator::proposal_signing_payload(view,
+    /// height, &block_hash, high_qc_view)`. The receiver verifies it against
+    /// the proposer's REGISTERED composite key before acting on the proposal
+    /// — it makes proposals attributable (proposal-equivocation slashing)
+    /// and authenticates the SyncInfo hint.
     ///
     /// Returns a vote if the proposal is valid.
     async fn on_proposal(
@@ -55,6 +63,7 @@ pub trait ConsensusEngine: Send + Sync {
         timeout_certificate: Option<crate::timeout::TimeoutCertificate>,
         no_endorsement_certificate: Option<crate::timeout::NoEndorsementCertificate>,
         proposer_high_qc_view: u64,
+        proposer_signature: &tenzro_crypto::composite::CompositeSignature,
     ) -> Result<Vote>;
 
     /// Handles a vote from another validator
@@ -101,6 +110,18 @@ pub trait SlashingCallback: Send + Sync {
         validator: &tenzro_types::primitives::Address,
         view: u64,
         evidence: &crate::validator::EquivocationEvidence,
+    );
+
+    /// Called when proposal equivocation is detected — a leader signed two
+    /// different blocks for the same view. Evidence embeds both hybrid
+    /// signatures plus the proposer's composite public key, so it is
+    /// independently verifiable via
+    /// [`crate::validator::ProposalEquivocationEvidence::is_valid`].
+    fn report_proposal_equivocation(
+        &self,
+        proposer: &tenzro_types::primitives::Address,
+        view: u64,
+        evidence: &crate::validator::ProposalEquivocationEvidence,
     );
 }
 

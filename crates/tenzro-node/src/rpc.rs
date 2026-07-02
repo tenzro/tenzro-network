@@ -166,7 +166,15 @@ impl RpcServer {
             // as a periodic pause to external observers.
             .layer(ConcurrencyLimitLayer::new(1000))
             // Request body size limit: 2 MB
-            .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
+            .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
+            // Per-IP GCRA gate, outermost so an abusive source is
+            // rejected with 429 before consuming a concurrency slot.
+            // 50 req/s sustained per IP with a burst of 200 — generous
+            // for any legitimate client, throttles scripted floods.
+            .layer(axum::middleware::from_fn_with_state(
+                crate::ip_rate_limit::IpRateLimiter::new(50, 200),
+                crate::ip_rate_limit::ip_rate_limit,
+            ));
 
         let listener = tokio::net::TcpListener::bind(&self.listen_addr)
             .await
@@ -182,7 +190,10 @@ impl RpcServer {
             let _ = tx.send(local_addr);
         }
 
-        axum::serve(listener, app)
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.recv().await;
                 info!("RPC server shutting down gracefully");
@@ -714,6 +725,9 @@ fn requires_admin_token(method: &str) -> bool {
             // counters for the chainlink-scoped bridge fee path. Strict
             // cross-tenant read — operator-only.
             | "tenzro_listBridgeAnalytics"
+            // Re-attempting an unpaid inference settlement moves caller
+            // funds — operator-only.
+            | "tenzro_retryUnpaidSettlement"
     )
 }
 
@@ -1199,6 +1213,8 @@ async fn dispatch_request(
         // Settlement methods
         "tenzro_settle" | "tenzro_settlePayment" => handle_settle(node, request.params).await,
         "tenzro_getSettlement" => handle_get_settlement(node, request.params).await,
+        "tenzro_listUnpaidSettlements" => handle_list_unpaid_settlements(node, request.params).await,
+        "tenzro_retryUnpaidSettlement" => handle_retry_unpaid_settlement(node, request.params).await,
         // Principal-chain receipt RPCs (Agent-Swarm Spec 5)
         "tenzro_getReceiptPrincipalChain" => {
             handle_get_receipt_principal_chain(node, request.params).await
@@ -2305,6 +2321,17 @@ async fn dispatch_request(
         "tenzro_moePlanDispatch" => crate::rpc_integrations::handle_moe_plan_dispatch(node, request.params).await,
         "tenzro_moeReplicationPolicy" => crate::rpc_integrations::handle_moe_replication_policy().await,
         "tenzro_moeCatalogShape" => crate::rpc_integrations::handle_moe_catalog_shape(request.params).await,
+        // MoE expert-host execution — weight loading, local routing/execute,
+        // and the router-peer forward that fans hidden states out to expert
+        // holders over local/iroh/HTTP transports.
+        "tenzro_moeExpertLoad" => crate::moe::handle_moe_expert_load(node, request.params).await,
+        "tenzro_moeGateLoad" => crate::moe::handle_moe_gate_load(node, request.params).await,
+        "tenzro_moeExpertUnload" => crate::moe::handle_moe_expert_unload(node, request.params).await,
+        "tenzro_moeGateUnload" => crate::moe::handle_moe_gate_unload(node, request.params).await,
+        "tenzro_moeExpertStatus" => crate::moe::handle_moe_expert_status(node).await,
+        "tenzro_moeRoute" => crate::moe::handle_moe_route(node, request.params).await,
+        "tenzro_moeExecute" => crate::moe::handle_moe_execute(node, request.params).await,
+        "tenzro_moeForward" => crate::moe::handle_moe_forward(node, request.params).await,
         "tenzro_modelMetadata" => crate::rpc_integrations::handle_model_metadata(request.params).await,
 
         _ => Err(JsonRpcError {
@@ -3354,6 +3381,184 @@ async fn handle_list_models(node: &Arc<TenzroNode>) -> std::result::Result<Value
     Ok(serde_json::json!(models))
 }
 
+/// Outcome of inference settlement, surfaced on the response contract so
+/// callers can distinguish "paid" from "nothing to pay" without parsing logs.
+enum SettlementOutcome {
+    /// Payment cleared. `via` is "channel" (micropayment channel debit) or
+    /// "transfer" (direct on-chain token transfer).
+    Settled { via: &'static str },
+    /// No settlement was attempted: zero cost, anonymous caller, or the
+    /// serving node has no token layer / billing wallet configured.
+    NotApplicable,
+}
+
+impl SettlementOutcome {
+    fn to_json(&self) -> Value {
+        match self {
+            SettlementOutcome::Settled { via } => serde_json::json!({
+                "status": "settled",
+                "via": via,
+            }),
+            SettlementOutcome::NotApplicable => serde_json::json!({
+                "status": "not_applicable",
+            }),
+        }
+    }
+}
+
+/// Resolves the wallet address this node bills inference to (the node
+/// operator's first registered identity).
+fn provider_billing_address(node: &Arc<TenzroNode>) -> Option<Address> {
+    let registry = node.identity_registry()?;
+    let all = registry.list_all();
+    let (_, identity) = all.first()?;
+    if identity.wallet_address == Address::default() {
+        None
+    } else {
+        Some(identity.wallet_address)
+    }
+}
+
+/// Persists a failed settlement to CF_SETTLEMENTS under the `unpaid:`
+/// keyspace so it can be retried via `tenzro_retryUnpaidSettlement`.
+/// Returns the record key, or None when the node has no storage.
+fn record_unpaid_settlement(
+    node: &Arc<TenzroNode>,
+    caller: &Address,
+    provider: Option<&Address>,
+    model_id: &str,
+    cost_wei: u128,
+    reason: &str,
+) -> Option<String> {
+    let storage = node.storage()?;
+    let created_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let caller_hex = hex::encode(caller.as_bytes());
+    let key = format!(
+        "unpaid:{}:{}:{}",
+        caller_hex,
+        created_at_ms,
+        &uuid::Uuid::new_v4().simple().to_string()[..8],
+    );
+    let record = serde_json::json!({
+        "caller": caller_hex,
+        "provider": provider.map(|p| hex::encode(p.as_bytes())),
+        "model_id": model_id,
+        "cost_wei": cost_wei.to_string(),
+        "reason": reason,
+        "created_at_ms": created_at_ms,
+    });
+    if let Err(e) = storage.put(
+        CF_SETTLEMENTS,
+        key.as_bytes(),
+        record.to_string().as_bytes(),
+    ) {
+        warn!(caller = %caller_hex, error = %e, "Failed to persist unpaid settlement record");
+        return None;
+    }
+    Some(key)
+}
+
+/// Settles the cost of one inference call. Settlement failure fails the
+/// request (error -32023) after recording an unpaid marker for retry —
+/// never a silent free inference.
+///
+/// Paths:
+///   1. Channel (caller supplied `channel_id` + `channel_update_sig`): debit
+///      the open micropayment channel. The signature is the payer's Ed25519
+///      authorization over the next cumulative state, so a failure means the
+///      caller did NOT authorize any other debit — no fallback to a direct
+///      transfer.
+///   2. Direct: single-shot on-chain `token.transfer`.
+fn settle_inference_cost(
+    node: &Arc<TenzroNode>,
+    caller_address: Option<&str>,
+    channel_id: Option<&str>,
+    channel_update_sig: Option<&str>,
+    model_id: &str,
+    cost_wei: u128,
+) -> std::result::Result<SettlementOutcome, JsonRpcError> {
+    if cost_wei == 0 {
+        return Ok(SettlementOutcome::NotApplicable);
+    }
+    let Some(caller_str) = caller_address else {
+        return Ok(SettlementOutcome::NotApplicable);
+    };
+    let caller_addr = parse_address(caller_str)?;
+
+    if let Some(cid) = channel_id {
+        let sig = channel_update_sig
+            .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "channel_id supplied without a valid hex channel_update_sig".to_string(),
+                data: None,
+            })?;
+        let Some(mgr) = node.channel_manager() else {
+            return Err(JsonRpcError {
+                code: -32023,
+                message: "Channel settlement requested but this node has no channel manager"
+                    .to_string(),
+                data: None,
+            });
+        };
+        return match mgr.update_channel(cid, cost_wei, sig) {
+            Ok(_) => {
+                debug!(channel = %cid, cost_wei = %cost_wei, "Inference settled via micropayment channel");
+                Ok(SettlementOutcome::Settled { via: "channel" })
+            }
+            Err(e) => {
+                let unpaid_key = record_unpaid_settlement(
+                    node,
+                    &caller_addr,
+                    provider_billing_address(node).as_ref(),
+                    model_id,
+                    cost_wei,
+                    &format!("channel {} update failed: {}", cid, e),
+                );
+                Err(JsonRpcError {
+                    code: -32023,
+                    message: format!("Settlement failed: channel update rejected: {}", e),
+                    data: Some(serde_json::json!({
+                        "cost_wei": cost_wei.to_string(),
+                        "unpaid_key": unpaid_key,
+                    })),
+                })
+            }
+        };
+    }
+
+    let Some(token) = node.token() else {
+        return Ok(SettlementOutcome::NotApplicable);
+    };
+    let Some(provider_addr) = provider_billing_address(node) else {
+        return Ok(SettlementOutcome::NotApplicable);
+    };
+    match token.transfer(&caller_addr, &provider_addr, cost_wei) {
+        Ok(_) => Ok(SettlementOutcome::Settled { via: "transfer" }),
+        Err(e) => {
+            let unpaid_key = record_unpaid_settlement(
+                node,
+                &caller_addr,
+                Some(&provider_addr),
+                model_id,
+                cost_wei,
+                &format!("token transfer failed: {}", e),
+            );
+            Err(JsonRpcError {
+                code: -32023,
+                message: format!("Settlement failed: token transfer rejected: {}", e),
+                data: Some(serde_json::json!({
+                    "cost_wei": cost_wei.to_string(),
+                    "unpaid_key": unpaid_key,
+                })),
+            })
+        }
+    }
+}
+
 async fn handle_inference_request(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -3439,72 +3644,14 @@ async fn handle_inference_request(
                             .saturating_mul(pricing.output_price_per_token_wei),
                     );
                 drop(pricing);
-                // Settlement. Two paths:
-                //   1. Channel path (preferred for metered sessions): the
-                //      caller supplies `channel_id` plus `channel_update_sig`
-                //      — their Ed25519 signature over the channel's next
-                //      cumulative state. This debits the open channel
-                //      off-chain via `update_channel`, amortizing many calls
-                //      into a single on-chain open/close. The serving node
-                //      CANNOT forge this signature (update_channel verifies
-                //      against the payer key), so the per-token debit is
-                //      authorized by the payer, not the provider.
-                //   2. Direct path (single-shot): no channel — settle the
-                //      one call with an on-chain `token.transfer`.
-                if cost_wei > 0
-                    && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
-                    && let Ok(caller_addr) = parse_address(caller_str)
-                {
-                    let channel_id = params.get("channel_id").and_then(|v| v.as_str());
-                    let channel_sig = params
-                        .get("channel_update_sig")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok());
-
-                    let settled_via_channel = if let (Some(cid), Some(sig), Some(mgr)) =
-                        (channel_id, channel_sig, node.channel_manager())
-                    {
-                        match mgr.update_channel(cid, cost_wei, sig) {
-                            Ok(_) => {
-                                tracing::debug!(
-                                    channel = %cid,
-                                    cost_wei = %cost_wei,
-                                    "Inference settled via micropayment channel"
-                                );
-                                true
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    channel = %cid,
-                                    error = %e,
-                                    "Channel settlement failed; falling back to direct transfer"
-                                );
-                                false
-                            }
-                        }
-                    } else {
-                        false
-                    };
-
-                    if !settled_via_channel
-                        && let Some(token) = node.token()
-                    {
-                        let provider_addr = if let Some(registry) = node.identity_registry() {
-                            let all = registry.list_all();
-                            if let Some((_, id)) = all.first() {
-                                id.wallet_address
-                            } else {
-                                Address::default()
-                            }
-                        } else {
-                            Address::default()
-                        };
-                        if provider_addr != Address::default()
-                            && let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
-                                tracing::warn!(caller = %caller_str, "Inference billing failed: {}", e);
-                            }
-                    }
-                }
+                let settlement = settle_inference_cost(
+                    node,
+                    params.get("caller_address").and_then(|v| v.as_str()),
+                    params.get("channel_id").and_then(|v| v.as_str()),
+                    params.get("channel_update_sig").and_then(|v| v.as_str()),
+                    model_id,
+                    cost_wei,
+                )?;
                 return Ok(serde_json::json!({
                     "model_id": model_id,
                     "output": result.text,
@@ -3513,6 +3660,7 @@ async fn handle_inference_request(
                     "generation_time_ms": result.generation_time_ms,
                     "tokens_per_second": result.tokens_per_second,
                     "cost_wei": cost_wei.to_string(),
+                    "settlement": settlement.to_json(),
                     "provider": "local",
                     "tee": node.tee_vendor().map(|v| serde_json::json!({
                         "attested": true,
@@ -4120,6 +4268,153 @@ async fn handle_get_settlement(
             "metadata": receipt.metadata,
         })),
         Err(_) => Ok(Value::Null)
+    }
+}
+
+/// `tenzro_listUnpaidSettlements` — list inference calls whose settlement
+/// failed at serve time (recorded under the `unpaid:` keyspace). Optional
+/// `caller` filter narrows to one payer address.
+async fn handle_list_unpaid_settlements(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+
+    let prefix = match params
+        .as_ref()
+        .and_then(|p| p.get("caller"))
+        .and_then(|v| v.as_str())
+    {
+        Some(caller_str) => {
+            let caller = parse_address(caller_str)?;
+            format!("unpaid:{}:", hex::encode(caller.as_bytes()))
+        }
+        None => "unpaid:".to_string(),
+    };
+
+    let entries = storage
+        .scan_prefix(CF_SETTLEMENTS, prefix.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage scan failed: {}", e),
+            data: None,
+        })?;
+
+    let records: Vec<Value> = entries
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let record: Value = serde_json::from_slice(&value).ok()?;
+            Some(serde_json::json!({
+                "key": String::from_utf8_lossy(&key),
+                "record": record,
+            }))
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "count": records.len(),
+        "unpaid": records,
+    }))
+}
+
+/// `tenzro_retryUnpaidSettlement` — re-attempt a failed inference
+/// settlement by key (admin-gated: moves caller funds). Deletes the record
+/// on success.
+async fn handle_retry_unpaid_settlement(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let key = params
+        .get("key")
+        .and_then(|v| v.as_str())
+        .filter(|k| k.starts_with("unpaid:"))
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or invalid key (must start with 'unpaid:')".to_string(),
+            data: None,
+        })?;
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+
+    let raw = storage
+        .get(CF_SETTLEMENTS, key.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Storage read failed: {}", e),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("No unpaid settlement record at key {}", key),
+            data: None,
+        })?;
+    let record: Value = serde_json::from_slice(&raw).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Corrupt unpaid settlement record: {}", e),
+        data: None,
+    })?;
+
+    let caller_hex = record.get("caller").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Unpaid record missing caller".to_string(),
+        data: None,
+    })?;
+    let caller = parse_address(caller_hex)?;
+    let cost_wei: u128 = record
+        .get("cost_wei")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Unpaid record missing cost_wei".to_string(),
+            data: None,
+        })?;
+    // Prefer the provider captured at serve time; fall back to this node's
+    // current billing wallet.
+    let provider = match record.get("provider").and_then(|v| v.as_str()) {
+        Some(p) => parse_address(p)?,
+        None => provider_billing_address(node).ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "No provider billing address available for retry".to_string(),
+            data: None,
+        })?,
+    };
+
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Token layer not initialized".to_string(),
+        data: None,
+    })?;
+
+    match token.transfer(&caller, &provider, cost_wei) {
+        Ok(_) => {
+            if let Err(e) = storage.delete(CF_SETTLEMENTS, key.as_bytes()) {
+                warn!(key = %key, error = %e, "Settled unpaid record but failed to delete it");
+            }
+            Ok(serde_json::json!({
+                "settled": true,
+                "key": key,
+                "cost_wei": cost_wei.to_string(),
+            }))
+        }
+        Err(e) => Err(JsonRpcError {
+            code: -32023,
+            message: format!("Retry settlement failed: {}", e),
+            data: Some(serde_json::json!({ "key": key })),
+        }),
     }
 }
 
@@ -17640,6 +17935,19 @@ async fn handle_serve_model(
             })?;
     }
 
+    // Speculative-decoding drafter: auto-load when the catalog pairs one with
+    // this model. Opt out with `"load_drafter": false`. Never blocks or fails
+    // the serve — the drafter arrives asynchronously when it needs a download.
+    let mtp_status = if params
+        .get("load_drafter")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+    {
+        node.autoload_drafter(model_id, &entry).await
+    } else {
+        "disabled"
+    };
+
     // Mark model as served
     node.served_models.insert(model_id.to_string(), true);
 
@@ -17813,6 +18121,7 @@ async fn handle_serve_model(
                 schedule: msg_schedule,
                 visibility: visibility_c,
                 ttl_secs: 120,
+                timestamp: chrono::Utc::now().timestamp_millis(),
                 withdrawn: false,
                 rpc_endpoint: api_endpoint_c,
                 weights_sha256,
@@ -17843,6 +18152,7 @@ async fn handle_serve_model(
         "status": "serving",
         "visibility": visibility,
         "max_concurrent": max_concurrent,
+        "mtp": mtp_status,
     }))
 }
 
@@ -17865,8 +18175,9 @@ async fn handle_stop_model(
             data: None,
         })?;
 
-    // Unload from model runtime
+    // Unload from model runtime (drafter first — it is keyed by target id)
     if let Some(runtime) = &node.model_runtime {
+        let _ = runtime.unload_drafter(model_id).await;
         runtime.unload_model(model_id).await.map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Failed to unload model: {}", e),
@@ -17919,6 +18230,7 @@ async fn handle_stop_model(
                 schedule: None,
                 visibility: "network".to_string(),
                 ttl_secs: 120,
+                timestamp: chrono::Utc::now().timestamp_millis(),
                 withdrawn: true,
                 rpc_endpoint: String::new(),
                 ..Default::default()
@@ -19399,6 +19711,100 @@ async fn handle_chat(
     }
 }
 
+/// Announcement pubkey pinned at gossip time for a network-served model
+/// (first-seen TOFU pinning in the `ModelAnnouncement` consumer). `None`
+/// when the model was not discovered via gossip or the provider announced
+/// without a key — unsigned providers stay fully routable, and any manifest
+/// they attach is then verified against its embedded key only.
+fn pinned_announcement_pubkey(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    provider: &str,
+) -> Option<Vec<u8>> {
+    node.network_models_snapshot()
+        .into_iter()
+        .find(|e| e.registration.model_id == model_id && e.registration.provider == provider)
+        .map(|e| e.registration.pubkey)
+        .filter(|pk| !pk.is_empty())
+}
+
+/// Verify a `tenzro_provenance` manifest attached to a forwarded inference
+/// response: content hash over the output bytes, model-id binding,
+/// registered-key binding when an announcement pubkey is pinned, and the
+/// manifest signature. Returns the manifest when it verifies; logs and
+/// returns `None` otherwise so optional-verification callers can pass the
+/// response through unsigned.
+fn verify_forwarded_provenance(
+    value: Option<&Value>,
+    output: &[u8],
+    model_id: &str,
+    registered_pubkey: Option<&[u8]>,
+    provider_label: &str,
+) -> Option<tenzro_types::ProvenanceManifest> {
+    let value = value.filter(|v| !v.is_null())?;
+    match serde_json::from_value::<tenzro_types::ProvenanceManifest>(value.clone()) {
+        Ok(manifest) => match tenzro_model::verify_response_manifest(
+            &manifest,
+            output,
+            model_id,
+            registered_pubkey,
+        ) {
+            Ok(()) => Some(manifest),
+            Err(e) => {
+                tracing::warn!(provider = %provider_label, model = %model_id,
+                    "Provider attached an invalid provenance manifest: {}", e);
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(provider = %provider_label, model = %model_id,
+                "Provider attached a malformed provenance manifest: {}", e);
+            None
+        }
+    }
+}
+
+/// Sign a locally-generated inference output with the node's provenance
+/// signer (the long-term Ed25519 announce key) and cache the manifest in
+/// the provenance store. `None` when the node has no signer — serving
+/// unsigned stays fully supported.
+fn sign_local_response(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    output: &[u8],
+) -> Option<tenzro_types::ProvenanceManifest> {
+    let signer = node.provenance_signer()?;
+    let provider_addr = node
+        .announce_signer()
+        .map(|s| {
+            let pk = s.public_key();
+            let bytes = pk.as_bytes();
+            let mut buf = [0u8; 32];
+            let len = bytes.len().min(32);
+            buf[32 - len..].copy_from_slice(&bytes[..len]);
+            Address(buf)
+        })
+        .unwrap_or_default();
+    match signer.sign(
+        model_id,
+        provider_addr,
+        output,
+        tenzro_model::ASSERTION_AI_GENERATED,
+    ) {
+        Ok(manifest) => {
+            if let Some(store) = node.provenance_store() {
+                store.put(manifest.clone());
+            }
+            Some(manifest)
+        }
+        Err(e) => {
+            tracing::warn!(model = %model_id,
+                "Failed to sign provenance manifest for local response: {}", e);
+            None
+        }
+    }
+}
+
 async fn handle_chat_simple(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -19434,6 +19840,14 @@ async fn handle_chat_simple(
     tenzro_types::validation::validate_string_len(
         message, "message", tenzro_types::validation::MAX_CHAT_MESSAGE_LEN,
     ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
+
+    // Opt-in verified-response mode: when set, the response must carry a
+    // provenance manifest that verifies against the provider's registered
+    // signing key. Default off — unsigned providers remain fully routable.
+    let require_signed = params
+        .get("require_signed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Resolve model: try service registry, then local served_models, then
     // gossip-discovered network models. This ensures non-provider nodes (e.g.
@@ -19580,31 +19994,14 @@ async fn handle_chat_simple(
             );
         drop(pricing);
 
-        // Wire TNZO billing: deduct from caller, credit this provider node
-        if let Some(token) = node.token()
-            && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
-                && let Ok(caller_addr) = parse_address(caller_str)
-                    && cost_wei > 0 {
-                        let provider_addr = if let Some(registry) = node.identity_registry() {
-                            let all = registry.list_all();
-                            if let Some((_, identity)) = all.first() {
-                                identity.wallet_address
-                            } else {
-                                Address::default()
-                            }
-                        } else {
-                            Address::default()
-                        };
-                        if provider_addr != Address::default() {
-                            if let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
-                                tracing::warn!(caller = %caller_str, cost_wei = %cost_wei,
-                                    "Inference billing failed: {}", e);
-                            } else {
-                                tracing::info!(caller = %caller_str, cost_wei = %cost_wei,
-                                    "Inference billed successfully");
-                            }
-                        }
-                    }
+        let settlement = settle_inference_cost(
+            node,
+            params.get("caller_address").and_then(|v| v.as_str()),
+            params.get("channel_id").and_then(|v| v.as_str()),
+            params.get("channel_update_sig").and_then(|v| v.as_str()),
+            &model_id,
+            cost_wei,
+        )?;
 
         // Build load snapshot for response
         let load = node.load_tracker.snapshot(&model_id).map(|s| {
@@ -19616,6 +20013,19 @@ async fn handle_chat_simple(
             })
         });
 
+        // Stamp the output with a signed provenance manifest when this node
+        // has a response signer. Optional by default; enforced only when the
+        // caller asked for a verified response.
+        let provenance = sign_local_response(node, &model_id, result.text.as_bytes());
+        if require_signed && provenance.is_none() {
+            return Err(JsonRpcError {
+                code: -32022,
+                message: "require_signed requested but this node has no response signer"
+                    .to_string(),
+                data: None,
+            });
+        }
+
         Ok(serde_json::json!({
             "output": result.text,
             "input_tokens": result.input_tokens,
@@ -19623,9 +20033,11 @@ async fn handle_chat_simple(
             "generation_time_ms": result.generation_time_ms,
             "tokens_per_second": result.tokens_per_second,
             "cost_wei": cost_wei.to_string(),
+            "settlement": settlement.to_json(),
             "model_id": model_id,
             "location": "local",
             "load": load,
+            "tenzro_provenance": provenance,
         }))
     } else if let Some(ref svc) = service {
         // === Network model — forward to remote provider via JSON-RPC ===
@@ -19643,6 +20055,7 @@ async fn handle_chat_simple(
                 "message": message,
                 "max_tokens": config.max_tokens,
                 "temperature": config.temperature,
+                "require_signed": require_signed,
             },
             "id": 1,
         });
@@ -19674,6 +20087,29 @@ async fn handle_chat_simple(
         let input_tokens = rpc_result.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
         let output_tokens = rpc_result.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
 
+        // Verify any provider-attached provenance manifest against the key
+        // pinned from the provider's signed gossip announcement. Invalid or
+        // missing manifests are dropped; they only fail the request when the
+        // caller explicitly asked for a verified response.
+        let pinned = pinned_announcement_pubkey(node, &model_id, &svc.provider_name);
+        let provenance = verify_forwarded_provenance(
+            rpc_result.get("tenzro_provenance"),
+            output.as_bytes(),
+            &model_id,
+            pinned.as_deref(),
+            &svc.provider_name,
+        );
+        if require_signed && provenance.is_none() {
+            return Err(JsonRpcError {
+                code: -32022,
+                message: format!(
+                    "Provider {} did not return a verifiable signed response (require_signed)",
+                    svc.provider_name
+                ),
+                data: None,
+            });
+        }
+
         // Record Prometheus inference counter for observability
         node.metrics().record_inference();
 
@@ -19684,6 +20120,7 @@ async fn handle_chat_simple(
             "model_id": model_id,
             "location": "network",
             "provider": svc.provider_name,
+            "tenzro_provenance": provenance,
         }))
     } else {
         Err(JsonRpcError {
@@ -20009,27 +20446,14 @@ async fn handle_chat_rich(
             );
         drop(pricing);
 
-        // Wire TNZO billing (same as simple shape).
-        if let Some(token) = node.token()
-            && let Some(caller_str) = params.get("caller_address").and_then(|v| v.as_str())
-                && let Ok(caller_addr) = parse_address(caller_str)
-                    && cost_wei > 0 {
-                        let provider_addr = if let Some(registry) = node.identity_registry() {
-                            let all = registry.list_all();
-                            if let Some((_, identity)) = all.first() {
-                                identity.wallet_address
-                            } else {
-                                Address::default()
-                            }
-                        } else {
-                            Address::default()
-                        };
-                        if provider_addr != Address::default()
-                            && let Err(e) = token.transfer(&caller_addr, &provider_addr, cost_wei) {
-                                tracing::warn!(caller = %caller_str, cost_wei = %cost_wei,
-                                    "Rich-chat billing failed: {}", e);
-                            }
-                    }
+        let settlement = settle_inference_cost(
+            node,
+            params.get("caller_address").and_then(|v| v.as_str()),
+            params.get("channel_id").and_then(|v| v.as_str()),
+            params.get("channel_update_sig").and_then(|v| v.as_str()),
+            &model_id,
+            cost_wei,
+        )?;
 
         // Map the inferred string stop reason onto the typed enum.
         let stop_reason = map_stop_reason(&inferred_stop_reason);
@@ -20079,6 +20503,7 @@ async fn handle_chat_rich(
             "stop_sequence": serde_json::Value::Null,
             "usage": usage,
             "cost_wei": cost_wei.to_string(),
+            "settlement": settlement.to_json(),
             "location": "local",
             "load": node.load_tracker.snapshot(&model_id).map(|s| {
                 serde_json::json!({
@@ -20892,6 +21317,16 @@ async fn handle_openai_chat_completions(
 
                     let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
+                    // Provider-side response signing: stamp a
+                    // `tenzro_provenance` manifest signed with the node's
+                    // long-term Ed25519 key so consumers (and routing nodes
+                    // with `require_signed_response`) can verify this output
+                    // against the announcement pubkey they pinned. Absent a
+                    // signer, the response goes out unsigned — serving
+                    // without attestation stays fully supported.
+                    let provenance_manifest =
+                        sign_local_response(&node, &model_id, result.text.as_bytes());
+
                     Json(serde_json::json!({
                         "id": completion_id,
                         "object": "chat.completion",
@@ -20916,6 +21351,7 @@ async fn handle_openai_chat_completions(
                         "cost_wei": cost_wei.to_string(),
                         "generation_time_ms": result.generation_time_ms,
                         "tokens_per_second": result.tokens_per_second,
+                        "tenzro_provenance": provenance_manifest,
                     }))
                     .into_response()
                 }
@@ -21178,11 +21614,48 @@ async fn handle_openai_chat_completions(
                 Ok(resp) => {
                     let status = resp.status();
                     match resp.json::<Value>().await {
-                        Ok(body) => (
-                            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK),
-                            Json(body),
-                        )
-                            .into_response(),
+                        Ok(mut body) => {
+                            // Best-effort verification of any provider-attached
+                            // provenance manifest against the pinned
+                            // announcement key. Invalid manifests are stripped
+                            // so callers never see an unverified stamp.
+                            if let Some(prov) = body
+                                .get("tenzro_provenance")
+                                .filter(|v| !v.is_null())
+                                .cloned()
+                            {
+                                let content = body
+                                    .get("choices")
+                                    .and_then(|c| c.get(0))
+                                    .and_then(|c| c.get("message"))
+                                    .and_then(|m| m.get("content"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let pinned = pinned_announcement_pubkey(
+                                    &node,
+                                    &svc.model_id,
+                                    &svc.provider_name,
+                                );
+                                if verify_forwarded_provenance(
+                                    Some(&prov),
+                                    content.as_bytes(),
+                                    &svc.model_id,
+                                    pinned.as_deref(),
+                                    &svc.provider_name,
+                                )
+                                .is_none()
+                                    && let Some(obj) = body.as_object_mut()
+                                {
+                                    obj.remove("tenzro_provenance");
+                                }
+                            }
+                            (
+                                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK),
+                                Json(body),
+                            )
+                                .into_response()
+                        }
                         Err(e) => json_error_response(
                             StatusCode::BAD_GATEWAY,
                             &format!("Failed to parse provider response: {}", e),
@@ -21722,30 +22195,27 @@ pub async fn handle_chat_stream_rich(
                 )
         };
 
-        if let Some(token) = node_for_stream.token()
-            && let Some(caller_str) = caller_address.as_deref()
-                && let Ok(caller_addr) = parse_address(caller_str)
-                    && cost_wei > 0 {
-                        let provider_addr = if let Some(registry) =
-                            node_for_stream.identity_registry()
-                        {
-                            let all = registry.list_all();
-                            if let Some((_, identity)) = all.first() {
-                                identity.wallet_address
-                            } else {
-                                Address::default()
-                            }
-                        } else {
-                            Address::default()
-                        };
-                        if provider_addr != Address::default()
-                            && let Err(e) =
-                                token.transfer(&caller_addr, &provider_addr, cost_wei)
-                            {
-                                tracing::warn!(caller = %caller_str, cost_wei = %cost_wei,
-                                    "Rich-stream billing failed: {}", e);
-                            }
-                    }
+        // Inside the SSE closure a JsonRpcError cannot be returned — surface
+        // settlement failure as a terminal `error` event instead. The unpaid
+        // record is still persisted for retry by the shared helper.
+        match settle_inference_cost(
+            &node_for_stream,
+            caller_address.as_deref(),
+            None,
+            None,
+            &model_id_for_stream,
+            cost_wei,
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                yield sse_event!("error", serde_json::json!({
+                    "type": "settlement_error",
+                    "code": e.code,
+                    "message": e.message,
+                    "data": e.data,
+                }));
+            }
+        }
 
         node_for_stream.metrics().record_inference();
         node_for_stream.touch_local_model_service(&model_id_for_stream);
@@ -41688,6 +42158,10 @@ fn training_err(e: tenzro_training::TrainingError) -> JsonRpcError {
         | TE::SealedShardSizeMismatch { .. }
         | TE::SealedShardHashMismatch { .. }
         | TE::EnclaveBindingMismatch { .. }
+        | TE::FragmentNotInActiveShard { .. }
+        | TE::PipelineStageMismatch { .. }
+        | TE::QuantizationMismatch { .. }
+        | TE::QuantizedPayloadMalformed(_)
         | TE::InvalidSignature { .. } => -32602,
         TE::AttestationRequired(_) | TE::QuorumNotMet { .. } => -32011,
         TE::ConflictingFinalize { .. } => -32010,

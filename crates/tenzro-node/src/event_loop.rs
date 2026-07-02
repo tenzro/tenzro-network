@@ -43,7 +43,7 @@ use crate::metrics::MetricsCollector;
 /// `provider_type`, `capabilities`, `rpc_endpoint` are captured once at node
 /// startup. Per-tick we still re-read `served_models` from the live
 /// `Arc<DashMap>` so additions / withdrawals propagate without a node restart.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProviderAnnouncementContext {
     /// `tenzro_types::HardwareCapabilities::detect()` evaluated once at startup.
     pub hardware: tenzro_types::HardwareCapabilities,
@@ -69,26 +69,34 @@ pub struct ProviderAnnouncementContext {
     /// serving only — peers will not auto-cluster this node. Captured once at
     /// startup from the local ggml device profile + linked llama.cpp commit.
     pub cluster_profile: Option<tenzro_types::ClusterProfile>,
-    /// Node Ed25519 signer, byte-shared with the validator identity that
-    /// derives this node's `peer_id`. Signs outbound model + provider
-    /// announcements so peers can reject spoofed or replayed announcements.
-    pub signer: std::sync::Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>,
 }
 
-impl std::fmt::Debug for ProviderAnnouncementContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderAnnouncementContext")
-            .field("hardware", &self.hardware)
-            .field("geography", &self.geography)
-            .field("provider_address", &self.provider_address)
-            .field("provider_type", &self.provider_type)
-            .field("capabilities", &self.capabilities)
-            .field("rpc_endpoint", &self.rpc_endpoint)
-            .field("ttl_secs", &self.ttl_secs)
-            .field("cluster_profile", &self.cluster_profile)
-            .field("signer", &"<signer>")
-            .finish()
+/// Maximum tolerated forward clock skew for announcement timestamps (ms).
+/// Announcements dated further into the future than this are rejected —
+/// a signer can't pre-date announcements to extend their replay window.
+const ANNOUNCE_MAX_FUTURE_SKEW_MS: i64 = 60_000;
+
+/// Replay-window check applied to every signed announcement on ingest.
+/// The signature covers `timestamp` + `ttl_secs`, so a captured
+/// announcement is only replayable inside its own TTL window; after the
+/// provider stops serving (or changes endpoint), the stale capture expires.
+fn check_announcement_freshness(timestamp_ms: i64, ttl_secs: u64) -> std::result::Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let age_ms = now.saturating_sub(timestamp_ms);
+    let ttl_ms = (ttl_secs as i64).saturating_mul(1000);
+    if age_ms > ttl_ms {
+        return Err(format!(
+            "stale announcement: age {}ms exceeds ttl {}s",
+            age_ms, ttl_secs
+        ));
     }
+    if age_ms < -ANNOUNCE_MAX_FUTURE_SKEW_MS {
+        return Err(format!(
+            "future-dated announcement: {}ms ahead of local clock",
+            -age_ms
+        ));
+    }
+    Ok(())
 }
 
 /// Event types flowing through the node
@@ -359,6 +367,11 @@ pub struct EventLoop {
     /// merge it into their `network_providers` cache. `None` on light
     /// clients that never serve.
     provider_announcement_ctx: Option<ProviderAnnouncementContext>,
+    /// Node Ed25519 announce signer. Signs every outbound model, provider,
+    /// and agent announcement so peers can reject spoofed or replayed
+    /// announcements. `None` disables announcement broadcast (unsigned
+    /// announcements are rejected network-wide).
+    announce_signer: Option<Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>>,
     /// Shared reference to the ModelRuntime for idle-TTL liveness checks of
     /// local model service instances.
     model_runtime: Option<Arc<tenzro_model::ModelRuntime>>,
@@ -551,6 +564,7 @@ impl EventLoop {
             network_agents: None,
             network_providers: None,
             provider_announcement_ctx: None,
+            announce_signer: None,
             model_runtime: None,
             load_tracker: None,
             remote_cortex_workers: None,
@@ -803,6 +817,18 @@ impl EventLoop {
         ctx: ProviderAnnouncementContext,
     ) -> Self {
         self.provider_announcement_ctx = Some(ctx);
+        self
+    }
+
+    /// Wires the node's Ed25519 announce signer used to sign every outbound
+    /// model, provider, and agent announcement. Without it the heartbeat
+    /// ticks skip broadcasting, because unsigned announcements are rejected
+    /// by every consumer.
+    pub fn with_announce_signer(
+        mut self,
+        signer: Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>,
+    ) -> Self {
+        self.announce_signer = Some(signer);
         self
     }
 
@@ -1383,9 +1409,12 @@ impl EventLoop {
                     // signer) so the heartbeat carries the same `provider` key and
                     // signature that consumers require — an unsigned or provider-empty
                     // heartbeat is dropped on ingest and never refreshes the TTL.
-                    if let (Some(network), Some(served), Some(ctx)) =
-                        (&self.network, &self.served_models, &self.provider_announcement_ctx)
-                    {
+                    if let (Some(network), Some(served), Some(ctx), Some(signer)) = (
+                        &self.network,
+                        &self.served_models,
+                        &self.provider_announcement_ctx,
+                        &self.announce_signer,
+                    ) {
                         let local_peer_id = match network.local_peer_id().await {
                             Ok(pid) => pid.to_string(),
                             Err(e) => {
@@ -1394,7 +1423,7 @@ impl EventLoop {
                             }
                         };
                         let provider_address = ctx.provider_address.clone();
-                        let signer = ctx.signer.clone();
+                        let signer = signer.clone();
                         let pricing = self.provider_pricing.as_ref().map(|p| p.read().clone());
                         let schedule = self.provider_schedule.as_ref().map(|s| s.read().clone());
                         let rpc_addr = self.rpc_addr.clone();
@@ -1438,6 +1467,7 @@ impl EventLoop {
                                 schedule: msg_schedule,
                                 visibility: "network".to_string(),
                                 ttl_secs: 120,
+                                timestamp: chrono::Utc::now().timestamp_millis(),
                                 withdrawn: false,
                                 rpc_endpoint: format!("http://{}", rpc_addr),
                                 ..Default::default()
@@ -1486,8 +1516,19 @@ impl EventLoop {
                         }
                     }
 
-                    // 3. Re-announce locally registered agents via gossipsub
-                    if let (Some(network), Some(ar)) = (&self.network, &self.agent_runtime) {
+                    // 3. Re-announce locally registered agents via gossipsub.
+                    // Requires the announce signer — unsigned agent announcements
+                    // are rejected by every consumer.
+                    if let (Some(network), Some(ar), Some(signer)) =
+                        (&self.network, &self.agent_runtime, &self.announce_signer)
+                    {
+                        let local_peer_id = match network.local_peer_id().await {
+                            Ok(pid) => pid.to_string(),
+                            Err(e) => {
+                                debug!(error = %e, "Skipping agent heartbeat: local_peer_id unavailable");
+                                continue;
+                            }
+                        };
                         let agents = ar.list_agents(None);
                         let rpc_addr = self.rpc_addr.clone();
                         for a in agents.iter() {
@@ -1504,17 +1545,23 @@ impl EventLoop {
                                     tenzro_types::agent::Capability::Custom { name, .. } => name.clone(),
                                 }
                             }).collect();
-                            let ann = tenzro_network::AgentAnnouncementMessage {
+                            let mut ann = tenzro_network::AgentAnnouncementMessage {
                                 agent_id: a.identity.agent_id.clone(),
                                 name: a.identity.name.clone(),
                                 agent_type: "tenzroclaw".to_string(),
                                 capabilities: cap_names,
                                 status: a.status.as_str().to_string(),
-                                origin_peer_id: String::new(),
+                                origin_peer_id: local_peer_id.clone(),
                                 rpc_endpoint: format!("http://{}", rpc_addr),
                                 timestamp: chrono::Utc::now().timestamp_millis(),
                                 ttl_secs: 180,
+                                pubkey: Vec::new(),
+                                signature: Vec::new(),
                             };
+                            if let Err(e) = ann.sign(signer.as_ref()) {
+                                warn!(error = %e, agent_id = %a.identity.agent_id, "Skipping agent heartbeat: signing failed");
+                                continue;
+                            }
                             let broadcast_msg = tenzro_network::NetworkMessage::new(
                                 tenzro_network::MessagePayload::AgentAnnouncement(ann),
                             );
@@ -1540,8 +1587,14 @@ impl EventLoop {
                         });
                     }
 
-                    // Broadcast our own provider announcement (only if context wired).
-                    if let (Some(network), Some(ctx)) = (&self.network, &self.provider_announcement_ctx) {
+                    // Broadcast our own provider announcement (only if context +
+                    // announce signer wired — unsigned announcements are rejected
+                    // by every consumer).
+                    if let (Some(network), Some(ctx), Some(signer)) = (
+                        &self.network,
+                        &self.provider_announcement_ctx,
+                        &self.announce_signer,
+                    ) {
                         let served: Vec<String> = self.served_models
                             .as_ref()
                             .map(|m| m.iter().map(|e| e.key().clone()).collect())
@@ -1578,7 +1631,7 @@ impl EventLoop {
                             pubkey: Vec::new(),
                             signature: Vec::new(),
                         };
-                        if let Err(e) = ann.sign(ctx.signer.as_ref()) {
+                        if let Err(e) = ann.sign(signer.as_ref()) {
                             warn!(error = %e, "Skipping provider announcement: signing failed");
                             continue;
                         }
@@ -1729,6 +1782,7 @@ impl EventLoop {
                                     high_qc_view,
                                     timeout_certificate,
                                     no_endorsement_certificate,
+                                    proposer_signature,
                                 } => {
                                     // Serialize TC if present. Drop encode failures
                                     // (the proposal still goes out without it; the
@@ -1759,14 +1813,26 @@ impl EventLoop {
                                             }
                                         }
                                     });
-                                    Some(ConsensusMessage::Proposal {
-                                        block: Box::new(block),
-                                        proposer: hex::encode(proposer.as_bytes()),
-                                        round,
-                                        high_qc_view,
-                                        timeout_certificate: tc_bytes,
-                                        no_endorsement_certificate: nec_bytes,
-                                    })
+                                    // The proposer signature is mandatory —
+                                    // receivers reject unsigned proposals, so
+                                    // on encode failure drop the whole
+                                    // outbound message rather than broadcast
+                                    // one that every peer will discard.
+                                    match bincode::serialize(&proposer_signature) {
+                                        Ok(sig_bytes) => Some(ConsensusMessage::Proposal {
+                                            block: Box::new(block),
+                                            proposer: hex::encode(proposer.as_bytes()),
+                                            round,
+                                            high_qc_view,
+                                            timeout_certificate: tc_bytes,
+                                            no_endorsement_certificate: nec_bytes,
+                                            proposer_signature: sig_bytes,
+                                        }),
+                                        Err(e) => {
+                                            warn!(error = %e, "Failed to encode proposer signature; dropping proposal");
+                                            None
+                                        }
+                                    }
                                 }
                                 ConsensusOutMessage::Timeout(timeout_msg) => {
                                     // Serialize hybrid signature and composite
@@ -1884,8 +1950,44 @@ impl EventLoop {
                                     error = %e,
                                     "Rejecting model announcement (signature verification failed)"
                                 );
+                            } else if let Err(e) = check_announcement_freshness(reg.timestamp, reg.ttl_secs) {
+                                warn!(
+                                    model_id = %reg.model_id,
+                                    provider = %reg.provider,
+                                    error = %e,
+                                    "Rejecting model announcement (replay window)"
+                                );
                             } else if let Some(ref nm) = self.network_models {
                                 let key = format!("{}:{}", reg.model_id, reg.provider);
+                                // First-seen pubkey pinning + monotonic timestamps:
+                                // the map key is attacker-choosable, so a signature
+                                // alone only proves self-consistency. Pin the pubkey
+                                // that first claimed this (model, provider) pair and
+                                // reject updates — including withdrawals — signed by
+                                // any other key, plus replays of older signed states.
+                                // Read prior fields into locals and drop the Ref
+                                // before mutating the same map (DashMap deadlock rule).
+                                let prior = nm
+                                    .get(&key)
+                                    .map(|e| (e.registration.pubkey.clone(), e.registration.timestamp));
+                                if let Some((pinned_pubkey, prev_ts)) = prior {
+                                    if pinned_pubkey != reg.pubkey {
+                                        warn!(
+                                            model_id = %reg.model_id,
+                                            provider = %reg.provider,
+                                            "Rejecting model announcement (pubkey differs from pinned key)"
+                                        );
+                                        continue;
+                                    }
+                                    if reg.timestamp <= prev_ts {
+                                        debug!(
+                                            model_id = %reg.model_id,
+                                            provider = %reg.provider,
+                                            "Dropping model announcement (non-monotonic timestamp)"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 if reg.withdrawn {
                                     nm.remove(&key);
                                     // Remove from persistent storage
@@ -1920,7 +2022,41 @@ impl EventLoop {
                             }
                         }
                         NodeEvent::AgentAnnouncement(ann) => {
-                            if let Some(ref na) = self.network_agents {
+                            if let Err(e) = ann.verify() {
+                                warn!(
+                                    agent_id = %ann.agent_id,
+                                    origin_peer_id = %ann.origin_peer_id,
+                                    error = %e,
+                                    "Rejecting agent announcement (signature verification failed)"
+                                );
+                            } else if let Err(e) = check_announcement_freshness(ann.timestamp, ann.ttl_secs) {
+                                warn!(
+                                    agent_id = %ann.agent_id,
+                                    error = %e,
+                                    "Rejecting agent announcement (replay window)"
+                                );
+                            } else if let Some(ref na) = self.network_agents {
+                                // First-seen pubkey pinning + monotonic timestamps
+                                // (see ModelAnnouncement handler for rationale).
+                                let prior = na
+                                    .get(&ann.agent_id)
+                                    .map(|e| (e.announcement.pubkey.clone(), e.announcement.timestamp));
+                                if let Some((pinned_pubkey, prev_ts)) = prior {
+                                    if pinned_pubkey != ann.pubkey {
+                                        warn!(
+                                            agent_id = %ann.agent_id,
+                                            "Rejecting agent announcement (pubkey differs from pinned key)"
+                                        );
+                                        continue;
+                                    }
+                                    if ann.timestamp <= prev_ts {
+                                        debug!(
+                                            agent_id = %ann.agent_id,
+                                            "Dropping agent announcement (non-monotonic timestamp)"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 na.insert(ann.agent_id.clone(), crate::node::NetworkAgentEntry {
                                     announcement: ann.clone(),
                                     last_seen: std::time::Instant::now(),
@@ -1941,7 +2077,34 @@ impl EventLoop {
                                     error = %e,
                                     "Rejecting provider announcement (signature verification failed)"
                                 );
+                            } else if let Err(e) = check_announcement_freshness(ann.timestamp, ann.ttl_secs) {
+                                warn!(
+                                    peer_id = %ann.peer_id,
+                                    error = %e,
+                                    "Rejecting provider announcement (replay window)"
+                                );
                             } else if let Some(ref np) = self.network_providers {
+                                // First-seen pubkey pinning + monotonic timestamps
+                                // (see ModelAnnouncement handler for rationale).
+                                let prior = np
+                                    .get(&ann.peer_id)
+                                    .map(|e| (e.announcement.pubkey.clone(), e.announcement.timestamp));
+                                if let Some((pinned_pubkey, prev_ts)) = prior {
+                                    if pinned_pubkey != ann.pubkey {
+                                        warn!(
+                                            peer_id = %ann.peer_id,
+                                            "Rejecting provider announcement (pubkey differs from pinned key)"
+                                        );
+                                        continue;
+                                    }
+                                    if ann.timestamp <= prev_ts {
+                                        debug!(
+                                            peer_id = %ann.peer_id,
+                                            "Dropping provider announcement (non-monotonic timestamp)"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 np.insert(ann.peer_id.clone(), crate::node::NetworkProviderEntry {
                                     announcement: ann.clone(),
                                     last_seen: std::time::Instant::now(),
@@ -2633,7 +2796,7 @@ impl EventLoop {
                     block.height()
                 ))
             })?;
-        qc.verify(&validator_set).map_err(|e| {
+        qc.verify_bls_aggregate(&validator_set).map_err(|e| {
             crate::error::NodeError::Other(format!(
                 "block-sync rejected block at height {} (hash={}): QC verification \
                  failed against epoch validator set ({} members): {}",
@@ -2648,7 +2811,7 @@ impl EventLoop {
             height = %block.height(),
             hash = %block_hash,
             qc_view = qc.view,
-            qc_votes = qc.votes.len(),
+            qc_signers = qc.signer_count(),
             "Block-sync: commit-QC verified, accepting block"
         );
 

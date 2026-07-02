@@ -17,7 +17,7 @@ serializes per fragment.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Protocol, runtime_checkable
 
 try:
@@ -72,6 +72,75 @@ def snapshot_state(model: "torch.nn.Module") -> dict[str, "torch.Tensor"]:
         name: p.detach().to("cpu").clone()
         for name, p in model.state_dict().items()
     }
+
+
+def load_partial_state(
+    model: "torch.nn.Module", partial: dict[str, "torch.Tensor"]
+) -> None:
+    """Copy the given tensors into the model's live parameters, in place.
+
+    Keys must exist in the model's ``state_dict``. Used to reset synced
+    fragments to the round's starting weights ``θ⁽⁰⁾`` before the outer
+    update is (re-)applied.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch is required")
+    sd = model.state_dict()
+    with torch.no_grad():
+        for k, v in partial.items():
+            if k not in sd:
+                raise KeyError(f"state-dict key {k!r} not found in model")
+            sd[k].copy_(v.to(sd[k].device, sd[k].dtype))
+
+
+def apply_state_delta(
+    model: "torch.nn.Module", delta: dict[str, "torch.Tensor"]
+) -> None:
+    """Add ``delta[k]`` to the model's live parameter ``k``, in place."""
+    if torch is None:
+        raise RuntimeError("PyTorch is required")
+    sd = model.state_dict()
+    with torch.no_grad():
+        for k, d in delta.items():
+            if k not in sd:
+                raise KeyError(f"state-dict key {k!r} not found in model")
+            sd[k].add_(d.to(sd[k].device, sd[k].dtype))
+
+
+@dataclass
+class OuterUpdateScheduler:
+    """Applies outer updates immediately or with a one-round delay.
+
+    DiLoCoX (arXiv 2506.21263) one-step-delayed apply: the aggregate computed
+    at round ``r`` is applied at the *start* of round ``r + 1``, overlapping
+    the outer synchronization with the next inner-step window. When
+    ``delayed`` is ``False`` (the classic DiLoCo default), updates apply
+    as soon as they arrive.
+    """
+
+    delayed: bool = False
+    _pending: dict[str, "torch.Tensor"] | None = field(default=None, init=False)
+
+    def on_round_start(self, model: "torch.nn.Module") -> None:
+        """Apply any update buffered during the previous round."""
+        if self._pending is not None:
+            apply_state_delta(model, self._pending)
+            self._pending = None
+
+    def on_outer_update(
+        self, model: "torch.nn.Module", delta: dict[str, "torch.Tensor"]
+    ) -> None:
+        """Route an outer update: apply now, or buffer for the next round."""
+        if self.delayed:
+            self._pending = delta
+        else:
+            apply_state_delta(model, delta)
+
+    def flush(self, model: "torch.nn.Module") -> None:
+        """Apply a still-buffered update at end of run so no delta is lost."""
+        if self._pending is not None:
+            apply_state_delta(model, self._pending)
+            self._pending = None
 
 
 def run_inner_loop(

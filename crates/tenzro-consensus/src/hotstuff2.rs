@@ -33,7 +33,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tenzro_crypto::bls::BlsKeyPair;
-use tenzro_crypto::composite::{CompositePublicKey, HybridSigner, InMemoryHybridSigner};
+use tenzro_crypto::composite::{
+    CompositePublicKey, CompositeSignature, HybridSigner, HybridVerifier, InMemoryHybridSigner,
+    StandardHybridVerifier,
+};
 use tenzro_crypto::pq::MlDsaSigningKey;
 use tenzro_crypto::signatures::Ed25519SignerImpl;
 use tenzro_crypto::KeyPair;
@@ -353,6 +356,11 @@ pub enum ConsensusOutMessage {
     /// fast-forward their own `high_qc_view` if the proposer is ahead, which
     /// shrinks the gap a lagging replica has to close before it can vote.
     /// Must satisfy `high_qc_view < view`.
+    /// `proposer_signature` is the leader's hybrid (Ed25519 + ML-DSA-65)
+    /// signature over `crate::validator::proposal_signing_payload(view,
+    /// height, &block_hash, high_qc_view)`. Receivers verify it against the
+    /// proposer's REGISTERED composite key — it makes proposals attributable
+    /// (proposal-equivocation slashing) and authenticates the SyncInfo hint.
     Proposal {
         block: Block,
         proposer: Address,
@@ -361,6 +369,7 @@ pub enum ConsensusOutMessage {
         high_qc_view: u64,
         timeout_certificate: Option<crate::timeout::TimeoutCertificate>,
         no_endorsement_certificate: Option<crate::timeout::NoEndorsementCertificate>,
+        proposer_signature: CompositeSignature,
     },
     /// A pacemaker timeout broadcast emitted on local view-timer expiry.
     /// Carries the sender's current view so a lagging peer can fast-forward
@@ -451,6 +460,14 @@ pub struct HotStuff2Engine {
     /// Slashing callback for punishing equivocating validators
     slashing_callback: Option<Arc<dyn SlashingCallback>>,
 
+    /// Long-lived equivocation detector shared with every [`VoteCollector`]
+    /// rebuild (epoch transitions rebuild the collector but must NOT reset
+    /// conviction state). Also runs the proposal-equivocation check in
+    /// `on_proposal`. Storage-backed when [`Self::with_audit_storage`] is
+    /// used, so votes/proposals/evidence survive node restarts — without
+    /// persistence an equivocator escapes slashing by restarting.
+    equivocation_detector: Arc<crate::validator::EquivocationDetector>,
+
     /// State root provider for block proposals
     state_root_provider: Option<Arc<dyn StateRootProvider>>,
 
@@ -526,6 +543,13 @@ pub struct HotStuff2Engine {
     /// `view < u64::MAX` always); we initialise to `0` and use a CAS-style
     /// fetch_max to enforce strict monotonicity.
     last_proposed_view: Arc<AtomicU64>,
+
+    /// Cumulative count of local view timeouts since process start.
+    /// Unlike `ViewTimer::consecutive_timeouts` (which resets on
+    /// progress), this never resets — exported as
+    /// `tenzro_consensus_view_timeouts_total` so on-call can alert on
+    /// the timeout *rate*.
+    view_timeouts_total: Arc<AtomicU64>,
 
     /// Receiver-side proposal dedup keyed by `(proposer, view, block_hash)`.
     /// Set of `(view, proposer_addr_first_4_bytes_u32, block_hash)` so a
@@ -689,6 +713,7 @@ impl HotStuff2Engine {
             drain: Arc::new(RwLock::new(false)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             slashing_callback: None,
+            equivocation_detector: Arc::new(crate::validator::EquivocationDetector::new()),
             state_root_provider: None,
             block_provider: None,
             consensus_out_tx: None,
@@ -699,6 +724,7 @@ impl HotStuff2Engine {
             last_round_nec: Arc::new(RwLock::new(None)),
             nec_collector: Arc::new(RwLock::new(None)),
             last_proposed_view: Arc::new(AtomicU64::new(0)),
+            view_timeouts_total: Arc::new(AtomicU64::new(0)),
             proposal_dedup: Arc::new(DashMap::new()),
             proposer_election,
             reputation,
@@ -710,6 +736,18 @@ impl HotStuff2Engine {
     /// Sets the slashing callback for punishing equivocating validators
     pub fn with_slashing_callback(mut self, callback: Arc<dyn SlashingCallback>) -> Self {
         self.slashing_callback = Some(callback);
+        self
+    }
+
+    /// Installs a storage-backed equivocation detector (write-through to
+    /// `CF_AUDIT` under `equivocation/*`, hydrated on construction) so
+    /// vote/proposal observations and conviction evidence survive node
+    /// restarts. Must be called before `start()` — collectors built at
+    /// start and at epoch transitions capture whichever detector is
+    /// current.
+    pub fn with_audit_storage(mut self, storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
+        self.equivocation_detector =
+            Arc::new(crate::validator::EquivocationDetector::with_storage(storage));
         self
     }
 
@@ -800,6 +838,29 @@ impl HotStuff2Engine {
     /// (the view advances asynchronously as messages arrive).
     pub fn current_view(&self) -> u64 {
         self.view_state.read().view
+    }
+
+    /// Cumulative count of local view timeouts since process start.
+    /// Exported as `tenzro_consensus_view_timeouts_total`.
+    pub fn view_timeouts_total(&self) -> u64 {
+        self.view_timeouts_total.load(Ordering::Relaxed)
+    }
+
+    /// Seconds since the last block finalized on this replica, or `None`
+    /// if nothing has finalized since process start. Exported as
+    /// `tenzro_consensus_last_finalized_age_seconds`.
+    pub fn seconds_since_last_finalized(&self) -> Option<u64> {
+        self.finality_tracker.seconds_since_last_finalized()
+    }
+
+    /// Counts of detected (vote, proposal) equivocations on this replica.
+    /// Exported as `tenzro_consensus_equivocation_evidence{kind}` — any
+    /// non-zero value is a page-worthy event.
+    pub fn equivocation_evidence_counts(&self) -> (usize, usize) {
+        (
+            self.equivocation_detector.evidence_count(),
+            self.equivocation_detector.proposal_evidence_count(),
+        )
     }
 
     /// Snapshot of the engine's working height — the NEXT height it will
@@ -1458,6 +1519,7 @@ impl HotStuff2Engine {
     /// requires the lagging proposer to produce a valid proposal at the
     /// higher view, which it cannot do (#164).
     async fn on_view_timeout(&self) -> Result<()> {
+        self.view_timeouts_total.fetch_add(1, Ordering::Relaxed);
         let current_view = self.view_state.read().view;
         let (timeout_ms, prior_consecutive) = {
             let timer = self.view_timer.read();
@@ -2285,10 +2347,13 @@ impl HotStuff2Engine {
         }
         tracing::info!(height = %height, "Epoch transition triggered");
 
-        // Update collectors with the new validator set
+        // Update collectors with the new validator set. The equivocation
+        // detector is the engine's long-lived instance — rebuilding the
+        // collector must not reset conviction state.
         let new_validator_set = Arc::new(self.validator_set());
-        *self.vote_collector.write() = Some(Arc::new(VoteCollector::new(
+        *self.vote_collector.write() = Some(Arc::new(VoteCollector::with_detector(
             new_validator_set.clone(),
+            self.equivocation_detector.clone(),
         )));
         *self.timeout_collector.write() = Some(Arc::new(
             crate::timeout::TimeoutCollector::new(new_validator_set.clone()),
@@ -2468,6 +2533,27 @@ impl HotStuff2Engine {
                             let raw = *self.high_qc_view.read();
                             if view == 0 { 0 } else { raw.min(view - 1) }
                         };
+                        // Sign the canonical proposal payload with the hybrid
+                        // (Ed25519 + ML-DSA-65) key. Binding `high_qc_view`
+                        // into the payload authenticates the SyncInfo hint,
+                        // and the signature makes the proposal attributable
+                        // for proposal-equivocation slashing.
+                        let proposer_signature = {
+                            let payload = crate::validator::proposal_signing_payload(
+                                view,
+                                block.header.height.0,
+                                &block.hash(),
+                                high_qc_view,
+                            );
+                            let keypair_bytes = self.keypair.to_bytes();
+                            let keypair_copy =
+                                KeyPair::from_bytes(self.keypair.key_type(), &keypair_bytes)?;
+                            let classical = Ed25519SignerImpl::new(keypair_copy)?;
+                            let pq_seed = self.pq_signing_key.seed_bytes();
+                            let pq_copy = MlDsaSigningKey::from_seed(pq_seed)?;
+                            let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
+                            hybrid.sign(&payload)?
+                        };
                         self.send_out(ConsensusOutMessage::Proposal {
                             block: block.clone(),
                             proposer: self.address,
@@ -2476,6 +2562,7 @@ impl HotStuff2Engine {
                             high_qc_view,
                             timeout_certificate,
                             no_endorsement_certificate,
+                            proposer_signature,
                         });
 
                         // Vote on our own proposal
@@ -2837,7 +2924,13 @@ impl HotStuff2Engine {
 
         let view = block.header.view;
         reputation.record_round_outcome(view, block.header.proposer, true);
-        let voters: Vec<Address> = commit_qc.votes.iter().map(|v| v.voter).collect();
+        // Voters come from the QC's signer bitmap resolved against the
+        // validator set active at the block's epoch — committed data only,
+        // so every node derives the identical voter list.
+        let voter_set = self
+            .validator_set_for_height(block.header.height)
+            .unwrap_or_else(|| self.validator_set());
+        let voters: Vec<Address> = commit_qc.signers(&voter_set);
         reputation.record_round_voters(view, voters);
 
         // Derive failed rounds from the committed view gap. The parent
@@ -2886,11 +2979,13 @@ impl ConsensusEngine for HotStuff2Engine {
             ));
         }
 
-        // Initialize vote collector
+        // Initialize vote collector around the engine's long-lived
+        // equivocation detector
         let validator_set = self.validator_set();
         let validator_set_arc = Arc::new(validator_set);
-        *self.vote_collector.write() = Some(Arc::new(VoteCollector::new(
+        *self.vote_collector.write() = Some(Arc::new(VoteCollector::with_detector(
             validator_set_arc.clone(),
+            self.equivocation_detector.clone(),
         )));
         // Initialize timeout collector (Bracha boost + 2f+1 TC formation)
         *self.timeout_collector.write() = Some(Arc::new(
@@ -2958,6 +3053,7 @@ impl ConsensusEngine for HotStuff2Engine {
         timeout_certificate: Option<crate::timeout::TimeoutCertificate>,
         no_endorsement_certificate: Option<crate::timeout::NoEndorsementCertificate>,
         proposer_high_qc_view: u64,
+        proposer_signature: &tenzro_crypto::composite::CompositeSignature,
     ) -> Result<Vote> {
         // RECEIVER-SIDE DEDUP (AptosBFT EpochManager::process_message
         // pattern): drop duplicate proposals at the door, keyed by
@@ -2978,12 +3074,12 @@ impl ConsensusEngine for HotStuff2Engine {
         // events. Pruned by `advance_view` alongside other per-view
         // caches.
         let dedup_key = (block.header.view, block.hash());
-        // `entry().or_insert` is the canonical SeqCst-equivalent atomic
-        // insertion-if-absent for `DashMap`. We don't care about the
-        // returned ref — only the side effect of "was the slot empty?".
-        // Re-check by trying to insert; if the slot was already populated
-        // we drop the proposal silently.
-        if !self.proposal_dedup.insert(dedup_key, ()).is_none() {
+        // Cheap read-only pre-check: an exact replay (same view + hash) is
+        // dropped before any signature work. The authoritative atomic
+        // insert happens AFTER signature verification below, so a forged
+        // proposal with a bad signature can never poison the dedup slot
+        // for the genuine one.
+        if self.proposal_dedup.contains_key(&dedup_key) {
             tracing::debug!(
                 view = block.header.view,
                 hash = %block.hash(),
@@ -2992,6 +3088,79 @@ impl ConsensusEngine for HotStuff2Engine {
             // Return a Vote-shaped error: the caller (event_loop)
             // doesn't broadcast on error, so a duplicate is silently
             // absorbed without re-broadcasting or re-voting.
+            return Err(ConsensusError::Internal(
+                "duplicate proposal (already processed at this view)".to_string(),
+            ));
+        }
+
+        // PROPOSER AUTHENTICATION: verify the leader's hybrid signature over
+        // the canonical proposal payload against the proposer's REGISTERED
+        // composite key from the current validator set. This makes proposals
+        // attributable (proposal-equivocation slashing below) and
+        // authenticates the `proposer_high_qc_view` SyncInfo hint before we
+        // adopt it. Verifying against the registered key — not any key
+        // embedded in the message — is the identity binding.
+        let proposer = block.header.proposer;
+        let registered_key = {
+            let validator_set = self.validator_set();
+            let Some(validator) = validator_set.get_by_address(&proposer) else {
+                return Err(ConsensusError::NonValidator(format!(
+                    "proposal from non-validator {}",
+                    proposer
+                )));
+            };
+            validator.composite_public_key()
+        };
+        let proposal_payload = crate::validator::proposal_signing_payload(
+            block.header.view,
+            block.header.height.0,
+            &block.hash(),
+            proposer_high_qc_view,
+        );
+        StandardHybridVerifier::new(registered_key.clone())
+            .verify(&proposal_payload, proposer_signature)
+            .map_err(|e| {
+                ConsensusError::InvalidSignature(format!(
+                    "proposal hybrid signature verification failed for {}: {}",
+                    proposer, e
+                ))
+            })?;
+
+        // PROPOSAL-EQUIVOCATION DETECTION: two verified signatures from the
+        // same proposer over DIFFERENT block hashes at the same view is
+        // slashable — the evidence embeds both signatures and is
+        // independently verifiable. Emitted exactly once per (proposer,
+        // view); repeats return `DuplicateProposal` without re-firing the
+        // slashing callback.
+        let observed = crate::validator::ProposalRecord {
+            height: block.header.height.0,
+            block_hash: block.hash(),
+            high_qc_view: proposer_high_qc_view,
+            signature: proposer_signature.clone(),
+        };
+        match self.equivocation_detector.check_proposal(
+            &proposer,
+            block.header.view,
+            observed,
+            &registered_key,
+        ) {
+            Ok(None) => {}
+            Ok(Some(evidence)) => {
+                if let Some(ref callback) = self.slashing_callback {
+                    callback.report_proposal_equivocation(&proposer, block.header.view, &evidence);
+                }
+                return Err(ConsensusError::InvalidProposal(format!(
+                    "proposal equivocation detected for {} at view {}",
+                    proposer, block.header.view
+                )));
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Authoritative atomic dedup insert — only reached with a verified,
+        // non-equivocating proposal. A concurrent racer that lost the
+        // insert drops here.
+        if self.proposal_dedup.insert(dedup_key, ()).is_some() {
             return Err(ConsensusError::Internal(
                 "duplicate proposal (already processed at this view)".to_string(),
             ));
@@ -3051,13 +3220,14 @@ impl ConsensusEngine for HotStuff2Engine {
         // Commit, so `on_vote` records the Prepare QC in `high_qc_view` but
         // never finalizes via `finalize_with_commit_qc`).
         //
-        // Safe because: (1) the embedded QC is signed by 2f+1 of the current
-        // epoch's validators (verified via `finalize_with_commit_qc` →
-        // `finality_tracker.finalize_block` → QC signature verification);
-        // (2) we only accept catchup-finalize for the parent of the
-        // incoming proposal, never arbitrary jumps; (3) the parent block
-        // must already be in `self.blocks` (every proposal forward-syncs
-        // its block into the cache on `on_proposal`'s prelude).
+        // Safe because: (1) the embedded QC is cryptographically verified
+        // below (`verify_bls_aggregate` against the validator set active at
+        // the parent's height) BEFORE `finalize_with_commit_qc` runs — a forged
+        // or under-quorum QC never reaches the finalize path; (2) we only
+        // accept catchup-finalize for the parent of the incoming proposal,
+        // never arbitrary jumps; (3) the parent block must already be in
+        // `self.blocks` (every proposal forward-syncs its block into the
+        // cache on `on_proposal`'s prelude).
         // Downward self-heal: `view_state.height` must never exceed
         // `finalized_height + 1`. Both finalize paths (on_vote and
         // finalize_with_commit_qc) advance `state.height` by `+1` relative
@@ -3119,30 +3289,62 @@ impl ConsensusEngine for HotStuff2Engine {
                         && parent_commit_qc.block_hash == parent_hash
                         && parent_commit_qc.height == local_height =>
                     {
+                        // The QC arrived over the wire inside the proposal —
+                        // it MUST be cryptographically verified against the
+                        // validator set that was active at the parent's
+                        // height before it is allowed to finalize anything.
+                        // A structural match (height/hash/vote_type) alone is
+                        // trivially forgeable.
+                        let qc_verified = match self.validator_set_for_height(local_height) {
+                            Some(parent_set) => match parent_commit_qc.verify_bls_aggregate(&parent_set) {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        proposal_height = %proposal_height,
+                                        parent_height = %local_height,
+                                        "Catchup-on-proposal: embedded parent QC failed \
+                                         signature/quorum verification — rejecting catchup"
+                                    );
+                                    false
+                                }
+                            },
+                            None => {
+                                tracing::warn!(
+                                    parent_height = %local_height,
+                                    "Catchup-on-proposal: no validator set available for \
+                                     parent height — skipping catchup, block-sync will bridge"
+                                );
+                                false
+                            }
+                        };
+
                         // Look up the parent block from our local cache and
                         // run the same finalize path that the leader-driven
                         // commit takes. Idempotent if we somehow already
                         // finalized.
-                        if let Some(parent_block) =
-                            self.blocks.get(&parent_hash).map(|r| r.clone())
-                        {
-                            tracing::info!(
-                                proposal_height = %proposal_height,
-                                parent_height = %local_height,
-                                qc_view = parent_commit_qc.view,
-                                "Catchup-on-proposal: finalizing missed parent \
-                                 via QC embedded in incoming proposal"
-                            );
-                            if let Err(e) = self
-                                .finalize_with_commit_qc(&parent_block, parent_commit_qc)
-                                .await
+                        if qc_verified {
+                            if let Some(parent_block) =
+                                self.blocks.get(&parent_hash).map(|r| r.clone())
                             {
-                                tracing::warn!(
-                                    error = %e,
+                                tracing::info!(
+                                    proposal_height = %proposal_height,
                                     parent_height = %local_height,
-                                    "Catchup-on-proposal: parent finalize failed; \
-                                     falling through to regular height-mismatch reject"
+                                    qc_view = parent_commit_qc.view,
+                                    "Catchup-on-proposal: finalizing missed parent \
+                                     via verified QC embedded in incoming proposal"
                                 );
+                                if let Err(e) = self
+                                    .finalize_with_commit_qc(&parent_block, parent_commit_qc)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        parent_height = %local_height,
+                                        "Catchup-on-proposal: parent finalize failed; \
+                                         falling through to regular height-mismatch reject"
+                                    );
+                                }
                             }
                         }
                     }
@@ -3706,12 +3908,14 @@ impl HotStuff2Engine {
         timeout_certificate: Option<crate::timeout::TimeoutCertificate>,
         no_endorsement_certificate: Option<crate::timeout::NoEndorsementCertificate>,
         proposer_high_qc_view: u64,
+        proposer_signature: &tenzro_crypto::composite::CompositeSignature,
     ) -> Result<Vote> {
         self.on_proposal(
             block,
             timeout_certificate,
             no_endorsement_certificate,
             proposer_high_qc_view,
+            proposer_signature,
         )
         .await
     }
@@ -3746,6 +3950,7 @@ impl Clone for HotStuff2Engine {
             drain: self.drain.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
             slashing_callback: self.slashing_callback.clone(),
+            equivocation_detector: self.equivocation_detector.clone(),
             state_root_provider: self.state_root_provider.clone(),
             block_provider: self.block_provider.clone(),
             consensus_out_tx: self.consensus_out_tx.clone(),
@@ -3761,6 +3966,7 @@ impl Clone for HotStuff2Engine {
             reputation: self.reputation.clone(),
             behind_hint_tx: self.behind_hint_tx.clone(),
             last_block_time: self.last_block_time.clone(),
+            view_timeouts_total: self.view_timeouts_total.clone(),
         }
     }
 }
@@ -4286,7 +4492,14 @@ mod tests {
     /// Helper: build an engine where `validators[0]` is this node, plus
     /// `extra` additional validators. Returns the engine and the address of
     /// validators[1] (a remote validator we use as a proposer in tests).
-    async fn build_test_engine(extra: usize) -> (HotStuff2Engine, tenzro_types::primitives::Address) {
+    async fn build_test_engine(
+        extra: usize,
+    ) -> (
+        HotStuff2Engine,
+        KeyPair,
+        MlDsaSigningKey,
+        tenzro_types::primitives::Address,
+    ) {
         let mut validators = create_test_validators(extra + 1);
         let local_keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let local_pq = MlDsaSigningKey::generate();
@@ -4302,7 +4515,23 @@ mod tests {
             local_bls.public_key().to_bytes().to_vec(),
             1000,
         );
-        let proposer_addr = validators[1].address;
+        // Replace validators[1] with a proposer whose signing keys the test
+        // retains — `on_proposal` verifies the proposer's hybrid signature
+        // against the registered key, so tests must sign proposals for real.
+        let proposer_keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let proposer_pq = MlDsaSigningKey::generate();
+        let proposer_bls = tenzro_crypto::bls::BlsKeyPair::generate().unwrap();
+        let proposer_crypto_addr = proposer_keypair.address();
+        let mut proposer_addr_bytes = [0u8; 32];
+        proposer_addr_bytes[..20].copy_from_slice(proposer_crypto_addr.as_bytes());
+        let proposer_addr = tenzro_types::primitives::Address::new(proposer_addr_bytes);
+        validators[1] = ValidatorInfo::new(
+            proposer_addr,
+            proposer_keypair.public_key().clone(),
+            proposer_pq.verifying_key_bytes().to_vec(),
+            proposer_bls.public_key().to_bytes().to_vec(),
+            1000,
+        );
 
         let config = ConsensusConfig::default();
         let epoch_manager = EpochManager::new(validators, 100).unwrap();
@@ -4329,7 +4558,28 @@ mod tests {
             crate::timeout::NoEndorsementCollector::new(validator_set),
         ));
 
-        (engine, proposer_addr)
+        (engine, proposer_keypair, proposer_pq, proposer_addr)
+    }
+
+    /// Hybrid-sign the canonical proposal payload for `block` "from" the
+    /// given signer, mirroring the propose path in `handle_prepare_phase`.
+    fn peer_sign_proposal(
+        block: &tenzro_types::block::Block,
+        high_qc_view: u64,
+        keypair: &KeyPair,
+        pq: &MlDsaSigningKey,
+    ) -> tenzro_crypto::composite::CompositeSignature {
+        let payload = crate::validator::proposal_signing_payload(
+            block.header.view,
+            block.header.height.0,
+            &block.hash(),
+            high_qc_view,
+        );
+        let kp_copy = KeyPair::from_bytes(keypair.key_type(), &keypair.to_bytes()).unwrap();
+        let classical = Ed25519SignerImpl::new(kp_copy).unwrap();
+        let pq_copy = MlDsaSigningKey::from_seed(pq.seed_bytes()).unwrap();
+        let hybrid = InMemoryHybridSigner::new(Box::new(classical), pq_copy);
+        hybrid.sign(&payload).unwrap()
     }
 
     /// Regression test for the height=0 testnet bug: when a proposal arrives at
@@ -4347,7 +4597,7 @@ mod tests {
         use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
         use tenzro_types::primitives::{BlockHeight, Hash};
 
-        let (engine, proposer_addr) = build_test_engine(3).await;
+        let (engine, proposer_kp, proposer_pq, proposer_addr) = build_test_engine(3).await;
 
         // Simulate the testnet failure mode: this node's local view is one
         // behind the proposer's (the canonical happy-path next-view case;
@@ -4371,9 +4621,13 @@ mod tests {
             ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
         );
         let block = stamp_genesis_edge_base_fee(Block::new(header, vec![]));
+        let sig = peer_sign_proposal(&block, 0, &proposer_kp, &proposer_pq);
 
         // Process the proposal — should advance local view AND produce a vote.
-        let vote = engine.on_proposal(&block, None, None, 0).await.expect("on_proposal succeeded");
+        let vote = engine
+            .on_proposal(&block, None, None, 0, &sig)
+            .await
+            .expect("on_proposal succeeded");
 
         // The vote MUST be stamped at the proposer's view, not the stale
         // local view. This is the entire point of the fix.
@@ -4401,7 +4655,7 @@ mod tests {
         use tenzro_types::block::{Block, BlockHeader, ConsensusAlgorithm, ConsensusProof};
         use tenzro_types::primitives::{BlockHeight, Hash};
 
-        let (engine, proposer_addr) = build_test_engine(3).await;
+        let (engine, proposer_kp, proposer_pq, proposer_addr) = build_test_engine(3).await;
 
         // Local view is well ahead of an inbound stale proposal.
         {
@@ -4421,8 +4675,9 @@ mod tests {
             ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
         );
         let block = Block::new(header, vec![]);
+        let sig = peer_sign_proposal(&block, 0, &proposer_kp, &proposer_pq);
 
-        let result = engine.on_proposal(&block, None, None, 0).await;
+        let result = engine.on_proposal(&block, None, None, 0, &sig).await;
         assert!(
             matches!(result, Err(ConsensusError::InvalidProposal(_))),
             "stale proposal must be rejected, got {:?}",
@@ -4718,10 +4973,13 @@ mod tests {
         assert_eq!(engine.view_state.read().view, 5, "view unchanged on bad sig");
     }
 
-    /// Builds a 4-validator engine and returns the local engine + each peer's
-    /// (keypair, pq_key, address). The local node is index 0; peers are 1..3.
-    /// This enables tests that need to construct multi-signer artifacts (TCs)
-    /// without going through the gossip layer.
+    /// Builds a 4-validator engine and returns the local engine + every
+    /// signer's (keypair, pq_key, bls_keypair, address). Entries 0..3 are the
+    /// three peer validators; the final entry is the LOCAL validator's keys
+    /// (the engine holds copies), so tests can sign artifacts as whichever
+    /// validator gets elected leader — including the local one. This enables
+    /// tests that need to construct multi-signer artifacts (TCs) without
+    /// going through the gossip layer.
     async fn build_test_engine_with_all_signers() -> (
         HotStuff2Engine,
         Vec<(KeyPair, MlDsaSigningKey, tenzro_crypto::bls::BlsKeyPair, tenzro_types::primitives::Address)>,
@@ -4790,7 +5048,24 @@ mod tests {
             crate::timeout::NoEndorsementCollector::new(validator_set),
         ));
 
+        peers.push((local_kp, local_pq, local_bls, local_addr));
         (engine, peers)
+    }
+
+    /// Finds the signer tuple for `addr` in the vec returned by
+    /// `build_test_engine_with_all_signers`.
+    fn signer_for(
+        peers: &[(KeyPair, MlDsaSigningKey, tenzro_crypto::bls::BlsKeyPair, tenzro_types::primitives::Address)],
+        addr: &tenzro_types::primitives::Address,
+    ) -> (KeyPair, MlDsaSigningKey) {
+        let (kp, pq, _, _) = peers
+            .iter()
+            .find(|(_, _, _, a)| a == addr)
+            .expect("signer for address present in validator set");
+        (
+            KeyPair::from_bytes(kp.key_type(), &kp.to_bytes()).unwrap(),
+            MlDsaSigningKey::from_seed(pq.seed_bytes()).unwrap(),
+        )
     }
 
     /// safe_to_extend (Jolteon §3.5): a proposal at view V where V > local_view + 1
@@ -4823,8 +5098,9 @@ mod tests {
             ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
         );
         let block = Block::new(header, vec![]);
+        let sig = peer_sign_proposal(&block, 0, &peers[0].0, &peers[0].1);
 
-        let result = engine.on_proposal(&block, None, None, 0).await;
+        let result = engine.on_proposal(&block, None, None, 0, &sig).await;
         assert!(
             matches!(result, Err(ConsensusError::InvalidProposal(_))),
             "view jump > 1 without TC must be rejected, got {:?}",
@@ -4904,9 +5180,11 @@ mod tests {
             ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
         );
         let block = stamp_genesis_edge_base_fee(Block::new(header, vec![]));
+        let (leader_kp, leader_pq) = signer_for(&peers, &proposer_addr);
+        let sig = peer_sign_proposal(&block, 0, &leader_kp, &leader_pq);
 
         let vote = engine
-            .on_proposal(&block, Some(tc), Some(nec), 0)
+            .on_proposal(&block, Some(tc), Some(nec), 0, &sig)
             .await
             .expect("proposal with valid TC + NEC must be accepted");
         assert_eq!(vote.view, 5, "vote stamped at proposer's view");
@@ -4960,8 +5238,9 @@ mod tests {
             ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
         );
         let block = Block::new(header, vec![]);
+        let sig = peer_sign_proposal(&block, 0, &peers[0].0, &peers[0].1);
 
-        let result = engine.on_proposal(&block, Some(tc), None, 0).await;
+        let result = engine.on_proposal(&block, Some(tc), None, 0, &sig).await;
         assert!(
             matches!(result, Err(ConsensusError::InvalidProposal(_))),
             "TC with wrong view must be rejected, got {:?}",
@@ -5014,8 +5293,9 @@ mod tests {
             ConsensusProof::new(ConsensusAlgorithm::PBFT, Vec::new()),
         );
         let block = Block::new(header, vec![]);
+        let sig = peer_sign_proposal(&block, 0, &peers[0].0, &peers[0].1);
 
-        let result = engine.on_proposal(&block, Some(tc), None, 0).await;
+        let result = engine.on_proposal(&block, Some(tc), None, 0, &sig).await;
         assert!(
             matches!(result, Err(ConsensusError::InvalidProposal(_))),
             "TC below quorum must be rejected, got {:?}",

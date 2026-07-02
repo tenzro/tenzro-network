@@ -81,7 +81,7 @@ pub use error::{IrohError, IrohResult};
 pub use gradient_store::IrohGradientStore;
 pub use jsonrpc::{
     call as jsonrpc_call, DeferredJsonRpcDispatcher, DeferredMcpHandler, JsonRpcDispatcher,
-    JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_MCP,
+    JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_MCP, ALPN_MOE,
 };
 pub use resolver::{IrohBackedResolver, IrohResolver};
 pub use sealed_shard_store::IrohSealedShardStore;
@@ -96,3 +96,8 @@ pub use tenzro_types::tenzro_uri::{TenzroUri, TenzroUriError};
 // without taking a direct dependency on `iroh`. Keeps the iroh runtime
 // surface in exactly one place — this crate.
 pub use iroh::endpoint::{RecvStream, SendStream};
+
+// Re-export `EndpointId` so `tenzro-node` can parse provider-advertised
+// iroh endpoint ids (e.g. MoE expert holders) and dial them via
+// [`jsonrpc::call`] without a direct `iroh` dependency.
+pub use iroh::EndpointId;

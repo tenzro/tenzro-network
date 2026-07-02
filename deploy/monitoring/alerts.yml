@@ -37,11 +37,28 @@ groups:
           summary: "Low peer count on {{ $labels.instance }}"
           description: "Node has fewer than 3 peers"
 
-      - alert: HighConsensusLatency
-        expr: histogram_quantile(0.99, tenzro_consensus_round_duration_seconds_bucket) > 5
+      - alert: FinalityStalled
+        expr: tenzro_consensus_last_finalized_age_seconds > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Finality stalled on {{ $labels.instance }}"
+          description: "No block has finalized in over a minute while the process is up"
+
+      - alert: FrequentViewTimeouts
+        expr: rate(tenzro_consensus_view_timeouts_total[5m]) > 0.2
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "High consensus latency"
-          description: "P99 consensus round time exceeds 5 seconds"
+          summary: "Frequent view timeouts on {{ $labels.instance }}"
+          description: "Views are timing out repeatedly — leader offline, partition, or clock skew"
+
+      - alert: EquivocationDetected
+        expr: tenzro_consensus_equivocation_evidence > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Equivocation evidence recorded on {{ $labels.instance }}"
+          description: "A validator double-signed ({{ $labels.kind }}) — slashing evidence has been persisted"

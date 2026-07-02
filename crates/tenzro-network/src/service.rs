@@ -76,7 +76,11 @@ fn dial_opts_new_port(addr: Multiaddr) -> DialOpts {
 ///
 /// The keypair is stored as a protobuf-encoded file at `{data_dir}/p2p_key`.
 /// This ensures the node has a stable PeerId across restarts.
-fn load_or_generate_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::identity::Keypair> {
+///
+/// Idempotent: the first call generates and persists the key; later calls
+/// (including the node computing its local PeerId before network start to
+/// sign a PeerId↔validator-identity binding) load the same key.
+pub fn load_or_generate_keypair(data_dir: &Option<PathBuf>) -> Result<libp2p::identity::Keypair> {
     let Some(dir) = data_dir else {
         tracing::warn!("No data_dir configured — generating ephemeral keypair (peer ID will change on restart)");
         return Ok(libp2p::identity::Keypair::generate_ed25519());
@@ -411,6 +415,10 @@ pub trait NetworkService: Send + Sync {
     /// Sets the validator registry for peer authorization on validator-only topics
     async fn set_validator_registry(&self, registry: std::sync::Arc<dyn crate::peer_manager::ValidatorRegistry>) -> Result<()>;
 
+    /// Sets the durable ban store; persisted bans are hydrated and re-enforced
+    /// at the libp2p transport layer immediately.
+    async fn set_ban_store(&self, store: std::sync::Arc<dyn crate::peer_manager::BanStore>) -> Result<()>;
+
     /// Returns the set of multiaddrs the swarm is currently listening on.
     ///
     /// Useful for tests and bootstrap scenarios where the listen port is
@@ -588,6 +596,10 @@ enum NetworkCommand {
     },
     SetValidatorRegistry {
         registry: std::sync::Arc<dyn crate::peer_manager::ValidatorRegistry>,
+        response: oneshot::Sender<Result<()>>,
+    },
+    SetBanStore {
+        store: std::sync::Arc<dyn crate::peer_manager::BanStore>,
         response: oneshot::Sender<Result<()>>,
     },
     /// Returns the current count of gossipsub mesh peers for `topic`.
@@ -1267,6 +1279,11 @@ impl NetworkService for TenzroNetworkService {
             .await
     }
 
+    async fn set_ban_store(&self, store: std::sync::Arc<dyn crate::peer_manager::BanStore>) -> Result<()> {
+        self.send_command(|response| NetworkCommand::SetBanStore { store, response })
+            .await
+    }
+
     async fn listen_addresses(&self) -> Result<Vec<Multiaddr>> {
         self.send_command(|response| NetworkCommand::ListenAddresses { response })
             .await
@@ -1802,15 +1819,38 @@ async fn run_event_loop(
             // Handle swarm events
             event = state.swarm.select_next_some() => {
                 handle_swarm_event(&mut state, event).await;
+
+                // Enforce reputation-driven auto-bans at the transport layer.
+                for peer_id in state.peer_manager.take_newly_banned() {
+                    state.swarm.behaviour_mut().block_peer(peer_id);
+                    let _ = state.swarm.disconnect_peer_id(peer_id);
+                }
             }
 
             // Periodic cleanup
             _ = cleanup_interval.tick() => {
-                // Clean up expired bans
-                state.peer_manager.cleanup_expired_bans();
+                // Lift transport-layer blocks for bans that have expired.
+                for peer_id in state.peer_manager.cleanup_expired_bans() {
+                    state.swarm.behaviour_mut().unblock_peer(peer_id);
+                }
+                // Backstop: enforce any auto-bans raised outside the swarm loop.
+                for peer_id in state.peer_manager.take_newly_banned() {
+                    state.swarm.behaviour_mut().block_peer(peer_id);
+                    let _ = state.swarm.disconnect_peer_id(peer_id);
+                }
 
                 // Clean up stale peers (not seen for 24 hours)
                 state.peer_manager.cleanup_stale_peers(Duration::from_secs(86400));
+
+                // Refresh gossipsub's P5 (application-specific) factor from
+                // the peer manager's reputation for every connected peer, so
+                // protocol-level misbehaviour tracked outside gossipsub
+                // (failed connections, invalid protocol messages) flows into
+                // mesh selection and graylisting.
+                for peer_id in state.peer_manager.connected_peers() {
+                    let score = state.peer_manager.app_specific_score(&peer_id);
+                    state.swarm.behaviour_mut().set_application_score(&peer_id, score);
+                }
 
                 // Update peer-count gauges from the authoritative peer manager.
                 let stats = state.peer_manager.stats();
@@ -2782,14 +2822,16 @@ async fn handle_swarm_event(
                     info.agent_version
                 );
 
-                // Dynamically admit Tenzro peers into the validator registry so
-                // their consensus / attestation messages don't get rejected and
-                // cause gossipsub peer-score decay → mutual ban. Only peers
-                // whose protocol version starts with "tenzro/" are admitted;
-                // anything else is a no-op. See PeerManager::try_register_validator_on_identify.
+                // Dynamically admit validators into the registry so their
+                // consensus / attestation messages don't get rejected and
+                // cause gossipsub peer-score decay → mutual ban. Admission
+                // requires a verified `tenzro-peer-binding=` token in the
+                // agent_version — an Ed25519 signature by an active validator
+                // identity over this transport-authenticated PeerId. Anything
+                // else is a no-op. See PeerManager::try_register_validator_on_identify.
                 state
                     .peer_manager
-                    .try_register_validator_on_identify(&peer_id, &info.protocol_version);
+                    .try_register_validator_on_identify(&peer_id, &info.agent_version);
 
                 // We do NOT call gossipsub.add_explicit_peer() here. In
                 // libp2p-gossipsub, "explicit peers" are bypass-the-mesh
@@ -3173,11 +3215,21 @@ async fn handle_swarm_event(
             num_established,
             ..
         } => {
-            // Auto-unban peers that reconnect — stale bans from previous
-            // sessions shouldn't permanently isolate validators.
+            // Enforce bans on reconnect. A banned peer that manages to
+            // establish a connection (e.g. the ban predates the libp2p
+            // block-list entry, or the block was hydrated after the dial)
+            // is disconnected immediately and re-blocked for the remainder
+            // of its ban window. `is_banned` returns false for protected
+            // peers (boot nodes, binding-verified validators), so cluster
+            // infrastructure can always reconnect.
             if state.peer_manager.is_banned(&peer_id) {
-                tracing::info!("Auto-unbanning reconnecting peer {}", peer_id);
-                state.peer_manager.unban_peer(&peer_id);
+                tracing::warn!(
+                    peer = %peer_id,
+                    "Rejecting connection from banned peer; enforcing libp2p block for remaining ban window"
+                );
+                state.swarm.behaviour_mut().block_peer(peer_id);
+                let _ = state.swarm.disconnect_peer_id(peer_id);
+                return;
             }
 
             tracing::info!(
@@ -3281,21 +3333,19 @@ async fn handle_swarm_event(
             tracing::info!("Listen address expired: {}", address);
             state.listen_addresses.retain(|a| a != &address);
         }
-        SwarmEvent::IncomingConnection { send_back_addr, local_addr, .. } => {
+        SwarmEvent::IncomingConnection { connection_id, send_back_addr, local_addr } => {
             tracing::debug!("Incoming connection from {} to {}", send_back_addr, local_addr);
 
             // Apply per-IP + global dial rate limiting to mitigate connection-flood DoS.
-            // The `check_dial_rate_limit` consults both a keyed IP limiter (10/min burst 5)
-            // and a global limiter (200/min burst 20). If either denies, we surface the
-            // rejection via metrics. NOTE: libp2p 0.56's SwarmEvent::IncomingConnection
-            // is a notification; actual denial must flow through the connection_limits
-            // behaviour (configured in TenzroBehaviour::new) or a future deny-list hook.
-            // Here we record the rate-limit decision for observability.
+            // `check_dial_rate_limit` consults both a keyed IP limiter (10/min burst 5)
+            // and a global limiter (200/min burst 20). If either denies, the pending
+            // connection is torn down before the handshake completes.
             if let Some(ip) = extract_ip(&send_back_addr)
                 && !state.peer_manager.check_dial_rate_limit(ip)
             {
-                tracing::warn!("Dial rate-limit exceeded for IP {}", ip);
+                tracing::warn!("Dial rate-limit exceeded for IP {}; closing connection", ip);
                 state.metrics.dials_rejected_per_ip.inc();
+                state.swarm.close_connection(connection_id);
             }
         }
         SwarmEvent::IncomingConnectionError { send_back_addr, error, .. } => {
@@ -3439,6 +3489,18 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
         NetworkCommand::SetValidatorRegistry { registry, response } => {
             state.peer_manager.set_validator_registry(registry);
             tracing::info!("Validator registry installed in peer manager");
+            let _ = response.send(Ok(()));
+        }
+        NetworkCommand::SetBanStore { store, response } => {
+            let hydrated = state.peer_manager.set_ban_store(store);
+            let hydrated_count = hydrated.len();
+            for peer_id in hydrated {
+                state.swarm.behaviour_mut().block_peer(peer_id);
+            }
+            tracing::info!(
+                bans_hydrated = hydrated_count,
+                "Durable ban store installed in peer manager"
+            );
             let _ = response.send(Ok(()));
         }
         NetworkCommand::MeshPeerCount { topic, response } => {

@@ -90,7 +90,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
     "temperature": 0.7,
     "top_p": 0.9,
     "repeat_penalty": 1.1,
-    "stop": ["\n\n"],
+    "require_signed": false,
     "caller_address": "0x..."
   },
   "id": 1
@@ -105,8 +105,11 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | `temperature` | float | no | 0.7 | Sampling temperature. |
 | `top_p` | float | no | 0.9 | Nucleus sampling. |
 | `repeat_penalty` | float | no | 1.1 | Repetition penalty. |
-| `stop` | string[] | no | [] | Stop sequences (up to 4). |
+| `draft_n` | uint | no | — | Multi-Token-Prediction draft count (1–6). Requires a drafter paired with the target model. |
+| `require_signed` | bool | no | false | Verified-response mode: the response must carry a `tenzro_provenance` manifest that verifies against the provider's registered signing key, otherwise the call fails with `-32022`. Off by default — unsigned providers are fully routable. |
 | `caller_address` | string | no | — | TNZO address billed for the inference. If absent, no on-chain billing. |
+| `channel_id` | string | no | — | Open micropayment channel to debit instead of a direct transfer. Requires `channel_update_sig`. |
+| `channel_update_sig` | string | no | — | Hex Ed25519 signature by the payer over the next cumulative channel state, authorizing the debit. |
 
 ### Response
 
@@ -121,13 +124,24 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
     "output_tokens": 7,
     "generation_time_ms": 142,
     "tokens_per_second": 49.3,
-    "cost": 0.00021,
+    "cost_wei": "210000000000000",
+    "settlement": { "status": "settled", "via": "transfer" },
     "location": "local",
     "load": {
       "active_requests": 1,
       "max_concurrent": 8,
       "utilization_percent": 12.5,
       "load_level": "low"
+    },
+    "tenzro_provenance": {
+      "content_hash": "0x...",
+      "model_id": "qwen3-8b",
+      "provider": "0x...",
+      "signed_at": 1780000000000,
+      "assertion": "ai-generated",
+      "signer_public_key": [/* raw bytes */],
+      "signature": [/* raw bytes */],
+      "algorithm": "ed25519"
     }
   }
 }
@@ -139,11 +153,14 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | `model_id` | string | Resolved model identifier. |
 | `input_tokens` | uint | Prompt tokens. |
 | `output_tokens` | uint | Generated tokens. |
-| `generation_time_ms` | uint | Wall-clock generation duration. |
-| `tokens_per_second` | float | Throughput. |
-| `cost` | float | Total cost in TNZO. |
+| `generation_time_ms` | uint | Wall-clock generation duration. Local path only. |
+| `tokens_per_second` | float | Throughput. Local path only. |
+| `cost_wei` | string | Total cost in wei (10^-18 TNZO). Local path only. |
+| `settlement` | object | `{"status": "settled", "via": "channel"\|"transfer"}` when payment cleared, `{"status": "not_applicable"}` when no billing applied (zero cost, no `caller_address`, or no billing wallet on the serving node). Local path only. |
 | `location` | string | `"local"` if served by this node, `"network"` if forwarded to a peer. |
-| `load` | object | Provider load snapshot. Useful for client-side routing decisions. |
+| `provider` | string | Serving provider identifier. Network path only. |
+| `load` | object | Provider load snapshot. Useful for client-side routing decisions. Local path only. |
+| `tenzro_provenance` | object \| null | Signed provenance manifest over the output bytes. `null` when the serving node has no response signer (unsigned serving is fully supported) or, on the network path, when the provider's manifest failed verification against its registered announce key. Signature preimage: `content_hash \|\| model_id \|\| provider \|\| signed_at_ms (le_u64) \|\| assertion`. |
 
 ### Errors
 
@@ -152,6 +169,8 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | -32001 | Authentication required (write tier). |
 | -32602 | Missing or invalid params. |
 | -32000 | Model not serving / runtime error. `data.load` carries load snapshot if at capacity. |
+| -32022 | `require_signed` was set but no verifiable signed response is available — the serving node has no response signer, or the provider's provenance manifest failed verification. |
+| -32023 | Settlement failed — channel debit or token transfer rejected. `data` carries `cost_wei` and `unpaid_key` (a persisted unpaid-settlement marker for retry). Never a silent free inference. |
 
 ---
 
@@ -451,6 +470,8 @@ When a node receives `tenzro_chat` for a model it does not serve, it forwards to
 ### Billing
 
 Cost calculation is identical for both shapes: `input_tokens × input_price + output_tokens × output_price`. Tool-use response tokens (the `tool_use` blocks themselves) count as output tokens. Cached input tokens are billed at a discounted rate (TBD; design says 10% of normal rate, matching Anthropic's prompt caching).
+
+Settlement runs on the serving node before the response is returned. With a `caller_address` and non-zero cost, the node either debits an open micropayment channel (when `channel_id` + `channel_update_sig` are supplied) or executes a direct on-chain transfer. A rejected debit or transfer fails the request with `-32023` and persists an unpaid-settlement marker keyed in `data.unpaid_key` — settlement failure is never a silent free inference. The outcome is reported in the response `settlement` field.
 
 Differential pricing for rich vs. simple is not implemented in this spec. If the network adopts it later, it would surface as a per-model `pricing.rich_multiplier` field in `ModelInfo`.
 

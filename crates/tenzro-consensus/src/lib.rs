@@ -145,8 +145,9 @@ pub use timeout::{
 };
 pub use traits::{ConsensusEngine, ConsensusNetwork, SlashingCallback, StateManager};
 pub use validator::{
-    EquivocationDetector, EquivocationEvidence, ProposerElection, ReputationProposer,
-    RoundRobinProposer, ValidatorInfo, ValidatorSet, ValidatorStatus,
+    EquivocationDetector, EquivocationEvidence, ProposalEquivocationEvidence, ProposalRecord,
+    ProposerElection, ReputationProposer, RoundRobinProposer, ValidatorInfo, ValidatorSet,
+    ValidatorStatus,
 };
 pub use vote_state::{
     open_default_file_store, FileVoteStateStore, LastSignState, MemoryVoteStateStore,

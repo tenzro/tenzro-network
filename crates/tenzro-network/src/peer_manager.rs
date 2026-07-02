@@ -5,8 +5,10 @@
 //! - **Reputation scoring**: Peers earn reputation from +100 to -100 based on behavior
 //! - **Rate limiting**: Per-peer sliding window rate limiting (default: 100 msgs/10s)
 //! - **Automatic banning**: Peers are auto-banned when reputation drops below -50
-//! - **Ban management**: Configurable ban duration (default: 1 hour) with automatic expiry
-//! - **Connection tracking**: Failed connection attempts trigger auto-banning after 5 failures
+//! - **Ban management**: Configurable ban duration (default: 5 minutes) with automatic
+//!   expiry, durable persistence via [`BanStore`], and libp2p transport-layer
+//!   enforcement (connections closed, dials rejected while banned)
+//! - **Connection tracking**: Failed connection attempts are counted for diagnostics
 //!
 //! Rate limiting is implemented using a sliding window approach with timestamps stored
 //! in a VecDeque. The `check_rate_limit()` method should be called for each incoming
@@ -44,14 +46,30 @@ pub trait ValidatorRegistry: Send + Sync {
     /// Returns the set of all active validator PeerIds.
     fn validator_peer_ids(&self) -> HashSet<PeerId>;
 
-    /// Attempt to dynamically register this peer as a validator after the
-    /// identify handshake has confirmed it speaks a trusted Tenzro protocol.
+    /// Returns true if the given Ed25519 public key belongs to an active
+    /// validator identity (genesis set or current epoch validator set).
+    ///
+    /// This is the identity-level check backing signed PeerId↔validator
+    /// bindings: the network layer verifies the binding signature over the
+    /// transport-authenticated PeerId, then asks the registry whether the
+    /// signing key is actually a validator.
+    ///
+    /// Default implementation: false (no identity is admitted).
+    fn is_validator_identity(&self, _ed25519_pubkey: &[u8]) -> bool {
+        false
+    }
+
+    /// Register this peer as a validator after its signed
+    /// PeerId↔validator-identity binding has been verified by the network
+    /// layer. `validator_pubkey` is the Ed25519 public key that produced the
+    /// verified binding signature; implementations should re-check it against
+    /// the validator set (defense in depth) before admitting the peer.
     ///
     /// Default implementation: no-op. The node-level registry overrides this
     /// to admit peers so that long-running validator topics (consensus,
     /// attestations) don't cause mutual peer-score decay & gossipsub bans
     /// when a new validator joins after the boot set has been wired.
-    fn try_add_validator(&self, _peer_id: &PeerId) {}
+    fn try_add_validator(&self, _peer_id: &PeerId, _validator_pubkey: &[u8]) {}
 
     /// Remove a peer from the validator set.
     ///
@@ -63,6 +81,31 @@ pub trait ValidatorRegistry: Send + Sync {
     ///
     /// Default implementation: no-op. The node-level registry overrides this.
     fn try_remove_validator(&self, _peer_id: &PeerId) {}
+}
+
+/// Durable storage for peer bans.
+///
+/// Implemented by the node over RocksDB so bans survive process restarts —
+/// without persistence, a misbehaving peer gets a clean slate on every node
+/// restart. Ban expiries are wall-clock (`u64` Unix seconds) because
+/// `Instant` is monotonic-only and cannot cross a restart.
+pub trait BanStore: Send + Sync {
+    /// Persist (or refresh) a ban that lasts until `until_unix_secs`.
+    fn record_ban(&self, peer_id: &PeerId, until_unix_secs: u64);
+
+    /// Remove a persisted ban (explicit unban or expiry).
+    fn remove_ban(&self, peer_id: &PeerId);
+
+    /// Load all persisted bans as `(peer_id, until_unix_secs)` pairs.
+    /// Callers filter expired entries.
+    fn load_bans(&self) -> Vec<(PeerId, u64)>;
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Topics that require validator authorization for message publishing.
@@ -187,6 +230,16 @@ pub struct PeerManager {
     /// Global dial rate limiter — protects against aggregate dial floods.
     /// Default: 200 dials/minute with burst of 20.
     global_dial_limiter: Arc<GlobalRateLimiter>,
+    /// Durable ban storage. When set, bans write through on creation and are
+    /// removed on unban/expiry; persisted bans are hydrated (and re-blocked
+    /// at the libp2p layer) via `set_ban_store`.
+    ban_store: Option<Arc<dyn BanStore>>,
+    /// Peers banned since the last drain. The swarm event loop drains this
+    /// via `take_newly_banned` and enforces each ban at the libp2p transport
+    /// layer (`allow_block_list`), closing existing connections and rejecting
+    /// future dials. Needed because reputation-driven auto-bans fire deep in
+    /// `&self` paths that have no access to the swarm.
+    newly_banned: DashSet<PeerId>,
 }
 
 impl PeerManager {
@@ -216,7 +269,43 @@ impl PeerManager {
             protected_peers: DashSet::new(),
             ip_dial_limiter,
             global_dial_limiter,
+            ban_store: None,
+            newly_banned: DashSet::new(),
         }
+    }
+
+    /// Installs durable ban storage and hydrates persisted bans.
+    ///
+    /// Expired persisted bans are pruned from the store; still-active bans
+    /// are restored onto their `ManagedPeer` records (creating entries as
+    /// needed) with the remaining wall-clock window converted back to a
+    /// monotonic deadline. Returns the still-banned PeerIds so the caller
+    /// (swarm event loop) can enforce each at the libp2p transport layer.
+    pub fn set_ban_store(&mut self, store: Arc<dyn BanStore>) -> Vec<PeerId> {
+        let now = unix_now_secs();
+        let mut active = Vec::new();
+        for (peer_id, until_unix) in store.load_bans() {
+            if until_unix <= now {
+                store.remove_ban(&peer_id);
+                continue;
+            }
+            let remaining = Duration::from_secs(until_unix - now);
+            let mut peer = self
+                .peers
+                .entry(peer_id)
+                .or_insert_with(|| ManagedPeer::new(peer_id));
+            peer.status = PeerStatus::Banned;
+            peer.ban_until = Some(Instant::now() + remaining);
+            drop(peer);
+            tracing::info!(
+                peer = %peer_id,
+                remaining_secs = remaining.as_secs(),
+                "Hydrated persisted peer ban"
+            );
+            active.push(peer_id);
+        }
+        self.ban_store = Some(store);
+        active
     }
 
     /// Checks if a dial from the given IP should be allowed.
@@ -324,35 +413,69 @@ impl PeerManager {
     }
 
     /// Dynamically admit a peer as a validator after the identify handshake
-    /// confirms it speaks a trusted Tenzro protocol.
+    /// delivers a verified PeerId↔validator-identity binding.
     ///
     /// This closes the "mutual ban" gap where a peer that joins AFTER the
     /// static boot-node list was wired would never be admitted to validator
     /// topics, causing its consensus/attestation messages to be rejected and
     /// its peer score to decay below thresholds.
     ///
-    /// Only protocol versions starting with `"tenzro/"` are admitted. All
-    /// other identify payloads are ignored (no-op).
-    pub fn try_register_validator_on_identify(&self, peer_id: &PeerId, protocol_version: &str) {
-        if !protocol_version.starts_with("tenzro/") {
+    /// Admission requires all of:
+    /// 1. A validator registry is configured (no registry ⇒ no identify-driven
+    ///    admission — boot nodes stay protected via explicit boot wiring).
+    /// 2. The identify `agent_version` carries a well-formed
+    ///    `tenzro-peer-binding=<pubkey_hex>:<sig_hex>` token.
+    /// 3. The Ed25519 signature verifies over the domain-separated payload
+    ///    for the transport-authenticated PeerId (libp2p Noise/TLS proves the
+    ///    remote possesses the p2p key behind that PeerId, so a binding
+    ///    replayed from a different transport identity fails verification).
+    /// 4. The signing public key is an active validator identity per the
+    ///    registry.
+    ///
+    /// Identify payloads without a valid binding are ignored (no-op) — the
+    /// peer keeps normal (unprotected, non-validator) standing.
+    pub fn try_register_validator_on_identify(&self, peer_id: &PeerId, agent_version: &str) {
+        let Some(registry) = &self.validator_registry else {
+            return;
+        };
+
+        let Some((pubkey, signature)) = crate::peer_binding::parse_agent_binding(agent_version)
+        else {
+            return;
+        };
+
+        if !crate::peer_binding::verify_peer_binding(peer_id, &pubkey, &signature) {
+            tracing::warn!(
+                peer = %peer_id,
+                "Rejected peer binding: signature does not verify over transport-authenticated PeerId"
+            );
+            return;
+        }
+
+        if !registry.is_validator_identity(&pubkey) {
+            tracing::debug!(
+                peer = %peer_id,
+                pubkey = %hex::encode(&pubkey),
+                "Peer binding verified but signing key is not an active validator identity"
+            );
             return;
         }
 
         // Promote to protected so cluster validators can never mutually ban
         // each other via reputation decay / rate-limit penalties. This is
         // the load-bearing fix for the "all blocks empty; peers perpetually
-        // banned" class of outage on the live testnet.
+        // banned" class of outage on the live testnet — now gated on a
+        // verified validator-identity binding instead of a spoofable
+        // Identify string.
         self.add_protected_peer(*peer_id);
 
-        if let Some(registry) = &self.validator_registry
-            && !registry.is_validator(peer_id)
-        {
+        if !registry.is_validator(peer_id) {
             tracing::info!(
                 peer = %peer_id,
-                protocol = protocol_version,
-                "Dynamically admitting peer as validator via identify handshake"
+                validator_pubkey = %hex::encode(&pubkey),
+                "Admitting peer as validator via verified identity binding"
             );
-            registry.try_add_validator(peer_id);
+            registry.try_add_validator(peer_id, &pubkey);
         }
     }
 
@@ -427,8 +550,8 @@ impl PeerManager {
 
     /// Decreases a peer's reputation and potentially bans them.
     ///
-    /// Protected peers (boot nodes, peers that completed a `tenzro/`
-    /// Identify handshake) are skipped entirely — neither their reputation
+    /// Protected peers (boot nodes, peers with a verified validator-identity
+    /// binding) are skipped entirely — neither their reputation
     /// nor their ban state is touched. This is deliberate: on a small
     /// validator set (e.g. 3 validators on the live testnet), HotStuff-2
     /// consensus bursts plus any single malformed gossip frame would
@@ -499,6 +622,16 @@ impl PeerManager {
         peer.ban_until = Some(Instant::now() + self.ban_duration);
         tracing::warn!("Banned peer {} for {} seconds", peer.peer_id, self.ban_duration.as_secs());
 
+        // Write through to durable storage so the ban survives a restart.
+        if let Some(store) = &self.ban_store {
+            store.record_ban(&peer.peer_id, unix_now_secs() + self.ban_duration.as_secs());
+        }
+
+        // Queue for libp2p transport-layer enforcement (allow_block_list).
+        // The swarm event loop drains this and calls `block_peer`, which
+        // closes existing connections and rejects future dials.
+        self.newly_banned.insert(peer.peer_id);
+
         // A banned peer must also be removed from the validator set so it
         // cannot continue to be authorized for validator-only gossipsub topics
         // (consensus, attestations). This keeps validator authorization
@@ -518,6 +651,27 @@ impl PeerManager {
             peer.reputation = 0; // Reset reputation
             tracing::info!("Unbanned peer {}", peer_id);
         }
+        self.newly_banned.remove(peer_id);
+        if let Some(store) = &self.ban_store {
+            store.remove_ban(peer_id);
+        }
+    }
+
+    /// Drains the set of peers banned since the last drain.
+    ///
+    /// Called by the swarm event loop after each event batch; every returned
+    /// peer must be blocked at the libp2p transport layer so the ban is
+    /// enforced (connections closed, future dials rejected) rather than
+    /// merely recorded.
+    pub fn take_newly_banned(&self) -> Vec<PeerId> {
+        if self.newly_banned.is_empty() {
+            return Vec::new();
+        }
+        let drained: Vec<PeerId> = self.newly_banned.iter().map(|p| *p).collect();
+        for peer_id in &drained {
+            self.newly_banned.remove(peer_id);
+        }
+        drained
     }
 
     /// Checks if a peer is banned
@@ -584,7 +738,7 @@ impl PeerManager {
     /// `false` if the peer has exceeded the rate limit (message should be dropped).
     /// Automatically decreases reputation for rate-limited peers.
     pub fn check_rate_limit(&self, peer_id: &PeerId) -> bool {
-        // Protected peers (boot nodes + identified tenzro/ peers) bypass
+        // Protected peers (boot nodes + binding-verified validators) bypass
         // the rate limiter entirely. HotStuff-2 + gossip amplification can
         // legitimately exceed 1000 msgs/10s on a small cluster during
         // view changes; dropping those messages stalls consensus.
@@ -669,9 +823,14 @@ impl PeerManager {
         }
     }
 
-    /// Cleans up expired bans
-    pub fn cleanup_expired_bans(&self) {
+    /// Cleans up expired bans.
+    ///
+    /// Returns the PeerIds whose bans just expired so the swarm event loop
+    /// can lift the corresponding libp2p transport-layer blocks. Also prunes
+    /// the expired entries from the durable ban store.
+    pub fn cleanup_expired_bans(&self) -> Vec<PeerId> {
         let now = Instant::now();
+        let mut expired = Vec::new();
         for mut entry in self.peers.iter_mut() {
             if let Some(until) = entry.ban_until
                 && now >= until
@@ -680,8 +839,15 @@ impl PeerManager {
                 entry.status = PeerStatus::Disconnected;
                 entry.reputation = 0;
                 tracing::info!("Ban expired for peer {}", entry.peer_id);
+                expired.push(entry.peer_id);
             }
         }
+        if let Some(store) = &self.ban_store {
+            for peer_id in &expired {
+                store.remove_ban(peer_id);
+            }
+        }
+        expired
     }
 
     /// Gets statistics about peers
@@ -802,6 +968,97 @@ mod tests {
         // Reputation should have decreased
         let peer = manager.get_peer(&peer_id).unwrap();
         assert!(peer.reputation < 0);
+    }
+
+    /// Registry with a mutable admitted set + a fixed identity allow-list,
+    /// mirroring the node-level registry shape for admission tests.
+    struct DynamicTestRegistry {
+        identities: HashSet<Vec<u8>>,
+        admitted: DashSet<PeerId>,
+    }
+
+    impl ValidatorRegistry for DynamicTestRegistry {
+        fn is_validator(&self, peer_id: &PeerId) -> bool {
+            self.admitted.contains(peer_id)
+        }
+
+        fn validator_peer_ids(&self) -> HashSet<PeerId> {
+            self.admitted.iter().map(|p| *p).collect()
+        }
+
+        fn is_validator_identity(&self, ed25519_pubkey: &[u8]) -> bool {
+            self.identities.contains(ed25519_pubkey)
+        }
+
+        fn try_add_validator(&self, peer_id: &PeerId, validator_pubkey: &[u8]) {
+            if self.identities.contains(validator_pubkey) {
+                self.admitted.insert(*peer_id);
+            }
+        }
+    }
+
+    #[test]
+    fn test_identify_admission_requires_verified_binding() {
+        use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+        use tenzro_crypto::{KeyPair, KeyType};
+
+        let peer_id = PeerId::random();
+        let keypair = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let pubkey = keypair.public_key().to_bytes();
+        let signer = Ed25519SignerImpl::new(keypair).unwrap();
+        let sig = signer
+            .sign(&crate::peer_binding::binding_payload(&peer_id))
+            .unwrap();
+
+        let registry = Arc::new(DynamicTestRegistry {
+            identities: [pubkey.clone()].into_iter().collect(),
+            admitted: DashSet::new(),
+        });
+
+        let mut manager = PeerManager::new(10);
+        manager.set_validator_registry(registry.clone());
+        manager.add_peer(peer_id);
+
+        // No binding token — not admitted, not protected.
+        manager.try_register_validator_on_identify(&peer_id, "tenzro-network/0.1.0");
+        assert!(!registry.is_validator(&peer_id));
+        assert!(!manager.is_protected(&peer_id));
+
+        // Binding signed for a DIFFERENT PeerId — replay rejected.
+        let other_peer = PeerId::random();
+        let replayed = crate::peer_binding::encode_agent_binding(
+            "tenzro-network/0.1.0",
+            &pubkey,
+            &sig.to_bytes(),
+        );
+        manager.try_register_validator_on_identify(&other_peer, &replayed);
+        assert!(!registry.is_validator(&other_peer));
+        assert!(!manager.is_protected(&other_peer));
+
+        // Valid binding from a non-validator identity — rejected.
+        let rogue = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let rogue_pub = rogue.public_key().to_bytes();
+        let rogue_signer = Ed25519SignerImpl::new(rogue).unwrap();
+        let rogue_peer = PeerId::random();
+        let rogue_sig = rogue_signer
+            .sign(&crate::peer_binding::binding_payload(&rogue_peer))
+            .unwrap();
+        manager.add_peer(rogue_peer);
+        manager.try_register_validator_on_identify(
+            &rogue_peer,
+            &crate::peer_binding::encode_agent_binding(
+                "tenzro-network/0.1.0",
+                &rogue_pub,
+                &rogue_sig.to_bytes(),
+            ),
+        );
+        assert!(!registry.is_validator(&rogue_peer));
+        assert!(!manager.is_protected(&rogue_peer));
+
+        // Valid binding, correct PeerId, validator identity — admitted + protected.
+        manager.try_register_validator_on_identify(&peer_id, &replayed);
+        assert!(registry.is_validator(&peer_id));
+        assert!(manager.is_protected(&peer_id));
     }
 
     #[test]

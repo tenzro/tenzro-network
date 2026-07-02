@@ -13,7 +13,7 @@ use libp2p::{
     autonat, dcutr,
     gossipsub::{
         self, IdentTopic, MessageAuthenticity, MessageId,
-        PeerScoreParams, PeerScoreThresholds, ValidationMode,
+        PeerScoreParams, PeerScoreThresholds, TopicScoreParams, ValidationMode,
     },
     identify, kad, mdns, ping, relay,
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
@@ -42,6 +42,61 @@ use crate::mpc_relay::{self, MpcRelayBehaviour};
 /// The canonical list lives in `peer_manager::VALIDATOR_ONLY_TOPICS`; this
 /// alias is re-exported for consumers of the behaviour module.
 pub use crate::peer_manager::VALIDATOR_ONLY_TOPICS;
+
+/// Per-topic gossipsub score parameters, classified by topic name.
+///
+/// Consensus-critical topics (consensus voting, block propagation, TEE
+/// attestations, the consensus-direct overlay) carry full weight; the
+/// transaction firehose carries half; every other topic (status, models,
+/// inference, agents, training, ...) carries quarter weight so a peer's
+/// standing on ancillary topics cannot outvote its consensus behaviour.
+///
+/// P3 (mesh message deliveries) and P3b (mesh failure penalty) are disabled
+/// on every topic: message rates vary with validator-set size and workload
+/// in a permissionless network, and any fixed delivery-rate expectation
+/// would penalize honest peers on quiet topics. Sybil/flood defence comes
+/// from P4 (invalid messages), P6 (IP colocation), and P7 (behaviour
+/// penalty), which make no rate assumptions.
+fn topic_score_params(topic_name: &str) -> TopicScoreParams {
+    let topic_weight = if topic_name.contains("/consensus")
+        || topic_name.contains("/blocks")
+        || topic_name.contains("/attestations")
+        || topic_name.contains("/direct")
+    {
+        1.0
+    } else if topic_name.contains("/transactions") {
+        0.5
+    } else {
+        0.25
+    };
+    TopicScoreParams {
+        topic_weight,
+        // P1: reward mesh longevity — 1 point per 30s in mesh, capped at 10.
+        time_in_mesh_weight: 0.033,
+        time_in_mesh_quantum: Duration::from_secs(30),
+        time_in_mesh_cap: 300.0,
+        // P2: reward peers that deliver messages first — capped at 16 points,
+        // halving each decay interval so the score reflects recent usefulness.
+        first_message_deliveries_weight: 1.0,
+        first_message_deliveries_decay: 0.5,
+        first_message_deliveries_cap: 16.0,
+        // P3 + P3b disabled (see rustdoc above).
+        mesh_message_deliveries_weight: 0.0,
+        mesh_message_deliveries_decay: 0.5,
+        mesh_message_deliveries_cap: 0.0,
+        mesh_message_deliveries_threshold: 0.0,
+        mesh_message_deliveries_window: Duration::from_millis(10),
+        mesh_message_deliveries_activation: Duration::from_secs(5),
+        mesh_failure_penalty_weight: 0.0,
+        mesh_failure_penalty_decay: 0.5,
+        // P4: punish invalid messages hard — the counter is squared, so on a
+        // weight-1.0 topic two invalid messages (-400) approach the graylist
+        // threshold (-500) and three (-900) cross it. Slow decay (~0.997/s)
+        // keeps offenders penalized for minutes, not heartbeats.
+        invalid_message_deliveries_weight: -100.0,
+        invalid_message_deliveries_decay: 0.997,
+    }
+}
 
 /// Combined network behaviour for Tenzro Network
 #[derive(NetworkBehaviour)]
@@ -258,7 +313,7 @@ impl TenzroBehaviour {
         // entirely; below publish they receive no messages; below gossip they
         // receive no gossip. This is the core Sybil/eclipse defence.
         let peer_score_params = PeerScoreParams {
-            topics: HashMap::new(), // populated on subscribe via TopicScoreParams
+            topics: HashMap::new(), // installed per-topic in `subscribe` via `topic_score_params`
             topic_score_cap: 32.0,
             app_specific_weight: 1.0,
             ip_colocation_factor_weight: -5.0,
@@ -480,9 +535,23 @@ impl TenzroBehaviour {
         self.allow_block_list.unblock_peer(peer_id);
     }
 
-    /// Subscribes to a gossipsub topic
+    /// Subscribes to a gossipsub topic, installing per-topic score parameters
+    /// first so the 7-factor scoring actually weighs topic behaviour (without
+    /// `TopicScoreParams` the P1–P4 counters are never accumulated for the
+    /// topic and only the topic-agnostic factors apply).
     pub fn subscribe(&mut self, topic: &IdentTopic) -> Result<bool, gossipsub::SubscriptionError> {
+        let params = topic_score_params(topic.hash().as_str());
+        if let Err(e) = self.gossipsub.set_topic_params(topic.clone(), params) {
+            tracing::warn!(topic = %topic, "Failed to install topic score params: {}", e);
+        }
         self.gossipsub.subscribe(topic)
+    }
+
+    /// Feeds the peer manager's reputation-derived score into gossipsub's
+    /// P5 (application-specific) scoring factor. Returns true if scoring is
+    /// active and the peer is known to gossipsub.
+    pub fn set_application_score(&mut self, peer_id: &PeerId, score: f64) -> bool {
+        self.gossipsub.set_application_score(peer_id, score)
     }
 
     /// Unsubscribes from a gossipsub topic. Returns true if we were previously

@@ -1612,6 +1612,50 @@ pub async fn prometheus_metrics(
             }
         }
 
+    // Consensus liveness + safety metrics for on-call alerting.
+    // Emitted whenever the consensus engine is wired, independent of
+    // the admission controller. The two page-worthy signals:
+    //   - tenzro_consensus_last_finalized_age_seconds growing without
+    //     bound → finalization stall
+    //   - tenzro_consensus_equivocation_evidence > 0 → a validator
+    //     double-voted or double-proposed (slashable)
+    if let Some(ref node) = state.node
+        && let Some(consensus) = node.consensus() {
+            body.push_str("# HELP tenzro_consensus_current_view Current HotStuff-2 view on this validator\n");
+            body.push_str("# TYPE tenzro_consensus_current_view gauge\n");
+            body.push_str(&format!("tenzro_consensus_current_view {}\n\n", consensus.current_view()));
+
+            body.push_str("# HELP tenzro_consensus_high_qc_view View of the highest quorum certificate this validator has seen\n");
+            body.push_str("# TYPE tenzro_consensus_high_qc_view gauge\n");
+            body.push_str(&format!("tenzro_consensus_high_qc_view {}\n\n", consensus.high_qc_view()));
+
+            body.push_str("# HELP tenzro_consensus_finalized_height Height of the most recently finalized block\n");
+            body.push_str("# TYPE tenzro_consensus_finalized_height gauge\n");
+            body.push_str(&format!("tenzro_consensus_finalized_height {}\n\n", consensus.current_finalized_height()));
+
+            body.push_str("# HELP tenzro_consensus_view_timeouts_total Cumulative local view timeouts since process start (never resets on progress)\n");
+            body.push_str("# TYPE tenzro_consensus_view_timeouts_total counter\n");
+            body.push_str(&format!("tenzro_consensus_view_timeouts_total {}\n\n", consensus.view_timeouts_total()));
+
+            // Absent until the first block finalizes after boot — a
+            // scrape-side `absent()` guard covers the startup window.
+            if let Some(age) = consensus.seconds_since_last_finalized() {
+                body.push_str("# HELP tenzro_consensus_last_finalized_age_seconds Seconds since the last block was finalized on this validator\n");
+                body.push_str("# TYPE tenzro_consensus_last_finalized_age_seconds gauge\n");
+                body.push_str(&format!("tenzro_consensus_last_finalized_age_seconds {}\n\n", age));
+            }
+
+            let (vote_evidence, proposal_evidence) = consensus.equivocation_evidence_counts();
+            body.push_str("# HELP tenzro_consensus_equivocation_evidence Recorded equivocation evidence entries, broken down by kind\n");
+            body.push_str("# TYPE tenzro_consensus_equivocation_evidence gauge\n");
+            body.push_str(&format!("tenzro_consensus_equivocation_evidence{{kind=\"vote\"}} {}\n", vote_evidence));
+            body.push_str(&format!("tenzro_consensus_equivocation_evidence{{kind=\"proposal\"}} {}\n\n", proposal_evidence));
+
+            body.push_str("# HELP tenzro_mempool_size Total pending transactions in the mempool across all lanes\n");
+            body.push_str("# TYPE tenzro_mempool_size gauge\n");
+            body.push_str(&format!("tenzro_mempool_size {}\n\n", consensus.mempool().len()));
+        }
+
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,
@@ -1706,9 +1750,17 @@ pub async fn chat_completion(
         callback: None,
     };
 
+    // Opt-in verified-response mode: clone the router's default routing
+    // config and flip `require_signed_response` per request. Default off —
+    // unsigned providers remain fully routable.
+    let routing_config = router
+        .default_config()
+        .clone()
+        .with_signed_response_required(request.require_signed.unwrap_or(false));
+
     if !stream {
         // Non-streaming: forward request and return full response
-        match router.forward_request(&inference_request).await {
+        match router.forward_request_with_config(&inference_request, &routing_config).await {
             Ok(response) => {
                 let output_text = String::from_utf8_lossy(&response.output).to_string();
 
@@ -1750,7 +1802,7 @@ pub async fn chat_completion(
         let model_name = request.model.clone();
         let stream = async_stream::stream! {
             // Forward request to provider
-            match router.forward_request(&inference_request).await {
+            match router.forward_request_with_config(&inference_request, &routing_config).await {
                 Ok(response) => {
                     let output_text = String::from_utf8_lossy(&response.output).to_string();
 

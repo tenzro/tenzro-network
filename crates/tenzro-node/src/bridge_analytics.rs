@@ -288,6 +288,24 @@ impl GcraLimiter {
         }
     }
 
+    /// Drop entries whose burst budget has fully replenished. A key whose
+    /// TAT is at least one full burst window in the past is
+    /// indistinguishable from a fresh key, so keeping it only wastes
+    /// memory. Called opportunistically by the per-IP gate to bound map
+    /// growth when a scanner sprays requests from many source addresses.
+    pub fn evict_replenished(&self) {
+        let now = Instant::now();
+        let burst_window = self.cfg.period.saturating_mul(self.cfg.burst);
+        if let Some(threshold) = now.checked_sub(burst_window) {
+            self.tat.retain(|_, tat| *tat > threshold);
+        }
+    }
+
+    /// Number of keys currently tracked.
+    pub fn active_keys(&self) -> usize {
+        self.tat.len()
+    }
+
     /// Returns the current configured limit (cells per second).
     pub fn rate_per_second(&self) -> f64 {
         1000.0 / self.cfg.period.as_millis() as f64

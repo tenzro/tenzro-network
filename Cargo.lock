@@ -13691,6 +13691,7 @@ dependencies = [
  "dashmap",
  "futures",
  "governor",
+ "hex",
  "libp2p",
  "libp2p-allow-block-list",
  "libp2p-connection-limits",

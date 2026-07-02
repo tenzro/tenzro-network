@@ -107,6 +107,11 @@ cuda-no-vmm = ["tenzro-model/cuda-no-vmm"]
 rocm = ["tenzro-model/rocm"]
 vulkan = ["tenzro-model/vulkan"]
 metal = ["tenzro-model/metal"]
+# ONNX Runtime GPU execution providers (forecast / vision / text-embedding /
+# segmentation / detection / audio runtimes). Forward to tenzro-model.
+onnx-cuda = ["tenzro-model/onnx-cuda"]
+onnx-tensorrt = ["tenzro-model/onnx-tensorrt"]
+onnx-coreml = ["tenzro-model/onnx-coreml"]
 visa-tap = ["tenzro-payments/visa-tap"]
 mastercard-agent-pay = ["tenzro-payments/mastercard-agent-pay"]
 # Enable the sandboxed WASI 0.2 component runtime for community MCP

@@ -28,16 +28,19 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import nacl.signing
+import numpy as np
 
 # Heavy ML deps are imported lazily so the lightweight helpers
 # (``fragment_indices``, signing) remain importable without torch /
 # safetensors installed (e.g. in CI image builds and unit tests).
+# numpy is a hard dependency (the quantization codec runs on it).
 try:
     import torch  # noqa: F401
 except ImportError:  # pragma: no cover - torch is a runtime dep for serialization
     torch = None  # type: ignore[assignment]
 
-from tenzro_trainer.types import OuterGradient, Signature
+from tenzro_trainer.quantization import dequantize, quantize
+from tenzro_trainer.types import GradientQuantization, OuterGradient, Signature
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +92,12 @@ def partition_state_dict(
 class FragmentBlob:
     """One fragment's serialized outer gradient.
 
-    ``payload`` is the safetensors-encoded bytes (already on disk or in memory);
-    ``digest`` is its SHA-256. The digest is what gets baked into the
-    ``OuterGradient`` and committed to the on-chain state root via
-    ``compute_state_root``.
+    Under ``GradientQuantization.none()`` the ``payload`` is the
+    safetensors-encoded bytes; under ``Int8`` / ``Int4`` it is the raw
+    quantized encoding of the fragment's flattened float32 values
+    (name-sorted key order, C-contiguous per tensor). ``digest`` is the
+    SHA-256 of the payload — i.e. of the *quantized* bytes when quantization
+    is active, so the hash commits to exactly what travels the wire.
     """
 
     fragment: int
@@ -104,23 +109,94 @@ class FragmentBlob:
         return len(self.payload)
 
 
+def flatten_fragment_values(
+    delta_state_dict: dict[str, "torch.Tensor"],
+) -> "np.ndarray":
+    """Flatten a fragment's tensors into one float32 numpy vector.
+
+    Name-sorted key order, each tensor C-contiguous — the canonical layout
+    both sides of the quantized wire format agree on.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch is required")
+    parts = [
+        delta_state_dict[k]
+        .detach()
+        .to("cpu", torch.float32)
+        .contiguous()
+        .reshape(-1)
+        .numpy()
+        for k in sorted(delta_state_dict.keys())
+    ]
+    if not parts:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(parts).astype(np.float32, copy=False)
+
+
 def serialize_fragment(
     fragment_index: int,
     delta_state_dict: dict[str, "torch.Tensor"],
+    quantization: GradientQuantization,
 ) -> FragmentBlob:
-    """Serialize a delta state-dict for one fragment as safetensors + SHA-256."""
+    """Serialize one fragment's delta state-dict + SHA-256 digest.
+
+    ``none()`` keeps the safetensors container; ``Int8`` / ``Int4`` encode
+    the flattened values with the blockwise codec from
+    :mod:`tenzro_trainer.quantization` (the format the Rust syncer's
+    ``dequantize`` consumes).
+    """
     if torch is None:
         raise RuntimeError("PyTorch is required to serialize fragments")
-    try:
-        from safetensors.torch import save as safetensors_save
-    except ImportError as e:  # pragma: no cover - hard runtime dep
-        raise RuntimeError(
-            "safetensors is required to serialize fragments "
-            "(pip install 'tenzro-trainer')"
-        ) from e
-    payload = safetensors_save(delta_state_dict)
+    if quantization.is_none:
+        try:
+            from safetensors.torch import save as safetensors_save
+        except ImportError as e:  # pragma: no cover - hard runtime dep
+            raise RuntimeError(
+                "safetensors is required to serialize fragments "
+                "(pip install 'tenzro-trainer')"
+            ) from e
+        payload = safetensors_save(delta_state_dict)
+    else:
+        payload = quantize(flatten_fragment_values(delta_state_dict), quantization)
     digest = hashlib.sha256(payload).digest()
     return FragmentBlob(fragment=fragment_index, payload=payload, digest=digest)
+
+
+def deserialize_fragment_delta(
+    payload: bytes,
+    reference_state: dict[str, "torch.Tensor"],
+    quantization: GradientQuantization,
+) -> dict[str, "torch.Tensor"]:
+    """Decode a fragment payload back into a per-key delta state-dict.
+
+    ``reference_state`` supplies the key set and tensor shapes (any state
+    dict restricted to the fragment's keys works — e.g. the round's
+    ``θ⁽⁰⁾`` snapshot). Under quantization this is the *lossy* delta the
+    syncer will aggregate, which is what the trainer must apply locally to
+    stay bit-consistent with its peers.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch is required")
+    if quantization.is_none:
+        try:
+            from safetensors.torch import load as safetensors_load
+        except ImportError as e:  # pragma: no cover - hard runtime dep
+            raise RuntimeError(
+                "safetensors is required to deserialize fragments "
+                "(pip install 'tenzro-trainer')"
+            ) from e
+        return safetensors_load(payload)
+    total = sum(int(t.numel()) for t in reference_state.values())
+    values = dequantize(payload, quantization, total)
+    out: dict[str, "torch.Tensor"] = {}
+    cursor = 0
+    for k in sorted(reference_state.keys()):
+        ref = reference_state[k]
+        n = int(ref.numel())
+        chunk = values[cursor : cursor + n]
+        cursor += n
+        out[k] = torch.from_numpy(chunk.copy()).reshape(ref.shape)
+    return out
 
 
 def compute_outer_delta(
@@ -189,13 +265,16 @@ def gradient_signing_bytes(
     trainer_did: str,
     safetensors_hash: bytes,
     payload_bytes: int,
+    quantization: GradientQuantization,
     inner_step_count: int,
     submitted_at: int,
 ) -> bytes:
     """Canonical preimage signed by the trainer.
 
     Mirrors the Rust convention of domain-prefixed BE-encoded fields. Order
-    matches the field order on ``OuterGradient`` minus the signature itself.
+    matches the field order on ``OuterGradient`` minus the signature itself;
+    the quantization is bound as its canonical display label
+    (``none`` / ``int8/N`` / ``int4/N``).
     """
     buf = bytearray()
     buf.extend(b"tenzro/train/outer-gradient")
@@ -205,6 +284,7 @@ def gradient_signing_bytes(
     buf.extend(trainer_did.encode("utf-8"))
     buf.extend(safetensors_hash)
     buf.extend(payload_bytes.to_bytes(8, "big"))
+    buf.extend(quantization.label().encode("utf-8"))
     buf.extend(inner_step_count.to_bytes(8, "big"))
     # Two's-complement encoding of i64 millis to match Rust's i64 timestamp.
     buf.extend(submitted_at.to_bytes(8, "big", signed=True))
@@ -218,6 +298,7 @@ def build_outer_gradient(
     blob: FragmentBlob,
     trainer_did: str,
     trainer_address: bytes,
+    quantization: GradientQuantization,
     inner_step_count: int,
     key: TrainerKey,
     submitted_at_ms: int | None = None,
@@ -233,6 +314,7 @@ def build_outer_gradient(
         trainer_did=trainer_did,
         safetensors_hash=blob.digest,
         payload_bytes=blob.size_bytes,
+        quantization=quantization,
         inner_step_count=inner_step_count,
         submitted_at=submitted,
     )
@@ -246,6 +328,7 @@ def build_outer_gradient(
         trainer_address=trainer_address,
         safetensors_hash=blob.digest,
         payload_bytes=blob.size_bytes,
+        quantization=quantization,
         inner_step_count=inner_step_count,
         submitted_at=submitted,
         signature=sig,
@@ -260,6 +343,7 @@ def build_round_gradients(
     blobs: Iterable[FragmentBlob],
     trainer_did: str,
     trainer_address: bytes,
+    quantization: GradientQuantization,
     inner_step_count: int,
     key: TrainerKey,
 ) -> list[OuterGradient]:
@@ -272,6 +356,7 @@ def build_round_gradients(
             blob=b,
             trainer_did=trainer_did,
             trainer_address=trainer_address,
+            quantization=quantization,
             inner_step_count=inner_step_count,
             key=key,
             submitted_at_ms=submitted,

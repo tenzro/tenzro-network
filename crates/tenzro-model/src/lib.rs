@@ -119,8 +119,10 @@ pub mod error;
 pub mod hf_download;
 pub mod library;
 pub mod load;
+pub mod moe_exec;
 pub mod moe_router;
 pub mod moe_shard;
+pub mod onnx_session;
 pub mod pricing;
 pub mod provenance;
 pub mod provider;
@@ -151,6 +153,11 @@ pub use moe_shard::{
 pub use moe_router::{
     plan_dispatch, DispatchPlan, ExpertBatch, MoeDispatchError, TokenAssignment,
     TokenRouting, TokenSlot,
+};
+pub use moe_exec::{
+    combine_expert_outputs, to_token_routing, ExpertExecuteRequest, ExpertExecuteResponse,
+    ExpertFfn, GatingNetwork, MoeExecError, MoeExpertRuntime, MoeExpertRuntimeStatus,
+    MoeLoadedExpert, MoeLoadedGate, RoutedSlot, RoutedToken,
 };
 pub use library::{
     CategoryType, CompatibilityRequirements, LibraryModelInfo, ModelCategory, ModelHighlight,
@@ -211,8 +218,9 @@ pub use video_runtime::{
     VisionFallbackVideoEncoder,
 };
 pub use provenance::{
-    hash_content, verify_manifest, Ed25519ProvenanceSigner, ProvenanceError, ProvenanceSigner,
-    ProvenanceStore, SharedProvenanceSigner, ASSERTION_AI_GENERATED, ASSERTION_DEEPFAKE,
+    hash_content, verify_manifest, verify_response_manifest, Ed25519ProvenanceSigner,
+    ProvenanceError, ProvenanceSigner, ProvenanceStore, SharedProvenanceSigner,
+    ASSERTION_AI_GENERATED, ASSERTION_DEEPFAKE,
 };
 pub use sla::{
     response_signing_payload as sla_response_signing_payload, ProviderSlashingCallback, SlaManager,

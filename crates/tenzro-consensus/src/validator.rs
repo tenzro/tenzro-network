@@ -6,6 +6,9 @@ use crate::voter::Vote;
 use dashmap::DashMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
+use tenzro_crypto::composite::{
+    CompositePublicKey, CompositeSignature, HybridVerifier, StandardHybridVerifier,
+};
 use tenzro_crypto::pq::ML_DSA_65_VK_LEN;
 use tenzro_crypto::PublicKey;
 
@@ -526,6 +529,97 @@ impl EquivocationEvidence {
     }
 }
 
+/// Canonical signing payload for a block proposal. The leader signs this
+/// with its hybrid (Ed25519 + ML-DSA-65) key at propose time; every replica
+/// verifies it against the proposer's REGISTERED composite public key before
+/// acting on the proposal. Binding `high_qc_view` into the payload also
+/// authenticates the SyncInfo pacemaker hint that rides on the proposal.
+pub fn proposal_signing_payload(
+    view: u64,
+    height: u64,
+    block_hash: &Hash,
+    high_qc_view: u64,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(16 + 8 + 8 + 32 + 8);
+    payload.extend_from_slice(b"TENZRO_PROPOSAL:");
+    payload.extend_from_slice(&view.to_le_bytes());
+    payload.extend_from_slice(&height.to_le_bytes());
+    payload.extend_from_slice(block_hash.as_bytes());
+    payload.extend_from_slice(&high_qc_view.to_le_bytes());
+    payload
+}
+
+/// One signed proposal observation recorded by the equivocation detector.
+/// Carries everything needed to re-derive the canonical signing payload so
+/// the signature stays independently verifiable by third parties.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalRecord {
+    /// Block height the proposal claimed
+    pub height: u64,
+
+    /// Hash of the proposed block
+    pub block_hash: Hash,
+
+    /// SyncInfo high-QC view hint bound into the signed payload
+    pub high_qc_view: u64,
+
+    /// Proposer's hybrid signature over `proposal_signing_payload(..)`
+    pub signature: CompositeSignature,
+}
+
+/// Evidence of proposer equivocation: two signed proposals for different
+/// blocks in the same view. Unlike vote-equivocation evidence (which relies
+/// on the vote pipeline's own signature checks), proposal evidence embeds
+/// both real signatures plus the proposer's composite public key, so it is
+/// attributable on its own — no replica can frame a proposer without
+/// producing two valid signatures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalEquivocationEvidence {
+    /// The proposer who equivocated
+    pub proposer: Address,
+
+    /// View number where the equivocation occurred
+    pub view: u64,
+
+    /// First signed proposal
+    pub proposal1: ProposalRecord,
+
+    /// Second, conflicting signed proposal
+    pub proposal2: ProposalRecord,
+
+    /// Proposer's composite public key (must match the registered
+    /// validator keys — the consensus engine checks that binding before
+    /// recording the observation)
+    pub public_key: CompositePublicKey,
+
+    /// Timestamp when evidence was detected
+    pub detected_at: Timestamp,
+}
+
+impl ProposalEquivocationEvidence {
+    /// Verifies the evidence end-to-end: distinct block hashes plus BOTH
+    /// hybrid signatures valid over their canonical payloads under the
+    /// embedded public key.
+    pub fn is_valid(&self) -> bool {
+        if self.proposal1.block_hash == self.proposal2.block_hash {
+            return false;
+        }
+        let verifier = StandardHybridVerifier::new(self.public_key.clone());
+        for record in [&self.proposal1, &self.proposal2] {
+            let payload = proposal_signing_payload(
+                self.view,
+                record.height,
+                &record.block_hash,
+                record.high_qc_view,
+            );
+            if verifier.verify(&payload, &record.signature).is_err() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Key for tracking votes per (validator, view) pair
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ValidatorViewKey {
@@ -541,6 +635,12 @@ pub struct EquivocationDetector {
 
     /// Detected equivocation evidence
     evidence: Arc<DashMap<(Address, u64), EquivocationEvidence>>,
+
+    /// Stores the first signed proposal observed per (proposer, view)
+    proposals: Arc<DashMap<ValidatorViewKey, ProposalRecord>>,
+
+    /// Detected proposer-equivocation evidence
+    proposal_evidence: Arc<DashMap<(Address, u64), ProposalEquivocationEvidence>>,
 
     /// Optional persistence backend. When set, every recorded vote
     /// and every detected EquivocationEvidence writes through to a
@@ -558,17 +658,22 @@ impl EquivocationDetector {
         Self {
             votes: Arc::new(DashMap::new()),
             evidence: Arc::new(DashMap::new()),
+            proposals: Arc::new(DashMap::new()),
+            proposal_evidence: Arc::new(DashMap::new()),
             storage: None,
         }
     }
 
     /// Production constructor: write-through to `CF_AUDIT` under
-    /// `equivocation/votes/*` and `equivocation/evidence/*`. Hydrates
-    /// both maps on construction.
+    /// `equivocation/votes/*`, `equivocation/evidence/*`,
+    /// `equivocation/proposals/*`, and `equivocation/proposal_evidence/*`.
+    /// Hydrates all maps on construction.
     pub fn with_storage(storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
         let d = Self {
             votes: Arc::new(DashMap::new()),
             evidence: Arc::new(DashMap::new()),
+            proposals: Arc::new(DashMap::new()),
+            proposal_evidence: Arc::new(DashMap::new()),
             storage: Some(storage),
         };
         d.hydrate();
@@ -585,6 +690,20 @@ impl EquivocationDetector {
     fn evidence_key(validator: &Address, view: u64) -> Vec<u8> {
         let mut k = b"equivocation/evidence/".to_vec();
         k.extend_from_slice(validator.as_bytes());
+        k.push(b'/');
+        k.extend_from_slice(&view.to_le_bytes());
+        k
+    }
+    fn proposal_key(proposer: &Address, view: u64) -> Vec<u8> {
+        let mut k = b"equivocation/proposals/".to_vec();
+        k.extend_from_slice(proposer.as_bytes());
+        k.push(b'/');
+        k.extend_from_slice(&view.to_le_bytes());
+        k
+    }
+    fn proposal_evidence_key(proposer: &Address, view: u64) -> Vec<u8> {
+        let mut k = b"equivocation/proposal_evidence/".to_vec();
+        k.extend_from_slice(proposer.as_bytes());
         k.push(b'/');
         k.extend_from_slice(&view.to_le_bytes());
         k
@@ -611,7 +730,9 @@ impl EquivocationDetector {
             storage.scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/evidence/")
         {
             for (key, value) in entries {
-                if let Some((addr, view)) = Self::parse_evidence_key(&key) {
+                if let Some((addr, view)) =
+                    Self::parse_addr_view_key(b"equivocation/evidence/", &key)
+                {
                     if let Ok(ev) =
                         serde_json::from_slice::<EquivocationEvidence>(&value)
                     {
@@ -620,30 +741,45 @@ impl EquivocationDetector {
                 }
             }
         }
+        if let Ok(entries) =
+            storage.scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/proposals/")
+        {
+            for (key, value) in entries {
+                if let Some((validator, view)) =
+                    Self::parse_addr_view_key(b"equivocation/proposals/", &key)
+                {
+                    if let Ok(record) = serde_json::from_slice::<ProposalRecord>(&value) {
+                        self.proposals
+                            .insert(ValidatorViewKey { validator, view }, record);
+                    }
+                }
+            }
+        }
+        if let Ok(entries) = storage
+            .scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/proposal_evidence/")
+        {
+            for (key, value) in entries {
+                if let Some((addr, view)) =
+                    Self::parse_addr_view_key(b"equivocation/proposal_evidence/", &key)
+                {
+                    if let Ok(ev) =
+                        serde_json::from_slice::<ProposalEquivocationEvidence>(&value)
+                    {
+                        self.proposal_evidence.insert((addr, view), ev);
+                    }
+                }
+            }
+        }
     }
 
     fn parse_vote_key(key: &[u8]) -> Option<ValidatorViewKey> {
-        let prefix = b"equivocation/votes/";
-        if !key.starts_with(prefix) {
-            return None;
-        }
-        let rest = &key[prefix.len()..];
-        if rest.len() < 9 {
-            return None;
-        }
-        let addr_end = rest.len() - 9;
-        if rest[addr_end] != b'/' {
-            return None;
-        }
-        let validator = Address::from_bytes(&rest[..addr_end])?;
-        let mut view_buf = [0u8; 8];
-        view_buf.copy_from_slice(&rest[addr_end + 1..]);
-        let view = u64::from_le_bytes(view_buf);
-        Some(ValidatorViewKey { validator, view })
+        Self::parse_addr_view_key(b"equivocation/votes/", key)
+            .map(|(validator, view)| ValidatorViewKey { validator, view })
     }
 
-    fn parse_evidence_key(key: &[u8]) -> Option<(Address, u64)> {
-        let prefix = b"equivocation/evidence/";
+    /// Parses `<prefix><addr bytes>/<view LE u64>` keys shared by every
+    /// equivocation keyspace.
+    fn parse_addr_view_key(prefix: &[u8], key: &[u8]) -> Option<(Address, u64)> {
         if !key.starts_with(prefix) {
             return None;
         }
@@ -662,6 +798,13 @@ impl EquivocationDetector {
         Some((validator, view))
     }
 
+    // Vote and proposal records are per-view detection inputs; losing one
+    // in a crash costs at worst a detection gap for that view, never a
+    // double penalty, so they use unsynced writes to keep the per-vote hot
+    // path off the WAL-fsync cost. Evidence records are the opposite: they
+    // are the guard against re-emitting (and re-slashing) a conviction, so
+    // they must be durable before the slashing callback observes them —
+    // those go through `write_batch_sync`.
     fn persist_vote(
         &self,
         vk: &ValidatorViewKey,
@@ -681,11 +824,35 @@ impl EquivocationDetector {
     fn persist_evidence(&self, ev: &EquivocationEvidence) {
         if let Some(ref storage) = self.storage {
             if let Ok(bytes) = serde_json::to_vec(ev) {
+                let _ = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+                    cf: tenzro_storage::CF_AUDIT.to_string(),
+                    key: Self::evidence_key(&ev.validator, ev.view),
+                    value: bytes,
+                }]);
+            }
+        }
+    }
+
+    fn persist_proposal(&self, key: &ValidatorViewKey, record: &ProposalRecord) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(record) {
                 let _ = storage.put(
                     tenzro_storage::CF_AUDIT,
-                    &Self::evidence_key(&ev.validator, ev.view),
+                    &Self::proposal_key(&key.validator, key.view),
                     &bytes,
                 );
+            }
+        }
+    }
+
+    fn persist_proposal_evidence(&self, ev: &ProposalEquivocationEvidence) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(ev) {
+                let _ = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+                    cf: tenzro_storage::CF_AUDIT.to_string(),
+                    key: Self::proposal_evidence_key(&ev.proposer, ev.view),
+                    value: bytes,
+                }]);
             }
         }
     }
@@ -699,6 +866,15 @@ impl EquivocationDetector {
             validator: vote.voter,
             view: vote.view,
         };
+
+        // Once evidence exists for this (validator, view) the offence is
+        // already convicted. A third conflicting vote — or a replay of the
+        // original pair — must NOT re-emit evidence, because every
+        // Ok(Some(..)) fires the slashing callback and would compound the
+        // penalty for a single offence.
+        if self.evidence.contains_key(&(vote.voter, vote.view)) {
+            return Err(ConsensusError::AlreadyVoted(vote.view));
+        }
 
         // Check if validator already voted in this view
         if let Some(existing) = self.votes.get(&key) {
@@ -747,8 +923,16 @@ impl EquivocationDetector {
                     vote.clone(),
                 );
 
-                // Store the evidence
-                self.evidence.insert((vote.voter, vote.view), evidence.clone());
+                // Store the evidence — atomic insert-if-absent so two
+                // concurrent detections of the same offence convict once.
+                match self.evidence.entry((vote.voter, vote.view)) {
+                    dashmap::mapref::entry::Entry::Occupied(_) => {
+                        return Err(ConsensusError::AlreadyVoted(vote.view));
+                    }
+                    dashmap::mapref::entry::Entry::Vacant(slot) => {
+                        slot.insert(evidence.clone());
+                    }
+                }
                 self.persist_evidence(&evidence);
 
                 tracing::warn!(
@@ -771,9 +955,101 @@ impl EquivocationDetector {
         Ok(None)
     }
 
+    /// Records a signed proposal observation and checks for proposer
+    /// equivocation. The caller MUST have verified `observed.signature`
+    /// over `proposal_signing_payload(view, observed.height,
+    /// &observed.block_hash, observed.high_qc_view)` against the
+    /// proposer's registered composite key before calling — the detector
+    /// stores what it is given.
+    ///
+    /// Returns Ok(None) when no equivocation is detected (first proposal
+    /// for the view, or a benign re-observation of the same block hash).
+    /// Returns Ok(Some(evidence)) exactly ONCE per (proposer, view)
+    /// offence; replays and third conflicting proposals return
+    /// Err(DuplicateProposal) so the slashing callback never re-fires.
+    pub fn check_proposal(
+        &self,
+        proposer: &Address,
+        view: u64,
+        observed: ProposalRecord,
+        public_key: &CompositePublicKey,
+    ) -> Result<Option<ProposalEquivocationEvidence>> {
+        // Already convicted for this view — do not re-emit evidence.
+        if self.proposal_evidence.contains_key(&(*proposer, view)) {
+            return Err(ConsensusError::DuplicateProposal(view));
+        }
+
+        let key = ValidatorViewKey {
+            validator: *proposer,
+            view,
+        };
+
+        let existing = self.proposals.get(&key).map(|r| r.clone());
+        if let Some(first) = existing {
+            if first.block_hash == observed.block_hash {
+                // Same proposal re-observed (gossip duplicate) — benign.
+                return Ok(None);
+            }
+
+            let evidence = ProposalEquivocationEvidence {
+                proposer: *proposer,
+                view,
+                proposal1: first,
+                proposal2: observed,
+                public_key: public_key.clone(),
+                detected_at: Timestamp::now(),
+            };
+
+            // Atomic insert-if-absent: concurrent detections convict once.
+            match self.proposal_evidence.entry((*proposer, view)) {
+                dashmap::mapref::entry::Entry::Occupied(_) => {
+                    return Err(ConsensusError::DuplicateProposal(view));
+                }
+                dashmap::mapref::entry::Entry::Vacant(slot) => {
+                    slot.insert(evidence.clone());
+                }
+            }
+            self.persist_proposal_evidence(&evidence);
+
+            tracing::warn!(
+                proposer = %proposer,
+                view,
+                block1 = %evidence.proposal1.block_hash,
+                block2 = %evidence.proposal2.block_hash,
+                "Proposal equivocation detected"
+            );
+
+            return Ok(Some(evidence));
+        }
+
+        self.proposals.insert(key.clone(), observed.clone());
+        self.persist_proposal(&key, &observed);
+
+        Ok(None)
+    }
+
     /// Gets all detected equivocation evidence
     pub fn get_all_evidence(&self) -> Vec<EquivocationEvidence> {
         self.evidence.iter().map(|entry| entry.value().clone()).collect()
+    }
+
+    /// Gets all detected proposal-equivocation evidence
+    pub fn get_all_proposal_evidence(&self) -> Vec<ProposalEquivocationEvidence> {
+        self.proposal_evidence
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// Gets proposal-equivocation evidence for a specific proposer and view
+    pub fn get_proposal_evidence(
+        &self,
+        proposer: &Address,
+        view: u64,
+    ) -> Option<ProposalEquivocationEvidence> {
+        self.proposal_evidence
+            .get(&(*proposer, view))
+            .map(|e| e.clone())
     }
 
     /// Gets equivocation evidence for a specific validator and view
@@ -809,6 +1085,25 @@ impl EquivocationDetector {
                 );
             }
         }
+
+        // Proposal observations follow the same retention as votes;
+        // proposal EVIDENCE is kept, same as vote evidence.
+        let mut pruned_proposals: Vec<ValidatorViewKey> = Vec::new();
+        self.proposals.retain(|key, _| {
+            let keep = key.view >= min_view;
+            if !keep {
+                pruned_proposals.push(key.clone());
+            }
+            keep
+        });
+        if let Some(ref storage) = self.storage {
+            for key in &pruned_proposals {
+                let _ = storage.delete(
+                    tenzro_storage::CF_AUDIT,
+                    &Self::proposal_key(&key.validator, key.view),
+                );
+            }
+        }
     }
 
     /// Returns the number of tracked votes
@@ -819,6 +1114,11 @@ impl EquivocationDetector {
     /// Returns the number of detected equivocations
     pub fn evidence_count(&self) -> usize {
         self.evidence.len()
+    }
+
+    /// Returns the number of detected proposal equivocations
+    pub fn proposal_evidence_count(&self) -> usize {
+        self.proposal_evidence.len()
     }
 }
 
