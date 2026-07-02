@@ -30,6 +30,7 @@ use commands::{
     ValidatorCommand, MemoryCommand, IrohCommand,
     AdaptiveBurnCommand, SeedAgentCommand, Erc7683Command, Erc7579Command, PqHybridCommand,
     AdminCommand,
+    TreasuryCommand,
     KeyCommand,
     WorkflowCommand, Eip7702Command, Permit2Command, SecureMintCommand, StableAssetCommand,
     HyperlaneCommand, AxelarCommand, BabylonCommand, CaipCommand,
@@ -344,6 +345,10 @@ enum Command {
     #[command(subcommand)]
     Admin(AdminCommand),
 
+    /// Treasury multisig withdrawals: add/remove withdrawer, threshold, approve, execute, pending
+    #[command(subcommand)]
+    Treasury(TreasuryCommand),
+
     /// Self-managed API keys: list-mine / revoke-mine (subject-gated via `X-Tenzro-Api-Key`)
     #[command(subcommand)]
     Key(KeyCommand),
@@ -631,6 +636,7 @@ async fn main() -> Result<()> {
         Command::Erc7579(cmd) => cmd.execute().await?,
         Command::PqHybrid(cmd) => cmd.execute().await?,
         Command::Admin(cmd) => cmd.execute().await?,
+        Command::Treasury(cmd) => cmd.execute().await?,
         Command::Key(cmd) => cmd.execute().await?,
         Command::Workflow(cmd) => cmd.execute().await?,
         Command::Eip7702(cmd) => cmd.execute().await?,

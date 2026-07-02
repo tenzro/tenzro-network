@@ -287,14 +287,18 @@ impl BridgeAdapter for TempoBridgeAdapter {
     async fn receive_message(
         &self,
         source_chain: &str,
-        payload: Vec<u8>,
-    ) -> tenzro_bridge::error::Result<()> {
-        info!(
-            "Received bridge message from {} ({} bytes)",
-            source_chain,
-            payload.len()
-        );
-        Ok(())
+        _payload: Vec<u8>,
+    ) -> tenzro_bridge::error::Result<Option<tenzro_bridge::message_format::TenzroMessage>>
+    {
+        // Fail-closed. Tempo settlement finality is observed on the
+        // Tempo chain itself (EIP-155 transactions queried over RPC),
+        // not attested by a committee this adapter can verify. An
+        // unverified inbound payload must never be admitted as
+        // cross-chain authority.
+        Err(tenzro_bridge::error::BridgeError::AdapterError(format!(
+            "Tempo adapter does not admit inbound bridge messages from {source_chain}; \
+             verify settlement directly against Tempo chain state"
+        )))
     }
 
     async fn bridge_tokens(

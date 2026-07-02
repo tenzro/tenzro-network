@@ -1303,7 +1303,11 @@ impl BridgeAdapter for LiFiAdapter {
         ))
     }
 
-    async fn receive_message(&self, _source_chain: &str, _payload: Vec<u8>) -> Result<()> {
+    async fn receive_message(
+        &self,
+        _source_chain: &str,
+        _payload: Vec<u8>,
+    ) -> Result<Option<crate::message_format::TenzroMessage>> {
         // Fail-closed. LI.FI is a route aggregator — it does not
         // deliver messages itself. Inbound traffic for a LI.FI route
         // must be admitted by the underlying provider adapter (LZ,

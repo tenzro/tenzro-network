@@ -132,6 +132,12 @@ def route_message(text: str) -> str:
     ]):
         return "secure-mint"
     if any(k in t for k in [
+        "treasury withdrawal", "treasury multisig", "pending withdrawal",
+        "approve withdrawal", "execute withdrawal", "add withdrawer",
+        "remove withdrawer", "withdrawal threshold",
+    ]):
+        return "treasury"
+    if any(k in t for k in [
         "stable-asset", "stable asset", "stable unit", "stablecoin issuance",
         "issue stable", "mint stable", "redeem stable", "stable-unit",
     ]):

@@ -13,7 +13,7 @@ The `tenzro-node` crate provides the complete node binary that integrates all Te
 - **Health Monitoring**: Real-time health tracking for all subsystems
 - **Metrics Collection**: Performance metrics and statistics
 - **JSON-RPC API**: Standard API for querying and interacting with the node (470+ methods across 26+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, settlement, escrow, agents, identity, network, governance, payments, ap2, staking, canton, task marketplace, agent marketplace, token registry, bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
-- **MCP Server**: Model Context Protocol server with 331 tools (base + 29 multi-modal AI + 3 AgentBond/insurance + 3 agent-memory) on `rmcp` Streamable HTTP transport at `/mcp`, port 3001
+- **MCP Server**: Model Context Protocol server with 414 tools (base + 29 multi-modal AI + 3 AgentBond/insurance + 3 agent-memory) on `rmcp` Streamable HTTP transport at `/mcp`, port 3001
 - **A2A Server**: Agent-to-Agent protocol server with 41 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
 - **Web Verification API**: REST endpoints for ZK proof, TEE attestation, and transaction verification (port 8080)
 - **Graceful Shutdown**: Clean shutdown sequence for all subsystems
@@ -263,7 +263,7 @@ The node runs a built-in [Model Context Protocol](https://modelcontextprotocol.i
 
 ### Available Tools (200+)
 
-The main Tenzro MCP server registers 331 tools (base + 29 multi-modal AI + 3 AgentBond/insurance: `post_agent_bond`, `get_agent_bond`, `file_insurance_claim` + 3 agent-memory: `memory_grant`, `memory_recall`, `memory_archive`) across wallet, identity, payments, inference, multi-modal AI (forecast, vision, text-embed, segment, detect, transcribe, video), staking, tokens, NFTs, bridges, cross-chain, deBridge, Li.Fi, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, events, and administrative categories. The table below lists representative tools — consult `crates/tenzro-node/src/mcp/server.rs` for the complete authoritative inventory.
+The main Tenzro MCP server registers 414 tools (base + 29 multi-modal AI + 3 AgentBond/insurance: `post_agent_bond`, `get_agent_bond`, `file_insurance_claim` + 3 agent-memory: `memory_grant`, `memory_recall`, `memory_archive`) across wallet, identity, payments, inference, multi-modal AI (forecast, vision, text-embed, segment, detect, transcribe, video), staking, tokens, NFTs, bridges, cross-chain, deBridge, Li.Fi, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, events, and administrative categories. The table below lists representative tools — consult `crates/tenzro-node/src/mcp/server.rs` for the complete authoritative inventory.
 
 | Category | Representative Tools |
 |----------|----------------------|

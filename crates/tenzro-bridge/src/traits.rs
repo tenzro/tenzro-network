@@ -56,7 +56,17 @@ pub trait BridgeAdapter: Send + Sync {
     /// # Arguments
     /// * `source_chain` - The source chain identifier
     /// * `payload` - The message payload received
-    async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()>;
+    ///
+    /// # Returns
+    /// The quorum-verified inner [`TenzroMessage`] when the payload
+    /// carries one, `None` when the payload is a provider-native
+    /// message with no Tenzro envelope. Consumers that mint or release
+    /// funds MUST bind their action to the returned message.
+    async fn receive_message(
+        &self,
+        source_chain: &str,
+        payload: Vec<u8>,
+    ) -> Result<Option<crate::message_format::TenzroMessage>>;
 
     /// Initiates a token bridge transfer
     ///

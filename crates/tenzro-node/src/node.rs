@@ -2304,6 +2304,30 @@ impl TenzroNode {
             }
         }
 
+        // 10c. Wire the live account state reader into the consensus mempool
+        //      for stateful admission (nonce ordering + balance coverage).
+        //      Reads the same VM execution state (CF_STATE) that block
+        //      execution writes, via a fresh StateAdapter per lookup.
+        if let (Some(consensus), Some(storage)) = (self.consensus.clone(), self.storage.clone()) {
+            use crate::lane_resolver::NodeAccountStateReader;
+
+            let reader = Arc::new(NodeAccountStateReader::new(storage as Arc<dyn KvStore>));
+            match consensus.set_state_reader(reader) {
+                Ok(()) => {
+                    info!(
+                        "Mempool stateful admission wired (nonce ordering + balance \
+                         coverage from VM execution state)"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "Mempool state reader already wired — refusing to overwrite"
+                    );
+                }
+            }
+        }
+
         // 11. Initialize payment gateway (MPP/x402)
         self.init_payments().await.inspect_err(|e| {
             self.health_monitor.mark_unhealthy("payments", e.to_string());
@@ -5806,6 +5830,35 @@ impl TenzroNode {
     async fn init_bridge(&mut self) -> Result<()> {
         info!("Initializing bridge router...");
 
+        // Bridge replay-cache persistence: hydrate each adapter's
+        // seen-message cache + inbound nonce tracker from
+        // CF_SETTLEMENTS so replay protection survives restarts.
+        let bridge_storage: Option<Arc<dyn KvStore>> =
+            self.storage.clone().map(|s| s as Arc<dyn KvStore>);
+
+        // The Hyperlane / Axelar adapters serve their RPC namespaces
+        // unconditionally and are constructed before storage opens;
+        // rebuild them here with persistence attached. Runs before any
+        // RPC serving (start() step 12), so the swap is not observable.
+        if let Some(ref st) = bridge_storage {
+            self.hyperlane_adapter = Arc::new(
+                HyperlaneAdapter::new(HyperlaneConfig::new(
+                    10_000,
+                    "0x0000000000000000000000000000000000000000",
+                    "0x0000000000000000000000000000000000000000",
+                ))
+                .with_storage(st.clone()),
+            );
+            self.axelar_adapter = Arc::new(
+                AxelarAdapter::new(AxelarConfig::new(
+                    "tenzro",
+                    "0x0000000000000000000000000000000000000000",
+                    "0x0000000000000000000000000000000000000000",
+                ))
+                .with_storage(st.clone()),
+            );
+        }
+
         // Wire the fee-in-TNZO surface onto every router from the start so
         // adapters can quote / sponsor uniformly via `tenzro_quoteBridgeFeeInTnzo`
         // and `tenzro_listBridgeSponsorshipPools`. When `bridge.chainlink_feeds`
@@ -5900,9 +5953,10 @@ impl TenzroNode {
                     "0x0000000000000000000000000000000000000001",
                     "0x0000000000000000000000000000000000000002",
                 );
-                let adapter = LayerZeroAdapter::new(lz_config);
-
-                let mut adapter = adapter;
+                let mut adapter = LayerZeroAdapter::new(lz_config);
+                if let Some(ref st) = bridge_storage {
+                    adapter = adapter.with_storage(st.clone());
+                }
                 if let Some(signer) = self.build_bridge_signer("LayerZero", lz_cfg).await {
                     adapter = adapter.with_signer(signer);
                 }
@@ -5944,6 +5998,9 @@ impl TenzroNode {
                 let mut adapter = ChainlinkCcipAdapter::new(
                     CcipConfig::ethereum_mainnet(FeeToken::Native),
                 );
+                if let Some(ref st) = bridge_storage {
+                    adapter = adapter.with_storage(st.clone());
+                }
 
                 if let Some(signer) = self.build_bridge_signer("CCIP", ccip_cfg).await {
                     adapter = adapter.with_signer(signer);
@@ -5998,6 +6055,9 @@ impl TenzroNode {
                     "0x0000000000000000000000000000000000000000",
                 );
                 let mut adapter = DeBridgeAdapter::new(debridge_config);
+                if let Some(ref st) = bridge_storage {
+                    adapter = adapter.with_storage(st.clone());
+                }
 
                 if let Some(signer) = self.build_bridge_signer("deBridge", db_cfg).await {
                     adapter = adapter.with_signer(signer);
@@ -6060,6 +6120,9 @@ impl TenzroNode {
                     "0x0000000000000000000000000000000000000000",
                 );
                 let mut adapter = WormholeAdapter::new(wormhole_config);
+                if let Some(ref st) = bridge_storage {
+                    adapter = adapter.with_storage(st.clone());
+                }
 
                 if let Some(signer) = self.build_bridge_signer("Wormhole", wh_cfg).await {
                     adapter = adapter.with_signer(signer);
@@ -6194,6 +6257,9 @@ impl TenzroNode {
                 let mut cct_ccip_adapter = ChainlinkCcipAdapter::new(
                     CcipConfig::ethereum_mainnet(FeeToken::Native),
                 );
+                if let Some(ref st) = bridge_storage {
+                    cct_ccip_adapter = cct_ccip_adapter.with_storage(st.clone());
+                }
                 if let Some(signer) = self.build_bridge_signer("CCT-CCIP", ccip_cfg).await {
                     cct_ccip_adapter = cct_ccip_adapter.with_signer(signer);
                 }
@@ -8693,6 +8759,11 @@ impl TenzroNode {
     /// Returns the staking manager if initialized
     pub fn staking(&self) -> Option<&Arc<StakingManager>> {
         self.staking.as_ref()
+    }
+
+    /// Returns the network treasury if initialized
+    pub fn treasury(&self) -> Option<&Arc<NetworkTreasury>> {
+        self.treasury.as_ref()
     }
 
     /// Returns the storage-provider runtime if this node serves the

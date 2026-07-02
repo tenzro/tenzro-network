@@ -267,6 +267,8 @@ pub struct HyperlaneAdapter {
     /// against the matching set. Absent → fail-closed (reject).
     validator_sets:
         Arc<RwLock<std::collections::HashMap<u32, HyperlaneValidatorSet>>>,
+    /// Optional write-through persistence for the replay cache.
+    seen_storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl HyperlaneAdapter {
@@ -288,6 +290,40 @@ impl HyperlaneAdapter {
             validator_sets: Arc::new(RwLock::new(
                 std::collections::HashMap::new(),
             )),
+            seen_storage: None,
+        }
+    }
+
+    /// Attach RocksDB persistence: hydrates the replay cache from
+    /// `CF_SETTLEMENTS / bridge_seen:hyperlane:*` and swaps the inbound
+    /// nonce tracker to its persistent variant.
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        for key in crate::message_format::load_seen_keys(&storage, "hyperlane") {
+            if let Ok(bytes) = hex::decode(&key) {
+                if bytes.len() == 32 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&bytes);
+                    self.seen_messages.insert(Hash::new(h), ());
+                }
+            }
+        }
+        self.inbound_nonce_tracker =
+            Arc::new(NonceTracker::with_storage("hyperlane", storage.clone()));
+        self.seen_storage = Some(storage);
+        self
+    }
+
+    fn record_seen(&self, id: &Hash) {
+        self.seen_messages.insert(*id, ());
+        if let Some(ref storage) = self.seen_storage {
+            crate::message_format::persist_seen_key(
+                storage,
+                "hyperlane",
+                &hex::encode(id.as_bytes()),
+            );
         }
     }
 
@@ -433,7 +469,11 @@ impl BridgeAdapter for HyperlaneAdapter {
         Ok(format!("0x{}", hex::encode(id.as_bytes())))
     }
 
-    async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+    async fn receive_message(
+        &self,
+        source_chain: &str,
+        payload: Vec<u8>,
+    ) -> Result<Option<TenzroMessage>> {
         let source_domain = self
             .config
             .chain_id(source_chain)
@@ -500,26 +540,13 @@ impl BridgeAdapter for HyperlaneAdapter {
         // the raw outer payload. The outer ISM multisig is the cross-
         // chain authority gate; this inner check guards malformed
         // Tenzro-native payloads.
-        if let Ok(message) = TenzroMessage::decode(body) {
-            message.validate()?;
-            if !message.verify_hash() {
-                return Err(BridgeError::InvalidParameter(
-                    "inbound TenzroMessage hash mismatch".into(),
-                ));
-            }
-            if message.signature.is_some()
-                && !message.verify_signature().unwrap_or(false)
-            {
-                return Err(BridgeError::InvalidParameter(
-                    "inbound TenzroMessage signature verification failed".into(),
-                ));
-            }
-            self.inbound_nonce_tracker
-                .check_and_update(&message.sender, message.nonce)
-                .map_err(|e| BridgeError::ReplayAttack(format!("nonce: {e}")))?;
-        }
-        self.seen_messages.insert(id, ());
-        Ok(())
+        let verified = crate::message_format::verify_inner_message(
+            body,
+            Some(self.inbound_nonce_tracker.as_ref()),
+        )?;
+        self.record_seen(&id);
+        self.record_seen(&inner_id);
+        Ok(verified)
     }
 
     async fn bridge_tokens(&self, request: BridgeTokenRequest) -> Result<BridgeTokenReceipt> {

@@ -130,6 +130,13 @@ pub struct LiquidStakingPool {
     /// Total underlying TNZO in the pool (staked + rewards - fees)
     total_underlying_wei: parking_lot::RwLock<u128>,
 
+    /// TNZO earmarked for unclaimed withdrawal requests. Still counted in
+    /// `total_underlying_wei` until claim, but excluded from the exchange
+    /// rate so remaining holders are not priced against funds already owed
+    /// to withdrawers. Derived from unclaimed `WithdrawalRequest` records
+    /// on hydration, so it is never persisted separately.
+    pending_withdrawal_wei: parking_lot::RwLock<u128>,
+
     /// Total protocol fees collected (TNZO)
     total_protocol_fees: parking_lot::RwLock<u128>,
 
@@ -183,6 +190,7 @@ impl LiquidStakingPool {
             sttnzo_balances: DashMap::new(),
             total_sttnzo_supply: parking_lot::RwLock::new(0),
             total_underlying_wei: parking_lot::RwLock::new(0),
+            pending_withdrawal_wei: parking_lot::RwLock::new(0),
             total_protocol_fees: parking_lot::RwLock::new(0),
             withdrawal_requests: DashMap::new(),
             validator_delegations: DashMap::new(),
@@ -210,6 +218,7 @@ impl LiquidStakingPool {
             sttnzo_balances: DashMap::new(),
             total_sttnzo_supply: parking_lot::RwLock::new(0),
             total_underlying_wei: parking_lot::RwLock::new(0),
+            pending_withdrawal_wei: parking_lot::RwLock::new(0),
             total_protocol_fees: parking_lot::RwLock::new(0),
             withdrawal_requests: DashMap::new(),
             validator_delegations: DashMap::new(),
@@ -308,6 +317,16 @@ impl LiquidStakingPool {
             })?;
             self.withdrawal_requests.insert(req.request_id.clone(), req);
         }
+
+        // Rebuild the earmarked-for-withdrawal aggregate from the unclaimed
+        // request records — they are the source of truth for owed TNZO.
+        let pending: u128 = self
+            .withdrawal_requests
+            .iter()
+            .filter(|entry| !entry.value().claimed)
+            .map(|entry| entry.value().tnzo_amount)
+            .sum();
+        *self.pending_withdrawal_wei.write() = pending;
 
         info!(
             holders = self.sttnzo_balances.len(),
@@ -462,24 +481,31 @@ impl LiquidStakingPool {
 
     /// Get the current exchange rate: TNZO per stTNZO.
     ///
-    /// `exchange_rate = total_underlying_wei / total_sttnzo_supply`
+    /// `exchange_rate = (total_underlying_wei - pending_withdrawal_wei) / total_sttnzo_supply`
+    ///
+    /// TNZO earmarked for unclaimed withdrawals is excluded from the
+    /// backing: those requests already burned their stTNZO at a snapshotted
+    /// rate, so counting the owed funds would price live stTNZO against
+    /// TNZO that no longer backs it.
     ///
     /// Returns the rate as a fixed-point number with 18 decimals.
     /// A rate of `1_000_000_000_000_000_000` (10^18) means 1:1.
     pub fn exchange_rate(&self) -> u128 {
         let supply = *self.total_sttnzo_supply.read();
         let underlying = *self.total_underlying_wei.read();
+        let pending = *self.pending_withdrawal_wei.read();
+        let backing = underlying.saturating_sub(pending);
 
         if supply == 0 {
             // Initial rate is 1:1
             ONE_STTNZO
         } else {
-            // rate = underlying * ONE_STTNZO / supply
-            // To avoid overflow when underlying is large, split the division:
-            // underlying / supply gives the integer TNZO-per-stTNZO ratio
-            // (underlying % supply) * ONE_STTNZO / supply gives the fractional part
-            let quotient = underlying / supply;
-            let remainder = underlying % supply;
+            // rate = backing * ONE_STTNZO / supply
+            // To avoid overflow when backing is large, split the division:
+            // backing / supply gives the integer TNZO-per-stTNZO ratio
+            // (backing % supply) * ONE_STTNZO / supply gives the fractional part
+            let quotient = backing / supply;
+            let remainder = backing % supply;
             quotient.saturating_mul(ONE_STTNZO)
                 .saturating_add(
                     remainder.saturating_mul(ONE_STTNZO)
@@ -608,7 +634,10 @@ impl LiquidStakingPool {
         self.sttnzo_balances.insert(requester, new_balance);
         *self.total_sttnzo_supply.write() -= sttnzo_amount;
 
-        // Don't subtract from underlying yet — wait until claim
+        // Earmark the owed TNZO so the exchange rate stops counting it as
+        // backing for the remaining supply. Underlying itself is only
+        // debited at claim time.
+        *self.pending_withdrawal_wei.write() += tnzo_amount;
 
         // Create withdrawal request
         let config = self.config.read();
@@ -686,8 +715,35 @@ impl LiquidStakingPool {
         let requester = snapshot.requester;
         let tnzo_amount = snapshot.tnzo_amount;
 
-        // Subtract from underlying pool
-        *self.total_underlying_wei.write() -= tnzo_amount.min(*self.total_underlying_wei.read());
+        // Debit the underlying pool by the exact owed amount. A shortfall
+        // means the pool cannot honor a withdrawal it committed to — fail
+        // closed and release the claim reservation instead of silently
+        // absorbing the deficit.
+        let debited = {
+            let mut underlying = self.total_underlying_wei.write();
+            match underlying.checked_sub(tnzo_amount) {
+                Some(v) => {
+                    *underlying = v;
+                    true
+                }
+                None => false,
+            }
+        };
+        if !debited {
+            let available = *self.total_underlying_wei.read();
+            if let Some(mut request) = self.withdrawal_requests.get_mut(request_id) {
+                request.claimed = false;
+            }
+            return Err(TokenError::InsufficientBalance {
+                required: tnzo_amount,
+                available,
+            });
+        }
+
+        {
+            let mut pending = self.pending_withdrawal_wei.write();
+            *pending = pending.saturating_sub(tnzo_amount);
+        }
 
         // Persist the claimed-flag flip and updated totals.
         if let Err(e) = self.persist_withdrawal(&snapshot) {
@@ -776,6 +832,7 @@ impl LiquidStakingPool {
         LiquidStakingStats {
             total_sttnzo_supply: *self.total_sttnzo_supply.read(),
             total_underlying_wei: *self.total_underlying_wei.read(),
+            pending_withdrawal_wei: *self.pending_withdrawal_wei.read(),
             exchange_rate: self.exchange_rate(),
             total_protocol_fees: *self.total_protocol_fees.read(),
             total_rewards_distributed: *self.total_rewards_distributed.read(),
@@ -879,6 +936,8 @@ pub struct LiquidStakingStats {
     pub total_sttnzo_supply: u128,
     /// Total TNZO underlying the pool
     pub total_underlying_wei: u128,
+    /// TNZO earmarked for unclaimed withdrawal requests
+    pub pending_withdrawal_wei: u128,
     /// Current exchange rate (TNZO per stTNZO, 18 decimals)
     pub exchange_rate: u128,
     /// Total protocol fees collected
@@ -1022,6 +1081,36 @@ mod tests {
         assert_eq!(stats.total_underlying_wei, 1000 * one_tnzo());
         assert_eq!(stats.holder_count, 1);
         assert_eq!(stats.exchange_rate, ONE_STTNZO);
+    }
+
+    #[test]
+    fn test_pending_withdrawal_excluded_from_backing() {
+        let pool = LiquidStakingPool::default();
+        let alice = Address::new([1u8; 32]);
+        let bob = Address::new([2u8; 32]);
+
+        pool.deposit(alice, 1000 * one_tnzo()).unwrap();
+        pool.deposit(bob, 1000 * one_tnzo()).unwrap();
+
+        // Alice exits fully at the 1:1 rate. Her owed TNZO is earmarked,
+        // so Bob's rate must stay 1:1 rather than doubling against funds
+        // the pool already owes Alice.
+        let request = pool.request_withdrawal(alice, 1000 * one_tnzo()).unwrap();
+        assert_eq!(request.tnzo_amount, 1000 * one_tnzo());
+        assert_eq!(pool.exchange_rate(), ONE_STTNZO);
+
+        let stats = pool.stats();
+        assert_eq!(stats.pending_withdrawal_wei, 1000 * one_tnzo());
+        assert_eq!(stats.total_underlying_wei, 2000 * one_tnzo());
+
+        // Rewards during unbonding accrue only to the live supply (Bob);
+        // Alice's owed amount stays fixed at the snapshotted rate.
+        pool.distribute_rewards(100 * one_tnzo()).unwrap();
+        assert!(pool.exchange_rate() > ONE_STTNZO);
+        assert_eq!(
+            pool.get_withdrawal(&request.request_id).unwrap().tnzo_amount,
+            1000 * one_tnzo()
+        );
     }
 
     #[test]

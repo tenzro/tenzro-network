@@ -2485,7 +2485,11 @@ impl BridgeAdapter for CantonAdapter {
         }
     }
 
-    async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+    async fn receive_message(
+        &self,
+        source_chain: &str,
+        payload: Vec<u8>,
+    ) -> Result<Option<crate::message_format::TenzroMessage>> {
         let synchronizer_id = source_chain
             .strip_prefix("canton-")
             .ok_or_else(|| BridgeError::ChainNotSupported(source_chain.to_string()))?;
@@ -2618,7 +2622,9 @@ impl BridgeAdapter for CantonAdapter {
             decoded,
             inbound_tx.is_some()
         );
-        Ok(())
+        // Canton delivery fans contracts out through the inbound
+        // channel; there is no single inner TenzroMessage to return.
+        Ok(None)
     }
 
     async fn bridge_tokens(&self, request: BridgeTokenRequest) -> Result<BridgeTokenReceipt> {

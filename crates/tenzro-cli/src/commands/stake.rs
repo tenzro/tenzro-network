@@ -189,6 +189,7 @@ impl LiquidStakingCmd {
                 for (label, key) in &[
                     ("Total stTNZO Supply", "total_sttnzo_supply"),
                     ("Total Underlying (wei)", "total_underlying_wei"),
+                    ("Pending Withdrawal (wei)", "pending_withdrawal_wei"),
                     ("Exchange Rate", "exchange_rate"),
                     ("Total Protocol Fees", "total_protocol_fees"),
                     ("Total Rewards Distributed", "total_rewards_distributed"),

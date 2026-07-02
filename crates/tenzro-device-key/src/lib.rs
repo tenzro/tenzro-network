@@ -14,22 +14,25 @@
 //!    calls, which makes this the right primitive for deriving a persistent
 //!    keystore password — see [`SecureEnclaveUnlocker`].
 //!
-//! ## Why not persist the key in the keychain?
+//! ## Where the key is persisted
 //!
-//! Storing a Secure Enclave key in *any* keychain (data-protection or file)
-//! requires a `keychain-access-groups` entitlement backed by a provisioning
-//! profile; without one, `SecKey::new` fails with `errSecMissingEntitlement`
-//! (-34018), and adding the entitlement without a profile makes the OS SIGKILL
-//! the app. So a key cannot be re-fetched by label across process restarts.
-//! Instead the live `SecKey` handle is cached in-process for the lifetime of
-//! the run (see the macOS backend's handle cache). Cross-restart *signing* of
-//! the same key is therefore not supported without a provisioning profile.
-//! Cross-restart *persistence of a secret* requires the same provisioning
-//! profile (so the key can be reopened by label and decrypt the on-disk
-//! ciphertext). On an un-provisioned build, [`SecureEnclaveUnlocker`] creates
-//! the key, wraps the password, and unwraps it WITHIN the same session, but a
-//! later run cannot reopen the key and reports the wallet as unavailable. See
-//! that type's docs for the exact lifecycle.
+//! The Secure-Enclave key is persisted in the legacy file-based (login)
+//! keychain via `Location::DefaultFileKeychain`, which sets
+//! `kSecAttrIsPermanent=true` *without* the `kSecUseDataProtectionKeychain`
+//! attribute. Only the data-protection keychain requires a
+//! `keychain-access-groups` entitlement backed by a provisioning profile; the
+//! file keychain does not, so a plain Developer-ID build can persist the key
+//! and re-`open()` it by label across process restarts. Touch ID / Face ID
+//! still gates every signing operation via the key's `SecAccessControl`, and
+//! AMFI does not SIGKILL the app. See Apple TN3137 ("On Mac keychains").
+//!
+//! Cross-restart *persistence of a secret* therefore works: [`SecureEnclaveUnlocker`]
+//! creates the key once, wraps the keystore password to its public key, and a
+//! later run reopens the key by label to unwrap the on-disk ciphertext. The
+//! live `SecKey` handle is additionally cached in-process to avoid repeated
+//! keychain queries within a run; in the rare context where file-keychain
+//! persistence fails, `create()` falls back to a non-persistent session key
+//! that still supports same-session create→sign→wrap/unwrap.
 
 /// Raw uncompressed SEC1 P-256 public key (`x ‖ y`, no `0x04` prefix).
 pub type DevicePublicKey = [u8; 64];
@@ -150,10 +153,14 @@ mod macos {
     // Decryption output is deterministic for a given (key, ciphertext).
     const ECIES: Algorithm = Algorithm::ECIESEncryptionStandardVariableIVX963SHA256AESGCM;
 
-    // The SE key cannot be re-fetched from the keychain (persisting it needs a
-    // provisioning-profile entitlement we don't have), so the live `SecKey`
-    // handle from `create()` is cached here for the process lifetime. `SecKey`
-    // is `Send + Sync + Clone` (a CFType). Keyed by the caller's label.
+    // errSecItemNotFound — returned by SecItemDelete when nothing matches.
+    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+    // The persisted SE key normally round-trips through the file keychain, but
+    // we also cache the live `SecKey` handle from `create()`/`open()` here so
+    // repeated calls within a session skip the keychain query (and so a
+    // same-session create→sign still works even in the rare non-persistent
+    // fallback). `SecKey` is `Send + Sync + Clone` (a CFType). Keyed by label.
     fn handles() -> &'static Mutex<HashMap<String, SecKey>> {
         static HANDLES: OnceLock<Mutex<HashMap<String, SecKey>>> = OnceLock::new();
         HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -167,6 +174,12 @@ mod macos {
 
     fn lookup_handle(label: &str) -> Option<SecKey> {
         handles().lock().ok()?.get(label).cloned()
+    }
+
+    fn forget_handle(label: &str) {
+        if let Ok(mut map) = handles().lock() {
+            map.remove(label);
+        }
     }
 
     pub(super) struct MacEnclaveKey {
@@ -268,9 +281,8 @@ mod macos {
     }
 
     pub fn open(label: &str) -> Result<Box<dyn DeviceKey>> {
-        // Path 1: in-process cache (always works within the session that
-        // created the key; the only path available when the app has no
-        // provisioning profile).
+        // Path 1: in-process cache — a fast path within the session that
+        // created or last opened the key, avoiding a keychain round-trip.
         if let Some(key) = lookup_handle(label) {
             return Ok(Box::new(MacEnclaveKey {
                 label: label.to_string(),
@@ -278,17 +290,17 @@ mod macos {
             }));
         }
 
-        // Path 2: keychain search. Succeeds ONLY when the key was persisted to
-        // the data-protection keychain at creation, which itself requires the
-        // app to carry a `keychain-access-groups` entitlement backed by an
-        // embedded provisioning profile. This is what enables cross-RESTART
-        // open. Without the profile the key was never persisted, so this misses
-        // and we fall through to NotFound.
+        // Path 2: keychain search of the legacy file-based (login) keychain,
+        // where `create()` persists the key. We deliberately do NOT call
+        // `.ignore_legacy_keychains()` — that flag sets
+        // `kSecUseDataProtectionKeychain=true` on the query, which would search
+        // the data-protection keychain (empty here) and miss the persisted key.
+        // This is the path that enables cross-RESTART open without a
+        // provisioning profile.
         let mut search = ItemSearchOptions::new();
         search
             .class(ItemClass::key())
             .label(label)
-            .ignore_legacy_keychains()
             .load_refs(true)
             .limit(Limit::Max(1));
         if let Ok(results) = search.search() {
@@ -307,15 +319,17 @@ mod macos {
     }
 
     pub fn create(label: &str) -> Result<Box<dyn DeviceKey>> {
-        // Attempt PERSISTENT creation first: `set_location(DataProtectionKeychain)`
+        // Attempt PERSISTENT creation first: `set_location(DefaultFileKeychain)`
         // sets `kSecAttrIsPermanent=true` so the key survives restarts and can
-        // be reopened by label. This SUCCEEDS only if the app carries the
-        // `keychain-access-groups` entitlement + an embedded provisioning
-        // profile (an app-deployment responsibility). If it isn't provisioned,
-        // `SecKey::new` returns errSecMissingEntitlement (-34018); we then fall
-        // back to a NON-persistent key cached in-process for this session so
-        // dev / unsigned / no-profile builds still function (same-session
-        // create→sign→wrap/unwrap), just without cross-restart persistence.
+        // be reopened by label, WITHOUT pushing `kSecUseDataProtectionKeychain`.
+        // Persisting a Secure-Enclave key in the legacy file-based (login)
+        // keychain needs neither a `keychain-access-groups` entitlement nor an
+        // embedded provisioning profile — those are required only by the
+        // data-protection keychain. Touch ID still gates every signing op via
+        // the SecAccessControl below; AMFI does not SIGKILL a Developer-ID build
+        // for using the file keychain. See Apple TN3137. If creation still fails
+        // (e.g. a sandboxed/headless context), we fall back to a NON-persistent
+        // session key cached in-process so dev builds keep working.
         let make_opts = |persistent: bool| {
             let acl = SecAccessControl::create_with_protection(
                 Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
@@ -331,7 +345,7 @@ mod macos {
                 opts.set_access_control(acl);
             }
             if persistent {
-                opts.set_location(Location::DataProtectionKeychain);
+                opts.set_location(Location::DefaultFileKeychain);
             }
             opts
         };
@@ -342,10 +356,9 @@ mod macos {
                 tracing::warn!(
                     label = %label,
                     error = %persistent_err,
-                    "persistent Secure Enclave key creation failed (no provisioning \
-                     profile / keychain-access-groups entitlement?); falling back to a \
-                     session-only key — wallet will NOT persist across restarts until the \
-                     app is provisioned"
+                    "persistent Secure Enclave key creation in the file keychain failed; \
+                     falling back to a session-only key — wallet will NOT persist across \
+                     restarts in this context"
                 );
                 SecKey::new(&make_opts(false))
                     .map_err(|e| DeviceKeyError::Enclave(format!("SecKey::new: {}", e)))?
@@ -360,10 +373,20 @@ mod macos {
         }))
     }
 
-    pub fn delete(_label: &str) -> Result<()> {
-        // `security-framework` 3.x doesn't expose typed `SecItemDelete`; the
-        // key is non-persistent anyway, so drop-on-process-exit is the
-        // lifecycle. Idempotent no-op.
-        Ok(())
+    pub fn delete(label: &str) -> Result<()> {
+        // Drop the in-process handle cache so a later `open()` doesn't resurrect
+        // a stale reference to a key we're deleting.
+        forget_handle(label);
+
+        // Remove the persisted key from the file keychain. As with `open()` we
+        // search the legacy keychain (no `.ignore_legacy_keychains()`). Missing
+        // the item is fine — deletion is idempotent.
+        let mut search = ItemSearchOptions::new();
+        search.class(ItemClass::key()).label(label);
+        match search.delete() {
+            Ok(()) => Ok(()),
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+            Err(e) => Err(DeviceKeyError::Enclave(format!("SecItemDelete: {}", e))),
+        }
     }
 }

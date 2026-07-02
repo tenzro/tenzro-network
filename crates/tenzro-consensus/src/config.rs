@@ -67,6 +67,14 @@ pub struct ConsensusConfig {
     /// Delegated `1.5×`, and Open `4.0×` (per `AdmissionConfig::Default`).
     pub mempool_min_gas_price: u64,
 
+    /// Maximum number of pending transactions a single sender address may
+    /// hold in the mempool at once (default: 64). Bounds the damage one
+    /// account can do to shared mempool capacity and doubles as the
+    /// admissible nonce look-ahead: a tx whose nonce exceeds
+    /// `account_nonce + mempool_max_per_sender` is rejected as
+    /// unexecutable-for-now spam.
+    pub mempool_max_per_sender: usize,
+
     /// Transaction TTL in seconds (default: 600)
     pub transaction_ttl_seconds: u64,
 
@@ -144,6 +152,7 @@ impl Default for ConsensusConfig {
             mempool_size_limit: 100 * 1024 * 1024, // 100MB
             mempool_max_transactions: 10_000,
             mempool_min_gas_price: 1_000_000_000, // 1 Gwei
+            mempool_max_per_sender: 64,
             transaction_ttl_seconds: 600,
             optimistic_responsiveness: true,
             proposer_election: ProposerElectionKind::Reputation,

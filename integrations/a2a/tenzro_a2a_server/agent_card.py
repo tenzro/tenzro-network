@@ -1123,6 +1123,31 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "treasury",
+                "name": "Treasury Multisig Withdrawals",
+                "description": (
+                    "Network treasury multisig withdrawal flow. "
+                    "Approvals are signed over the "
+                    "`tenzro/treasury/withdrawal-approval` preimage "
+                    "(withdrawal_id || asset_id || amount LE) with the "
+                    "approver's Ed25519 or Secp256k1 key; execution "
+                    "requires the configured approval threshold. "
+                    "Withdrawer-set and threshold mutations are "
+                    "admin-token-gated operator RPCs."
+                ),
+                "tags": [
+                    "treasury", "multisig", "withdrawal", "approval",
+                    "threshold",
+                ],
+                "examples": [
+                    "Show pending treasury withdrawal wd-1",
+                    "Approve treasury withdrawal wd-1 (signed approval via metadata)",
+                    "Execute treasury withdrawal wd-1 once threshold is reached",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "stable-asset",
                 "name": "Stable-Asset Issuance",
                 "description": (

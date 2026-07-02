@@ -36,8 +36,24 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
-use tenzro_types::primitives::Hash;
-use tenzro_types::transaction::SignedTransaction;
+use tenzro_types::primitives::{Address, Hash};
+use tenzro_types::transaction::{SignedTransaction, TransactionType};
+
+/// Read access to live account execution state for stateful admission.
+///
+/// Implemented by the node layer over the VM execution state (CF_STATE
+/// `nonce:` / balance keys) and wired post-construction via
+/// [`Mempool::set_state_reader`] — same lifecycle as the Spec 2 admission
+/// controller. When unwired (tests, early bootstrap before storage is up),
+/// the mempool skips nonce/balance validation and relies on execution-time
+/// rejection alone.
+pub trait AccountStateReader: Send + Sync {
+    /// Current execution-state nonce for `address` (0 for unknown accounts).
+    fn account_nonce(&self, address: &Address) -> u64;
+
+    /// Current spendable balance for `address` (0 for unknown accounts).
+    fn account_balance(&self, address: &Address) -> u128;
+}
 
 /// Transaction with priority metadata
 #[derive(Debug, Clone)]
@@ -106,6 +122,18 @@ pub struct Mempool {
     /// any `&mut self` on the hot path. Read on every `add_transaction`,
     /// written exactly once at node startup.
     admission: OnceLock<Arc<AdmissionController>>,
+
+    /// Live account state reader for stateful admission (nonce ordering +
+    /// balance coverage). Same wire-once lifecycle as `admission`; when
+    /// unset, nonce/balance checks are skipped and only execution rejects
+    /// invalid transactions.
+    state_reader: OnceLock<Arc<dyn AccountStateReader>>,
+
+    /// Pending-transaction count per sender address. Enforces
+    /// `ConsensusConfig::mempool_max_per_sender` so a single account cannot
+    /// monopolize shared mempool capacity. Incremented on insert,
+    /// decremented in `remove_transaction`, cleared in `clear`.
+    sender_counts: Arc<DashMap<Address, usize>>,
 }
 
 impl Mempool {
@@ -117,7 +145,18 @@ impl Mempool {
             config,
             total_size: Arc::new(RwLock::new(0)),
             admission: OnceLock::new(),
+            state_reader: OnceLock::new(),
+            sender_counts: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Wire an account state reader into a live `Mempool` for stateful
+    /// admission (nonce ordering + balance coverage). Same at-most-once
+    /// contract as [`Self::set_admission`].
+    pub fn set_state_reader(&self, reader: Arc<dyn AccountStateReader>) -> Result<()> {
+        self.state_reader
+            .set(reader)
+            .map_err(|_| ConsensusError::AlreadyStarted)
     }
 
     /// Wire a Spec-2 admission controller into a live `Mempool`. The
@@ -233,6 +272,74 @@ impl Mempool {
             None
         };
 
+        // Per-sender pending cap. Runs regardless of whether a state reader
+        // is wired — it is a pure mempool-shape invariant, not a state check.
+        let sender = transaction.transaction.from;
+        let per_sender_cap = self.config.mempool_max_per_sender;
+        if per_sender_cap > 0 {
+            let pending = self
+                .sender_counts
+                .get(&sender)
+                .map(|c| *c.value())
+                .unwrap_or(0);
+            if pending >= per_sender_cap {
+                return Err(ConsensusError::SenderCapExceeded {
+                    sender: sender.to_string(),
+                    pending,
+                    cap: per_sender_cap,
+                });
+            }
+        }
+
+        // Stateful admission: nonce ordering + balance coverage against live
+        // execution state. Skipped when no reader is wired (tests, early
+        // bootstrap) — execution-time rejection is the backstop.
+        if let Some(reader) = self.state_reader.get() {
+            let account_nonce = reader.account_nonce(&sender);
+            let tx_nonce = transaction.transaction.nonce.0;
+
+            if tx_nonce < account_nonce {
+                return Err(ConsensusError::NonceTooLow {
+                    sender: sender.to_string(),
+                    tx_nonce,
+                    account_nonce,
+                });
+            }
+
+            // Bound the future-nonce gap so unexecutable transactions can't
+            // park in the mempool indefinitely. The per-sender cap doubles as
+            // the look-ahead window.
+            if per_sender_cap > 0 && tx_nonce > account_nonce.saturating_add(per_sender_cap as u64)
+            {
+                return Err(ConsensusError::NonceGapTooLarge {
+                    sender: sender.to_string(),
+                    tx_nonce,
+                    account_nonce,
+                    max_gap: per_sender_cap as u64,
+                });
+            }
+
+            // Worst-case cost: gas_limit × gas_price + transferred value.
+            let value: u128 = match &transaction.transaction.tx_type {
+                TransactionType::Transfer { amount } => *amount,
+                TransactionType::ProviderStake { amount, .. } => *amount,
+                TransactionType::BridgeTransfer { amount, .. } => *amount,
+                TransactionType::CreateEscrow { amount, .. } => *amount,
+                _ => 0,
+            };
+            let required = (transaction.transaction.gas_limit as u128)
+                .saturating_mul(transaction.transaction.gas_price as u128)
+                .saturating_add(value);
+            let balance = reader.account_balance(&sender);
+            if balance < required {
+                return Err(ConsensusError::InsufficientBalance {
+                    sender: sender.to_string(),
+                    balance,
+                    required,
+                });
+            }
+        }
+
         let tx_size = self.estimate_transaction_size(&transaction);
         let gas_price = transaction.transaction.gas_price;
 
@@ -275,6 +382,7 @@ impl Mempool {
 
         self.queue.write().push(prioritized);
         self.transactions.insert(hash, transaction);
+        *self.sender_counts.entry(sender).or_insert(0) += 1;
 
         // Update size
         *self.total_size.write() += tx_size;
@@ -380,6 +488,16 @@ impl Mempool {
         if let Some((_, transaction)) = self.transactions.remove(hash) {
             let tx_size = self.estimate_transaction_size(&transaction);
             *self.total_size.write() -= tx_size;
+
+            let sender = transaction.transaction.from;
+            if let Some(mut count) = self.sender_counts.get_mut(&sender) {
+                if *count.value() <= 1 {
+                    drop(count);
+                    self.sender_counts.remove(&sender);
+                } else {
+                    *count.value_mut() -= 1;
+                }
+            }
 
             // Note: We don't remove from the priority queue immediately
             // It will be filtered out when popping
@@ -527,6 +645,7 @@ impl Mempool {
     pub fn clear(&self) {
         self.queue.write().clear();
         self.transactions.clear();
+        self.sender_counts.clear();
         *self.total_size.write() = 0;
     }
 
@@ -933,6 +1052,166 @@ mod tests {
         assert_eq!(depths[Lane::Verified as usize], 0);
         assert_eq!(depths[Lane::Delegated as usize], 0);
         assert_eq!(depths[Lane::Open as usize], 3);
+    }
+
+    /// Mock state reader with fixed nonce/balance for every address.
+    struct FixedStateReader {
+        nonce: u64,
+        balance: u128,
+    }
+
+    impl AccountStateReader for FixedStateReader {
+        fn account_nonce(&self, _address: &Address) -> u64 {
+            self.nonce
+        }
+        fn account_balance(&self, _address: &Address) -> u128 {
+            self.balance
+        }
+    }
+
+    #[test]
+    fn test_stateful_admission_rejects_stale_nonce() {
+        let mempool = Mempool::new(Arc::new(ConsensusConfig::default()));
+        mempool
+            .set_state_reader(Arc::new(FixedStateReader {
+                nonce: 5,
+                balance: u128::MAX,
+            }))
+            .unwrap();
+
+        // tx nonce 1 < account nonce 5 — can never execute.
+        let result = mempool.add_transaction(create_test_transaction(1_000_000_000, 1));
+        match result {
+            Err(ConsensusError::NonceTooLow {
+                tx_nonce,
+                account_nonce,
+                ..
+            }) => {
+                assert_eq!(tx_nonce, 1);
+                assert_eq!(account_nonce, 5);
+            }
+            other => panic!("expected NonceTooLow, got {:?}", other),
+        }
+        assert_eq!(mempool.len(), 0);
+    }
+
+    #[test]
+    fn test_stateful_admission_rejects_excessive_nonce_gap() {
+        let config = ConsensusConfig {
+            mempool_max_per_sender: 8,
+            ..ConsensusConfig::default()
+        };
+        let mempool = Mempool::new(Arc::new(config));
+        mempool
+            .set_state_reader(Arc::new(FixedStateReader {
+                nonce: 0,
+                balance: u128::MAX,
+            }))
+            .unwrap();
+
+        // nonce 9 > account nonce 0 + gap 8 — parked-forever spam.
+        let result = mempool.add_transaction(create_test_transaction(1_000_000_000, 9));
+        match result {
+            Err(ConsensusError::NonceGapTooLarge {
+                tx_nonce, max_gap, ..
+            }) => {
+                assert_eq!(tx_nonce, 9);
+                assert_eq!(max_gap, 8);
+            }
+            other => panic!("expected NonceGapTooLarge, got {:?}", other),
+        }
+
+        // nonce 8 == account nonce 0 + gap 8 — at the boundary, admitted.
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 8))
+            .unwrap();
+        assert_eq!(mempool.len(), 1);
+    }
+
+    #[test]
+    fn test_stateful_admission_rejects_insufficient_balance() {
+        let mempool = Mempool::new(Arc::new(ConsensusConfig::default()));
+        // Balance covers neither gas nor the 1000-unit transfer value.
+        mempool
+            .set_state_reader(Arc::new(FixedStateReader {
+                nonce: 0,
+                balance: 10,
+            }))
+            .unwrap();
+
+        let result = mempool.add_transaction(create_test_transaction(1_000_000_000, 0));
+        match result {
+            Err(ConsensusError::InsufficientBalance {
+                balance, required, ..
+            }) => {
+                assert_eq!(balance, 10);
+                // 21000 gas × 1 Gwei + 1000 transfer value
+                assert_eq!(required, 21_000u128 * 1_000_000_000 + 1000);
+            }
+            other => panic!("expected InsufficientBalance, got {:?}", other),
+        }
+        assert_eq!(mempool.len(), 0);
+    }
+
+    #[test]
+    fn test_stateful_admission_admits_when_balance_covers_cost() {
+        let mempool = Mempool::new(Arc::new(ConsensusConfig::default()));
+        mempool
+            .set_state_reader(Arc::new(FixedStateReader {
+                nonce: 0,
+                balance: 21_000u128 * 1_000_000_000 + 1000,
+            }))
+            .unwrap();
+
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 0))
+            .unwrap();
+        assert_eq!(mempool.len(), 1);
+    }
+
+    #[test]
+    fn test_per_sender_cap_enforced_and_released() {
+        let config = ConsensusConfig {
+            mempool_max_per_sender: 2,
+            ..ConsensusConfig::default()
+        };
+        let mempool = Mempool::new(Arc::new(config));
+
+        // All test txs share Address::default() as sender.
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 0))
+            .unwrap();
+        let mut second = create_test_transaction(1_000_000_001, 1);
+        let second_hash = second.hash();
+        mempool.add_transaction(second).unwrap();
+
+        // Third pending tx from the same sender exceeds the cap.
+        let result = mempool.add_transaction(create_test_transaction(1_000_000_002, 2));
+        match result {
+            Err(ConsensusError::SenderCapExceeded { pending, cap, .. }) => {
+                assert_eq!(pending, 2);
+                assert_eq!(cap, 2);
+            }
+            other => panic!("expected SenderCapExceeded, got {:?}", other),
+        }
+
+        // Removing one pending tx frees a slot.
+        mempool.remove_transaction(&second_hash);
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_002, 2))
+            .unwrap();
+        assert_eq!(mempool.len(), 2);
+    }
+
+    #[test]
+    fn test_unwired_state_reader_skips_stateful_checks() {
+        // No set_state_reader call: a stale-nonce, zero-balance-account tx
+        // still enters the mempool (execution is the backstop).
+        let mempool = Mempool::new(Arc::new(ConsensusConfig::default()));
+        mempool
+            .add_transaction(create_test_transaction(1_000_000_000, 999))
+            .unwrap();
+        assert_eq!(mempool.len(), 1);
     }
 
     /// A fee-floor rejection bumps `rejected_fee_floor` (not the

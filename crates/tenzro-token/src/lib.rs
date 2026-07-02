@@ -61,7 +61,10 @@ pub mod validator_registry;
 // Re-export commonly used types
 pub use error::{TokenError, Result};
 pub use tnzo::{TnzoToken, TokenStats, CircuitBreaker};
-pub use treasury::{NetworkTreasury, FeeDistributionConfig, TreasuryStats, TreasuryStorageBackend};
+pub use treasury::{
+    withdrawal_approval_preimage, FeeDistributionConfig, NetworkTreasury, PendingWithdrawal,
+    TreasuryStats, TreasuryStorageBackend,
+};
 pub use staking::{
     StakingManager, StakeInfo, SlashEvent, RestoreEvent, StakeStatus,
     DEFAULT_MIN_STAKE, DEFAULT_UNBONDING_PERIOD_MS

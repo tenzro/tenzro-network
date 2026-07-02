@@ -2836,6 +2836,70 @@ async def handle_secure_mint(text: str, metadata: dict = None) -> str:
     )
 
 
+async def handle_treasury(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+    md = metadata or {}
+
+    if "approve" in t:
+        required = [
+            "withdrawal_id", "asset_id", "amount",
+            "approver", "public_key", "signature",
+        ]
+        if all(k in md for k in required):
+            result = await rpc_call("tenzro_treasuryApproveWithdrawal", {
+                "withdrawal_id": md["withdrawal_id"],
+                "asset_id": md["asset_id"],
+                "amount": str(md["amount"]),
+                "approver": md["approver"],
+                "key_type": md.get("key_type", "ed25519"),
+                "public_key": md["public_key"],
+                "signature": md["signature"],
+            })
+            return f"Treasury withdrawal approval:\n{json.dumps(result, indent=2)}"
+        return (
+            "Approve a treasury withdrawal with a signed approval:\n"
+            "  RPC: tenzro_treasuryApproveWithdrawal { withdrawal_id, asset_id, amount, approver, key_type?, public_key, signature }\n"
+            "  Signature preimage: \"tenzro/treasury/withdrawal-approval\" || withdrawal_id || asset_id || amount (u128 LE)\n"
+            "  Pass the fields via message metadata to submit directly."
+        )
+
+    if "execute" in t:
+        if all(k in md for k in ["withdrawal_id", "asset_id", "amount"]):
+            result = await rpc_call("tenzro_treasuryExecuteWithdrawal", {
+                "withdrawal_id": md["withdrawal_id"],
+                "asset_id": md["asset_id"],
+                "amount": str(md["amount"]),
+            })
+            return f"Treasury withdrawal execution:\n{json.dumps(result, indent=2)}"
+        return (
+            "Execute a treasury withdrawal once approvals reach the threshold:\n"
+            "  RPC: tenzro_treasuryExecuteWithdrawal { withdrawal_id, asset_id, amount }\n"
+            "  Pass the fields via message metadata to submit directly."
+        )
+
+    if "pending" in t or "show" in t or "get" in t or "status" in t:
+        wid = md.get("withdrawal_id")
+        if not wid:
+            m = re.search(r"\b(wd-[\w-]+)\b", text)
+            if m:
+                wid = m.group(1)
+        if wid:
+            result = await rpc_call(
+                "tenzro_treasuryGetPendingWithdrawal",
+                {"withdrawal_id": wid},
+            )
+            return f"Pending treasury withdrawal {wid}:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Treasury multisig withdrawals:\n"
+        "  - 'Show pending treasury withdrawal <id>'  (tenzro_treasuryGetPendingWithdrawal)\n"
+        "  - 'Approve treasury withdrawal'            (tenzro_treasuryApproveWithdrawal — signed approval via metadata)\n"
+        "  - 'Execute treasury withdrawal'            (tenzro_treasuryExecuteWithdrawal)\n"
+        "  Withdrawer-set and threshold changes are admin-token-gated operator RPCs\n"
+        "  (tenzro_treasuryAddWithdrawer / RemoveWithdrawer / SetWithdrawalThreshold)."
+    )
+
+
 async def handle_stable_asset(text: str, metadata: dict = None) -> str:
     t = text.lower()
     if "register" in t:
@@ -3242,6 +3306,7 @@ HANDLERS: dict[str, callable] = {
     "eip7702": handle_eip7702,
     "permit2": handle_permit2,
     "secure-mint": handle_secure_mint,
+    "treasury": handle_treasury,
     "stable-asset": handle_stable_asset,
     "hyperlane": handle_hyperlane,
     "axelar": handle_axelar,

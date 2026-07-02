@@ -117,6 +117,7 @@ fn chain_eid(name: &str) -> Option<u32> {
         "story" => Some(30364),
         "monad" => Some(30390),
         "megaeth" => Some(30398),
+        "robinhood" => Some(30416),
         "tron" | "trx" => Some(30420),
         _ => None,
     }
@@ -147,6 +148,10 @@ fn drpc_url(chain: &str) -> String {
 /// Return an RPC URL for a chain name.
 fn chain_rpc(name: &str) -> Option<String> {
     let slug = match name.to_lowercase().as_str() {
+        // Robinhood Chain is not carried by dRPC — use its public RPC.
+        "robinhood" => {
+            return Some("https://rpc.mainnet.chain.robinhood.com".to_string());
+        }
         "ethereum" | "eth" => "ethereum",
         "arbitrum" | "arb" => "arbitrum",
         "base" => "base",
@@ -185,6 +190,7 @@ fn all_chains() -> Vec<(&'static str, u32)> {
         ("story", 30364),
         ("monad", 30390),
         ("megaeth", 30398),
+        ("robinhood", 30416),
         ("tron", 30420),
     ]
 }
@@ -780,7 +786,7 @@ impl LayerZeroMcpServer {
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
             err_invalid_params(format!(
-                "Unsupported source chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, zksync, sei, sonic, berachain, story, monad, megaeth, tron",
+                "Unsupported source chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, zksync, sei, sonic, berachain, story, monad, megaeth, robinhood, tron",
                 params.src_chain
             ))
         })?;
@@ -858,7 +864,7 @@ impl LayerZeroMcpServer {
         // Validate source chain
         let _rpc_url = chain_rpc(&params.src_chain).ok_or_else(|| {
             err_invalid_params(format!(
-                "Unsupported source chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, zksync, sei, sonic, berachain, story, monad, megaeth, tron",
+                "Unsupported source chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, zksync, sei, sonic, berachain, story, monad, megaeth, robinhood, tron",
                 params.src_chain
             ))
         })?;
@@ -979,13 +985,13 @@ impl LayerZeroMcpServer {
         // Validate chain names
         if chain_eid(&params.src_chain).is_none() {
             return Err(err_invalid_params(format!(
-                "Unsupported source chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, solana, zksync, sei, sonic, berachain, story, monad, megaeth, tron",
+                "Unsupported source chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, solana, zksync, sei, sonic, berachain, story, monad, megaeth, robinhood, tron",
                 params.src_chain
             )));
         }
         if chain_eid(&params.dst_chain).is_none() {
             return Err(err_invalid_params(format!(
-                "Unsupported destination chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, solana, zksync, sei, sonic, berachain, story, monad, megaeth, tron",
+                "Unsupported destination chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, solana, zksync, sei, sonic, berachain, story, monad, megaeth, robinhood, tron",
                 params.dst_chain
             )));
         }
@@ -1130,7 +1136,7 @@ impl LayerZeroMcpServer {
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let rpc_url = chain_rpc(&params.chain_name).ok_or_else(|| {
             err_invalid_params(format!(
-                "No RPC URL for chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, zksync, sei, sonic, berachain, story, monad, megaeth, tron. Solana does not use EVM RPC.",
+                "No RPC URL for chain '{}'. Supported: ethereum, arbitrum, optimism, polygon, bsc, avalanche, base, zksync, sei, sonic, berachain, story, monad, megaeth, robinhood, tron. Solana does not use EVM RPC.",
                 params.chain_name
             ))
         })?;

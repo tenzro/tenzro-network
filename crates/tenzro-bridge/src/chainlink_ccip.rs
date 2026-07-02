@@ -95,6 +95,11 @@ pub struct ChainlinkCcipAdapter {
     /// signatures over the SAME prehash. The RMN ARM acts as a second
     /// layer of defence against a compromised OCR committee.
     rmn_sets: Arc<parking_lot::RwLock<std::collections::HashMap<u64, crate::secp256k1_multisig::ValidatorSet>>>,
+    /// Replay cache for inbound commit reports keyed
+    /// `{src_selector}:{report_hash_hex}`.
+    seen_reports: Arc<DashMap<String, ()>>,
+    /// Optional write-through persistence for the replay cache.
+    seen_storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
 impl ChainlinkCcipAdapter {
@@ -107,7 +112,22 @@ impl ChainlinkCcipAdapter {
             signer: None,
             commit_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             rmn_sets: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            seen_reports: Arc::new(DashMap::new()),
+            seen_storage: None,
         }
+    }
+
+    /// Attach RocksDB persistence: hydrates the inbound commit-report
+    /// replay cache from `CF_SETTLEMENTS / bridge_seen:ccip:*`.
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+    ) -> Self {
+        for key in crate::message_format::load_seen_keys(&storage, "ccip") {
+            self.seen_reports.insert(key, ());
+        }
+        self.seen_storage = Some(storage);
+        self
     }
 
     /// Install the OCR commit-store committee set for a source chain
@@ -832,7 +852,11 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
         Ok(message_id)
     }
 
-    async fn receive_message(&self, source_chain: &str, payload: Vec<u8>) -> Result<()> {
+    async fn receive_message(
+        &self,
+        source_chain: &str,
+        payload: Vec<u8>,
+    ) -> Result<Option<crate::message_format::TenzroMessage>> {
         // Real CCIP OffRamp-class verifier. Mirrors the CCIP OffRamp +
         // RMN ARM blessing model server-side:
         //
@@ -889,13 +913,28 @@ impl BridgeAdapter for ChainlinkCcipAdapter {
         Sha3Digest::update(&mut k, body);
         let report_hash: [u8; 32] = k.finalize().into();
 
+        // Replay protection keyed on the verified report hash. Checked
+        // before quorum verification; recorded only after both quorums
+        // pass so unverified reports cannot poison the cache.
+        let report_key = format!("{}:{}", src_selector, hex::encode(report_hash));
+        if self.seen_reports.contains_key(&report_key) {
+            return Err(BridgeError::ReplayAttack(report_key));
+        }
+
         commit_set.verify_quorum(&report_hash, &committee_sigs)?;
         rmn_set.verify_quorum(&report_hash, &rmn_sigs)?;
+        // Inner Tenzro-side check on the double-quorum-verified report
+        // body. Report-hash replay protection above covers dedup.
+        let verified = crate::message_format::verify_inner_message(body, None)?;
+        if let Some(ref storage) = self.seen_storage {
+            crate::message_format::persist_seen_key(storage, "ccip", &report_key);
+        }
+        self.seen_reports.insert(report_key, ());
         info!(
             "CCIP: commit-store + RMN ARM quorum verified ({} committee sigs, {} RMN sigs, selector {})",
             committee_sigs.len(), rmn_sigs.len(), src_selector
         );
-        Ok(())
+        Ok(verified)
     }
 
     async fn bridge_tokens(&self, request: BridgeTokenRequest) -> Result<BridgeTokenReceipt> {

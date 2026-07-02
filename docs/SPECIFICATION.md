@@ -195,7 +195,7 @@ The system is implemented as a Rust workspace of 26 crates plus SDKs, organized 
 | Workflow | `tenzro-workflow` | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
 | Sandboxed skills | `tenzro-wasm` | WASI 0.2 component host for language-agnostic agent skills and MCP tools. Capability-based sandbox, deterministic fuel metering, content-addressed component identity, execution receipts |
 | Bridge | `tenzro-bridge` | LayerZero V2, Chainlink CCIP + CCT, deBridge DLN, Li.Fi, Wormhole NTT (with Guardian quorum verifier), Canton, **Hyperlane V3** (sovereign Tenzro-ISM), **Axelar GMP** (Cosmos / Move / Stellar reach), **Babylon Bitcoin staking** (finality-providers protocol) |
-| Node | `tenzro-node` | Full node binary, RPC server (490+ methods across 26+ namespaces), MCP (331 tools), A2A (42 skills), web API |
+| Node | `tenzro-node` | Full node binary, RPC server (490+ methods across 26+ namespaces), MCP (414 tools), A2A (42 skills), web API |
 | CLI | `tenzro-cli` | Command-line interface (63 command modules) |
 | SDK | `tenzro-sdk` | Rust SDK with builder-pattern configuration |
 | TypeScript SDK | `tenzro-ts-sdk` | TypeScript SDK for browser and Node.js integration |
@@ -248,7 +248,7 @@ Transaction submission goes through `tenzro_signAndSendTransaction` (server-side
 | `POST /faucet` | Request testnet TNZO tokens |
 
 **MCP Server** (default `0.0.0.0:3001`):
-Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 331 tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
+Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 414 tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -2507,7 +2507,7 @@ The Python `OuterGradient.to_json()` produces the *exact* JSON shape the Rust sy
 - Connect payment protocols to live settlement rails (Stripe MPP, Coinbase x402, Tempo network)
 
 ### Phase 3: Agent & Protocol Integration
-- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 331 tools
+- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 414 tools
 - ~~Implement A2A protocol server~~ — **DONE**: JSON-RPC 2.0 on port 3002, Agent Card discovery, SSE streaming, 42 skills
 - ~~Implement ecosystem MCP servers~~ — **DONE**: Solana (3003), Ethereum (3004), Canton (3005), LayerZero (3006), Chainlink (3007), Li.Fi (3008)
 - ~~Implement challenge store for payment protocols~~ — **DONE**: persistent challenge lookup for MPP and x402

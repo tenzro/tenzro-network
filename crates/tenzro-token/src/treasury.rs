@@ -9,10 +9,56 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tenzro_crypto::{PublicKey, Signature};
 use tenzro_types::asset::AssetId;
 use tenzro_types::primitives::Address;
 use tenzro_storage::kv::{KvStore, CF_METADATA};
 use tracing::{debug, info, warn};
+
+/// Domain separator for treasury withdrawal-approval signatures.
+const WITHDRAWAL_APPROVAL_DOMAIN: &[u8] = b"tenzro/treasury/withdrawal-approval";
+
+/// A pending multisig withdrawal: the payload is pinned by the first approval
+/// so every subsequent approval and the final execution are bound to the same
+/// (asset, amount) pair.
+#[derive(Debug, Clone)]
+pub struct PendingWithdrawal {
+    /// Asset being withdrawn
+    pub asset_id: AssetId,
+    /// Amount being withdrawn
+    pub amount: u128,
+    /// Addresses that have approved so far
+    pub approvers: Vec<Address>,
+}
+
+/// Canonical signing preimage for a withdrawal approval.
+///
+/// `domain || withdrawal_id || asset_id || amount_le` — approvers sign these
+/// bytes with the key that derives their authorized withdrawer address.
+pub fn withdrawal_approval_preimage(
+    withdrawal_id: &str,
+    asset_id: &AssetId,
+    amount: u128,
+) -> Vec<u8> {
+    let mut preimage = Vec::with_capacity(
+        WITHDRAWAL_APPROVAL_DOMAIN.len() + withdrawal_id.len() + asset_id.as_str().len() + 16,
+    );
+    preimage.extend_from_slice(WITHDRAWAL_APPROVAL_DOMAIN);
+    preimage.extend_from_slice(withdrawal_id.as_bytes());
+    preimage.extend_from_slice(asset_id.as_str().as_bytes());
+    preimage.extend_from_slice(&amount.to_le_bytes());
+    preimage
+}
+
+/// Checks that a public key derives to the given canonical 32-byte address.
+///
+/// Convention: the 20-byte address derived from the key is left-aligned in the
+/// 32-byte slot with a zero-padded tail.
+fn public_key_binds_address(public_key: &PublicKey, address: &Address) -> bool {
+    let derived = public_key.to_address();
+    let addr_bytes = address.as_bytes();
+    addr_bytes[..20] == *derived.as_bytes() && addr_bytes[20..].iter().all(|b| *b == 0)
+}
 
 /// Fee distribution configuration
 ///
@@ -178,7 +224,7 @@ pub struct NetworkTreasury {
     /// Minimum number of approvals required for withdrawal (multisig threshold)
     withdrawal_threshold: RwLock<usize>,
     /// Pending withdrawal approvals (withdrawal_id -> set of approvers)
-    pending_approvals: RwLock<HashMap<String, Vec<Address>>>,
+    pending_approvals: RwLock<HashMap<String, PendingWithdrawal>>,
     /// Optional storage backend for persistence
     storage: Option<Arc<TreasuryStorageBackend>>,
     /// Per-bridge-adapter sponsorship pool balances. Tracks TNZO held
@@ -365,10 +411,23 @@ impl NetworkTreasury {
         Ok(())
     }
 
-    /// Approves a pending withdrawal (multisig step)
+    /// Approves a pending withdrawal (multisig step).
+    ///
+    /// The approver must present a signature over
+    /// [`withdrawal_approval_preimage`] made with the key that derives their
+    /// authorized withdrawer address. The first approval pins the
+    /// (asset, amount) payload; subsequent approvals must match it exactly.
     ///
     /// Returns `true` if the withdrawal has reached threshold and should be executed.
-    pub fn approve_withdrawal(&self, withdrawal_id: &str, approver: &Address) -> Result<bool> {
+    pub fn approve_withdrawal(
+        &self,
+        withdrawal_id: &str,
+        asset_id: &AssetId,
+        amount: u128,
+        approver: &Address,
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> Result<bool> {
         // Verify the approver is authorized
         let withdrawers = self.authorized_withdrawers.read();
         if !withdrawers.contains(approver) {
@@ -378,25 +437,71 @@ impl NetworkTreasury {
         }
         drop(withdrawers);
 
+        // The presented public key must derive to the approver address
+        if !public_key_binds_address(public_key, approver) {
+            return Err(TokenError::Unauthorized {
+                reason: "Public key does not derive to approver address".to_string(),
+            });
+        }
+
+        // Verify the signature over the domain-separated approval preimage
+        let preimage = withdrawal_approval_preimage(withdrawal_id, asset_id, amount);
+        tenzro_crypto::signatures::verify(public_key, &preimage, signature).map_err(|e| {
+            TokenError::Unauthorized {
+                reason: format!("Invalid approval signature: {}", e),
+            }
+        })?;
+
+        if amount == 0 {
+            return Err(TokenError::InvalidAmount(
+                "Amount must be greater than zero".to_string(),
+            ));
+        }
+
         let threshold = *self.withdrawal_threshold.read();
         let mut approvals = self.pending_approvals.write();
-        let entry = approvals.entry(withdrawal_id.to_string()).or_default();
+        let entry = approvals
+            .entry(withdrawal_id.to_string())
+            .or_insert_with(|| PendingWithdrawal {
+                asset_id: asset_id.clone(),
+                amount,
+                approvers: Vec::new(),
+            });
+
+        // All approvals must bind to the same payload the first approval pinned
+        if entry.asset_id != *asset_id || entry.amount != amount {
+            return Err(TokenError::Unauthorized {
+                reason: format!(
+                    "Approval payload mismatch for withdrawal {}: pinned ({}, {}), got ({}, {})",
+                    withdrawal_id,
+                    entry.asset_id.as_str(),
+                    entry.amount,
+                    asset_id.as_str(),
+                    amount
+                ),
+            });
+        }
 
         // Prevent duplicate approvals from the same address
-        if entry.contains(approver) {
+        if entry.approvers.contains(approver) {
             return Err(TokenError::InvalidAmount(
                 format!("Already approved withdrawal {}", withdrawal_id)
             ));
         }
 
-        entry.push(*approver);
-        let approval_count = entry.len();
+        entry.approvers.push(*approver);
+        let approval_count = entry.approvers.len();
         info!(
             "Withdrawal {} approved by {} ({}/{})",
             withdrawal_id, approver, approval_count, threshold
         );
 
         Ok(approval_count >= threshold)
+    }
+
+    /// Returns the pending withdrawal record for an id, if any.
+    pub fn pending_withdrawal(&self, withdrawal_id: &str) -> Option<PendingWithdrawal> {
+        self.pending_approvals.read().get(withdrawal_id).cloned()
     }
 
     /// Clears pending approvals for a withdrawal (after execution or cancellation)
@@ -526,13 +631,29 @@ impl NetworkTreasury {
     ) -> Result<()> {
         let threshold = *self.withdrawal_threshold.read();
         let approvals = self.pending_approvals.read();
-        let approval_count = approvals.get(withdrawal_id).map(|a| a.len()).unwrap_or(0);
+        let pending = approvals.get(withdrawal_id);
+        let approval_count = pending.map(|p| p.approvers.len()).unwrap_or(0);
 
         if approval_count < threshold {
             return Err(TokenError::Unauthorized {
                 reason: format!(
                     "Insufficient approvals for withdrawal {}: have {}, need {}",
                     withdrawal_id, approval_count, threshold
+                ),
+            });
+        }
+
+        // Execution must match the payload the approvals were signed over
+        let pending = pending.expect("approval_count >= threshold >= 1 implies record exists");
+        if pending.asset_id != *asset_id || pending.amount != amount {
+            return Err(TokenError::Unauthorized {
+                reason: format!(
+                    "Execution payload mismatch for withdrawal {}: approved ({}, {}), got ({}, {})",
+                    withdrawal_id,
+                    pending.asset_id.as_str(),
+                    pending.amount,
+                    asset_id.as_str(),
+                    amount
                 ),
             });
         }
@@ -663,6 +784,16 @@ impl NetworkTreasury {
         let mut withdrawers = self.authorized_withdrawers.write();
         withdrawers.retain(|a| a != address);
         info!("Removed authorized withdrawer: {}", address);
+    }
+
+    /// Returns the current set of authorized withdrawers
+    pub fn authorized_withdrawers(&self) -> Vec<Address> {
+        self.authorized_withdrawers.read().clone()
+    }
+
+    /// Returns the current multisig withdrawal threshold
+    pub fn withdrawal_threshold(&self) -> usize {
+        *self.withdrawal_threshold.read()
     }
 
     /// Audits the treasury's supply invariant
@@ -797,15 +928,39 @@ mod tests {
         assert_eq!(treasury.balance(&asset_id), 500);
     }
 
+    /// Generates an Ed25519 keypair and the canonical 32-byte withdrawer
+    /// address it derives to (20-byte crypto address, zero-padded tail).
+    fn test_signer() -> (tenzro_crypto::KeyPair, Address) {
+        let keypair = tenzro_crypto::KeyPair::generate(tenzro_crypto::KeyType::Ed25519).unwrap();
+        let derived = keypair.public_key().to_address();
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[..20].copy_from_slice(derived.as_bytes());
+        (keypair, Address::new(addr_bytes))
+    }
+
+    fn sign_approval(
+        keypair: &tenzro_crypto::KeyPair,
+        withdrawal_id: &str,
+        asset_id: &AssetId,
+        amount: u128,
+    ) -> Signature {
+        use tenzro_crypto::Signer as _;
+        let kp = tenzro_crypto::KeyPair::from_secret_key(keypair.secret_key().clone()).unwrap();
+        let signer = tenzro_crypto::signatures::Ed25519SignerImpl::new(kp).unwrap();
+        signer
+            .sign(&withdrawal_approval_preimage(withdrawal_id, asset_id, amount))
+            .unwrap()
+    }
+
     #[test]
     fn test_multisig_withdrawal() {
         let treasury_addr = Address::new([0u8; 32]);
         let treasury = NetworkTreasury::new(treasury_addr);
         let asset_id = AssetId::tnzo();
 
-        let signer1 = Address::new([1u8; 32]);
-        let signer2 = Address::new([2u8; 32]);
-        let signer3 = Address::new([3u8; 32]);
+        let (kp1, signer1) = test_signer();
+        let (kp2, signer2) = test_signer();
+        let (_kp3, signer3) = test_signer();
 
         // Add authorized withdrawers
         treasury.add_authorized_withdrawer(signer1);
@@ -822,15 +977,24 @@ mod tests {
         assert!(treasury.withdraw(&asset_id, 500, &signer1).is_err());
 
         // First approval — not yet reached threshold
-        let reached = treasury.approve_withdrawal("w1", &signer1).unwrap();
+        let sig1 = sign_approval(&kp1, "w1", &asset_id, 500);
+        let reached = treasury
+            .approve_withdrawal("w1", &asset_id, 500, &signer1, kp1.public_key(), &sig1)
+            .unwrap();
         assert!(!reached);
 
         // Execute before threshold — should fail
         assert!(treasury.execute_withdrawal("w1", &asset_id, 500).is_err());
 
         // Second approval — reached threshold
-        let reached = treasury.approve_withdrawal("w1", &signer2).unwrap();
+        let sig2 = sign_approval(&kp2, "w1", &asset_id, 500);
+        let reached = treasury
+            .approve_withdrawal("w1", &asset_id, 500, &signer2, kp2.public_key(), &sig2)
+            .unwrap();
         assert!(reached);
+
+        // Execute with a different amount than approved — must fail
+        assert!(treasury.execute_withdrawal("w1", &asset_id, 999).is_err());
 
         // Execute now — should succeed
         treasury.execute_withdrawal("w1", &asset_id, 500).unwrap();
@@ -841,14 +1005,53 @@ mod tests {
     fn test_no_duplicate_approvals() {
         let treasury_addr = Address::new([0u8; 32]);
         let treasury = NetworkTreasury::new(treasury_addr);
+        let asset_id = AssetId::tnzo();
 
-        let signer = Address::new([1u8; 32]);
+        let (kp, signer) = test_signer();
         treasury.add_authorized_withdrawer(signer);
         treasury.set_withdrawal_threshold(1).unwrap();
 
-        treasury.approve_withdrawal("w1", &signer).unwrap();
+        let sig = sign_approval(&kp, "w1", &asset_id, 100);
+        treasury
+            .approve_withdrawal("w1", &asset_id, 100, &signer, kp.public_key(), &sig)
+            .unwrap();
         // Duplicate approval should fail
-        assert!(treasury.approve_withdrawal("w1", &signer).is_err());
+        assert!(treasury
+            .approve_withdrawal("w1", &asset_id, 100, &signer, kp.public_key(), &sig)
+            .is_err());
+    }
+
+    #[test]
+    fn test_approval_rejects_bad_signature_and_wrong_key() {
+        let treasury = NetworkTreasury::new(Address::new([0u8; 32]));
+        let asset_id = AssetId::tnzo();
+
+        let (kp, signer) = test_signer();
+        let (other_kp, _other_addr) = test_signer();
+        treasury.add_authorized_withdrawer(signer);
+        treasury.set_withdrawal_threshold(1).unwrap();
+
+        // Signature over a different payload must be rejected
+        let sig_wrong_payload = sign_approval(&kp, "w1", &asset_id, 999);
+        assert!(treasury
+            .approve_withdrawal("w1", &asset_id, 100, &signer, kp.public_key(), &sig_wrong_payload)
+            .is_err());
+
+        // A key that does not derive to the approver address must be rejected,
+        // even with a valid signature over the right payload
+        let sig_other = sign_approval(&other_kp, "w1", &asset_id, 100);
+        assert!(treasury
+            .approve_withdrawal("w1", &asset_id, 100, &signer, other_kp.public_key(), &sig_other)
+            .is_err());
+
+        // Payload pinning: valid first approval, then a conflicting payload
+        let sig = sign_approval(&kp, "w1", &asset_id, 100);
+        treasury
+            .approve_withdrawal("w1", &asset_id, 100, &signer, kp.public_key(), &sig)
+            .unwrap();
+        let pinned = treasury.pending_withdrawal("w1").unwrap();
+        assert_eq!(pinned.amount, 100);
+        assert_eq!(pinned.approvers.len(), 1);
     }
 
     #[test]

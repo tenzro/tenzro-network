@@ -393,6 +393,86 @@ impl Default for NonceTracker {
     }
 }
 
+/// Load all persisted replay-protection dedup keys for `scope` from
+/// `CF_SETTLEMENTS / bridge_seen:<scope>:<key>`. Used by adapters to
+/// hydrate their in-memory seen-message maps on construction so replay
+/// protection survives node restart.
+pub fn load_seen_keys(
+    storage: &Arc<dyn tenzro_storage::KvStore>,
+    scope: &str,
+) -> Vec<String> {
+    let mut prefix = b"bridge_seen:".to_vec();
+    prefix.extend_from_slice(scope.as_bytes());
+    prefix.push(b':');
+    let entries =
+        match storage.scan_prefix(tenzro_storage::CF_SETTLEMENTS, &prefix) {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
+    let prefix_len = prefix.len();
+    entries
+        .into_iter()
+        .filter_map(|(key, _)| {
+            if key.len() <= prefix_len {
+                return None;
+            }
+            std::str::from_utf8(&key[prefix_len..])
+                .ok()
+                .map(|s| s.to_string())
+        })
+        .collect()
+}
+
+/// Write-through a single replay-protection dedup key to
+/// `CF_SETTLEMENTS / bridge_seen:<scope>:<key>`.
+pub fn persist_seen_key(
+    storage: &Arc<dyn tenzro_storage::KvStore>,
+    scope: &str,
+    key: &str,
+) {
+    let mut k = b"bridge_seen:".to_vec();
+    k.extend_from_slice(scope.as_bytes());
+    k.push(b':');
+    k.extend_from_slice(key.as_bytes());
+    let _ = storage.put(tenzro_storage::CF_SETTLEMENTS, &k, b"");
+}
+
+/// Runs the standard inner-message verification discipline on a
+/// quorum-verified outer body: decode → validate → verify_hash →
+/// verify_signature → optional per-sender nonce check.
+///
+/// Returns `Ok(None)` when the body does not carry a [`TenzroMessage`]
+/// (plain provider-native payloads such as Token-Bridge transfers or
+/// commit reports), `Ok(Some(message))` when it does and every check
+/// passes, and `Err` when the body decodes as a `TenzroMessage` but
+/// fails validation.
+pub fn verify_inner_message(
+    body: &[u8],
+    nonce_tracker: Option<&NonceTracker>,
+) -> Result<Option<TenzroMessage>> {
+    let message = match TenzroMessage::decode(body) {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    message.validate()?;
+    if !message.verify_hash() {
+        return Err(BridgeError::InvalidParameter(
+            "inbound TenzroMessage hash mismatch".into(),
+        ));
+    }
+    if message.signature.is_some() && !message.verify_signature().unwrap_or(false) {
+        return Err(BridgeError::InvalidParameter(
+            "inbound TenzroMessage signature verification failed".into(),
+        ));
+    }
+    if let Some(tracker) = nonce_tracker {
+        tracker
+            .check_and_update(&message.sender, message.nonce)
+            .map_err(|e| BridgeError::ReplayAttack(format!("nonce: {e}")))?;
+    }
+    Ok(Some(message))
+}
+
 /// Type of cross-chain message
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageType {

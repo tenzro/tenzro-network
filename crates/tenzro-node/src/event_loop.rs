@@ -459,7 +459,24 @@ pub struct EventLoop {
     /// configured [`crate::snapshot::SnapshotConfig::interval_blocks`]
     /// cadence. `None` until wired by the node.
     snapshot_store: Option<Arc<crate::snapshot::SnapshotStore>>,
+
+    /// Ring of the most recent locally computed post-commit state roots
+    /// (newest at the back). Execution is deferred: the proposer stamps its
+    /// latest *executed* root into the header, which can lag the proposed
+    /// height by a few blocks. A strict per-height equality check would
+    /// therefore false-positive; instead the header claim is validated by
+    /// membership in this window. All honest nodes compute identical roots
+    /// per height, so a claim absent from a full window means the proposer
+    /// executed a divergent state — a fork signal, raised as an alarm
+    /// (the block is already finalized; halting would only break local
+    /// liveness without protecting anyone).
+    recent_state_roots: std::collections::VecDeque<Hash>,
 }
+
+/// Capacity of [`EventLoop::recent_state_roots`]. Proposer execution lag is
+/// bounded by pipeline depth (single digits); 128 gives orders-of-magnitude
+/// headroom while keeping the membership scan trivial.
+const STATE_ROOT_WINDOW: usize = 128;
 
 impl EventLoop {
     /// Creates a new event loop
@@ -533,6 +550,7 @@ impl EventLoop {
             last_observed_base_fee_burn: 0,
             last_observed_slash_burn: 0,
             snapshot_store: None,
+            recent_state_roots: std::collections::VecDeque::with_capacity(STATE_ROOT_WINDOW),
         }
     }
 
@@ -838,18 +856,24 @@ impl EventLoop {
             "Processing finality notification"
         );
         let height = notification.height.0;
-        let state_root_bytes = notification.block.header.state_root;
         let res = self.handle_block_finalized(notification.block).await;
 
         // Snapshot ABCI: produce a state-sync snapshot at the configured
         // block interval, but only on nodes that opt in as producers
         // (dedicated RPC / archival). We only attempt this after
         // `handle_block_finalized` has run so the live KV store reflects the
-        // block we're snapshotting at.
+        // block we're snapshotting at. The recorded root is the LOCALLY
+        // computed post-commit root (window back), not the proposer's header
+        // claim — the header root lags execution and is unverified input.
         if let Some(store) = self.snapshot_store.as_ref() {
             if store.should_produce_at(height) {
+                let local_root = self
+                    .recent_state_roots
+                    .back()
+                    .copied()
+                    .unwrap_or_else(Hash::zero);
                 let mut sr = [0u8; 32];
-                let bytes = state_root_bytes.as_bytes();
+                let bytes = local_root.as_bytes();
                 let n = bytes.len().min(32);
                 sr[..n].copy_from_slice(&bytes[..n]);
                 let store = store.clone();
@@ -2917,6 +2941,33 @@ impl EventLoop {
             state_root = %state_root,
             "State committed"
         );
+
+        // Track the locally computed root and validate the proposer's header
+        // claim against the window. The claim is the proposer's latest
+        // *executed* root at proposal time (deferred execution), so it must
+        // appear among our recently computed roots. Skip while the window is
+        // warming up (fresh start / restart) and skip the zero root, which a
+        // proposer without a state-root provider stamps by default.
+        self.recent_state_roots.push_back(state_root);
+        if self.recent_state_roots.len() > STATE_ROOT_WINDOW {
+            self.recent_state_roots.pop_front();
+        }
+        let claimed_root = block.header.state_root;
+        if self.recent_state_roots.len() == STATE_ROOT_WINDOW
+            && claimed_root != Hash::zero()
+            && !self.recent_state_roots.contains(&claimed_root)
+        {
+            error!(
+                height = %block_height,
+                block_hash = %block_hash,
+                claimed_root = %claimed_root,
+                local_root = %state_root,
+                window = STATE_ROOT_WINDOW,
+                "STATE-ROOT DIVERGENCE: finalized header claims a state root \
+                 absent from the local execution window — proposer executed a \
+                 divergent state or this node's state has forked"
+            );
+        }
 
         // Persist the block to storage via the blocking thread pool.
         // Also index each transaction into CF_TRANSACTIONS keyed by its hex-encoded

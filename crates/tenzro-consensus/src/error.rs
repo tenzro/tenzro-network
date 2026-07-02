@@ -131,6 +131,47 @@ pub enum ConsensusError {
         base: u64,
         multiplier: f64,
     },
+
+    /// Transaction nonce is below the sender's current account nonce —
+    /// it can never execute and would only occupy mempool space.
+    #[error("Nonce too low for {sender}: tx nonce {tx_nonce} < account nonce {account_nonce}")]
+    NonceTooLow {
+        sender: String,
+        tx_nonce: u64,
+        account_nonce: u64,
+    },
+
+    /// Transaction nonce is too far ahead of the sender's current account
+    /// nonce. A bounded gap keeps future-nonce spam from parking
+    /// unexecutable transactions in the mempool indefinitely.
+    #[error(
+        "Nonce gap too large for {sender}: tx nonce {tx_nonce} > account nonce \
+         {account_nonce} + max gap {max_gap}"
+    )]
+    NonceGapTooLarge {
+        sender: String,
+        tx_nonce: u64,
+        account_nonce: u64,
+        max_gap: u64,
+    },
+
+    /// Sender balance cannot cover the transaction's worst-case cost
+    /// (`gas_limit × gas_price + transfer value`).
+    #[error("Insufficient balance for {sender}: balance {balance} < required {required}")]
+    InsufficientBalance {
+        sender: String,
+        balance: u128,
+        required: u128,
+    },
+
+    /// Sender already has the maximum number of pending transactions in
+    /// the mempool.
+    #[error("Sender {sender} has {pending} pending transactions (cap {cap})")]
+    SenderCapExceeded {
+        sender: String,
+        pending: usize,
+        cap: usize,
+    },
 }
 
 impl From<tenzro_crypto::CryptoError> for ConsensusError {
