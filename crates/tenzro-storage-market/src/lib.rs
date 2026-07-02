@@ -12,6 +12,8 @@
 //!   to `m` shards.
 //! - [`metering`] (D4) — per-byte pricing and per-epoch streaming payment,
 //!   gated on passing the retrievability challenge each epoch.
+//! - [`placement`] — rendezvous (HRW) hashing so shards self-select onto
+//!   multiple independent providers with no coordinator.
 //!
 //! # Economic model
 //!
@@ -26,11 +28,13 @@
 
 pub mod error;
 pub mod metering;
+pub mod placement;
 pub mod por;
 pub mod provider;
 pub mod redundancy;
 
 pub use error::{Result, StorageMarketError};
+pub use placement::{hrw_score, select_holders, should_replicate};
 pub use metering::{
     ChargeOutcome, StorageDeal, StorageDealStatus, StorageMeter, StoragePricing,
 };

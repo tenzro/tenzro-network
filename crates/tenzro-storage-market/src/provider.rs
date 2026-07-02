@@ -30,7 +30,11 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_iroh::{IrohResolver, TenzroUri};
+use tenzro_storage::{KvStore, CF_SETTLEMENTS};
 use tracing::{debug, info, warn};
+
+/// RocksDB key prefix (in `CF_SETTLEMENTS`) for persisted object descriptors.
+const STORAGE_OBJECT_PREFIX: &[u8] = b"storage_object:";
 
 /// Durable manifest for a stored object: enough to fetch every shard back and
 /// reconstruct, plus the integrity commitments to detect tampering.
@@ -72,6 +76,8 @@ pub struct StorageProvider {
     resolver: Arc<dyn IrohResolver>,
     /// Object descriptors by object id.
     objects: DashMap<String, ObjectDescriptor>,
+    /// Durable store for object descriptors, so held objects survive restart.
+    storage: Option<Arc<dyn KvStore>>,
 }
 
 impl std::fmt::Debug for StorageProvider {
@@ -88,6 +94,58 @@ impl StorageProvider {
         Self {
             resolver,
             objects: DashMap::new(),
+            storage: None,
+        }
+    }
+
+    /// Creates a provider whose descriptor index is durable: persisted object
+    /// descriptors are hydrated from `CF_SETTLEMENTS` on construction and
+    /// written through on every `store_object`.
+    pub fn with_storage(resolver: Arc<dyn IrohResolver>, storage: Arc<dyn KvStore>) -> Self {
+        let objects = DashMap::new();
+        match storage.get_keys_with_prefix(CF_SETTLEMENTS, STORAGE_OBJECT_PREFIX) {
+            Ok(keys) => {
+                for key in keys {
+                    let value = match storage.get(CF_SETTLEMENTS, &key) {
+                        Ok(Some(v)) => v,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            warn!("Failed to read persisted object descriptor: {}", e);
+                            continue;
+                        }
+                    };
+                    match serde_json::from_slice::<ObjectDescriptor>(&value) {
+                        Ok(desc) => {
+                            objects.insert(desc.object_id.clone(), desc);
+                        }
+                        Err(e) => warn!("Skipping unparseable persisted object descriptor: {}", e),
+                    }
+                }
+            }
+            Err(e) => warn!("Failed to hydrate object descriptors: {}", e),
+        }
+        info!("Hydrated {} storage object descriptor(s)", objects.len());
+        Self {
+            resolver,
+            objects,
+            storage: Some(storage),
+        }
+    }
+
+    /// Best-effort write-through of an object descriptor to durable storage.
+    fn persist_object(&self, descriptor: &ObjectDescriptor) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let mut key = STORAGE_OBJECT_PREFIX.to_vec();
+        key.extend_from_slice(descriptor.object_id.as_bytes());
+        match serde_json::to_vec(descriptor) {
+            Ok(bytes) => {
+                if let Err(e) = storage.put(CF_SETTLEMENTS, &key, &bytes) {
+                    warn!("Failed to persist object descriptor {}: {}", descriptor.object_id, e);
+                }
+            }
+            Err(e) => warn!("Failed to serialize object descriptor {}: {}", descriptor.object_id, e),
         }
     }
 
@@ -127,6 +185,7 @@ impl StorageProvider {
         };
 
         self.objects.insert(object_id.clone(), descriptor.clone());
+        self.persist_object(&descriptor);
         info!(
             "Stored object {} ({} bytes) as {} shards (k={} m={})",
             object_id,

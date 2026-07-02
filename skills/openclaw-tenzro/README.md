@@ -101,7 +101,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **Staking & Governance:** `stake`, `unstake`, `list_proposals`, `vote`, `get_voting_power`, `register_provider`
 
-**Settlement & Payments:** `settle`, `get_settlement`, `create_escrow`, `release_escrow`, `refund_escrow`, `get_escrow`, `open_payment_channel`, `pay_mpp`, `pay_x402` — escrow `create`/`release`/`refund` are signed `CreateEscrow`/`ReleaseEscrow`/`RefundEscrow` transactions submitted via `tenzro_signAndSendTransaction` (consensus-mediated, payer-only authorization)
+**Settlement & Payments:** `settle`, `get_settlement`, `create_escrow`, `release_escrow`, `refund_escrow`, `get_escrow`, `prepaid_deposit`, `prepaid_withdraw`, `prepaid_balance`, `open_payment_channel`, `pay_mpp`, `pay_x402` — escrow `create`/`release`/`refund` are signed `CreateEscrow`/`ReleaseEscrow`/`RefundEscrow` transactions submitted via `tenzro_signAndSendTransaction` (consensus-mediated, payer-only authorization); `prepaid_*` fund, refund, and read the streaming balance that storage deals and compute rentals draw down per epoch
 
 **Bridge & Cross-Chain:** `bridge_tokens`, `bridge_quote`, `get_bridge_routes`, `list_bridge_adapters`. Adapter coverage spans LayerZero V2, Chainlink CCIP, deBridge DLN, Li.Fi aggregator, Wormhole NTT, Canton, Hyperlane V3 (sovereign Tenzro-validator-set ISM), Axelar GMP (Cosmos / Move / Stellar reach), and Babylon (Bitcoin staking finality-providers).
 

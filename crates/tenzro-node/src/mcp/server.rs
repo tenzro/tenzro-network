@@ -1946,6 +1946,34 @@ pub struct ListEscrowsByPayeeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PrepaidDepositParams {
+    #[schemars(description = "Renter address (hex, with or without 0x prefix). The amount is locked out of this account's on-chain TNZO balance.")]
+    pub renter: String,
+    #[schemars(description = "Amount in base units (wei). Decimal string preferred; a JSON integer is accepted for small values.")]
+    pub amount: String,
+    #[schemars(description = "Asset id. Only TNZO is streamable today; defaults to TNZO when omitted.")]
+    pub asset: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PrepaidWithdrawParams {
+    #[schemars(description = "Renter address (hex). The withdrawn amount returns to this account's on-chain TNZO balance.")]
+    pub renter: String,
+    #[schemars(description = "Amount in base units (wei) to withdraw. Capped at the available prepaid balance.")]
+    pub amount: String,
+    #[schemars(description = "Asset id. Only TNZO is streamable today; defaults to TNZO when omitted.")]
+    pub asset: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PrepaidBalanceParams {
+    #[schemars(description = "Renter address (hex). Returns the current prepaid balance for this account.")]
+    pub renter: String,
+    #[schemars(description = "Asset id. Defaults to TNZO when omitted.")]
+    pub asset: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetDisputeParams {
     #[schemars(description = "Dispute id. Returns the full ChannelDispute record (challenger, evidence blobs, status, opened_at/timeout_at/resolved_at, resolution). Returns -32004 if no dispute with that id exists.")]
     pub dispute_id: String,
@@ -11598,6 +11626,59 @@ impl TenzroMcpServer {
         )
         .await
         .map_err(|e| err_internal(format!("listEscrowsByPayee failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Prepaid streaming-service balance tools ───
+
+    #[tool(description = "Pre-fund the streaming settlement path: lock `amount` (wei) of the renter's on-chain TNZO into the prepaid ledger so storage/compute runtimes can stream per epoch out of it. Returns `{renter, asset, deposited, balance}`. Requires the node to run with storage + token subsystems.")]
+    async fn prepaid_deposit(
+        &self,
+        Parameters(params): Parameters<PrepaidDepositParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut req = serde_json::json!({
+            "renter": params.renter,
+            "amount": params.amount,
+        });
+        if let Some(asset) = params.asset {
+            req["asset"] = serde_json::Value::String(asset);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_prepaidDeposit", req)
+            .await
+            .map_err(|e| err_internal(format!("prepaidDeposit failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Withdraw up to `amount` (wei) of the renter's unspent prepaid balance back to their on-chain account. Returns `{renter, asset, withdrawn, balance}` — `withdrawn` is capped at the available balance.")]
+    async fn prepaid_withdraw(
+        &self,
+        Parameters(params): Parameters<PrepaidWithdrawParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut req = serde_json::json!({
+            "renter": params.renter,
+            "amount": params.amount,
+        });
+        if let Some(asset) = params.asset {
+            req["asset"] = serde_json::Value::String(asset);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_prepaidWithdraw", req)
+            .await
+            .map_err(|e| err_internal(format!("prepaidWithdraw failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read the renter's current prepaid balance. Returns `{renter, asset, balance}` in wei.")]
+    async fn prepaid_balance(
+        &self,
+        Parameters(params): Parameters<PrepaidBalanceParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut req = serde_json::json!({ "renter": params.renter });
+        if let Some(asset) = params.asset {
+            req["asset"] = serde_json::Value::String(asset);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_prepaidBalance", req)
+            .await
+            .map_err(|e| err_internal(format!("prepaidBalance failed: {}", e)))?;
         json_result(result)
     }
 

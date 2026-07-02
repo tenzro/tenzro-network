@@ -27,10 +27,9 @@ use tenzro_consensus::{
 use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_identity::IdentityRegistry;
 use tenzro_model::{
-    AudioRuntime, DetectionRuntime, HfDownloader, InferenceRouter, ModelRegistry, ModelRuntime,
-    MtpKind, ProviderManager, SegmentationRuntime, TextEmbeddingRuntime, TextSegmentationRuntime,
-    TimeseriesRuntime, VideoRuntime,
-    VisionRuntime,
+    AudioRuntime, DetectionRuntime, ExternalEngine, ExternalEngineKind, HfDownloader,
+    InferenceRouter, ModelRegistry, ModelRuntime, MtpKind, ProviderManager, SegmentationRuntime,
+    TextEmbeddingRuntime, TextSegmentationRuntime, TimeseriesRuntime, VideoRuntime, VisionRuntime,
 };
 use tenzro_network::{MessagePayload, NetworkMessage, NetworkService, TenzroNetworkService};
 use tenzro_payments::gateway::TenzroPaymentGateway;
@@ -1109,6 +1108,20 @@ pub const DEFAULT_STORAGE_RATE_PER_BYTE_EPOCH: u128 = 1_000;
 /// charges before any operator override or dynamic-pricing switch.
 pub const DEFAULT_COMPUTE_RATE_PER_EPOCH: u128 = 1_000_000_000_000;
 
+/// Interval between provider billing epochs. Each tick streams one epoch's
+/// slice of every active storage deal + compute rental this node provides (PoR-
+/// / availability-gated), then persists the prepaid ledger. One hour balances
+/// settlement latency against the per-epoch pricing granularity.
+pub const BILLING_EPOCH_INTERVAL_SECS: u64 = 3_600;
+
+/// Rendezvous (HRW) replica set size for shard self-selection. This is the
+/// top-`R` cut a storage-serving node applies when deciding which shards of an
+/// announced object it should hold. It matches the default erasure scheme's
+/// total shard count (4 data + 2 parity) so a node's expected share of any
+/// object is one shard, and the union of every node's self-selected set covers
+/// all shards under a converged membership view.
+pub const DEFAULT_STORAGE_REPLICAS: usize = 6;
+
 /// Minimum verified free disk (GB) a node must have to advertise the
 /// StorageProvider role. Below this there is no point accepting deals — the
 /// node could not honor a single redundancy slot. Storage is permissionless
@@ -1826,6 +1839,13 @@ pub struct TenzroNode {
     /// `ProviderObligations` tracker) and one balances map with the storage
     /// runtime. Spawned during startup once the staking ledger is available.
     pub compute_runtime: Option<Arc<crate::compute_rental_runtime::ComputeRentalRuntime>>,
+    /// Prepaid-balance ledger for the streaming storage/compute settlement path.
+    /// Funds the shared balances map from renters' on-chain TNZO (locking it into
+    /// the prepaid vault) and persists every balance to `CF_SETTLEMENTS`. `Some`
+    /// only when a provider runtime is spawned and durable storage + the token
+    /// subsystem are available. The billing epoch calls `persist()` on it after
+    /// streaming each epoch's slices.
+    pub prepaid_ledger: Option<Arc<tenzro_settlement::PrepaidLedger>>,
     /// Cluster-serving runtime. `Some` only when this node serves AI — it lets
     /// the node join a LAN layer-pipeline cluster as a member and/or head one,
     /// serving a model too large for any single machine. Inert until a cluster
@@ -2055,6 +2075,7 @@ impl TenzroNode {
             runtime_roles: Arc::new(RwLock::new(initial_roles)),
             storage_runtime: None,
             compute_runtime: None,
+            prepaid_ledger: None,
             cluster_serving_runtime: None,
             oauth_state: Arc::new(RwLock::new(None)),
             network_models: Arc::new(DashMap::new()),
@@ -4602,7 +4623,7 @@ impl TenzroNode {
                 } else {
                     info!(
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (ephemeral key, in-memory blob store, A2A + MCP + MoE ALPNs registered)"
+                        "Tenzro iroh resolver bound (ephemeral key, persistent blob store, A2A + MCP + MoE ALPNs registered)"
                     );
                 }
                 self.iroh_resolver = Some(resolver);
@@ -4639,8 +4660,30 @@ impl TenzroNode {
             );
             let obligations =
                 Arc::new(tenzro_settlement::obligations::ProviderObligations::new());
+
+            // Prepaid-balance ledger: funds the shared balances map from renters'
+            // on-chain TNZO and persists it. Built only when both durable storage
+            // and the token subsystem are present; otherwise the streaming path
+            // runs over an in-memory, unfunded map (test/dev). When present, the
+            // ledger's own map becomes the shared `balances` so deposits, per-epoch
+            // streaming, and refunds all move value inside the durable ledger.
             let balances: Arc<dashmap::DashMap<(tenzro_types::primitives::Address, tenzro_types::asset::AssetId), u128>> =
-                Arc::new(dashmap::DashMap::new());
+                match (&self.storage, &self.token) {
+                    (Some(kv), Some(token)) => {
+                        let accounts: Arc<dyn tenzro_settlement::AccountLedger> = Arc::new(
+                            crate::prepaid_account_ledger::TnzoAccountLedger::new(token.clone()),
+                        );
+                        let ledger = Arc::new(tenzro_settlement::PrepaidLedger::new(
+                            accounts,
+                            kv.clone() as Arc<dyn tenzro_storage::KvStore>,
+                        ));
+                        let inner = ledger.inner();
+                        self.prepaid_ledger = Some(ledger);
+                        info!("Prepaid-balance ledger initialized (CF_SETTLEMENTS / prepaid_balance:)");
+                        inner
+                    }
+                    _ => Arc::new(dashmap::DashMap::new()),
+                };
 
             // Storage-provider runtime. Needs the iroh data plane for shard
             // transport in addition to the staking-backed coverage above.
@@ -4648,14 +4691,28 @@ impl TenzroNode {
                 match &self.iroh_resolver {
                     Some(resolver) => {
                         let resolver: Arc<dyn tenzro_iroh::IrohResolver> = resolver.clone();
-                        let runtime = crate::storage_provider_runtime::StorageProviderRuntime::with_fixed_rate(
-                            provider_address,
-                            resolver,
-                            balances.clone(),
-                            stake_ledger.clone(),
-                            obligations.clone(),
-                            DEFAULT_STORAGE_RATE_PER_BYTE_EPOCH,
-                        );
+                        let policy = crate::pricing::PricingPolicy::Fixed {
+                            rate: DEFAULT_STORAGE_RATE_PER_BYTE_EPOCH,
+                        };
+                        let runtime = match &self.storage {
+                            Some(kv) => crate::storage_provider_runtime::StorageProviderRuntime::with_storage(
+                                provider_address,
+                                resolver,
+                                balances.clone(),
+                                stake_ledger.clone(),
+                                obligations.clone(),
+                                policy,
+                                kv.clone() as Arc<dyn tenzro_storage::KvStore>,
+                            ),
+                            None => crate::storage_provider_runtime::StorageProviderRuntime::new(
+                                provider_address,
+                                resolver,
+                                balances.clone(),
+                                stake_ledger.clone(),
+                                obligations.clone(),
+                                policy,
+                            ),
+                        };
                         self.storage_runtime = Some(Arc::new(runtime));
                         info!(
                             provider = %provider_address,
@@ -4673,13 +4730,26 @@ impl TenzroNode {
             // CPU/GPU capacity for fixed terms; no transport is needed, just the
             // shared coverage backing.
             if self.config.roles.serves_ai() {
-                let runtime = crate::compute_rental_runtime::ComputeRentalRuntime::with_fixed_rate(
-                    provider_address,
-                    balances.clone(),
-                    stake_ledger.clone(),
-                    obligations.clone(),
-                    DEFAULT_COMPUTE_RATE_PER_EPOCH,
-                );
+                let policy = crate::pricing::PricingPolicy::Fixed {
+                    rate: DEFAULT_COMPUTE_RATE_PER_EPOCH,
+                };
+                let runtime = match &self.storage {
+                    Some(kv) => crate::compute_rental_runtime::ComputeRentalRuntime::with_storage(
+                        provider_address,
+                        balances.clone(),
+                        stake_ledger.clone(),
+                        obligations.clone(),
+                        policy,
+                        kv.clone() as Arc<dyn tenzro_storage::KvStore>,
+                    ),
+                    None => crate::compute_rental_runtime::ComputeRentalRuntime::new(
+                        provider_address,
+                        balances.clone(),
+                        stake_ledger.clone(),
+                        obligations.clone(),
+                        policy,
+                    ),
+                };
                 self.compute_runtime = Some(Arc::new(runtime));
                 info!(
                     provider = %provider_address,
@@ -4707,6 +4777,44 @@ impl TenzroNode {
         } else if self.config.roles.serves_storage() || self.config.roles.serves_ai() {
             warn!(
                 "Provider role set but staking ledger unavailable; storage/compute runtimes not spawned"
+            );
+        }
+
+        // Billing epoch loop. When this node runs a storage and/or compute
+        // provider runtime, a background task streams one epoch's slice of every
+        // active deal + rental each interval: storage charges are PoR-gated
+        // (`StorageMeter::charge_epoch`), compute slices are availability-gated
+        // (`RentalManager::settle_epoch`). After streaming, it persists the
+        // prepaid ledger so the durable balances track the epoch's value moves.
+        // Provider-local metering only — every replica bills the deals it serves;
+        // no leader gate.
+        if self.storage_runtime.is_some() || self.compute_runtime.is_some() {
+            let storage_runtime = self.storage_runtime.clone();
+            let compute_runtime = self.compute_runtime.clone();
+            let prepaid_ledger = self.prepaid_ledger.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                    BILLING_EPOCH_INTERVAL_SECS,
+                ));
+                // Skip the immediate first tick — no deals exist at boot.
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    // Each runtime logs its own per-epoch counts internally.
+                    if let Some(rt) = &storage_runtime {
+                        rt.run_billing_epoch().await;
+                    }
+                    if let Some(rt) = &compute_runtime {
+                        rt.run_billing_epoch();
+                    }
+                    if let Some(ledger) = &prepaid_ledger {
+                        ledger.persist();
+                    }
+                }
+            });
+            info!(
+                interval_secs = BILLING_EPOCH_INTERVAL_SECS,
+                "Provider billing epoch loop spawned"
             );
         }
 
@@ -7682,6 +7790,13 @@ impl TenzroNode {
             event_loop = event_loop.with_provider_announcement(ctx);
         }
 
+        // A storage-serving node opts into HRW shard self-selection: inbound
+        // shard-replication requests are ranked against its local membership
+        // view and the top-`R` shards for this node are pinned locally.
+        if self.config.roles.serves_storage() {
+            event_loop = event_loop.with_storage_replicas(DEFAULT_STORAGE_REPLICAS);
+        }
+
         // Wire the snapshot ABCI store so the finality hook produces a
         // state-sync snapshot at the configured interval on producer nodes.
         let event_loop = if let Some(ref s) = self.snapshot_store {
@@ -7770,6 +7885,15 @@ impl TenzroNode {
         // Wire the shared RemoteWorkerRegistry so the event loop can ingest verified
         // Cortex advertisements received over the tenzro/cortex gossipsub topic.
         let event_loop = event_loop.with_cortex_registry(self.remote_cortex_workers.clone());
+
+        // Wire the iroh resolver so the blob heartbeat can announce locally
+        // held blobs on tenzro/blobs and inbound peer announcements populate
+        // the resolver's blob-provider hint cache.
+        let event_loop = if let Some(resolver) = self.iroh_resolver.clone() {
+            event_loop.with_iroh_resolver(resolver)
+        } else {
+            event_loop
+        };
 
         // Wire the shared TrainingRuntime so the event loop can dispatch
         // OuterGradient / SyncRound payloads received over the tenzro/training
@@ -8493,6 +8617,51 @@ impl TenzroNode {
             });
             info!("Provider discovery wired to gossipsub (tenzro/providers)");
 
+            // Wire blob availability discovery: subscribe to gossipsub blobs topic
+            // and forward to event loop. Announcements feed the iroh resolver's
+            // blob-provider hint cache so hint-less `tenzro://blob/...` fetches
+            // can dial announced holders.
+            let event_tx_blobs = event_loop.event_sender();
+            let net_blobs = network.clone();
+            tokio::spawn(async move {
+                match net_blobs.subscribe("tenzro/blobs").await {
+                    Ok(mut rx) => {
+                        tracing::info!("Blob discovery: subscribed to tenzro/blobs");
+                        while let Some(msg) = rx.recv().await {
+                            match msg.payload {
+                                tenzro_network::MessagePayload::BlobAnnouncement(ann) => {
+                                    if let Err(e) =
+                                        event_tx_blobs.send(NodeEvent::BlobAnnouncement(ann)).await
+                                    {
+                                        tracing::error!(
+                                            "Failed to forward blob announcement to event loop: {}",
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
+                                tenzro_network::MessagePayload::ShardReplication(req) => {
+                                    if let Err(e) =
+                                        event_tx_blobs.send(NodeEvent::ShardReplication(req)).await
+                                    {
+                                        tracing::error!(
+                                            "Failed to forward shard replication to event loop: {}",
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to subscribe to blobs gossipsub topic: {}", e);
+                    }
+                }
+            });
+            info!("Blob discovery wired to gossipsub (tenzro/blobs)");
+
             // Wire cortex advertisement discovery: subscribe to gossipsub cortex topic
             // and forward opaque payloads to the event loop for signature verification
             // and ingestion into the RemoteWorkerRegistry. Cortex advertisements are
@@ -9153,6 +9322,12 @@ impl TenzroNode {
         self.compute_runtime.as_ref()
     }
 
+    /// Returns the prepaid-balance ledger if a provider runtime was spawned with
+    /// durable storage and the token subsystem available.
+    pub fn prepaid_ledger(&self) -> Option<&Arc<tenzro_settlement::PrepaidLedger>> {
+        self.prepaid_ledger.as_ref()
+    }
+
     /// Returns the liquid staking pool (stTNZO) if initialized.
     pub fn liquid_staking_pool(
         &self,
@@ -9502,6 +9677,13 @@ impl TenzroNode {
     /// Returns the network service if initialized
     pub fn network(&self) -> Option<&Arc<TenzroNetworkService>> {
         self.network.as_ref()
+    }
+
+    /// Node iroh resolver (single content-addressed endpoint). `None` until
+    /// startup binds it. Used by storage-market producers to read the local
+    /// `EndpointId` when broadcasting shard-replication requests.
+    pub fn iroh_resolver(&self) -> Option<&Arc<tenzro_iroh::IrohBackedResolver>> {
+        self.iroh_resolver.as_ref()
     }
 
     /// Node Ed25519 signer for outbound model + provider gossip
@@ -9954,6 +10136,92 @@ impl TenzroNode {
         (evicted_instances.len(), cleared_served.len())
     }
 
+    /// Re-register an external OpenAI-compatible engine from its persisted
+    /// CF_MODELS record after a restart. Health-probes the upstream; returns
+    /// `false` (clear the serve flag) when the catalog entry is gone, the
+    /// record is malformed, or the upstream is unreachable.
+    async fn reconcile_external_engine(
+        &self,
+        model_id: &str,
+        catalog: Option<&tenzro_model::HfModelEntry>,
+        record: &serde_json::Value,
+    ) -> bool {
+        if catalog.is_none() {
+            warn!(
+                model_id = %model_id,
+                "External-engine model not found in catalog — clearing serve flag",
+            );
+            return false;
+        }
+
+        let Some(runtime) = self.model_runtime.as_ref() else {
+            warn!(
+                model_id = %model_id,
+                "ModelRuntime not initialized — clearing external serve flag",
+            );
+            return false;
+        };
+
+        if runtime.is_loaded(model_id) {
+            return true;
+        }
+
+        let engine_kind_str = record.get("engine").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(kind) = ExternalEngineKind::parse_str(engine_kind_str) else {
+            warn!(
+                model_id = %model_id,
+                engine = %engine_kind_str,
+                "Unknown external engine kind in persisted record — clearing serve flag",
+            );
+            return false;
+        };
+        let Some(base_url) = record.get("base_url").and_then(|v| v.as_str()) else {
+            warn!(
+                model_id = %model_id,
+                "External-engine record missing base_url — clearing serve flag",
+            );
+            return false;
+        };
+        let upstream_model = record
+            .get("upstream_model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(model_id)
+            .to_string();
+
+        let engine = match ExternalEngine::new(kind, base_url, upstream_model, None) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(
+                    model_id = %model_id,
+                    "Invalid persisted external-engine config: {} — clearing serve flag",
+                    e,
+                );
+                return false;
+            }
+        };
+
+        match runtime.register_external_engine(model_id, engine).await {
+            Ok(()) => {
+                info!(
+                    model_id = %model_id,
+                    engine = %engine_kind_str,
+                    base_url = %base_url,
+                    "Re-registered external engine after restart",
+                );
+                true
+            }
+            Err(e) => {
+                warn!(
+                    model_id = %model_id,
+                    base_url = %base_url,
+                    "External engine unreachable on restart: {} — clearing serve flag",
+                    e,
+                );
+                false
+            }
+        }
+    }
+
     /// Run a full reconciliation of the model registry against on-disk state
     /// and the in-memory runtime. Used both at startup and on-demand via
     /// `tenzro_pruneModelRegistry`.
@@ -9987,6 +10255,50 @@ impl TenzroNode {
 
         for model_id in &served_ids {
             let catalog = get_model_by_id(model_id);
+
+            // External-engine records carry an `engine` + `base_url` in their
+            // CF_MODELS row instead of a local GGUF. Re-register the engine
+            // (health-probing the upstream) rather than trying to reload
+            // weights from disk. A dead upstream clears the serve flag.
+            let external_record = self.storage.as_ref().and_then(|storage| {
+                storage
+                    .get(CF_MODELS, model_id.as_bytes())
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .filter(|rec| rec.get("engine").and_then(|v| v.as_str()).is_some())
+            });
+
+            if let Some(rec) = external_record {
+                let ok = self
+                    .reconcile_external_engine(model_id, catalog.as_ref(), &rec)
+                    .await;
+                if ok {
+                    reloaded += 1;
+                } else {
+                    self.served_models.remove(model_id);
+                    self.load_tracker.unregister_model(model_id);
+                    if let Some(ref storage) = self.storage {
+                        let _ = storage.delete(CF_MODELS, model_id.as_bytes());
+                    }
+                    cleared_models += 1;
+                    let svc_ids: Vec<String> = self
+                        .model_services
+                        .iter()
+                        .filter(|e| e.value().model_id == *model_id)
+                        .map(|e| e.key().clone())
+                        .collect();
+                    for id in &svc_ids {
+                        self.model_services.remove(id);
+                        if let Some(ref storage) = self.storage {
+                            let _ = storage.delete(CF_MODEL_SERVICES, id.as_bytes());
+                        }
+                        cleared_services += 1;
+                    }
+                }
+                continue;
+            }
+
             let gguf_path = self.resolve_gguf_path(model_id);
 
             let ok = match (catalog, gguf_path) {

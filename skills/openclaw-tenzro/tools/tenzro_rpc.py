@@ -6452,6 +6452,39 @@ def list_escrows_by_payee(payee: str) -> dict:
     return _rpc("tenzro_listEscrowsByPayee", {"payee": payee})
 
 
+def prepaid_deposit(renter: str, amount_wei: int, asset: str = "TNZO") -> dict:
+    """Lock `amount_wei` of the renter's on-chain balance into the prepaid
+    streaming ledger. Storage deals and compute rentals stream per epoch out
+    of this balance.
+
+    Returns `{ renter, asset, deposited, balance }`.
+    """
+    return _rpc(
+        "tenzro_prepaidDeposit",
+        {"renter": renter, "amount": str(amount_wei), "asset": asset},
+    )
+
+
+def prepaid_withdraw(renter: str, amount_wei: int, asset: str = "TNZO") -> dict:
+    """Withdraw up to `amount_wei` of the renter's unspent prepaid balance back
+    to their on-chain account. `withdrawn` is capped at the available balance.
+
+    Returns `{ renter, asset, withdrawn, balance }`.
+    """
+    return _rpc(
+        "tenzro_prepaidWithdraw",
+        {"renter": renter, "amount": str(amount_wei), "asset": asset},
+    )
+
+
+def prepaid_balance(renter: str, asset: str = "TNZO") -> dict:
+    """Read the renter's current prepaid streaming balance (wei).
+
+    Returns `{ renter, asset, balance }`.
+    """
+    return _rpc("tenzro_prepaidBalance", {"renter": renter, "asset": asset})
+
+
 # ── Burn quota & mempool (Specs 3 + 6) ────────────────────────────
 
 
@@ -8410,6 +8443,18 @@ COMMANDS = {
     # ── Escrow listing ──
     "list_escrows_by_payer": lambda args: list_escrows_by_payer(args[0]),
     "list_escrows_by_payee": lambda args: list_escrows_by_payee(args[0]),
+    # prepaid_deposit: renter amount_wei [asset]
+    "prepaid_deposit": lambda args: prepaid_deposit(
+        args[0], int(args[1]), args[2] if len(args) > 2 else "TNZO",
+    ),
+    # prepaid_withdraw: renter amount_wei [asset]
+    "prepaid_withdraw": lambda args: prepaid_withdraw(
+        args[0], int(args[1]), args[2] if len(args) > 2 else "TNZO",
+    ),
+    # prepaid_balance: renter [asset]
+    "prepaid_balance": lambda args: prepaid_balance(
+        args[0], args[1] if len(args) > 1 else "TNZO",
+    ),
     # ── Validator registry (read-only) ──
     "get_validator_state": lambda args: get_validator_state(args[0]),
     "list_validators": lambda args: list_validators(args[0] if args else None),
