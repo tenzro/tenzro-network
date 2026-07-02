@@ -1300,6 +1300,35 @@ impl MessageContent {
     }
 }
 
+impl ContentBlock {
+    /// Total byte length of the text-bearing payload of this block,
+    /// including inline image data. Used to bound request size before a
+    /// request reaches a provider's context window.
+    pub fn payload_len(&self) -> usize {
+        match self {
+            ContentBlock::Text { text, .. } => text.len(),
+            ContentBlock::Thinking { thinking } => thinking.len(),
+            ContentBlock::ToolUse { name, input, .. } => {
+                name.len() + input.to_string().len()
+            }
+            ContentBlock::ToolResult { content, .. } => match content {
+                ToolResultContent::Text(s) => s.len(),
+                ToolResultContent::Blocks(bs) => bs.iter().map(ContentBlock::payload_len).sum(),
+            },
+            ContentBlock::Image { source } => match source {
+                ImageSource::Base64 { data, .. } => data.len(),
+            },
+        }
+    }
+}
+
+impl RichChatMessage {
+    /// Total byte length of this message's content payload across all blocks.
+    pub fn payload_len(&self) -> usize {
+        self.content.as_blocks().iter().map(ContentBlock::payload_len).sum()
+    }
+}
+
 /// A tool the model may invoke. The model emits `ContentBlock::ToolUse`
 /// blocks whose `input` validates against `input_schema`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

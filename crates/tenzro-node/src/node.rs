@@ -1089,6 +1089,13 @@ pub struct TenzroNode {
     /// `RevocationBroadcaster`. `None` on non-validator roles.
     validator_hybrid_signer: Option<Arc<dyn tenzro_crypto::composite::HybridSigner>>,
 
+    /// Node Ed25519 signer for outbound model + provider gossip
+    /// announcements. Byte-shared with the validator identity that derives
+    /// this node's `peer_id`, so consumers can bind a signed announcement to
+    /// the announcing node and reject spoofed / replayed announcements.
+    /// Loaded from `keygen::load_validator_keypair` during startup.
+    announce_signer: Option<Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>>,
+
     /// Stripe SPT ceiling-resolver cache adapter. Held here so the
     /// SPT-revocation RPC + (future) webhook receive endpoint can
     /// invalidate the cache in lockstep with `IdentityRegistry::revoke`.
@@ -1762,6 +1769,7 @@ impl TenzroNode {
             consensus_out_rx: None,
             local_validator_address: None,
             validator_hybrid_signer: None,
+            announce_signer: None,
             spt_ceiling_cache: None,
             vm_runtime: None,
             wallet_service: None,
@@ -2085,6 +2093,36 @@ impl TenzroNode {
 
         // 6. Initialize wallet service
         self.init_wallet().await?;
+
+        // 6b. Load the node Ed25519 signer used to authenticate outbound
+        // model + provider gossip announcements. Role-independent: model
+        // providers sign announcements too, not just validators. Byte-shared
+        // with the validator identity that derives peer_id. An absent key
+        // leaves the signer as `None` — the node boots, but its announcements
+        // won't be broadcast (consumers drop unsigned announcements). A key
+        // that exists but is unreadable/corrupt is a hard error.
+        match crate::keygen::load_validator_keypair(&self.config.data_dir) {
+            Ok(announce_keypair) => {
+                let signer: Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync> =
+                    Arc::new(
+                        tenzro_crypto::signatures::Ed25519SignerImpl::new(announce_keypair)
+                            .map_err(|e| {
+                                NodeError::Other(format!(
+                                    "Failed to construct Ed25519 announcement signer: {}",
+                                    e
+                                ))
+                            })?,
+                    );
+                self.announce_signer = Some(signer);
+            }
+            Err(NodeError::KeyMissing { .. }) => {
+                warn!(
+                    "No node Ed25519 key on disk — gossip announcements will not be \
+                     signed or broadcast until a key is provisioned"
+                );
+            }
+            Err(e) => return Err(e),
+        }
 
         // 7. Initialize consensus (validators only)
         // Only validators produce blocks. All other roles (ModelProvider, TeeProvider,
@@ -7327,17 +7365,32 @@ impl TenzroNode {
                 None
             };
 
-            let ctx = crate::event_loop::ProviderAnnouncementContext {
-                hardware,
-                geography: self.config.geography.clone(),
-                provider_address,
-                provider_type: provider_type.to_string(),
-                capabilities,
-                rpc_endpoint,
-                ttl_secs: 120,
-                cluster_profile,
-            };
-            event_loop = event_loop.with_provider_announcement(ctx);
+            // Ed25519 signer for outbound announcements, loaded once in
+            // step 6b. Byte-shared with the validator identity that derives
+            // peer_id, so peers can bind an announcement to the announcing
+            // node. Absent when no key is provisioned — in that case the node
+            // simply doesn't self-announce (peers drop unsigned announcements
+            // anyway), so we skip wiring the announcement context rather than
+            // failing startup.
+            if let Some(announce_signer) = self.announce_signer.clone() {
+                let ctx = crate::event_loop::ProviderAnnouncementContext {
+                    hardware,
+                    geography: self.config.geography.clone(),
+                    provider_address,
+                    provider_type: provider_type.to_string(),
+                    capabilities,
+                    rpc_endpoint,
+                    ttl_secs: 120,
+                    cluster_profile,
+                    signer: announce_signer,
+                };
+                event_loop = event_loop.with_provider_announcement(ctx);
+            } else {
+                warn!(
+                    "Skipping provider announcement setup — no node Ed25519 signer \
+                     (announcements require a provisioned key)"
+                );
+            }
         }
 
         // Wire the snapshot ABCI store so the finality hook produces a
@@ -9131,6 +9184,14 @@ impl TenzroNode {
     /// Returns the network service if initialized
     pub fn network(&self) -> Option<&Arc<TenzroNetworkService>> {
         self.network.as_ref()
+    }
+
+    /// Node Ed25519 signer for outbound model + provider gossip
+    /// announcements. `None` before startup step 6b has run.
+    pub fn announce_signer(
+        &self,
+    ) -> Option<&Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>> {
+        self.announce_signer.as_ref()
     }
 
     /// Returns the bridge router if initialized

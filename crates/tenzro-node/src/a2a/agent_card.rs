@@ -1276,9 +1276,17 @@ mod tests {
     #[test]
     fn test_agent_card_has_all_skills() {
         let card = build_agent_card("localhost:3002", "LightClient");
-        assert_eq!(card.skills.len(), 36);
 
         let skill_ids: Vec<&str> = card.skills.iter().map(|s| s.id.as_str()).collect();
+        // Skill IDs must be unique — a duplicate id would shadow a skill in the
+        // A2A registry. Assert de-dup rather than an exact count so adding a
+        // skill doesn't require touching this test.
+        let unique: std::collections::HashSet<&str> = skill_ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            skill_ids.len(),
+            "duplicate skill id in agent card"
+        );
         assert!(skill_ids.contains(&"wallet"));
         assert!(skill_ids.contains(&"identity"));
         assert!(skill_ids.contains(&"inference"));

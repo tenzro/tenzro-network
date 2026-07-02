@@ -62,6 +62,9 @@ realfft = { workspace = true }
 # Video frame extraction shells out to the `ffmpeg` CLI binary.
 tempfile = { workspace = true }
 
+# System memory/disk probing for model-load admission control.
+sysinfo = "0.31"
+
 [features]
 default = ["cluster-serving"]
 # LAN layer-pipeline cluster serving: builds the ggml RPC backend + rpc-server

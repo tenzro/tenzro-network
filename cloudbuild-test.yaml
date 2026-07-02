@@ -75,6 +75,9 @@ steps:
         echo "==== cargo test -p tenzro-bridge ===="
         cargo test -p tenzro-bridge --locked
 
+        echo "==== cargo test -p tenzro-network ===="
+        cargo test -p tenzro-network --locked
+
         echo "==== cargo test -p tenzro-node --lib ===="
         # --lib avoids integration tests that need a live node/network.
         cargo test -p tenzro-node --lib --locked
