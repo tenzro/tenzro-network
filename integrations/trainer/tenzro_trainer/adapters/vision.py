@@ -31,6 +31,8 @@ except ImportError:  # pragma: no cover
     nn = None  # type: ignore[assignment]
 
 
+from tenzro_trainer.muon import build_inner_optimizer
+
 log = logging.getLogger(__name__)
 
 
@@ -214,6 +216,7 @@ def build_adapter(
 
     Hyperparams accepted:
 
+    * ``inner_optimizer`` (``muon`` | ``adamw`` | ``sgd``, default ``adamw``)
     * ``learning_rate`` (default 3e-5 — fine-tune scale for pretrained ViT)
     * ``weight_decay`` (default 0.05 — standard ViT recipe)
     * ``batch_size`` (default 8)
@@ -258,11 +261,8 @@ def build_adapter(
         img_size=img_size,
     ).to(device)
 
-    opt = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(hp.get("learning_rate", 3e-5)),
-        weight_decay=float(hp.get("weight_decay", 0.05)),
-        betas=(0.9, 0.95),
+    opt = build_inner_optimizer(
+        model, md, hp, default_lr=3e-5, default_weight_decay=0.05
     )
     log.info(
         "built vision adapter %r: %d params",

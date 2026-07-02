@@ -127,6 +127,8 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **Distributed MoE Serving:** `moe_shard_map`, `moe_plan_dispatch`, `moe_replication_policy`, `moe_catalog_shape` — expert-shard placement, top-k dispatch planning, and replication policy across providers.
 
+**Tenzro Train Inspection:** `training_list_runs`, `training_get_run`, `training_get_receipt`, `training_get_sealed_manifest` — read-side view of decentralized training runs: run state per task, sealed receipts for finalized runs, and Confidential-tier sealed-shard manifests.
+
 **Local Discovery & LAN Clustering:** `local_peers`, `node_reachability`, `node_profile`, `cluster_plan`, `cluster_preview` — same-segment peers via mDNS, the node's reachability tier, its hardware self-profile, and the layer-wise pipeline plan when a model needs more than one box. `cluster_preview` previews placement for a downloaded model from the node's live view (derives shape from the GGUF header, discovers LAN members) — no manual dimensions required; `cluster_plan` is the lower-level form taking explicit dimensions + a members list.
 
 **Cryptography:** `sign_message`, `verify_signature`, `encrypt_data`, `decrypt_data`, `derive_key`, `generate_keypair`, `hash_sha256`, `hash_keccak256`, `x25519_key_exchange`

@@ -1,6 +1,6 @@
 # tenzro-trainer
 
-**Tenzro Train Phase 1 reference trainer.** Python implementation of the inner
+**Tenzro Train reference trainer.** Python implementation of the inner
 training loop for Decoupled DiLoCo, paired with the Rust protocol layer in
 [`crates/tenzro-training/`](../../crates/tenzro-training).
 
@@ -34,19 +34,33 @@ training loop for Decoupled DiLoCo, paired with the Rust protocol layer in
                             └──────────────────────────────────┘
 ```
 
-## Phase 1 scope
+## Scope
 
 - **Modalities:** timeseries (TimesFM-class 200M models), language (Qwen 3 0.6B
   default via `transformers.AutoModelForCausalLM`; swap to any catalog LM via
   `architecture.metadata.hf_repo`), and vision (`timm` ViT-B/16 default; swap
   via `architecture.metadata.timm_model`). All share the same outer-gradient
   + RPC plumbing.
-- **Trust tier:** Open (no TEE attestation). Trust comes from stake bonding +
-  redundant fragment assignment + Mean aggregation across K-of-M trainers.
-- **Aggregation:** the *Rust* syncer applies `AggregationRule::Mean` to the
-  outer gradients submitted by all enrolled trainers. The Python trainer never
-  sees other trainers' gradients — it only ever produces its own and submits
-  the safetensors hash.
+- **Trust tiers:** Open (stake bonding + redundant fragment assignment),
+  Verified (TEE attestation at enrollment), and Confidential (TEE-resident
+  data — `tenzro_trainer.confidential` unwraps sealed dataset shards inside
+  the trainer's enclave via HPKE RFC 9180 + AES-256-GCM).
+- **Aggregation:** the *Rust* syncer applies the task's `AggregationRule`
+  (Mean on Open; Mean / TrimmedMean / CoordinateMedian / Krum on Verified +
+  Confidential) to the outer gradients submitted by all enrolled trainers.
+  The Python trainer never sees other trainers' gradients — it only ever
+  produces its own and submits the safetensors hash.
+- **Inner optimizer:** selectable per task via `architecture.metadata.inner_optimizer`
+  (`muon` / `adamw` / `sgd`, default `adamw`). Muon orthogonalizes 2D weight
+  updates with Newton-Schulz iteration and falls back to AdamW for 1D,
+  embedding, and head parameters.
+- **Communication efficiency:** blockwise symmetric gradient quantization
+  (`GradientQuantization`: Int8 4×, Int4 ~8× smaller than f32 — the codec in
+  `tenzro_trainer.quantization` is byte-identical to the Rust implementation),
+  streaming synchronization (one parameter shard per round when the task uses
+  `SyncStrategy::Streaming`), and delayed outer-update application
+  (`OuterUpdateScheduler` applies round r's update during round r+1 so
+  communication overlaps computation).
 
 ## Quickstart
 
@@ -71,7 +85,10 @@ tenzro-trainer run \
 | `tenzro_trainer.types` | Python mirrors of `tenzro_types::training` (dataclasses serializable to the same JSON the Rust syncer expects). |
 | `tenzro_trainer.rpc_bridge` | Thin JSON-RPC 2.0 client over `requests`. Handles `enrollTrainer`, `submitOuterGradient`, `finalizeRound`. |
 | `tenzro_trainer.gradient` | Outer-gradient packaging: per-fragment safetensors blobs + SHA-256 + signing helpers (Ed25519 via PyNaCl). |
-| `tenzro_trainer.inner_loop` | Generic H-step inner SGD driver. Modality adapters provide a `step()` callable. |
+| `tenzro_trainer.inner_loop` | Generic H-step inner driver plus `OuterUpdateScheduler` (delayed outer-update application), partial-state load/apply for streaming shards, and state snapshots. |
+| `tenzro_trainer.muon` | Muon inner optimizer — Newton-Schulz orthogonalization of 2D weight updates, AdamW fallback for 1D / embedding / head parameters. |
+| `tenzro_trainer.quantization` | Blockwise symmetric Int8/Int4 gradient codec, byte-identical to the Rust `tenzro_training::quantization` implementation. |
+| `tenzro_trainer.confidential` | Confidential-tier sealed-shard unwrap: HPKE RFC 9180 base-mode key unwrap + AES-256-GCM shard decryption, run inside the trainer's TEE enclave. |
 | `tenzro_trainer.adapters.*` | Modality-specific model + dataset wiring. |
 | `tenzro_trainer.cli` | `tenzro-trainer enroll | run | submit-gradient | finalize-round` |
 

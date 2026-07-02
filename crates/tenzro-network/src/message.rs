@@ -171,6 +171,14 @@ pub enum ConsensusMessage {
         /// steady-state happy path AND when the leader is reproposing the
         /// existing high-tip block (the parent-hash match suffices).
         no_endorsement_certificate: Option<Vec<u8>>,
+        /// bincode-serialized `tenzro_crypto::composite::CompositeSignature`
+        /// — the leader's hybrid (Ed25519 + ML-DSA-65) signature over the
+        /// canonical proposal payload (`view || height || block_hash ||
+        /// high_qc_view`). Receivers verify it against the proposer's
+        /// REGISTERED composite key before acting on the proposal, making
+        /// proposals attributable (proposal-equivocation slashing) and
+        /// authenticating the `high_qc_view` SyncInfo hint.
+        proposer_signature: Vec<u8>,
     },
     /// Vote on a proposal
     ///
@@ -350,6 +358,11 @@ pub struct ModelRegistrationMessage {
     /// TTL in seconds — entries expire if not refreshed (default 120s)
     #[serde(default = "default_ttl")]
     pub ttl_secs: u64,
+    /// Unix timestamp (ms) when this announcement was created. Covered by
+    /// the signature; consumers reject announcements older than `ttl_secs`
+    /// or dated in the future, so a captured announcement can't be replayed
+    /// after the provider stops serving or changes its endpoint.
+    pub timestamp: i64,
     /// Whether this is a withdrawal (model stopped serving)
     #[serde(default)]
     pub withdrawn: bool,
@@ -388,74 +401,73 @@ pub struct ModelRegistrationMessage {
     pub signature: Vec<u8>,
 }
 
-/// Canonical signing preimage for a [`ModelRegistrationMessage`]. Covers the
-/// fields that route traffic or money (endpoint, pricing, weights hash) plus
-/// the identity binding (`pubkey`) so a signed announcement can't be replayed
-/// with a swapped endpoint or price.
-#[derive(Serialize)]
-struct ModelRegPreimage<'a> {
-    model_id: &'a str,
-    provider: &'a str,
-    peer_id: &'a str,
-    rpc_endpoint: &'a str,
-    weights_sha256: &'a str,
-    per_token: Option<u64>,
-    per_request: u64,
-    withdrawn: bool,
-    pubkey: &'a [u8],
+/// Domain-separation tags for announcement signatures. Each announcement
+/// type signs `tag || serde_json(message with signature cleared)`, so a
+/// signature over one announcement type can never be replayed as another
+/// even though all three are signed by the same node key.
+const MODEL_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/model";
+const AGENT_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/agent";
+const PROVIDER_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/provider";
+
+/// Builds the canonical signing preimage for an announcement: the domain
+/// tag followed by the JSON serialization of the message. The message must
+/// already have `pubkey` populated and `signature` cleared, so the entire
+/// announcement — every routable, priceable, or freshness-relevant field —
+/// is covered by the signature. Fields added later are covered
+/// automatically instead of silently becoming replay-mutable.
+fn announce_preimage<T: Serialize>(domain: &[u8], msg: &T) -> Result<Vec<u8>, String> {
+    let body = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
+    let mut preimage = Vec::with_capacity(domain.len() + body.len());
+    preimage.extend_from_slice(domain);
+    preimage.extend_from_slice(&body);
+    Ok(preimage)
+}
+
+fn verify_announce_signature<T: Serialize>(
+    domain: &[u8],
+    unsigned: &T,
+    pubkey: &[u8],
+    signature: &[u8],
+) -> Result<(), String> {
+    use tenzro_crypto::{
+        keys::{KeyType, PublicKey},
+        signatures::{verify, Signature},
+    };
+    let preimage = announce_preimage(domain, unsigned)?;
+    let pk = PublicKey::new(KeyType::Ed25519, pubkey.to_vec());
+    let sig = Signature::new(KeyType::Ed25519, signature.to_vec());
+    verify(&pk, &preimage, &sig).map_err(|e| e.to_string())
 }
 
 impl ModelRegistrationMessage {
     /// Sign this announcement with the provider's Ed25519 key, populating
-    /// `pubkey` + `signature`. Call after all routable fields are set.
+    /// `pubkey` + `signature`. Call after all fields are set.
     pub fn sign(
         &mut self,
         signer: &dyn tenzro_crypto::signatures::Signer,
     ) -> Result<(), String> {
-        let pubkey = signer.public_key().as_bytes().to_vec();
-        let preimage = serde_json::to_vec(&ModelRegPreimage {
-            model_id: &self.model_id,
-            provider: &self.provider,
-            peer_id: &self.peer_id,
-            rpc_endpoint: &self.rpc_endpoint,
-            weights_sha256: &self.weights_sha256,
-            per_token: self.pricing.per_token,
-            per_request: self.pricing.per_request,
-            withdrawn: self.withdrawn,
-            pubkey: &pubkey,
-        })
-        .map_err(|e| e.to_string())?;
+        self.pubkey = signer.public_key().as_bytes().to_vec();
+        self.signature = Vec::new();
+        let preimage = announce_preimage(MODEL_ANNOUNCE_DOMAIN, self)?;
         let sig = signer.sign(&preimage).map_err(|e| e.to_string())?;
         self.signature = sig.as_bytes().to_vec();
-        self.pubkey = pubkey;
         Ok(())
     }
 
-    /// Verify the embedded signature over the canonical preimage. Returns an
+    /// Verify the embedded signature over the full announcement. Returns an
     /// error for unsigned (empty `pubkey`/`signature`) or tampered messages.
     pub fn verify(&self) -> Result<(), String> {
-        use tenzro_crypto::{
-            keys::{KeyType, PublicKey},
-            signatures::{verify, Signature},
-        };
         if self.pubkey.is_empty() || self.signature.is_empty() {
             return Err("unsigned model announcement".to_string());
         }
-        let preimage = serde_json::to_vec(&ModelRegPreimage {
-            model_id: &self.model_id,
-            provider: &self.provider,
-            peer_id: &self.peer_id,
-            rpc_endpoint: &self.rpc_endpoint,
-            weights_sha256: &self.weights_sha256,
-            per_token: self.pricing.per_token,
-            per_request: self.pricing.per_request,
-            withdrawn: self.withdrawn,
-            pubkey: &self.pubkey,
-        })
-        .map_err(|e| e.to_string())?;
-        let pk = PublicKey::new(KeyType::Ed25519, self.pubkey.clone());
-        let sig = Signature::new(KeyType::Ed25519, self.signature.clone());
-        verify(&pk, &preimage, &sig).map_err(|e| e.to_string())
+        let mut unsigned = self.clone();
+        unsigned.signature = Vec::new();
+        verify_announce_signature(
+            MODEL_ANNOUNCE_DOMAIN,
+            &unsigned,
+            &self.pubkey,
+            &self.signature,
+        )
     }
 }
 
@@ -505,6 +517,44 @@ pub struct AgentAnnouncementMessage {
     /// TTL in seconds — entries expire if not refreshed (default 180s)
     #[serde(default = "default_agent_ttl")]
     pub ttl_secs: u64,
+    /// Ed25519 public key (raw 32B) of the announcing node. Empty on
+    /// unsigned announcements, which consumers reject.
+    #[serde(default)]
+    pub pubkey: Vec<u8>,
+    /// Ed25519 signature over the canonical preimage. Empty on unsigned
+    /// announcements, which consumers reject.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+impl AgentAnnouncementMessage {
+    /// Sign this announcement with the node's Ed25519 announce key,
+    /// populating `pubkey` + `signature`. Call after all fields are set —
+    /// the signature covers the entire struct.
+    pub fn sign(&mut self, signer: &dyn tenzro_crypto::signatures::Signer) -> Result<(), String> {
+        self.pubkey = signer.public_key().as_bytes().to_vec();
+        self.signature = Vec::new();
+        let preimage = announce_preimage(AGENT_ANNOUNCE_DOMAIN, self)?;
+        let sig = signer.sign(&preimage).map_err(|e| e.to_string())?;
+        self.signature = sig.as_bytes().to_vec();
+        Ok(())
+    }
+
+    /// Verify the embedded signature over the whole-struct preimage. Returns
+    /// an error for unsigned (empty `pubkey`/`signature`) or tampered messages.
+    pub fn verify(&self) -> Result<(), String> {
+        if self.pubkey.is_empty() || self.signature.is_empty() {
+            return Err("unsigned agent announcement".to_string());
+        }
+        let mut unsigned = self.clone();
+        unsigned.signature = Vec::new();
+        verify_announce_signature(
+            AGENT_ANNOUNCE_DOMAIN,
+            &unsigned,
+            &self.pubkey,
+            &self.signature,
+        )
+    }
 }
 
 /// Provider announcement message — broadcast over gossipsub topic "tenzro/providers"
@@ -578,65 +628,35 @@ pub struct ProviderAnnouncementMessage {
     pub signature: Vec<u8>,
 }
 
-/// Canonical signing preimage for a [`ProviderAnnouncementMessage`]. Covers the
-/// routing-relevant identity fields (peer id, address, endpoint, served models)
-/// plus the `pubkey` binding so a signed announcement can't be replayed with a
-/// swapped endpoint or served-model set.
-#[derive(Serialize)]
-struct ProviderRegPreimage<'a> {
-    peer_id: &'a str,
-    provider_address: &'a str,
-    provider_type: &'a str,
-    rpc_endpoint: &'a str,
-    served_models: &'a [String],
-    pubkey: &'a [u8],
-}
-
 impl ProviderAnnouncementMessage {
-    /// Sign this announcement with the provider's Ed25519 key, populating
-    /// `pubkey` + `signature`. Call after all routable fields are set.
-    pub fn sign(
-        &mut self,
-        signer: &dyn tenzro_crypto::signatures::Signer,
-    ) -> Result<(), String> {
-        let pubkey = signer.public_key().as_bytes().to_vec();
-        let preimage = serde_json::to_vec(&ProviderRegPreimage {
-            peer_id: &self.peer_id,
-            provider_address: &self.provider_address,
-            provider_type: &self.provider_type,
-            rpc_endpoint: &self.rpc_endpoint,
-            served_models: &self.served_models,
-            pubkey: &pubkey,
-        })
-        .map_err(|e| e.to_string())?;
+    /// Sign this announcement with the provider's Ed25519 announce key,
+    /// populating `pubkey` + `signature`. Call after all fields are set —
+    /// the signature covers the entire struct (endpoint, served models,
+    /// hardware, status, timestamp, ttl), so no field can be mutated
+    /// post-signing without invalidating the signature.
+    pub fn sign(&mut self, signer: &dyn tenzro_crypto::signatures::Signer) -> Result<(), String> {
+        self.pubkey = signer.public_key().as_bytes().to_vec();
+        self.signature = Vec::new();
+        let preimage = announce_preimage(PROVIDER_ANNOUNCE_DOMAIN, self)?;
         let sig = signer.sign(&preimage).map_err(|e| e.to_string())?;
         self.signature = sig.as_bytes().to_vec();
-        self.pubkey = pubkey;
         Ok(())
     }
 
-    /// Verify the embedded signature over the canonical preimage. Returns an
-    /// error for unsigned (empty `pubkey`/`signature`) or tampered messages.
+    /// Verify the embedded signature over the whole-struct preimage. Returns
+    /// an error for unsigned (empty `pubkey`/`signature`) or tampered messages.
     pub fn verify(&self) -> Result<(), String> {
-        use tenzro_crypto::{
-            keys::{KeyType, PublicKey},
-            signatures::{verify, Signature},
-        };
         if self.pubkey.is_empty() || self.signature.is_empty() {
             return Err("unsigned provider announcement".to_string());
         }
-        let preimage = serde_json::to_vec(&ProviderRegPreimage {
-            peer_id: &self.peer_id,
-            provider_address: &self.provider_address,
-            provider_type: &self.provider_type,
-            rpc_endpoint: &self.rpc_endpoint,
-            served_models: &self.served_models,
-            pubkey: &self.pubkey,
-        })
-        .map_err(|e| e.to_string())?;
-        let pk = PublicKey::new(KeyType::Ed25519, self.pubkey.clone());
-        let sig = Signature::new(KeyType::Ed25519, self.signature.clone());
-        verify(&pk, &preimage, &sig).map_err(|e| e.to_string())
+        let mut unsigned = self.clone();
+        unsigned.signature = Vec::new();
+        verify_announce_signature(
+            PROVIDER_ANNOUNCE_DOMAIN,
+            &unsigned,
+            &self.pubkey,
+            &self.signature,
+        )
     }
 }
 
@@ -788,5 +808,138 @@ mod tests {
             .topic(),
             "test/topic"
         );
+    }
+
+    use tenzro_crypto::signatures::Signer;
+
+    fn test_signer() -> tenzro_crypto::signatures::Ed25519SignerImpl {
+        tenzro_crypto::signatures::Ed25519SignerImpl::generate().expect("keypair generation")
+    }
+
+    fn sample_model_announcement() -> ModelRegistrationMessage {
+        ModelRegistrationMessage {
+            model_id: "qwen3-0.6b".to_string(),
+            name: "Qwen 3 0.6B".to_string(),
+            provider: "0xabc".to_string(),
+            peer_id: "12D3KooWTest".to_string(),
+            rpc_endpoint: "http://10.0.0.1:8545".to_string(),
+            timestamp: 1_700_000_000_000,
+            ttl_secs: 120,
+            ..Default::default()
+        }
+    }
+
+    fn sample_provider_announcement() -> ProviderAnnouncementMessage {
+        ProviderAnnouncementMessage {
+            peer_id: "12D3KooWTest".to_string(),
+            provider_address: "0xabc".to_string(),
+            provider_type: "llm".to_string(),
+            served_models: vec!["qwen3-0.6b".to_string()],
+            capabilities: vec!["inference".to_string()],
+            rpc_endpoint: "http://10.0.0.1:8545".to_string(),
+            status: "active".to_string(),
+            timestamp: 1_700_000_000_000,
+            ttl_secs: 120,
+            runtime_support: RuntimeSupport::default(),
+            network_profile: NodeNetworkProfile::default(),
+            trust_profile: TrustProfile::default(),
+            worker_roles: Vec::new(),
+            hardware: HardwareCapabilities::default(),
+            geography: None,
+            cluster_profile: None,
+            pubkey: Vec::new(),
+            signature: Vec::new(),
+        }
+    }
+
+    fn sample_agent_announcement() -> AgentAnnouncementMessage {
+        AgentAnnouncementMessage {
+            agent_id: "agent-1".to_string(),
+            name: "Test Agent".to_string(),
+            agent_type: "custom".to_string(),
+            capabilities: vec!["chat".to_string()],
+            status: "active".to_string(),
+            origin_peer_id: "12D3KooWTest".to_string(),
+            rpc_endpoint: "http://10.0.0.1:8545".to_string(),
+            timestamp: 1_700_000_000_000,
+            ttl_secs: 180,
+            pubkey: Vec::new(),
+            signature: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_model_announcement_sign_verify_roundtrip() {
+        let signer = test_signer();
+        let mut msg = sample_model_announcement();
+        msg.sign(&signer).unwrap();
+        assert!(!msg.pubkey.is_empty());
+        assert!(!msg.signature.is_empty());
+        msg.verify().unwrap();
+    }
+
+    #[test]
+    fn test_model_announcement_tamper_rejected() {
+        let signer = test_signer();
+        let mut msg = sample_model_announcement();
+        msg.sign(&signer).unwrap();
+
+        let mut tampered = msg.clone();
+        tampered.rpc_endpoint = "http://evil:8545".to_string();
+        assert!(tampered.verify().is_err());
+
+        let mut tampered = msg.clone();
+        tampered.timestamp += 1;
+        assert!(tampered.verify().is_err());
+
+        let mut tampered = msg.clone();
+        tampered.withdrawn = true;
+        assert!(tampered.verify().is_err());
+    }
+
+    #[test]
+    fn test_unsigned_announcements_rejected() {
+        assert!(sample_model_announcement().verify().is_err());
+        assert!(sample_provider_announcement().verify().is_err());
+        assert!(sample_agent_announcement().verify().is_err());
+    }
+
+    #[test]
+    fn test_provider_announcement_sign_verify_roundtrip() {
+        let signer = test_signer();
+        let mut msg = sample_provider_announcement();
+        msg.sign(&signer).unwrap();
+        msg.verify().unwrap();
+
+        let mut tampered = msg.clone();
+        tampered.served_models.push("other-model".to_string());
+        assert!(tampered.verify().is_err());
+    }
+
+    #[test]
+    fn test_agent_announcement_sign_verify_roundtrip() {
+        let signer = test_signer();
+        let mut msg = sample_agent_announcement();
+        msg.sign(&signer).unwrap();
+        msg.verify().unwrap();
+
+        let mut tampered = msg.clone();
+        tampered.origin_peer_id = "12D3KooWEvil".to_string();
+        assert!(tampered.verify().is_err());
+    }
+
+    #[test]
+    fn test_announcement_key_substitution_rejected() {
+        // An attacker re-signing someone else's announcement with their own
+        // key produces a self-consistent message; consumers detect this via
+        // first-seen pubkey pinning, but the raw signature must also fail
+        // when only the pubkey is swapped without re-signing.
+        let signer = test_signer();
+        let other = test_signer();
+        let mut msg = sample_provider_announcement();
+        msg.sign(&signer).unwrap();
+        let mut swapped = msg.clone();
+        swapped.pubkey = other.public_key().as_bytes().to_vec();
+        assert!(swapped.verify().is_err());
     }
 }

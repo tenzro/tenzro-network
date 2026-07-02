@@ -761,6 +761,14 @@ pub struct InferenceProvider {
     pub status: ProviderStatus,
     /// Registration timestamp
     pub registered_at: Timestamp,
+    /// Registered Ed25519 response-signing public key. When set, the
+    /// provider commits to attaching a `tenzro_provenance` manifest
+    /// signed by this key to every inference response, and routers can
+    /// verify manifests against it. `None` means the provider serves
+    /// unsigned responses — it remains fully routable; response
+    /// verification is strictly opt-in per request.
+    #[serde(default)]
+    pub signing_pubkey: Option<Vec<u8>>,
 }
 
 impl InferenceProvider {
@@ -777,12 +785,19 @@ impl InferenceProvider {
             total_inferences: 0,
             status: ProviderStatus::Pending,
             registered_at: Timestamp::now(),
+            signing_pubkey: None,
         }
     }
 
     /// Sets the provider's OpenAI-compatible API endpoint URL
     pub fn with_endpoint_url(mut self, url: impl Into<String>) -> Self {
         self.endpoint_url = Some(url.into());
+        self
+    }
+
+    /// Sets the provider's registered response-signing public key
+    pub fn with_signing_pubkey(mut self, pubkey: Vec<u8>) -> Self {
+        self.signing_pubkey = Some(pubkey);
         self
     }
 

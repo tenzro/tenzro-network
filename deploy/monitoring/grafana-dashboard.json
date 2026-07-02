@@ -26,21 +26,37 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 1000},
-              {"color": "red", "value": 10000}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1000
+              },
+              {
+                "color": "red",
+                "value": 10000
+              }
             ]
           },
           "unit": "none"
         }
       },
-      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "options": {
         "orientation": "auto",
         "reduceOptions": {
           "values": false,
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": ""
         },
         "showThresholdLabels": false,
@@ -60,7 +76,9 @@
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -71,19 +89,31 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "unit": "ops"
         }
       },
-      "gridPos": {"h": 8, "w": 9, "x": 6, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 6,
+        "y": 0
+      },
       "id": 2,
       "options": {
         "legend": {
@@ -91,11 +121,13 @@
           "displayMode": "list",
           "placement": "bottom"
         },
-        "tooltip": {"mode": "single"}
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "targets": [
         {
-          "expr": "rate(tenzro_transactions_total[1m])",
+          "expr": "rate(tenzro_transactions_processed_total[1m])",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
@@ -111,21 +143,37 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red", "value": null},
-              {"color": "yellow", "value": 3},
-              {"color": "green", "value": 5}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 3
+              },
+              {
+                "color": "green",
+                "value": 5
+              }
             ]
           },
           "unit": "none"
         }
       },
-      "gridPos": {"h": 8, "w": 6, "x": 15, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 15,
+        "y": 0
+      },
       "id": 3,
       "options": {
         "orientation": "auto",
         "reduceOptions": {
           "values": false,
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": ""
         },
         "showThresholdLabels": false,
@@ -146,7 +194,9 @@
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -157,48 +207,67 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "unit": "s"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
       "id": 4,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "right"
         },
-        "tooltip": {"mode": "single"}
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(tenzro_consensus_round_duration_seconds_bucket[5m]))",
-          "legendFormat": "p95",
+          "expr": "tenzro_consensus_last_finalized_age_seconds",
+          "legendFormat": "last finalized age (s) {{instance}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, rate(tenzro_consensus_round_duration_seconds_bucket[5m]))",
-          "legendFormat": "p99",
+          "expr": "rate(tenzro_consensus_view_timeouts_total[5m])",
+          "legendFormat": "view timeouts/s {{instance}}",
           "refId": "B"
         }
       ],
-      "title": "Consensus Round Time",
+      "title": "Finality",
       "type": "timeseries"
     },
     {
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -209,27 +278,43 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "unit": "bytes"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
       "id": 5,
       "options": {
         "legend": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "displayMode": "list",
           "placement": "bottom"
         },
-        "tooltip": {"mode": "multi"}
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
         {
@@ -245,7 +330,9 @@
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -256,27 +343,43 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "unit": "percentunit"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
       "id": 6,
       "options": {
         "legend": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "displayMode": "list",
           "placement": "bottom"
         },
-        "tooltip": {"mode": "multi"}
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
         {
@@ -292,7 +395,9 @@
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -303,43 +408,61 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
-          "unit": "bytes"
+          "unit": "short"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
       "id": 7,
       "options": {
         "legend": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "displayMode": "list",
           "placement": "bottom"
         },
-        "tooltip": {"mode": "multi"}
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
         {
-          "expr": "tenzro_storage_size_bytes",
-          "legendFormat": "{{instance}}",
+          "expr": "tenzro_mempool_size",
+          "legendFormat": "pending txs {{instance}}",
           "refId": "A"
         }
       ],
-      "title": "Storage Size",
+      "title": "Mempool",
       "type": "timeseries"
     },
     {
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -350,43 +473,62 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "unit": "reqps"
         }
       },
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24},
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
       "id": 8,
       "options": {
         "legend": {
-          "calcs": ["mean", "max"],
+          "calcs": [
+            "mean",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "right"
         },
-        "tooltip": {"mode": "multi"}
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
         {
-          "expr": "rate(tenzro_rpc_requests_total[1m])",
-          "legendFormat": "{{method}} - {{instance}}",
+          "expr": "rate(tenzro_inference_requests_total[1m])",
+          "legendFormat": "inferences/s {{instance}}",
           "refId": "A"
         }
       ],
-      "title": "RPC Request Rate",
+      "title": "Inference Request Rate",
       "type": "timeseries"
     },
     {
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -397,27 +539,56 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "unit": "ops"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
       "id": 9,
       "options": {
-        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right"},
-        "tooltip": {"mode": "multi"}
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
-        {"expr": "rate(tenzro_network_gossip_accepted_total[1m])", "legendFormat": "accepted - {{instance}}", "refId": "A"},
-        {"expr": "rate(tenzro_network_gossip_published_total[1m])", "legendFormat": "published - {{instance}}", "refId": "B"}
+        {
+          "expr": "rate(tenzro_network_gossip_accepted_total[1m])",
+          "legendFormat": "accepted - {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(tenzro_network_gossip_published_total[1m])",
+          "legendFormat": "published - {{instance}}",
+          "refId": "B"
+        }
       ],
       "title": "Gossipsub Throughput (msg/s)",
       "type": "timeseries"
@@ -426,7 +597,9 @@
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -437,33 +610,73 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false,
-            "stacking": {"mode": "normal", "group": "A"}
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 10},
-              {"color": "red", "value": 100}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
             ]
           },
           "unit": "ops"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
       "id": 10,
       "options": {
-        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right"},
-        "tooltip": {"mode": "multi"}
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
-        {"expr": "rate(tenzro_network_gossip_rejected_invalid_total[1m])", "legendFormat": "invalid - {{instance}}", "refId": "A"},
-        {"expr": "rate(tenzro_network_gossip_rejected_duplicate_total[1m])", "legendFormat": "duplicate - {{instance}}", "refId": "B"},
-        {"expr": "rate(tenzro_network_gossip_rejected_validator_only_total[1m])", "legendFormat": "unauthorized - {{instance}}", "refId": "C"}
+        {
+          "expr": "rate(tenzro_network_gossip_rejected_invalid_total[1m])",
+          "legendFormat": "invalid - {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(tenzro_network_gossip_rejected_duplicate_total[1m])",
+          "legendFormat": "duplicate - {{instance}}",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(tenzro_network_gossip_rejected_validator_only_total[1m])",
+          "legendFormat": "unauthorized - {{instance}}",
+          "refId": "C"
+        }
       ],
       "title": "Gossipsub Rejections (msg/s)",
       "type": "timeseries"
@@ -472,7 +685,9 @@
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -483,7 +698,9 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
@@ -491,23 +708,54 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 1},
-              {"color": "red", "value": 10}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
             ]
           },
           "unit": "ops"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
       "id": 11,
       "options": {
-        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right"},
-        "tooltip": {"mode": "multi"}
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
-        {"expr": "rate(tenzro_network_dials_rejected_per_ip_total[1m])", "legendFormat": "per-IP - {{instance}}", "refId": "A"},
-        {"expr": "rate(tenzro_network_dials_rejected_global_total[1m])", "legendFormat": "global - {{instance}}", "refId": "B"}
+        {
+          "expr": "rate(tenzro_network_dials_rejected_per_ip_total[1m])",
+          "legendFormat": "per-IP - {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(tenzro_network_dials_rejected_global_total[1m])",
+          "legendFormat": "global - {{instance}}",
+          "refId": "B"
+        }
       ],
       "title": "Dial Rate-Limit Rejections (deny/s)",
       "type": "timeseries"
@@ -516,7 +764,9 @@
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -527,28 +777,60 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "unit": "none"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
       "id": 12,
       "options": {
-        "legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "right"},
-        "tooltip": {"mode": "multi"}
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
-        {"expr": "tenzro_network_connections_established", "legendFormat": "established - {{instance}}", "refId": "A"},
-        {"expr": "rate(tenzro_network_connections_inbound_total[5m]) * 60", "legendFormat": "inbound/min - {{instance}}", "refId": "B"},
-        {"expr": "rate(tenzro_network_connections_outbound_total[5m]) * 60", "legendFormat": "outbound/min - {{instance}}", "refId": "C"}
+        {
+          "expr": "tenzro_network_connections_established",
+          "legendFormat": "established - {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(tenzro_network_connections_inbound_total[5m]) * 60",
+          "legendFormat": "inbound/min - {{instance}}",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(tenzro_network_connections_outbound_total[5m]) * 60",
+          "legendFormat": "outbound/min - {{instance}}",
+          "refId": "C"
+        }
       ],
       "title": "libp2p Connections",
       "type": "timeseries"
@@ -561,25 +843,49 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red", "value": null},
-              {"color": "yellow", "value": 3},
-              {"color": "green", "value": 8}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 3
+              },
+              {
+                "color": "green",
+                "value": 8
+              }
             ]
           },
           "unit": "none"
         }
       },
-      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 48},
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 48
+      },
       "id": 13,
       "options": {
         "orientation": "auto",
-        "reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""},
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
         "showThresholdLabels": false,
         "showThresholdMarkers": true
       },
       "pluginVersion": "9.0.0",
       "targets": [
-        {"expr": "tenzro_network_gossipsub_mesh_size", "legendFormat": "{{instance}}", "refId": "A"}
+        {
+          "expr": "tenzro_network_gossipsub_mesh_size",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
       ],
       "title": "Gossipsub Mesh Size",
       "type": "gauge"
@@ -592,25 +898,49 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red", "value": null},
-              {"color": "yellow", "value": 10},
-              {"color": "green", "value": 20}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 20
+              }
             ]
           },
           "unit": "none"
         }
       },
-      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 48},
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 48
+      },
       "id": 14,
       "options": {
         "orientation": "auto",
-        "reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""},
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
         "showThresholdLabels": false,
         "showThresholdMarkers": true
       },
       "pluginVersion": "9.0.0",
       "targets": [
-        {"expr": "tenzro_network_kad_routing_table_size", "legendFormat": "{{instance}}", "refId": "A"}
+        {
+          "expr": "tenzro_network_kad_routing_table_size",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
       ],
       "title": "Kademlia Routing Table Size",
       "type": "gauge"
@@ -619,7 +949,9 @@
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -630,27 +962,55 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [{"color": "green", "value": null}]
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
           },
           "unit": "none"
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
       "id": 15,
       "options": {
-        "legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "right"},
-        "tooltip": {"mode": "multi"}
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
-        {"expr": "tenzro_network_peers_connected", "legendFormat": "connected - {{instance}}", "refId": "A"},
-        {"expr": "tenzro_network_peers_banned", "legendFormat": "banned - {{instance}}", "refId": "B"}
+        {
+          "expr": "tenzro_network_peers_connected",
+          "legendFormat": "connected - {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "tenzro_network_peers_banned",
+          "legendFormat": "banned - {{instance}}",
+          "refId": "B"
+        }
       ],
       "title": "Peers (Connected vs Banned)",
       "type": "timeseries"
@@ -659,7 +1019,9 @@
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisLabel": "",
             "axisPlacement": "auto",
@@ -670,7 +1032,9 @@
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
-            "scaleDistribution": {"type": "linear"},
+            "scaleDistribution": {
+              "type": "linear"
+            },
             "showPoints": "never",
             "spanNulls": false
           },
@@ -678,22 +1042,49 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 0.1},
-              {"color": "red", "value": 1}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
             ]
           },
           "unit": "ops"
         }
       },
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 56},
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
       "id": 16,
       "options": {
-        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right"},
-        "tooltip": {"mode": "multi"}
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
-        {"expr": "rate(tenzro_network_events_dropped_total[5m])", "legendFormat": "events dropped - {{instance}}", "refId": "A"}
+        {
+          "expr": "rate(tenzro_network_events_dropped_total[5m])",
+          "legendFormat": "events dropped - {{instance}}",
+          "refId": "A"
+        }
       ],
       "title": "Swarm Event Channel Back-pressure (drops/s)",
       "type": "timeseries"
@@ -701,7 +1092,10 @@
   ],
   "schemaVersion": 36,
   "style": "dark",
-  "tags": ["tenzro", "blockchain"],
+  "tags": [
+    "tenzro",
+    "blockchain"
+  ],
   "templating": {
     "list": [
       {

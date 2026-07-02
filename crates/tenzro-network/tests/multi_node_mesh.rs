@@ -19,9 +19,11 @@ use libp2p::{Multiaddr, PeerId};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
+use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_network::{
-    MessagePayload, NetworkConfig, NetworkMessage, NetworkService, TenzroNetworkService,
-    ValidatorRegistry,
+    binding_payload, encode_agent_binding, load_or_generate_keypair, MessagePayload,
+    NetworkConfig, NetworkMessage, NetworkService, TenzroNetworkService, ValidatorRegistry,
 };
 use tokio::time::timeout;
 
@@ -60,6 +62,53 @@ async fn spawn_node() -> (TenzroNetworkService, Vec<Multiaddr>) {
         let tcp = tcp_addrs(&addrs);
         if !tcp.is_empty() {
             return (service, tcp);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "node never bound a TCP listen address after 5s; addrs={:?}",
+                addrs
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Spawns a node whose Identify `agent_version` carries a signed
+/// PeerId↔validator-identity binding, mirroring the production validator
+/// startup flow: pre-generate the persistent p2p key to learn the local
+/// PeerId, sign the binding payload with a fresh validator Ed25519 key,
+/// and attach the token to `user_agent`. Returns the service, its bound
+/// TCP addresses, and the validator public key for registry seeding.
+async fn spawn_bound_validator_node() -> (TenzroNetworkService, Vec<Multiaddr>, Vec<u8>) {
+    let dir = std::env::temp_dir().join(format!("tenzro-mesh-test-{}", uuid::Uuid::new_v4()));
+    let data_dir = Some(dir);
+
+    let p2p_key = load_or_generate_keypair(&data_dir).expect("p2p keypair");
+    let peer_id = PeerId::from(p2p_key.public());
+
+    let validator_key = KeyPair::generate(KeyType::Ed25519).unwrap();
+    let validator_pubkey = validator_key.public_key().to_bytes();
+    let signer = Ed25519SignerImpl::new(validator_key).unwrap();
+    let sig = signer.sign(&binding_payload(&peer_id)).unwrap();
+
+    let mut config = NetworkConfig::local();
+    config.data_dir = data_dir;
+    config.user_agent =
+        encode_agent_binding(&config.user_agent, &validator_pubkey, &sig.to_bytes());
+
+    let service = TenzroNetworkService::new(config)
+        .await
+        .expect("network service spawned");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let addrs = service
+            .listen_addresses()
+            .await
+            .expect("listen_addresses() succeeds");
+        let tcp = tcp_addrs(&addrs);
+        if !tcp.is_empty() {
+            return (service, tcp, validator_pubkey);
         }
         if tokio::time::Instant::now() >= deadline {
             panic!(
@@ -372,9 +421,12 @@ async fn validator_registry_blocks_unknown_publisher() {
 }
 
 /// Dynamic-admission registry that mirrors `NodeValidatorRegistry`: it
-/// starts empty and admits peers via `try_add_validator()` once identify
-/// confirms a Tenzro protocol version. This is the production behavior.
+/// starts with an identity allow-list (validator Ed25519 pubkeys) but an
+/// empty PeerId set, and admits peers via `try_add_validator()` once
+/// identify delivers a verified PeerId↔identity binding for one of the
+/// allowed identities. This is the production behavior.
 struct DynamicValidatorRegistry {
+    identities: HashSet<Vec<u8>>,
     inner: Arc<dashmap::DashMap<PeerId, ()>>,
 }
 
@@ -385,8 +437,11 @@ impl ValidatorRegistry for DynamicValidatorRegistry {
     fn validator_peer_ids(&self) -> HashSet<PeerId> {
         self.inner.iter().map(|e| *e.key()).collect()
     }
-    fn try_add_validator(&self, peer_id: &PeerId) {
-        if !self.inner.contains_key(peer_id) {
+    fn is_validator_identity(&self, ed25519_pubkey: &[u8]) -> bool {
+        self.identities.contains(ed25519_pubkey)
+    }
+    fn try_add_validator(&self, peer_id: &PeerId, validator_pubkey: &[u8]) {
+        if self.identities.contains(validator_pubkey) && !self.inner.contains_key(peer_id) {
             self.inner.insert(*peer_id, ());
             tracing::info!(peer = %peer_id, "DynamicValidatorRegistry admitted peer");
         }
@@ -410,15 +465,20 @@ impl ValidatorRegistry for DynamicValidatorRegistry {
 async fn dynamic_admission_via_identify_propagates_consensus() {
     let _ = tracing_subscriber::fmt::try_init();
 
-    let (n0, addrs_0) = spawn_node().await;
-    let (n1, _) = spawn_node().await;
-    let (n2, _) = spawn_node().await;
-    let (n3, _) = spawn_node().await;
+    let (n0, addrs_0, pk0) = spawn_bound_validator_node().await;
+    let (n1, _, pk1) = spawn_bound_validator_node().await;
+    let (n2, _, pk2) = spawn_bound_validator_node().await;
+    let (n3, _, pk3) = spawn_bound_validator_node().await;
 
-    // Each node gets ITS OWN empty registry — admission happens via
-    // identify, not via prior knowledge of the validator set.
+    // Each node gets ITS OWN registry with an empty PeerId set — PeerId
+    // admission happens via identify bindings, not via prior knowledge —
+    // but the validator *identity* allow-list (the epoch/genesis set) is
+    // shared knowledge, as it is in production.
+    let identities: HashSet<Vec<u8>> =
+        [pk0.clone(), pk1.clone(), pk2.clone(), pk3.clone()].into_iter().collect();
     for n in [&n0, &n1, &n2, &n3] {
         let reg = Arc::new(DynamicValidatorRegistry {
+            identities: identities.clone(),
             inner: Arc::new(dashmap::DashMap::new()),
         });
         n.set_validator_registry(reg).await.unwrap();
@@ -478,13 +538,16 @@ async fn dynamic_admission_via_identify_propagates_consensus() {
 async fn wait_for_admitted_mesh_is_sufficient_first_publish_gate() {
     let _ = tracing_subscriber::fmt::try_init();
 
-    let (n0, addrs_0) = spawn_node().await;
-    let (n1, _) = spawn_node().await;
-    let (n2, _) = spawn_node().await;
-    let (n3, _) = spawn_node().await;
+    let (n0, addrs_0, pk0) = spawn_bound_validator_node().await;
+    let (n1, _, pk1) = spawn_bound_validator_node().await;
+    let (n2, _, pk2) = spawn_bound_validator_node().await;
+    let (n3, _, pk3) = spawn_bound_validator_node().await;
 
+    let identities: HashSet<Vec<u8>> =
+        [pk0.clone(), pk1.clone(), pk2.clone(), pk3.clone()].into_iter().collect();
     for n in [&n0, &n1, &n2, &n3] {
         let reg = Arc::new(DynamicValidatorRegistry {
+            identities: identities.clone(),
             inner: Arc::new(dashmap::DashMap::new()),
         });
         n.set_validator_registry(reg).await.unwrap();

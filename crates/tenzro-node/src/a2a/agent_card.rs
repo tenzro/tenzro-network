@@ -1054,7 +1054,10 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 description: "Decentralized mixture-of-experts expert-shard serving. Read the \
                               shard map for a model, build a dispatch plan from per-token top-k \
                               routing decisions, read the governance-tuned replication policy, \
-                              and read the catalog-side MoE topology."
+                              read the catalog-side MoE topology, load per-expert and gating \
+                              weight blobs into the local expert runtime, and run distributed \
+                              layer forwards that fan hidden states out to expert holders over \
+                              local, iroh, or HTTP transports and gather gate-weighted outputs."
                     .to_string(),
                 tags: vec![
                     "moe".to_string(),
@@ -1062,11 +1065,14 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                     "dispatch".to_string(),
                     "replication".to_string(),
                     "inference".to_string(),
+                    "expert-execution".to_string(),
                 ],
                 examples: vec![
                     "Show the MoE shard map for a model".to_string(),
                     "Plan dispatch for top-k routings on a model".to_string(),
                     "Read the catalog MoE topology for a model".to_string(),
+                    "Load an expert weight blob for layer 4 expert 17".to_string(),
+                    "Run a distributed MoE forward for one layer".to_string(),
                 ],
                 input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
                 output_modes: vec!["application/json".to_string()],

@@ -28,7 +28,7 @@ use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_identity::IdentityRegistry;
 use tenzro_model::{
     AudioRuntime, DetectionRuntime, HfDownloader, InferenceRouter, ModelRegistry, ModelRuntime,
-    ProviderManager, SegmentationRuntime, TextEmbeddingRuntime, TextSegmentationRuntime,
+    MtpKind, ProviderManager, SegmentationRuntime, TextEmbeddingRuntime, TextSegmentationRuntime,
     TimeseriesRuntime, VideoRuntime,
     VisionRuntime,
 };
@@ -100,14 +100,11 @@ impl StakingSlashingCallback {
     }
 }
 
-impl SlashingCallback for StakingSlashingCallback {
-    fn report_equivocation(
-        &self,
-        validator: &Address,
-        view: u64,
-        evidence: &EquivocationEvidence,
-    ) {
-        // Slash 10% of the validator's stake for equivocation
+impl StakingSlashingCallback {
+    /// Shared slash path for consensus offences: slash 10% of the
+    /// validator's stake, drop them from the next-epoch pending queue,
+    /// and jail them in the permissionless registry.
+    fn slash_for_consensus_offence(&self, validator: &Address, view: u64, reason: String) {
         let slash_amount = self.staking.get_stake(validator)
             .map(|info| info.amount / 10)
             .unwrap_or(0);
@@ -116,17 +113,10 @@ impl SlashingCallback for StakingSlashingCallback {
             tracing::warn!(
                 validator = %validator,
                 view = view,
-                "Equivocation detected but validator has no stake to slash"
+                "Consensus offence detected but validator has no stake to slash"
             );
             return;
         }
-
-        let reason = format!(
-            "Equivocation in view {}: voted for blocks {} and {}",
-            view,
-            evidence.vote1.block_hash,
-            evidence.vote2.block_hash,
-        );
 
         match self.staking.slash(validator, slash_amount, reason, Address::default()) {
             Ok(()) => {
@@ -134,7 +124,7 @@ impl SlashingCallback for StakingSlashingCallback {
                     validator = %validator,
                     view = view,
                     slash_amount = slash_amount,
-                    "Slashed validator for equivocation"
+                    "Slashed validator for consensus offence"
                 );
 
                 // Drop the slashed validator from the next epoch's pending
@@ -184,10 +174,42 @@ impl SlashingCallback for StakingSlashingCallback {
                     validator = %validator,
                     view = view,
                     error = %e,
-                    "Failed to slash validator for equivocation"
+                    "Failed to slash validator for consensus offence"
                 );
             }
         }
+    }
+}
+
+impl SlashingCallback for StakingSlashingCallback {
+    fn report_equivocation(
+        &self,
+        validator: &Address,
+        view: u64,
+        evidence: &EquivocationEvidence,
+    ) {
+        let reason = format!(
+            "Equivocation in view {}: voted for blocks {} and {}",
+            view,
+            evidence.vote1.block_hash,
+            evidence.vote2.block_hash,
+        );
+        self.slash_for_consensus_offence(validator, view, reason);
+    }
+
+    fn report_proposal_equivocation(
+        &self,
+        proposer: &Address,
+        view: u64,
+        evidence: &tenzro_consensus::ProposalEquivocationEvidence,
+    ) {
+        let reason = format!(
+            "Proposal equivocation in view {}: signed blocks {} and {}",
+            view,
+            evidence.proposal1.block_hash,
+            evidence.proposal2.block_hash,
+        );
+        self.slash_for_consensus_offence(proposer, view, reason);
     }
 }
 
@@ -631,6 +653,17 @@ impl tenzro_token::governance::ProposalExecutor for TenzroProposalExecutor {
 pub struct NodeValidatorRegistry {
     /// Set of PeerIds known to be active validators
     validator_peers: DashMap<libp2p::PeerId, ()>,
+    /// Validator identity Ed25519 public keys seeded from the genesis
+    /// validator set. Used as the identity check for peers whose signed
+    /// PeerId↔identity binding arrives before (or without) a live consensus
+    /// engine — e.g. on non-validator nodes that still gate validator-only
+    /// gossip topics.
+    genesis_identities: DashMap<Vec<u8>, ()>,
+    /// Live epoch manager handle, installed once consensus is initialized.
+    /// When present, identity checks consult the CURRENT epoch validator set
+    /// so that validators admitted after genesis (stake-based joins) are
+    /// recognized and validators rotated out stop being admitted.
+    epoch_manager: parking_lot::RwLock<Option<Arc<EpochManager>>>,
 }
 
 impl Default for NodeValidatorRegistry {
@@ -644,6 +677,8 @@ impl NodeValidatorRegistry {
     pub fn new() -> Self {
         Self {
             validator_peers: DashMap::new(),
+            genesis_identities: DashMap::new(),
+            epoch_manager: parking_lot::RwLock::new(None),
         }
     }
 
@@ -651,6 +686,17 @@ impl NodeValidatorRegistry {
     pub fn add_validator(&self, peer_id: libp2p::PeerId) {
         self.validator_peers.insert(peer_id, ());
         tracing::info!(peer = %peer_id, "Registered validator peer");
+    }
+
+    /// Seeds a validator identity Ed25519 public key (from genesis config).
+    pub fn add_identity(&self, ed25519_pubkey: Vec<u8>) {
+        self.genesis_identities.insert(ed25519_pubkey, ());
+    }
+
+    /// Installs the live epoch manager so identity checks track the current
+    /// epoch validator set instead of the static genesis set.
+    pub fn set_epoch_manager(&self, epoch_manager: Arc<EpochManager>) {
+        *self.epoch_manager.write() = Some(epoch_manager);
     }
 
     /// Removes a PeerId from the validator set.
@@ -675,23 +721,46 @@ impl tenzro_network::ValidatorRegistry for NodeValidatorRegistry {
         self.validator_peers.iter().map(|entry| *entry.key()).collect()
     }
 
-    /// Dynamically admit a peer as a validator after it has completed a Tenzro
-    /// identify handshake. This closes the "mutual ban" gap where peers that
-    /// come online after the static boot-node list was wired would never be
-    /// admitted to validator topics (consensus / attestations), resulting in
-    /// their messages being rejected and their gossipsub peer-score decaying
-    /// below the graylist threshold.
+    /// Checks whether an Ed25519 public key belongs to an active validator
+    /// identity. Consults the live epoch validator set when consensus is
+    /// running (so stake-based joins and rotations are tracked), falling
+    /// back to the genesis validator identities otherwise.
+    fn is_validator_identity(&self, ed25519_pubkey: &[u8]) -> bool {
+        if let Some(epoch_manager) = self.epoch_manager.read().as_ref() {
+            let epoch = epoch_manager.current_epoch();
+            return epoch
+                .validator_set
+                .iter()
+                .any(|v| v.is_active() && v.public_key.as_bytes() == ed25519_pubkey);
+        }
+        self.genesis_identities.contains_key(ed25519_pubkey)
+    }
+
+    /// Dynamically admit a peer as a validator after the network layer has
+    /// verified its signed PeerId↔validator-identity binding. This closes
+    /// the "mutual ban" gap where peers that come online after the static
+    /// boot-node list was wired would never be admitted to validator topics
+    /// (consensus / attestations), resulting in their messages being
+    /// rejected and their gossipsub peer-score decaying below the graylist
+    /// threshold.
     ///
-    /// The network layer only calls this after verifying the peer's protocol
-    /// prefix matches `"tenzro/"`, so any admitted peer is at minimum a Tenzro
-    /// node. On epoch rotation the full validator set can still be re-synced
-    /// from on-chain stake state.
-    fn try_add_validator(&self, peer_id: &libp2p::PeerId) {
+    /// The network layer only calls this after verifying the binding
+    /// signature over the transport-authenticated PeerId AND checking
+    /// `is_validator_identity`; the identity membership is re-checked here
+    /// as defense in depth.
+    fn try_add_validator(&self, peer_id: &libp2p::PeerId, validator_pubkey: &[u8]) {
+        if !self.is_validator_identity(validator_pubkey) {
+            tracing::warn!(
+                peer = %peer_id,
+                "Refusing validator admission: pubkey not in active validator set"
+            );
+            return;
+        }
         if !self.validator_peers.contains_key(peer_id) {
             self.validator_peers.insert(*peer_id, ());
             tracing::info!(
                 peer = %peer_id,
-                "Dynamically registered validator peer via identify"
+                "Registered validator peer via verified identity binding"
             );
         }
     }
@@ -701,6 +770,82 @@ impl tenzro_network::ValidatorRegistry for NodeValidatorRegistry {
     /// consistent with peer admission state.
     fn try_remove_validator(&self, peer_id: &libp2p::PeerId) {
         self.remove_validator(peer_id);
+    }
+}
+
+/// Durable peer-ban store backed by RocksDB (`CF_METADATA`, `peer_ban:` prefix).
+///
+/// Bans survive node restarts: the peer manager hydrates active bans on
+/// startup and re-blocks them at the libp2p transport layer, so a misbehaving
+/// peer cannot escape its ban window by waiting for an operator restart.
+/// Values are the ban-expiry wall-clock time as 8-byte little-endian Unix
+/// seconds (`Instant` is monotonic-only and cannot cross process restarts).
+pub struct NodeBanStore {
+    storage: Arc<dyn KvStore>,
+}
+
+const PEER_BAN_KEY_PREFIX: &str = "peer_ban:";
+
+impl NodeBanStore {
+    pub fn new(storage: Arc<dyn KvStore>) -> Self {
+        Self { storage }
+    }
+
+    fn key(peer_id: &libp2p::PeerId) -> String {
+        format!("{}{}", PEER_BAN_KEY_PREFIX, peer_id)
+    }
+}
+
+impl tenzro_network::BanStore for NodeBanStore {
+    fn record_ban(&self, peer_id: &libp2p::PeerId, until_unix_secs: u64) {
+        if let Err(e) = self.storage.put(
+            tenzro_storage::CF_METADATA,
+            Self::key(peer_id).as_bytes(),
+            &until_unix_secs.to_le_bytes(),
+        ) {
+            warn!(peer = %peer_id, "Failed to persist peer ban: {}", e);
+        }
+    }
+
+    fn remove_ban(&self, peer_id: &libp2p::PeerId) {
+        if let Err(e) = self
+            .storage
+            .delete(tenzro_storage::CF_METADATA, Self::key(peer_id).as_bytes())
+        {
+            warn!(peer = %peer_id, "Failed to remove persisted peer ban: {}", e);
+        }
+    }
+
+    fn load_bans(&self) -> Vec<(libp2p::PeerId, u64)> {
+        let entries = match self.storage.scan_prefix(
+            tenzro_storage::CF_METADATA,
+            PEER_BAN_KEY_PREFIX.as_bytes(),
+        ) {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!("Failed to list persisted peer bans: {}", e);
+                return Vec::new();
+            }
+        };
+        let mut bans = Vec::new();
+        for (key, value) in entries {
+            let Ok(key_str) = std::str::from_utf8(&key) else {
+                continue;
+            };
+            let Some(peer_str) = key_str.strip_prefix(PEER_BAN_KEY_PREFIX) else {
+                continue;
+            };
+            let (Ok(peer_id), Ok(until)) = (
+                peer_str.parse::<libp2p::PeerId>(),
+                <[u8; 8]>::try_from(value.as_slice()).map(u64::from_le_bytes),
+            ) else {
+                warn!(key = %key_str, "Dropping malformed persisted peer ban");
+                let _ = self.storage.delete(tenzro_storage::CF_METADATA, &key);
+                continue;
+            };
+            bans.push((peer_id, until));
+        }
+        bans
     }
 }
 
@@ -1375,6 +1520,12 @@ pub struct TenzroNode {
     /// (reader). Shared via `Arc` so both producer and consumer see the
     /// same SHA-256-keyed manifest cache.
     provenance_store: Option<Arc<tenzro_model::ProvenanceStore>>,
+    /// Provenance signer used when this node serves a model itself — the
+    /// `/v1/chat/completions` handler stamps a `tenzro_provenance` manifest
+    /// on locally-generated responses with it. Built from the node's
+    /// long-term Ed25519 key so the manifest verifies against the
+    /// announcement pubkey consumers pinned.
+    provenance_signer: Option<tenzro_model::SharedProvenanceSigner>,
     agent_runtime: Option<Arc<AgentRuntime>>,
     swarm_manager: Option<Arc<SwarmManager>>,
 
@@ -1405,6 +1556,11 @@ pub struct TenzroNode {
     /// persistence to CF_TRAINING_RUNS / CF_TRAINING_RECEIPTS once storage
     /// is available.
     pub training_runtime: Arc<tenzro_training::TrainingRuntime>,
+
+    /// MoE expert-host runtime — per-expert FFN weights + gating networks
+    /// for distributed mixture-of-experts serving. Serves both the local
+    /// `tenzro_moe*` RPC surface and the `tenzro/moe` iroh ALPN.
+    pub moe_runtime: Arc<tenzro_model::MoeExpertRuntime>,
 
     /// Shared iroh endpoint resolver (Phase C1, #219). Constructed at node
     /// startup when `NodeConfig::iroh` is `Some`; held here so every
@@ -1822,6 +1978,7 @@ impl TenzroNode {
             inference_router: None,
             usage_tracker: None,
             provenance_store: None,
+            provenance_signer: None,
             agent_runtime: None,
             swarm_manager: None,
             liveness_sweeper: None,
@@ -1836,6 +1993,7 @@ impl TenzroNode {
             audio_runtime: Arc::new(AudioRuntime::new()),
             video_runtime: Arc::new(VideoRuntime::new()),
             training_runtime: Arc::new(tenzro_training::TrainingRuntime::new()),
+            moe_runtime: Arc::new(tenzro_model::MoeExpertRuntime::new()),
             iroh_resolver: None,
             iroh_a2a_dispatcher: None,
             iroh_mcp_handler: None,
@@ -2095,12 +2253,15 @@ impl TenzroNode {
         self.init_wallet().await?;
 
         // 6b. Load the node Ed25519 signer used to authenticate outbound
-        // model + provider gossip announcements. Role-independent: model
-        // providers sign announcements too, not just validators. Byte-shared
-        // with the validator identity that derives peer_id. An absent key
-        // leaves the signer as `None` — the node boots, but its announcements
-        // won't be broadcast (consumers drop unsigned announcements). A key
-        // that exists but is unreadable/corrupt is a hard error.
+        // model / provider / agent gossip announcements. Role-independent:
+        // model providers sign announcements too, not just validators. This
+        // is a DIFFERENT keypair from the libp2p transport key that derives
+        // peer_id (`{data_dir}/p2p_key`) — consumers bind announcements to
+        // this pubkey via first-seen pinning, not peer_id derivation. An
+        // absent key leaves the signer as `None` — the node boots, but its
+        // announcements won't be broadcast (consumers drop unsigned
+        // announcements). A key that exists but is unreadable/corrupt is a
+        // hard error.
         match crate::keygen::load_validator_keypair(&self.config.data_dir) {
             Ok(announce_keypair) => {
                 let signer: Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync> =
@@ -2136,6 +2297,30 @@ impl TenzroNode {
         if let Some(ref network) = self.network {
             let registry = Arc::new(NodeValidatorRegistry::new());
 
+            // Seed the validator IDENTITY set from genesis. Identity checks
+            // gate binding-based admission: a peer is only admitted as a
+            // validator when its Identify binding is signed by one of these
+            // Ed25519 keys (or, once consensus runs, a key in the live
+            // epoch's validator set).
+            if let Some(genesis) = &self.config.genesis {
+                for gv in &genesis.validators {
+                    match hex::decode(&gv.public_key) {
+                        Ok(pubkey) => registry.add_identity(pubkey),
+                        Err(e) => warn!(
+                            key = %gv.public_key,
+                            "Skipping malformed genesis validator public key: {}", e
+                        ),
+                    }
+                }
+            }
+
+            // Prefer the live epoch's validator set once consensus is
+            // running — it tracks stake-based joins and rotations that the
+            // static genesis seed cannot.
+            if let Some(consensus) = &self.consensus {
+                registry.set_epoch_manager(consensus.epoch_manager());
+            }
+
             // Register the local node's PeerId as a validator if we run consensus.
             if should_init_consensus
                 && let Ok(local_peer_id) = network.local_peer_id().await {
@@ -2163,6 +2348,18 @@ impl TenzroNode {
                 warn!("Failed to set validator registry in network layer: {}", e);
             } else {
                 info!("Validator registry wired into network peer manager");
+            }
+
+            // Wire the durable ban store so peer bans survive restarts and
+            // are re-enforced at the libp2p transport layer on boot.
+            if let Some(storage) = &self.storage {
+                let ban_store =
+                    Arc::new(NodeBanStore::new(storage.clone() as Arc<dyn KvStore>));
+                if let Err(e) = network.set_ban_store(ban_store).await {
+                    warn!("Failed to set ban store in network layer: {}", e);
+                } else {
+                    info!("Durable peer-ban store wired into network peer manager");
+                }
             }
         }
 
@@ -2814,6 +3011,59 @@ impl TenzroNode {
         // Pass the node's data_dir to the network config for persistent keypair storage
         let mut network_config = self.config.network.clone();
         network_config.data_dir = Some(self.config.data_dir.clone());
+
+        // Validators attach a signed peer binding to the Identify
+        // agent_version: the validator Ed25519 key signs the node's
+        // transport PeerId, letting remote peers verify — over the
+        // transport-authenticated channel — that this PeerId is operated by
+        // an active validator identity. Without the binding, peers are never
+        // admitted to validator-only topics via Identify.
+        if self.config.roles.is_validator() {
+            match crate::keygen::load_validator_keypair(&self.config.data_dir) {
+                Ok(validator_keypair) => {
+                    let p2p_keypair =
+                        tenzro_network::load_or_generate_keypair(&network_config.data_dir)
+                            .map_err(|e| {
+                                NodeError::Other(format!(
+                                    "Failed to load p2p keypair for peer binding: {}",
+                                    e
+                                ))
+                            })?;
+                    let local_peer_id = libp2p::PeerId::from(p2p_keypair.public());
+                    let validator_pubkey = validator_keypair.public_key().to_bytes();
+                    let signer = tenzro_crypto::signatures::Ed25519SignerImpl::new(
+                        validator_keypair,
+                    )
+                    .map_err(|e| {
+                        NodeError::Other(format!(
+                            "Failed to construct peer-binding signer: {}",
+                            e
+                        ))
+                    })?;
+                    let signature = tenzro_crypto::signatures::Signer::sign(
+                        &signer,
+                        &tenzro_network::binding_payload(&local_peer_id),
+                    )
+                    .map_err(|e| {
+                        NodeError::Other(format!("Failed to sign peer binding: {}", e))
+                    })?;
+                    network_config.user_agent = tenzro_network::encode_agent_binding(
+                        &network_config.user_agent,
+                        &validator_pubkey,
+                        &signature.to_bytes(),
+                    );
+                    info!(peer = %local_peer_id, "Attached signed validator peer binding to Identify agent_version");
+                }
+                Err(NodeError::KeyMissing { .. }) => {
+                    warn!(
+                        "No validator Ed25519 key on disk — Identify peer binding not \
+                         attached; remote peers will not admit this node to \
+                         validator-only topics"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
         let network = Arc::new(TenzroNetworkService::new(network_config).await?);
         self.network = Some(network);
@@ -3736,6 +3986,14 @@ impl TenzroNode {
             ));
             engine = engine.with_block_provider(block_provider);
             info!("Block provider wired to consensus engine");
+
+            // Wire the audit store so equivocation votes + evidence and
+            // proposal records + proposal-equivocation evidence survive
+            // restarts. Without this, an operator-induced restart erases
+            // slashing evidence and lets a convicted offence re-fire.
+            engine = engine
+                .with_audit_storage(storage.clone() as Arc<dyn tenzro_storage::KvStore>);
+            info!("Equivocation audit store wired to consensus engine (CF_AUDIT)");
         }
 
         // Wire the persistent vote-state store so equivocation can never be
@@ -4091,27 +4349,50 @@ impl TenzroNode {
         self.usage_tracker = Some(usage_tracker.clone());
 
         // EU AI Act Art. 50(2): every node that serves inference produces a
-        // signed provenance manifest for each response. The signer is fresh
-        // per node lifetime — when we add long-term provenance keys to the
-        // node config, this is the swap point. The store is shared with the
-        // `tenzro_getProvenance` RPC so the read and write paths see the
-        // same in-memory cache. Failure to mint a key is non-fatal: the
-        // router degrades to "synthetic_content=true but no signature",
-        // matching dev-mode nodes.
+        // signed provenance manifest for each response. The signer uses the
+        // node's long-term Ed25519 key — the same key that signs gossip
+        // announcements — so consumers can verify response manifests against
+        // the announcement pubkey they already pinned. Nodes without a key
+        // on disk fall back to an ephemeral signer (manifest is still a
+        // valid disclosure mark, just not bindable to a registered
+        // provider). The store is shared with the `tenzro_getProvenance`
+        // RPC so the read and write paths see the same in-memory cache.
+        // Failure to mint any key is non-fatal: the router degrades to
+        // "synthetic_content=true but no signature", matching dev-mode
+        // nodes.
         let provenance_store = Arc::new(tenzro_model::ProvenanceStore::default());
         self.provenance_store = Some(provenance_store.clone());
         let provenance_signer: Option<tenzro_model::SharedProvenanceSigner> =
-            match tenzro_model::Ed25519ProvenanceSigner::generate() {
-                Ok(s) => Some(s.into_shared()),
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to mint provenance signer ({}); responses will carry \
-                         synthetic_content=true but no signed manifest",
-                        e
-                    );
-                    None
+            match crate::keygen::load_validator_keypair(&self.config.data_dir) {
+                Ok(keypair) => {
+                    match tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair) {
+                        Ok(signer) => Some(
+                            tenzro_model::Ed25519ProvenanceSigner::new(signer).into_shared(),
+                        ),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to construct provenance signer from node key ({}); \
+                                 responses will carry synthetic_content=true but no signed \
+                                 manifest",
+                                e
+                            );
+                            None
+                        }
+                    }
                 }
+                Err(_) => match tenzro_model::Ed25519ProvenanceSigner::generate() {
+                    Ok(s) => Some(s.into_shared()),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to mint provenance signer ({}); responses will carry \
+                             synthetic_content=true but no signed manifest",
+                            e
+                        );
+                        None
+                    }
+                },
             };
+        self.provenance_signer = provenance_signer.clone();
 
         // Initialize inference router with the tracker attached so every
         // successful inference flows through `record_usage` for durable
@@ -4292,10 +4573,17 @@ impl TenzroNode {
         self.iroh_mcp_handler = Some(mcp_deferred.clone());
         let mcp_handler: Arc<dyn tenzro_iroh::McpStreamHandler> = mcp_deferred;
 
+        // MoE-over-iroh: unlike A2A/MCP, the dispatcher only needs the
+        // expert runtime, which already exists — register the real one.
+        let moe_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = Arc::new(
+            crate::moe::MoeIrohDispatcher::new(Arc::clone(&self.moe_runtime)),
+        );
+
         match tenzro_iroh::IrohBackedResolver::bind_with_jsonrpc(
             &cfg,
             Some(a2a_dispatcher),
             Some(mcp_handler),
+            Some(moe_dispatcher),
         )
         .await
         {
@@ -4304,17 +4592,17 @@ impl TenzroNode {
                     info!(
                         pkarr_relay = %cfg.pkarr_relay_url.as_ref().unwrap(),
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A + MCP ALPNs registered)"
+                        "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A + MCP + MoE ALPNs registered)"
                     );
                 } else if cfg.secret_key_seed.is_some() {
                     info!(
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A + MCP ALPNs registered)"
+                        "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A + MCP + MoE ALPNs registered)"
                     );
                 } else {
                     info!(
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (ephemeral key, in-memory blob store, A2A + MCP ALPNs registered)"
+                        "Tenzro iroh resolver bound (ephemeral key, in-memory blob store, A2A + MCP + MoE ALPNs registered)"
                     );
                 }
                 self.iroh_resolver = Some(resolver);
@@ -7296,6 +7584,22 @@ impl TenzroNode {
         // Wire network_providers map for gossipsub-discovered provider merging
         let mut event_loop = event_loop.with_provider_discovery(self.network_providers.clone());
 
+        // Wire the node's Ed25519 announce signer, loaded once in step 6b.
+        // NOTE: this is a DIFFERENT keypair from the libp2p transport key
+        // that derives peer_id (`{data_dir}/p2p_key`) — consumers bind
+        // announcements to the announce pubkey via first-seen pinning, not
+        // via peer_id derivation. Signs every outbound model, provider, and
+        // agent announcement. Absent when no key is provisioned — the node
+        // simply doesn't self-announce (peers drop unsigned announcements).
+        if let Some(signer) = self.announce_signer.clone() {
+            event_loop = event_loop.with_announce_signer(signer);
+        } else {
+            warn!(
+                "Skipping announcement signing setup — no node Ed25519 signer \
+                 (announcements require a provisioned key)"
+            );
+        }
+
         // Wire provider announcement broadcast context. Only providers (model
         // / TEE / storage / validator) self-announce; light clients stay
         // anonymous on this topic. Hardware is detected once at startup; the
@@ -7365,32 +7669,17 @@ impl TenzroNode {
                 None
             };
 
-            // Ed25519 signer for outbound announcements, loaded once in
-            // step 6b. Byte-shared with the validator identity that derives
-            // peer_id, so peers can bind an announcement to the announcing
-            // node. Absent when no key is provisioned — in that case the node
-            // simply doesn't self-announce (peers drop unsigned announcements
-            // anyway), so we skip wiring the announcement context rather than
-            // failing startup.
-            if let Some(announce_signer) = self.announce_signer.clone() {
-                let ctx = crate::event_loop::ProviderAnnouncementContext {
-                    hardware,
-                    geography: self.config.geography.clone(),
-                    provider_address,
-                    provider_type: provider_type.to_string(),
-                    capabilities,
-                    rpc_endpoint,
-                    ttl_secs: 120,
-                    cluster_profile,
-                    signer: announce_signer,
-                };
-                event_loop = event_loop.with_provider_announcement(ctx);
-            } else {
-                warn!(
-                    "Skipping provider announcement setup — no node Ed25519 signer \
-                     (announcements require a provisioned key)"
-                );
-            }
+            let ctx = crate::event_loop::ProviderAnnouncementContext {
+                hardware,
+                geography: self.config.geography.clone(),
+                provider_address,
+                provider_type: provider_type.to_string(),
+                capabilities,
+                rpc_endpoint,
+                ttl_secs: 120,
+                cluster_profile,
+            };
+            event_loop = event_loop.with_provider_announcement(ctx);
         }
 
         // Wire the snapshot ABCI store so the finality hook produces a
@@ -7786,6 +8075,7 @@ impl TenzroNode {
                                 high_qc_view,
                                 timeout_certificate,
                                 no_endorsement_certificate,
+                                proposer_signature,
                             } => {
                                 // Decode hex proposer → Address. On malformed input,
                                 // log and drop — the proposer field is informational
@@ -7843,6 +8133,25 @@ impl TenzroNode {
                                         continue;
                                     }
                                 };
+                                // Decode the mandatory hybrid proposer
+                                // signature. A malformed blob means the
+                                // proposal cannot be attributed — drop it
+                                // rather than hand the engine an
+                                // unverifiable proposal.
+                                let proposer_sig = match bincode::deserialize::<
+                                    tenzro_crypto::composite::CompositeSignature,
+                                >(&proposer_signature)
+                                {
+                                    Ok(sig) => sig,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            proposer = %hex::encode(proposer_addr.as_bytes()),
+                                            error = %e,
+                                            "Dropping proposal with malformed proposer signature"
+                                        );
+                                        continue;
+                                    }
+                                };
                                 let height = block.height();
                                 tracing::debug!(
                                     height = %height,
@@ -7852,7 +8161,10 @@ impl TenzroNode {
                                     has_nec = nec.is_some(),
                                     "Received consensus proposal from peer"
                                 );
-                                match consensus.on_proposal(&block, tc, nec, high_qc_view).await {
+                                match consensus
+                                    .on_proposal(&block, tc, nec, high_qc_view, &proposer_sig)
+                                    .await
+                                {
                                     Ok(_vote) => {
                                         // The vote is also emitted on `consensus_out_rx`
                                         // by the engine, which the event loop picks up
@@ -8660,6 +8972,12 @@ impl TenzroNode {
         self.provenance_store.as_ref()
     }
 
+    /// Returns the provenance signer used to stamp locally-served inference
+    /// responses with a `tenzro_provenance` manifest.
+    pub fn provenance_signer(&self) -> Option<&tenzro_model::SharedProvenanceSigner> {
+        self.provenance_signer.as_ref()
+    }
+
     /// Returns the event loop sender for submitting transactions
     pub fn event_sender(&self) -> Option<&mpsc::Sender<NodeEvent>> {
         self.event_loop_tx.as_ref()
@@ -9390,6 +9708,153 @@ impl TenzroNode {
         None
     }
 
+    /// Load the speculative-decoding drafter declared by a catalog entry for a
+    /// model that just started serving. Never fails the serve: on any problem
+    /// the target keeps serving without speculative decoding.
+    ///
+    /// Returns a status string surfaced in the serve response:
+    /// - `"none"`                — catalog entry declares no MTP support
+    /// - `"inline"`              — single-file MTP model; the draft head lives
+    ///   inside the target GGUF itself (no separate drafter to load)
+    /// - `"drafter_loaded"`      — drafter GGUF found locally and loaded
+    /// - `"drafter_downloading"` — drafter missing locally; background
+    ///   download + load started, target serves non-speculatively until then
+    /// - `"drafter_load_failed"` — local drafter present but the runtime
+    ///   rejected it (e.g. memory admission)
+    /// - `"drafter_unavailable"` — drafter_id doesn't resolve in the catalog
+    ///   or no runtime/downloader is available
+    pub async fn autoload_drafter(
+        &self,
+        target_model_id: &str,
+        entry: &tenzro_model::HfModelEntry,
+    ) -> &'static str {
+        if entry.mtp_kind == MtpKind::None {
+            return "none";
+        }
+        let Some(drafter_id) = entry.drafter_id.as_deref() else {
+            return "inline";
+        };
+        let Some(runtime) = self.model_runtime.clone() else {
+            return "drafter_unavailable";
+        };
+        if runtime.has_drafter(target_model_id) {
+            return "drafter_loaded";
+        }
+        let Some(drafter_entry) = tenzro_model::get_model_by_id(drafter_id) else {
+            warn!(
+                target = %target_model_id,
+                drafter = %drafter_id,
+                "Catalog declares a drafter that does not resolve — serving without MTP",
+            );
+            return "drafter_unavailable";
+        };
+
+        if let Some(path) = self.resolve_gguf_path(drafter_id) {
+            return match runtime
+                .load_drafter(target_model_id, &path, Some(drafter_entry.context_length))
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        target = %target_model_id,
+                        drafter = %drafter_id,
+                        "Loaded MTP drafter for speculative decoding",
+                    );
+                    "drafter_loaded"
+                }
+                Err(e) => {
+                    warn!(
+                        target = %target_model_id,
+                        drafter = %drafter_id,
+                        "MTP drafter load failed: {} — serving without speculative decoding",
+                        e,
+                    );
+                    "drafter_load_failed"
+                }
+            };
+        }
+
+        // Drafter not on disk — download in the background, then load.
+        let Some(hf) = self.hf_downloader.clone() else {
+            return "drafter_unavailable";
+        };
+        let downloads = self.model_downloads.clone();
+        downloads.insert(
+            drafter_id.to_string(),
+            ModelDownloadStatus {
+                model_id: drafter_id.to_string(),
+                status: "downloading".to_string(),
+                progress_percent: 0.0,
+                downloaded_bytes: 0,
+                total_bytes: drafter_entry.size_bytes,
+                error: None,
+            },
+        );
+        let target = target_model_id.to_string();
+        tokio::spawn(async move {
+            let drafter_id = drafter_entry.id.clone();
+            let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(
+                tenzro_model::DownloadProgress {
+                    model_id: drafter_id.clone(),
+                    status: tenzro_model::DownloadState::Pending,
+                    progress_percent: 0.0,
+                    downloaded_bytes: 0,
+                    total_bytes: drafter_entry.size_bytes,
+                },
+            );
+            let downloads_inner = downloads.clone();
+            let drafter_id_inner = drafter_id.clone();
+            tokio::spawn(async move {
+                while progress_rx.changed().await.is_ok() {
+                    let prog = progress_rx.borrow().clone();
+                    if let Some(mut row) = downloads_inner.get_mut(&drafter_id_inner) {
+                        row.status = prog.status.to_string();
+                        row.progress_percent = prog.progress_percent;
+                        row.downloaded_bytes = prog.downloaded_bytes;
+                        row.total_bytes = prog.total_bytes;
+                    }
+                }
+            });
+            match hf.download_model(&drafter_entry, None, progress_tx).await {
+                Ok(path) => {
+                    if let Some(mut row) = downloads.get_mut(&drafter_id) {
+                        row.status = "completed".to_string();
+                        row.progress_percent = 100.0;
+                    }
+                    match runtime
+                        .load_drafter(&target, &path, Some(drafter_entry.context_length))
+                        .await
+                    {
+                        Ok(()) => info!(
+                            target = %target,
+                            drafter = %drafter_id,
+                            "Downloaded and loaded MTP drafter for speculative decoding",
+                        ),
+                        Err(e) => warn!(
+                            target = %target,
+                            drafter = %drafter_id,
+                            "MTP drafter load failed after download: {}",
+                            e,
+                        ),
+                    }
+                }
+                Err(e) => {
+                    if let Some(mut row) = downloads.get_mut(&drafter_id) {
+                        row.status = "failed".to_string();
+                        row.error = Some(e.to_string());
+                    }
+                    warn!(
+                        target = %target,
+                        drafter = %drafter_id,
+                        "MTP drafter download failed: {} — serving without speculative decoding",
+                        e,
+                    );
+                }
+            }
+        });
+        "drafter_downloading"
+    }
+
     /// Evict Local ModelServiceInstance entries whose model is no longer loaded
     /// in the runtime AND have been idle (no `last_seen` update) for >= 1 hour.
     ///
@@ -9530,6 +9995,8 @@ impl TenzroNode {
                     // not already loaded.
                     if let Some(ref runtime) = self.model_runtime {
                         if runtime.is_loaded(model_id) {
+                            // Idempotent: no-op when the drafter is already loaded.
+                            let _ = self.autoload_drafter(model_id, &entry).await;
                             true
                         } else {
                             match runtime
@@ -9575,6 +10042,8 @@ impl TenzroNode {
                                     };
                                     self.load_tracker
                                         .register_model(model_id, max_concurrent);
+                                    // Restore speculative decoding across restarts.
+                                    let _ = self.autoload_drafter(model_id, &entry).await;
                                     true
                                 }
                                 Err(e) => {

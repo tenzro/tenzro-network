@@ -60,6 +60,11 @@ pub enum ConsensusError {
     #[error("Already voted in view {0}")]
     AlreadyVoted(u64),
 
+    /// A conflicting proposal for this view was already recorded and
+    /// convicted — the offence is final and must not re-fire slashing
+    #[error("Proposal equivocation already recorded for view {0}")]
+    DuplicateProposal(u64),
+
     /// Invalid validator set
     #[error("Invalid validator set: {0}")]
     InvalidValidatorSet(String),

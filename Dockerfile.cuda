@@ -1,0 +1,161 @@
+# CUDA image variant. Builds tenzro-node with GPU acceleration:
+#   - llama.cpp CUDA backend for LLM inference (feature `tenzro-node/cuda`)
+#   - ONNX Runtime CUDA execution provider for the non-LLM modalities
+#     (feature `tenzro-node/onnx-cuda`; forecast / vision / text-embedding /
+#     segmentation / detection / audio runtimes)
+#
+# Run with the NVIDIA container runtime: `docker run --gpus all ...`
+# The CPU image is built from ./Dockerfile and is unchanged by this file.
+
+# Stage 1: Build
+FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04 AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    clang \
+    cmake \
+    protobuf-compiler \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain (the workspace rust-toolchain.toml selects the channel;
+# rustup syncs it on the first cargo invocation)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH=/root/.cargo/bin:$PATH
+
+WORKDIR /build
+
+# Force clang as the C/C++ compiler (required by llama-cpp-sys-2 which uses
+# clang-specific flags). nvcc keeps g++ as its host compiler via CUDAHOSTCXX —
+# clang is not a supported nvcc host compiler on every CUDA 12.x minor.
+ENV CC=clang
+ENV CXX=clang++
+ENV CUDAHOSTCXX=g++
+
+# Target GPU architectures for the ggml CUDA kernels (CMake >= 3.20 reads
+# CUDAARCHS into CMAKE_CUDA_ARCHITECTURES). "native" is unusable here: the
+# build container has no GPU. Turing / Ampere / Ada / Hopper.
+ENV CUDAARCHS="75;80;86;89;90"
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY sdk/ sdk/
+COPY tools/ tools/
+# vendor/* subtrees (erc8004-evm, erc8004-solana, erc8004-daml, erc8004-atom)
+# are source artifacts for regenerate.sh / DAML compilation, not build-time
+# dependencies — they're copied here because COPY vendor/ is a single layer
+# and the cost is negligible vs. surgical sub-copies.
+COPY vendor/ vendor/
+
+# Create minimal stub for desktop app workspace member (not built, but cargo needs it to resolve workspace)
+# The real Cargo.toml is excluded by .gcloudignore (apps/), so we generate a stub inline
+# NOTE: Cannot use shell heredocs here — Docker's classic parser interprets each line as a
+# Dockerfile instruction, so [package] would be parsed as unknown instruction [PACKAGE].
+RUN mkdir -p apps/tenzro-desktop/src-tauri/src && \
+    echo "fn main() {}" > apps/tenzro-desktop/src-tauri/src/main.rs && \
+    echo "fn main() {}" > apps/tenzro-desktop/src-tauri/build.rs && \
+    printf '%s\n' \
+      '[package]' \
+      'name = "tenzro-desktop"' \
+      'version = "0.1.0"' \
+      'edition = "2021"' \
+      '' \
+      '[build-dependencies]' \
+      'tauri-build = { version = "2", features = [] }' \
+      '' \
+      '[dependencies]' \
+      'tauri = { version = "2", features = ["tray-icon"] }' \
+      'tauri-plugin-shell = "2"' \
+      'serde = { version = "1", features = ["derive"] }' \
+      'serde_json = "1"' \
+      'tokio = { version = "1", features = ["full"] }' \
+      'reqwest = { version = "0.12", features = ["json", "stream"] }' \
+      'futures-util = "0.3"' \
+      'thiserror = "2"' \
+      'tracing = "0.1"' \
+      'uuid = { version = "1", features = ["v4"] }' \
+      'hex = "0.4"' \
+      'dirs = "5"' \
+      'sysinfo = "0.31"' \
+      'sha2 = "0.10"' \
+      'aes-gcm = "0.10"' \
+      'rand = "0.8"' \
+      'hostname = "0.4"' \
+      'tenzro-model = { path = "../../../crates/tenzro-model" }' \
+      'tenzro-zk = { path = "../../../crates/tenzro-zk" }' \
+      '' \
+      '[features]' \
+      'default = ["custom-protocol"]' \
+      'custom-protocol = ["tauri/custom-protocol"]' \
+      > apps/tenzro-desktop/src-tauri/Cargo.toml
+
+# Build tenzro-node (llama.cpp CUDA + ONNX Runtime CUDA EP) and tenzro-cli.
+# ort-sys with the `cuda` feature downloads the cu12 ONNX Runtime dist at
+# build time (network required, same as the CPU image's download-binaries).
+RUN cargo build --release -p tenzro-node -p tenzro-cli \
+    --features tenzro-node/cuda,tenzro-node/onnx-cuda
+
+# The `rpc` feature (on by default via cluster-serving) builds the standalone
+# ggml `rpc-server` binary into llama-cpp-sys-2's cargo OUT_DIR. That path does
+# not survive into the runtime stage, so stage it at a fixed location for COPY.
+# The final ldd guard fails the build if rpc-server links a ggml/llama shared
+# object. CUDA libraries are expected dynamic links here: libcudart/libcublas
+# resolve from the runtime image, and libcuda.so.1 is the driver library the
+# NVIDIA container runtime injects at `docker run --gpus all` — it is absent in
+# the build container, so it is excluded from the not-found check.
+RUN set -eux; \
+    src="$(find target/release/build -type f -name rpc-server -perm -u+x 2>/dev/null | head -n1)"; \
+    test -n "$src"; \
+    cp "$src" /build/rpc-server; \
+    ldd /build/rpc-server || true; \
+    ! ldd /build/rpc-server | grep -v 'libcuda\.so\.1' | grep -qiE 'libggml|libllama|not found'
+
+# Stage 2: Runtime
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04 AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    curl \
+    libstdc++6 \
+    libgomp1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro
+
+# Copy binaries from builder
+COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
+COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+# ggml rpc-server sidecar for LAN cluster serving; the node resolves it via
+# TENZRO_RPC_SERVER_BIN (overrides the compile-time OUT_DIR path that the
+# multi-stage build discards).
+COPY --from=builder /build/rpc-server /usr/local/bin/rpc-server
+ENV TENZRO_RPC_SERVER_BIN=/usr/local/bin/rpc-server
+
+# Create data directories
+RUN mkdir -p /data/tenzro /config /home/tenzro/.tenzro/models && chown -R tenzro:tenzro /data /config /home/tenzro/.tenzro
+
+USER tenzro
+WORKDIR /home/tenzro
+
+# Expose ports
+# P2P, JSON-RPC, Web API, Metrics, MCP, A2A
+EXPOSE 9000 8545 8080 9090 3001 3002
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/verify/health || exit 1
+
+# Default entrypoint
+ENTRYPOINT ["tenzro-node"]
+
+# Default args (override with docker run args)
+CMD ["--data-dir", "/data/tenzro", "--log-level", "info"]

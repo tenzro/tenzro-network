@@ -330,6 +330,10 @@ llama-cpp-2 = "0.1.147"
 # build via the `download-binaries` feature. CoreML on macOS, CUDA on Linux.
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "download-binaries"] }
 ndarray = "0.16"
+# Safetensors parsing for MoE per-expert weight blobs and gating networks.
+safetensors = "0.8"
+# f16 / bf16 → f32 decode for safetensors tensor data.
+half = "2"
 # Image decoding + resize for vision encoder preprocessing.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 

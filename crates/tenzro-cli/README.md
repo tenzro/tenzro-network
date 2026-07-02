@@ -1,6 +1,6 @@
 # Tenzro Network CLI
 
-The official command-line interface for operating Tenzro Network nodes, managing wallets, models, staking, and governance. Interact with Tenzro Ledger (the L1 settlement layer) and earn TNZO tokens.
+The official command-line interface for operating Tenzro Network nodes, managing wallets, models, staking, and governance. Interact with Tenzro Ledger (the settlement layer) and earn TNZO tokens.
 
 ## Features
 
@@ -9,6 +9,8 @@ The official command-line interface for operating Tenzro Network nodes, managing
 - **Wallet Operations**: Create FROST-Ed25519 threshold wallets, check balances, send transactions (real reqwest RPC client)
 - **Model Management**: List, download, serve AI models (local + remote RPC)
 - **Multi-Modal Inference**: Forecast, vision/text/video embedding, segmentation, detection, audio transcription via dedicated CLI commands
+- **Distributed MoE**: Expert-shard maps, dispatch planning, expert/gate weight loading, and distributed layer forwards via `tenzro moe`
+- **Tenzro Train**: Post training tasks, enroll trainers, submit outer gradients, finalize rounds, and manage sealed manifests via `tenzro train`
 - **Staking**: Stake TNZO tokens as validator or provider
 - **Governance**: Participate in on-chain governance and voting
 - **Provider Tools**: Register and manage inference/TEE providers
@@ -492,6 +494,31 @@ tenzro train get-receipt --run-id <id> --round <r>
 tenzro train enroll-trainer --run-id <id>
 tenzro train submit-gradient --run-id <id> --round <r> --payload ./grad.bin
 tenzro train finalize-round --run-id <id> --round <r>
+tenzro train install-sealed-manifest --manifest ./manifest.json
+tenzro train get-sealed-manifest --manifest-hash <64-hex>
+```
+
+### Distributed MoE
+
+`tenzro moe` is the CLI surface for distributed Mixture-of-Experts serving
+(`tenzro_moe*` RPCs) — shard-map planning plus expert/gate weight loading and
+distributed forward execution on the node's expert runtime.
+
+```bash
+# Planning
+tenzro moe shard-map --model-id <id>            # live expert → holder map
+tenzro moe plan-dispatch --model-id <id> --routing ./routing.json
+tenzro moe replication-policy                   # governance-tuned policy
+tenzro moe catalog-shape --model-id <id>        # catalog MoE topology
+
+# Execution
+tenzro moe load-expert --model-id <id> --layer <l> --expert <e> --file ./expert.safetensors
+tenzro moe load-expert --model-id <id> --layer <l> --expert <e> --uri tenzro://blob/<hash>
+tenzro moe load-gate --model-id <id> --layer <l> --file ./gate.safetensors
+tenzro moe unload-expert --model-id <id> --layer <l> --expert <e>
+tenzro moe unload-gate --model-id <id> --layer <l>
+tenzro moe status                               # resident experts + gates
+tenzro moe forward --model-id <id> --layer <l> --d-model <dim> --hidden ./hidden.f32
 ```
 
 ### Approval Flow

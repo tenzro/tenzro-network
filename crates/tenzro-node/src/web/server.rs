@@ -92,7 +92,16 @@ impl WebServer {
             // Concurrency limit: max 100 in-flight requests
             .layer(ConcurrencyLimitLayer::new(100))
             // Request body size limit: 2 MB
-            .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
+            .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
+            // Per-IP GCRA gate, outermost so an abusive source is
+            // rejected with 429 before consuming a concurrency slot.
+            // 10 req/s sustained per IP with a burst of 50 — the Web API
+            // fronts inference chat and verification, both heavier per
+            // request than plain RPC reads.
+            .layer(axum::middleware::from_fn_with_state(
+                crate::ip_rate_limit::IpRateLimiter::new(10, 50),
+                crate::ip_rate_limit::ip_rate_limit,
+            ));
 
         let listener = tokio::net::TcpListener::bind(&self.listen_addr).await?;
         if let Some(gate) = self.payment_gate.as_ref() {
@@ -110,7 +119,10 @@ impl WebServer {
             tracing::info!(addr = %self.listen_addr, "Web API listening (includes /metrics)");
         }
 
-        axum::serve(listener, app)
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.recv().await;
                 tracing::info!("Web API server shutting down gracefully");

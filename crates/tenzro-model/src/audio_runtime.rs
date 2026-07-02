@@ -530,7 +530,7 @@ mod preprocessing {
 mod onnx_backend {
     use super::*;
     use ndarray::{Array2, Array3, Array4};
-    use ort::session::{Session, SessionInputValue, builder::GraphOptimizationLevel};
+    use ort::session::{Session, SessionInputValue};
     use ort::value::Tensor;
     use parking_lot::Mutex;
     use std::time::Instant;
@@ -538,16 +538,10 @@ mod onnx_backend {
 
     use super::preprocessing::{N_FRAMES, SAMPLE_RATE, decode_to_mono_16k, log_mel_spectrogram};
 
-    /// Open an ONNX session from disk with Level3 optimizations.
+    /// Open an ONNX session from disk via the shared execution-provider-aware
+    /// session builder (Level3 optimizations, GPU providers when compiled in).
     fn load_session(path: impl AsRef<std::path::Path>) -> Result<Session> {
-        Session::builder()
-            .map_err(|e| ModelError::InvalidModel(format!("ORT session builder: {}", e)))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| ModelError::InvalidModel(format!("ORT optimization level: {}", e)))?
-            .commit_from_file(path.as_ref())
-            .map_err(|e| {
-                ModelError::ProviderNotAvailable(format!("ORT load failed: {}", e))
-            })
+        crate::onnx_session::build_onnx_session(path, "model")
     }
 
     /// Pair of `past_key_values.*` decoder inputs and `present.*` outputs

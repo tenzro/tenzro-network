@@ -26,6 +26,7 @@ use crate::config::TenzroIrohConfig;
 use crate::error::{IrohError, IrohResult};
 use crate::jsonrpc::{
     JsonRpcDispatcher, JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_MCP,
+    ALPN_MOE,
 };
 use crate::tdip::derive_iroh_secret_key_from_ed25519;
 use tenzro_types::tenzro_uri::TenzroUri;
@@ -110,7 +111,7 @@ impl IrohBackedResolver {
         let endpoint = Endpoint::bind(presets::N0)
             .await
             .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))?;
-        Self::with_endpoint(endpoint, None, None)
+        Self::with_endpoint(endpoint, None, None, None)
     }
 
     /// Bind a new endpoint using a [`TenzroIrohConfig`] — Phase C2 (#220).
@@ -146,7 +147,7 @@ impl IrohBackedResolver {
         }
 
         let endpoint = Self::build_endpoint(cfg).await?;
-        Self::with_endpoint(endpoint, None, None)
+        Self::with_endpoint(endpoint, None, None, None)
     }
 
     /// Build an iroh `Endpoint` from a [`TenzroIrohConfig`]. Shared by
@@ -251,13 +252,14 @@ impl IrohBackedResolver {
     /// addressing record) is used for blobs and JSON-RPC alike — one
     /// QUIC stack, three ALPNs.
     ///
-    /// `None` for either dispatcher skips that ALPN registration. Nodes
-    /// that do not run an A2A or MCP server pass `None` for the
-    /// corresponding slot.
+    /// `None` for any dispatcher skips that ALPN registration. Nodes
+    /// that do not run an A2A or MCP server — or do not host MoE
+    /// experts — pass `None` for the corresponding slot.
     pub async fn bind_with_jsonrpc(
         cfg: &TenzroIrohConfig,
         a2a: Option<Arc<dyn JsonRpcDispatcher>>,
         mcp: Option<Arc<dyn McpStreamHandler>>,
+        moe: Option<Arc<dyn JsonRpcDispatcher>>,
     ) -> IrohResult<Arc<Self>> {
         // Same bind decision as `bind_with_config` — see comments there.
         let endpoint = if cfg.pkarr_relay_url.is_none()
@@ -270,16 +272,18 @@ impl IrohBackedResolver {
         } else {
             Self::build_endpoint(cfg).await?
         };
-        Self::with_endpoint(endpoint, a2a, mcp)
+        Self::with_endpoint(endpoint, a2a, mcp, moe)
     }
 
     /// Stand up an in-memory blob store + iroh-blobs ALPN router on top of
     /// an already-bound endpoint, optionally registering an A2A JSON-RPC
-    /// dispatcher and an MCP session handler on the same router.
+    /// dispatcher, an MCP session handler, and a MoE expert-host
+    /// dispatcher on the same router.
     fn with_endpoint(
         endpoint: Endpoint,
         a2a: Option<Arc<dyn JsonRpcDispatcher>>,
         mcp: Option<Arc<dyn McpStreamHandler>>,
+        moe: Option<Arc<dyn JsonRpcDispatcher>>,
     ) -> IrohResult<Arc<Self>> {
         let store = MemStore::new();
         let blobs = BlobsProtocol::new(&store, None);
@@ -289,6 +293,9 @@ impl IrohBackedResolver {
         }
         if let Some(handler) = mcp {
             builder = builder.accept(ALPN_MCP, McpProtocol::new(handler));
+        }
+        if let Some(dispatcher) = moe {
+            builder = builder.accept(ALPN_MOE, JsonRpcProtocol::moe(dispatcher));
         }
         let router = builder.spawn();
         let downloader = Downloader::new(&*store, &endpoint);

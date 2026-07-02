@@ -250,13 +250,21 @@ impl StakingManager {
         manager
     }
 
-    /// Persists a single stake to storage
+    /// Persists a single stake to storage.
+    ///
+    /// Uses a synced (fsync'd) write: stake mutations include slashing
+    /// outcomes that consensus has already acted on — a crash must not
+    /// resurrect slashed stake.
     fn persist_stake(&self, address: &Address, stake_info: &StakeInfo) {
         if let Some(storage) = &self.storage {
             let key = format!("{}{}", STAKE_PREFIX, hex::encode(address.as_bytes()));
             match bincode::serialize(stake_info) {
                 Ok(data) => {
-                    if let Err(e) = storage.put(STAKING_CF, key.as_bytes(), &data) {
+                    if let Err(e) = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+                        cf: STAKING_CF.to_string(),
+                        key: key.into_bytes(),
+                        value: data,
+                    }]) {
                         warn!("Failed to persist stake for {}: {}", address, e);
                     }
                 }
@@ -265,11 +273,16 @@ impl StakingManager {
         }
     }
 
-    /// Persists total staked for a provider type
+    /// Persists total staked for a provider type (synced write — moves with
+    /// stake/slash mutations and must survive a crash together with them).
     fn persist_total_staked(&self, provider_type: ProviderType, amount: u128) {
         if let Some(storage) = &self.storage {
             let key = format!("total_staked:{:?}", provider_type);
-            if let Err(e) = storage.put(STAKING_CF, key.as_bytes(), &amount.to_le_bytes()) {
+            if let Err(e) = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+                cf: STAKING_CF.to_string(),
+                key: key.into_bytes(),
+                value: amount.to_le_bytes().to_vec(),
+            }]) {
                 warn!("Failed to persist total staked for {:?}: {}", provider_type, e);
             }
         }
@@ -338,7 +351,11 @@ impl StakingManager {
 
             match bincode::serialize(&addresses) {
                 Ok(data) => {
-                    if let Err(e) = storage.put(STAKING_CF, STAKING_INDEX_KEY.as_bytes(), &data) {
+                    if let Err(e) = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+                        cf: STAKING_CF.to_string(),
+                        key: STAKING_INDEX_KEY.as_bytes().to_vec(),
+                        value: data,
+                    }]) {
                         warn!("Failed to persist staking index: {}", e);
                     }
                 }
@@ -357,7 +374,11 @@ impl StakingManager {
             config_data.extend_from_slice(&min_stake.to_le_bytes());
             config_data.extend_from_slice(&unbonding_ms.to_le_bytes());
 
-            if let Err(e) = storage.put(STAKING_CF, STAKING_CONFIG_KEY.as_bytes(), &config_data) {
+            if let Err(e) = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+                cf: STAKING_CF.to_string(),
+                key: STAKING_CONFIG_KEY.as_bytes().to_vec(),
+                value: config_data,
+            }]) {
                 warn!("Failed to persist staking config: {}", e);
             }
         }

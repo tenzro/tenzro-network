@@ -178,6 +178,15 @@ impl SlashingCallback for MockSlashingCallback {
     ) {
         self.calls.lock().push((*validator, view));
     }
+
+    fn report_proposal_equivocation(
+        &self,
+        proposer: &Address,
+        view: u64,
+        _evidence: &tenzro_consensus::ProposalEquivocationEvidence,
+    ) {
+        self.calls.lock().push((*proposer, view));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +216,7 @@ fn test_four_node_consensus_happy_path() {
             // Third vote should form the QC.
             assert!(result.is_some(), "QC should form on third vote");
             let qc = result.unwrap();
-            assert_eq!(qc.vote_count(), 3);
+            assert_eq!(qc.signer_count(), 3);
             assert_eq!(qc.view, view);
             assert_eq!(qc.block_hash, block_hash);
             assert_eq!(qc.vote_type, VoteType::Prepare);
@@ -228,7 +237,7 @@ fn test_four_node_consensus_happy_path() {
 
     let qc = commit_qc.unwrap();
     assert_eq!(qc.vote_type, VoteType::Commit);
-    assert_eq!(qc.vote_count(), 3);
+    assert_eq!(qc.signer_count(), 3);
 
     // Verify finality can be recorded.
     let finality = FinalityTracker::new();
@@ -340,7 +349,7 @@ fn test_consensus_with_one_byzantine_node() {
             // Third honest vote (indices 1,2,3) should form quorum.
             assert!(result.is_some(), "Quorum should be reached with 3 honest votes");
             let qc = result.unwrap();
-            assert_eq!(qc.vote_count(), 3);
+            assert_eq!(qc.signer_count(), 3);
         }
     }
 }
@@ -625,7 +634,6 @@ fn test_finality_notification_on_commit() {
         height,
         block_hash,
         VoteType::Commit,
-        vec![], // votes elided for brevity
         3000,
         // FinalityTracker doesn't run BLS verification — placeholders are sound here.
         [0u8; 96],
@@ -854,7 +862,6 @@ fn test_sequential_block_finalization() {
             BlockHeight::from(h),
             block.hash(),
             VoteType::Commit,
-            vec![],
             3000,
             [0u8; 96],
             Vec::new(),
@@ -883,7 +890,6 @@ fn test_duplicate_finalization_rejected() {
         BlockHeight::from(1),
         block1.hash(),
         VoteType::Commit,
-        vec![],
         3000,
         [0u8; 96],
         Vec::new(),

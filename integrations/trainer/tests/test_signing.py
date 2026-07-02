@@ -16,6 +16,7 @@ from tenzro_trainer.gradient import (
     gradient_signing_bytes,
 )
 from tenzro_trainer.gradient import FragmentBlob
+from tenzro_trainer.types import GradientQuantization
 
 
 def test_preimage_layout_is_stable():
@@ -26,6 +27,7 @@ def test_preimage_layout_is_stable():
         trainer_did="did:tenzro:machine:trainer-7",
         safetensors_hash=bytes([9] * 32),
         payload_bytes=12345,
+        quantization=GradientQuantization.none(),
         inner_step_count=64,
         submitted_at=1_745_539_200_000,
     )
@@ -56,6 +58,7 @@ def test_build_outer_gradient_signs_canonical_preimage():
         blob=blob,
         trainer_did="did:tenzro:machine:trainer-1",
         trainer_address=bytes(32),
+        quantization=GradientQuantization.none(),
         inner_step_count=10,
         key=key,
         submitted_at_ms=1_000_000,
@@ -67,6 +70,7 @@ def test_build_outer_gradient_signs_canonical_preimage():
         trainer_did="did:tenzro:machine:trainer-1",
         safetensors_hash=bytes([1] * 32),
         payload_bytes=100,
+        quantization=GradientQuantization.none(),
         inner_step_count=10,
         submitted_at=1_000_000,
     )

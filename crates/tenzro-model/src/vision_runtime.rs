@@ -120,7 +120,7 @@ mod onnx_backend {
     use super::*;
     use image::imageops::FilterType;
     use ndarray::Array4;
-    use ort::session::{Session, builder::GraphOptimizationLevel};
+    use ort::session::Session;
     use ort::value::Tensor;
     use std::time::Instant;
 
@@ -148,12 +148,7 @@ mod onnx_backend {
             embedding_dim: usize,
             normalization: ImageNormalization,
         ) -> Result<Self> {
-            let session = Session::builder()
-                .map_err(|e| ModelError::InvalidModel(format!("ORT session builder: {}", e)))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| ModelError::InvalidModel(format!("ORT optimization level: {}", e)))?
-                .commit_from_file(path.as_ref())
-                .map_err(|e| ModelError::ProviderNotAvailable(format!("ORT load failed: {}", e)))?;
+            let session = crate::onnx_session::build_onnx_session(path.as_ref(), "model")?;
 
             let input_name = session
                 .inputs

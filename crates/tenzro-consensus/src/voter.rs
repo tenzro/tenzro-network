@@ -225,23 +225,16 @@ pub struct QuorumCertificate {
     /// Vote type
     pub vote_type: VoteType,
 
-    /// Votes included in this QC. Each carries its own [`CompositeSignature`]
-    /// (Ed25519 + ML-DSA-65) plus its individual [`BlsSignature`] — kept for
-    /// the slow-path verifier ([`Self::verify`]) and for forensic / slashing
-    /// evidence. The fast-path verifier ([`Self::verify_bls_aggregate`]) only
-    /// needs `bls_aggregate` + `signer_bitmap`.
-    pub votes: Vec<Vote>,
-
-    /// Total voting power of the votes
+    /// Total voting power of the signers in `signer_bitmap`
     pub voting_power: u128,
 
     /// Aggregated BLS12-381 G2-compressed signature (96 bytes, `min_pk`
-    /// scheme) over the canonical vote signing payload, summing the
-    /// `bls_signature` field of every vote in `votes`. ROADMAP B.1: this is
-    /// the third signature leg, sitting alongside the per-vote
-    /// [`CompositeSignature`] entries — BLS gives O(1) verification cost on
-    /// the QC path; Composite preserves the PQ-hybrid property per individual
-    /// vote.
+    /// scheme) over [`Self::bls_signing_payload`], summing the
+    /// `bls_signature` of every contributing vote. The QC carries only this
+    /// aggregate plus `signer_bitmap` — individual votes (with their ~3.4KB
+    /// PQ-hybrid [`CompositeSignature`]s) stay in the local `VoteCollector`
+    /// for forensics; slashing evidence flows through the
+    /// `EquivocationDetector`, never through QCs.
     #[serde(with = "bls_aggregate_serde")]
     pub bls_aggregate: [u8; 96],
 
@@ -262,7 +255,6 @@ impl QuorumCertificate {
         height: BlockHeight,
         block_hash: Hash,
         vote_type: VoteType,
-        votes: Vec<Vote>,
         voting_power: u128,
         bls_aggregate: [u8; 96],
         signer_bitmap: Vec<u8>,
@@ -272,21 +264,40 @@ impl QuorumCertificate {
             height,
             block_hash,
             vote_type,
-            votes,
             voting_power,
             bls_aggregate,
             signer_bitmap,
         }
     }
 
-    /// Returns the number of votes
-    pub fn vote_count(&self) -> usize {
-        self.votes.len()
+    /// Returns the number of signers set in `signer_bitmap`
+    pub fn signer_count(&self) -> usize {
+        self.signer_bitmap
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum()
     }
 
-    /// Verifies the QC has sufficient voting power
-    pub fn verify_threshold(&self, _total_voting_power: u128, threshold: usize) -> bool {
-        self.votes.len() >= threshold
+    /// Resolves `signer_bitmap` to the addresses of the contributing
+    /// validators, indexed against the given epoch's active set.
+    ///
+    /// The caller must pass the validator set that was active at this QC's
+    /// epoch (`HotStuff2Engine::validator_set_for_height`); out-of-range bits
+    /// are skipped rather than erroring because verification is
+    /// [`Self::verify_bls_aggregate`]'s job — this is an attribution helper.
+    pub fn signers(&self, validator_set: &crate::validator::ValidatorSet) -> Vec<Address> {
+        let active = validator_set.active_validators();
+        let mut out = Vec::new();
+        for bit_index in 0..(self.signer_bitmap.len() * 8) {
+            let byte = self.signer_bitmap[bit_index / 8];
+            if (byte >> (bit_index % 8)) & 1 == 0 {
+                continue;
+            }
+            if let Some(validator) = active.get(bit_index) {
+                out.push(validator.address);
+            }
+        }
+        out
     }
 
     /// Extracts a QC that was embedded in a block's `consensus_proof.proof_data`
@@ -307,166 +318,15 @@ impl QuorumCertificate {
         bincode::deserialize::<Self>(bytes).ok()
     }
 
-    /// Verifies this QC against a validator set:
-    /// 1. Every contained vote uses the current wire-format version.
-    /// 2. Every vote's `(view, height, block_hash, vote_type)` matches the QC.
-    /// 3. Every voter is a known active validator in `validator_set`.
-    /// 4. Every vote's embedded composite public key matches the validator's
-    ///    registered classical + ML-DSA-65 keys exactly (key-substitution defence).
-    /// 5. Every vote's hybrid signature validates against `vote.signing_payload()`.
-    /// 6. No duplicate voters within the QC.
-    /// 7. Aggregated voting power of all valid votes meets the validator-set
-    ///    quorum threshold.
+    /// Verifies a QC that crossed the network (block-sync import,
+    /// catchup-on-proposal): re-aggregates the BLS public keys of validators
+    /// whose bit is set in `signer_bitmap` against the active set, then
+    /// verifies `bls_aggregate` in a single pairing check.
     ///
-    /// This is the verification block-sync runs on every imported block
-    /// (after [`extract_from_block`]). A QC that passes this check was finalized
-    /// by ⅔+ stake of the *given* validator set without re-running consensus.
-    ///
-    /// Note: the validator set passed in must be the one that was active at the
-    /// QC's epoch. Caller (BlockSyncEngine) is responsible for selecting the
-    /// correct historical validator set.
-    pub fn verify(&self, validator_set: &crate::validator::ValidatorSet) -> Result<()> {
-        if self.votes.is_empty() {
-            return Err(ConsensusError::InvalidSignature(
-                "QC contains no votes".to_string(),
-            ));
-        }
-
-        let mut seen_voters: std::collections::HashSet<Address> = std::collections::HashSet::new();
-        let mut total_voting_power: u128 = 0;
-
-        for vote in &self.votes {
-            // (1) Format version pinning.
-            if vote.vote_format_version != VOTE_FORMAT_VERSION {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "QC vote rejected: unsupported vote_format_version {} (expected {})",
-                    vote.vote_format_version, VOTE_FORMAT_VERSION
-                )));
-            }
-
-            // (2) Vote must agree with QC on what is being voted on.
-            if vote.view != self.view
-                || vote.height != self.height
-                || vote.block_hash != self.block_hash
-                || vote.vote_type != self.vote_type
-            {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "QC vote at view={}/height={}/hash={}/type={:?} disagrees with QC at view={}/height={}/hash={}/type={:?}",
-                    vote.view, vote.height, vote.block_hash, vote.vote_type,
-                    self.view, self.height, self.block_hash, self.vote_type,
-                )));
-            }
-
-            // (3) Voter must be a known active validator.
-            let validator = validator_set.get_by_address(&vote.voter).ok_or_else(|| {
-                ConsensusError::NonValidator(format!("QC voter not in validator set: {}", vote.voter))
-            })?;
-            if !validator.is_active() {
-                return Err(ConsensusError::NonValidator(format!(
-                    "QC voter {} is not active",
-                    vote.voter
-                )));
-            }
-
-            // (4) Composite public key must match the validator's registered keys.
-            if vote.public_key.classical != validator.public_key {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "QC vote classical pubkey mismatch for {}",
-                    vote.voter
-                )));
-            }
-            if vote.public_key.pq != validator.pq_public_key {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "QC vote PQ pubkey mismatch for {}",
-                    vote.voter
-                )));
-            }
-
-            // (5) Hybrid signature verification.
-            let payload = vote.signing_payload();
-            let verifier = StandardHybridVerifier::new(validator.composite_public_key());
-            verifier.verify(&payload, &vote.signature).map_err(|e| {
-                ConsensusError::InvalidSignature(format!(
-                    "QC vote hybrid signature verification failed for {}: {}",
-                    vote.voter, e
-                ))
-            })?;
-
-            // (5b) Per-vote BLS signature must verify against the QC-canonical
-            // BLS payload. Slow-path forensic verifier — fast-path callers
-            // should use `verify_bls_aggregate` instead and skip the per-vote
-            // hybrid + BLS checks entirely.
-            let bls_pk = BlsPublicKey::from_bytes(&validator.bls_public_key).map_err(|e| {
-                ConsensusError::InvalidSignature(format!(
-                    "QC voter {} has malformed BLS verifying key: {}",
-                    vote.voter, e
-                ))
-            })?;
-            let bls_payload = bls_payload_for_vote(vote);
-            let bls_ok = vote.bls_signature.verify(&bls_pk, &bls_payload).map_err(|e| {
-                ConsensusError::InvalidSignature(format!(
-                    "QC vote BLS signature raised error for {}: {}",
-                    vote.voter, e
-                ))
-            })?;
-            if !bls_ok {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "QC vote BLS signature verification failed for {}",
-                    vote.voter
-                )));
-            }
-
-            // (6) Duplicate voter check.
-            if !seen_voters.insert(vote.voter) {
-                return Err(ConsensusError::InvalidSignature(format!(
-                    "QC contains duplicate vote from {}",
-                    vote.voter
-                )));
-            }
-
-            total_voting_power = total_voting_power.saturating_add(validator.voting_power());
-        }
-
-        // (7) Aggregated *stake-weighted* voting power must meet the quorum.
-        // Safety is decided on normalized stake weight (Sui model), not on a
-        // head-count of signers: a node with zero stake contributes zero, so
-        // unstaked service nodes cannot move a quorum.
-        let signed_power = validator_set.voting_power_of(seen_voters.iter());
-        let quorum_power = validator_set.quorum_voting_power();
-        if signed_power < quorum_power {
-            return Err(ConsensusError::InvalidSignature(format!(
-                "QC carries {} stake-weight from {} signers, below quorum power {}",
-                signed_power,
-                seen_voters.len(),
-                quorum_power
-            )));
-        }
-
-        // Sanity check: the QC's claimed voting_power must agree with the raw
-        // (uncapped) stake we re-tallied. A mismatch is a data-integrity error,
-        // not a signature forgery, but it indicates the QC was tampered with
-        // after formation. (This field is raw stake, not normalized weight, so
-        // it stays comparable to the formation-time sum.)
-        if self.voting_power != total_voting_power {
-            return Err(ConsensusError::InvalidSignature(format!(
-                "QC claims voting_power={} but votes total {}",
-                self.voting_power, total_voting_power
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Fast-path BLS aggregate verifier (ROADMAP B.1).
-    ///
-    /// Re-aggregates the BLS public keys of validators whose bit is set in
-    /// `signer_bitmap` against the active set, then verifies `bls_aggregate`
-    /// in a single pairing check rather than N hybrid checks.
-    ///
-    /// Block-sync and the consensus engine should call this for QC validation
-    /// — the per-vote [`Self::verify`] path is reserved for forensic /
-    /// slashing-evidence reconstruction where individual signatures are
-    /// required.
+    /// The validator set passed in must be the one that was active at the
+    /// QC's epoch (`HotStuff2Engine::validator_set_for_height`). Locally
+    /// formed QCs (assembled by `VoteCollector` from individually verified
+    /// votes) do not need re-verification.
     ///
     /// # Errors
     ///
@@ -626,18 +486,32 @@ pub struct VoteCollector {
     /// Validator set
     validator_set: Arc<ValidatorSet>,
 
-    /// Equivocation detector — detects validators voting for multiple blocks in the same view
-    equivocation_detector: EquivocationDetector,
+    /// Equivocation detector — detects validators voting for multiple blocks in the same view.
+    /// Shared (`Arc`) so the engine's persistent detector survives the
+    /// collector rebuilds that happen at every epoch transition.
+    equivocation_detector: Arc<EquivocationDetector>,
 }
 
 impl VoteCollector {
-    /// Creates a new vote collector
+    /// Creates a new vote collector with a fresh in-memory equivocation
+    /// detector (test path — production uses [`Self::with_detector`]).
     pub fn new(validator_set: Arc<ValidatorSet>) -> Self {
+        Self::with_detector(validator_set, Arc::new(EquivocationDetector::new()))
+    }
+
+    /// Creates a vote collector around a shared equivocation detector.
+    /// The engine passes its long-lived (optionally storage-backed)
+    /// detector here so conviction state survives epoch transitions and
+    /// node restarts.
+    pub fn with_detector(
+        validator_set: Arc<ValidatorSet>,
+        equivocation_detector: Arc<EquivocationDetector>,
+    ) -> Self {
         Self {
             votes: Arc::new(DashMap::new()),
             quorum_certificates: Arc::new(DashMap::new()),
             validator_set,
-            equivocation_detector: EquivocationDetector::new(),
+            equivocation_detector,
         }
     }
 
@@ -860,7 +734,6 @@ impl VoteCollector {
                 vote.height,
                 vote.block_hash,
                 vote.vote_type,
-                votes_entry.clone(),
                 total_voting_power,
                 bls_aggregate,
                 signer_bitmap,
@@ -1059,7 +932,7 @@ mod tests {
         assert!(result.is_some());
 
         let qc = result.unwrap();
-        assert_eq!(qc.vote_count(), 4);
+        assert_eq!(qc.signer_count(), 4);
         assert_eq!(qc.view, view);
     }
 

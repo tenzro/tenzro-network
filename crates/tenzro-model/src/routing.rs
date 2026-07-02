@@ -173,6 +173,13 @@ pub struct RoutingConfig {
     pub timeout_ms: u64,
     /// Require TEE provider
     pub require_tee: bool,
+    /// Require a provider-signed inference response. When true, routing
+    /// is restricted to providers with a registered signing key and the
+    /// response manifest is verified against that key — a missing or
+    /// invalid manifest counts as a provider failure. When false
+    /// (default), unsigned providers are fully routable and any attached
+    /// manifest is verified best-effort only.
+    pub require_signed_response: bool,
     /// Preferred providers (will be tried first if available)
     pub preferred_providers: Vec<Address>,
 }
@@ -184,6 +191,7 @@ impl Default for RoutingConfig {
             max_retries: 3,
             timeout_ms: 120_000,
             require_tee: false,
+            require_signed_response: false,
             preferred_providers: Vec::new(),
         }
     }
@@ -204,6 +212,12 @@ impl RoutingConfig {
     /// Sets TEE requirement
     pub fn with_tee_required(mut self, required: bool) -> Self {
         self.require_tee = required;
+        self
+    }
+
+    /// Sets the signed-response requirement
+    pub fn with_signed_response_required(mut self, required: bool) -> Self {
+        self.require_signed_response = required;
         self
     }
 
@@ -498,6 +512,18 @@ impl InferenceRouter {
             }
         }
 
+        // Filter by signed-response requirement — only providers with a
+        // registered signing key can satisfy a verified response.
+        if config.require_signed_response {
+            providers.retain(|p| p.provider.signing_pubkey.is_some());
+            if providers.is_empty() {
+                return Err(ModelError::NoProvidersAvailable(format!(
+                    "{} (signed response required)",
+                    request.model_id
+                )));
+            }
+        }
+
         // Filter by price
         providers.retain(|p| {
             let provider_price = p.provider.pricing.minimum_price;
@@ -654,6 +680,13 @@ impl InferenceRouter {
             .await
     }
 
+    /// Returns the router's default routing configuration. Callers that
+    /// need per-request overrides (e.g. `require_signed_response`) clone
+    /// this and pass the result to `forward_request_with_config`.
+    pub fn default_config(&self) -> &RoutingConfig {
+        &self.default_config
+    }
+
     /// Forwards an inference request with custom routing configuration
     pub async fn forward_request_with_config(
         &self,
@@ -792,6 +825,67 @@ impl InferenceRouter {
                         .unwrap_or("")
                         .to_string();
 
+                    // Provider-attached provenance manifest (optional
+                    // `tenzro_provenance` extension on the OpenAI-compatible
+                    // response). Verified against the output bytes, the
+                    // routed model id, and — when the provider registered a
+                    // signing key — that key. When the caller demanded a
+                    // signed response, a missing or invalid manifest is a
+                    // provider failure and the retry loop moves on; when
+                    // verification is optional, a bad manifest is dropped
+                    // with a warning and routing proceeds unsigned.
+                    let provider_manifest = match resp_body.get("tenzro_provenance") {
+                        Some(v) if !v.is_null() => {
+                            match serde_json::from_value::<tenzro_types::ProvenanceManifest>(
+                                v.clone(),
+                            ) {
+                                Ok(manifest) => {
+                                    match crate::provenance::verify_response_manifest(
+                                        &manifest,
+                                        output_text.as_bytes(),
+                                        &request.model_id,
+                                        provider.signing_pubkey.as_deref(),
+                                    ) {
+                                        Ok(()) => Some(manifest),
+                                        Err(e) => {
+                                            warn!(
+                                                "Provider {} attached an invalid provenance \
+                                                 manifest for request {}: {}",
+                                                provider_address, request.request_id, e
+                                            );
+                                            None
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Provider {} attached a malformed provenance \
+                                         manifest for request {}: {}",
+                                        provider_address, request.request_id, e
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if config.require_signed_response && provider_manifest.is_none() {
+                        warn!(
+                            "Provider {} did not return a verifiable signed response \
+                             for request {} (signed response required)",
+                            provider_address, request.request_id
+                        );
+                        self.record_provider_failure(&provider_address);
+                        self.provider_manager.record_call_failure(&provider_address);
+                        excluded_providers.push(provider_address);
+                        last_error = Some(ModelError::InferenceError(format!(
+                            "Provider {} did not return a verifiable signed response",
+                            provider_address
+                        )));
+                        continue;
+                    }
+
                     // Provider self-reports token counts in the OpenAI-compatible
                     // `usage` field. A dishonest provider can inflate either
                     // count to overbill the consumer, since the router has
@@ -902,13 +996,21 @@ impl InferenceRouter {
                             .record_settled_success(&provider_address, price as u128);
                     }
 
-                    // EU AI Act Art. 50(2): stamp the response with a signed
-                    // provenance manifest before returning. Failure to sign
-                    // is logged but non-fatal — the consumer still gets the
+                    // EU AI Act Art. 50(2): attach a provenance manifest
+                    // before returning. A verified provider-signed manifest
+                    // wins — it binds the output to the provider's own key.
+                    // Otherwise the router stamps with its own signer as a
+                    // fallback disclosure mark. Failure to sign is logged
+                    // but non-fatal — the consumer still gets the
                     // `synthetic_content = true` disclosure flag, just no
                     // verifiable signature. This matches the behavior on
                     // dev-mode nodes that don't yet have a provenance key.
-                    if let Some(signer) = &self.provenance_signer {
+                    if let Some(manifest) = provider_manifest {
+                        if let Some(store) = &self.provenance_store {
+                            store.put(manifest.clone());
+                        }
+                        response.provenance = Some(manifest);
+                    } else if let Some(signer) = &self.provenance_signer {
                         match signer.sign(
                             &response.model_id,
                             response.provider,

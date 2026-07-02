@@ -140,6 +140,132 @@ pub enum AggregationRule {
 }
 
 // ---------------------------------------------------------------------------
+// Gradient quantization
+// ---------------------------------------------------------------------------
+
+/// Wire-format quantization applied to outer-gradient tensor payloads.
+///
+/// Streaming DiLoCo (arXiv 2501.18512) demonstrates that outer gradients
+/// tolerate aggressive low-bit quantization with no convergence loss because
+/// they are momentum-smoothed deltas, not raw activations. Quantization is
+/// blockwise symmetric: the tensor is split into fixed-size blocks, each
+/// block stores one little-endian `f32` scale followed by the packed integer
+/// codes. Dequantized value = `code * scale`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum GradientQuantization {
+    /// Raw little-endian `f32` values. No compression.
+    #[default]
+    None,
+    /// 8-bit symmetric per-block: `scale = max_abs / 127`, codes are `i8`.
+    /// 4x smaller than f32.
+    Int8 { block_size: u32 },
+    /// 4-bit symmetric per-block: `scale = max_abs / 7`, codes in `[-7, 7]`
+    /// packed two per byte (low nibble first, odd tail zero-padded).
+    /// ~8x smaller than f32.
+    Int4 { block_size: u32 },
+}
+
+impl fmt::Display for GradientQuantization {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Int8 { block_size } => write!(f, "int8/{block_size}"),
+            Self::Int4 { block_size } => write!(f, "int4/{block_size}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sync strategy
+// ---------------------------------------------------------------------------
+
+/// How fragments are scheduled for outer synchronization each round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SyncStrategy {
+    /// Every fragment syncs every round. Classic DiLoCo.
+    #[default]
+    Full,
+    /// Streaming DiLoCo (arXiv 2501.18512): fragments are partitioned into
+    /// `num_shards` shards and only the active shard
+    /// (`round % num_shards`) syncs each round, overlapping communication
+    /// of one shard with computation on the others. Peak bandwidth drops
+    /// by ~`num_shards`x.
+    Streaming { num_shards: u32 },
+}
+
+impl SyncStrategy {
+    /// Which shard is active for a given round. `Full` is always shard 0
+    /// of 1.
+    pub fn active_shard(&self, round: u32) -> u32 {
+        match self {
+            Self::Full => 0,
+            Self::Streaming { num_shards } => round % (*num_shards).max(1),
+        }
+    }
+
+    /// Number of shards under this strategy.
+    pub fn shard_count(&self) -> u32 {
+        match self {
+            Self::Full => 1,
+            Self::Streaming { num_shards } => (*num_shards).max(1),
+        }
+    }
+
+    /// Which shard a fragment belongs to, given the total fragment count.
+    /// Fragments are partitioned contiguously:
+    /// `shard = fragment * num_shards / fragment_count`.
+    pub fn shard_of_fragment(&self, fragment: u32, fragment_count: u32) -> u32 {
+        let shards = self.shard_count() as u64;
+        let count = fragment_count.max(1) as u64;
+        ((fragment as u64 * shards) / count) as u32
+    }
+
+    /// Whether a fragment is expected to sync in a given round.
+    pub fn fragment_active(&self, fragment: u32, fragment_count: u32, round: u32) -> bool {
+        self.shard_of_fragment(fragment, fragment_count) == self.active_shard(round)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline config
+// ---------------------------------------------------------------------------
+
+/// DiLoCoX-style (arXiv 2506.21263) pipeline-parallel trainer groups.
+///
+/// When set, trainers enroll as `(group_id, stage)` pairs: a group of
+/// `num_stages` trainers jointly holds one model replica, each stage owning
+/// the contiguous fragment slice
+/// `stage = fragment * num_stages / fragment_count`. Quorum counts distinct
+/// **groups** per fragment, so a whole pipeline group is one logical trainer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// Pipeline stages per trainer group (>= 2 to be meaningful; 1 is
+    /// equivalent to no pipelining).
+    pub num_stages: u32,
+}
+
+impl PipelineConfig {
+    /// Which stage owns a fragment, mirroring
+    /// [`SyncStrategy::shard_of_fragment`] partitioning.
+    pub fn stage_of_fragment(&self, fragment: u32, fragment_count: u32) -> u32 {
+        let stages = self.num_stages.max(1) as u64;
+        let count = fragment_count.max(1) as u64;
+        ((fragment as u64 * stages) / count) as u32
+    }
+}
+
+/// A trainer's position inside a pipeline-parallel group. Bound at
+/// enrollment when the task spec carries a [`PipelineConfig`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineAssignment {
+    /// Pipeline group this trainer belongs to. Groups are numbered
+    /// `0..(trainer_count / num_stages)`.
+    pub group_id: u32,
+    /// Stage within the group (`0..num_stages`).
+    pub stage: u32,
+}
+
+// ---------------------------------------------------------------------------
 // Architecture spec
 // ---------------------------------------------------------------------------
 
@@ -190,6 +316,19 @@ pub struct TrainingTaskSpec {
     pub tier: TrainingTier,
     /// Aggregation rule the syncer must apply.
     pub aggregation: AggregationRule,
+    /// Fragment sync scheduling (full every round vs. Streaming DiLoCo
+    /// shard rotation).
+    pub sync_strategy: SyncStrategy,
+    /// Quantization trainers must apply to outer-gradient payloads. The
+    /// syncer rejects submissions whose declared quantization differs.
+    pub quantization: GradientQuantization,
+    /// DiLoCoX one-step-delay: when `true`, the aggregate computed at round
+    /// `r` is applied by trainers at round `r + 1`, overlapping the outer
+    /// sync with the next inner-step window.
+    pub delayed_apply: bool,
+    /// Pipeline-parallel trainer groups (DiLoCoX). `None` = each trainer
+    /// holds a full replica.
+    pub pipeline: Option<PipelineConfig>,
     /// Number of trainers (M). Total slots.
     pub trainer_count: u32,
     /// Quorum (K). Outer gradient is accepted once K of M have submitted
@@ -249,6 +388,9 @@ pub struct OuterGradient {
     pub safetensors_hash: Hash,
     /// Payload size in bytes (for bandwidth accounting).
     pub payload_bytes: u64,
+    /// Quantization applied to the payload. Must match the task spec's
+    /// `quantization` policy; the syncer dequantizes before aggregation.
+    pub quantization: GradientQuantization,
     /// Vector clock entry: number of inner SGD steps the trainer had
     /// completed when this gradient was emitted. Decoupled DiLoCo's
     /// asynchronous learner support hinges on this.
@@ -503,6 +645,9 @@ pub struct TrainingRun {
     pub syncer_address: Option<Address>,
     /// Enrolled trainer DIDs.
     pub trainers: Vec<String>,
+    /// Pipeline-group assignment per trainer DID. Empty when the task spec
+    /// has no [`PipelineConfig`].
+    pub pipeline_assignments: HashMap<String, PipelineAssignment>,
     /// Most recent completed round (0 = none).
     pub current_round: u32,
     /// State roots collected so far (length == current_round).
@@ -557,5 +702,59 @@ mod tests {
     fn run_status_display() {
         assert_eq!(TrainingRunStatus::Pending.to_string(), "pending");
         assert_eq!(TrainingRunStatus::Training.to_string(), "training");
+    }
+
+    #[test]
+    fn full_strategy_activates_every_fragment_every_round() {
+        let s = SyncStrategy::Full;
+        for round in 0..5 {
+            for fragment in 0..8 {
+                assert!(s.fragment_active(fragment, 8, round));
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_strategy_rotates_shards() {
+        // 8 fragments, 4 shards -> 2 contiguous fragments per shard.
+        let s = SyncStrategy::Streaming { num_shards: 4 };
+        assert_eq!(s.shard_of_fragment(0, 8), 0);
+        assert_eq!(s.shard_of_fragment(1, 8), 0);
+        assert_eq!(s.shard_of_fragment(2, 8), 1);
+        assert_eq!(s.shard_of_fragment(7, 8), 3);
+        // Round r activates shard r % 4.
+        assert!(s.fragment_active(0, 8, 0));
+        assert!(!s.fragment_active(2, 8, 0));
+        assert!(s.fragment_active(2, 8, 1));
+        assert!(s.fragment_active(0, 8, 4));
+        // Every fragment is active exactly once per num_shards rounds.
+        for fragment in 0..8 {
+            let active: Vec<u32> = (0..4).filter(|r| s.fragment_active(fragment, 8, *r)).collect();
+            assert_eq!(active.len(), 1, "fragment {fragment} active {active:?}");
+        }
+    }
+
+    #[test]
+    fn streaming_strategy_uneven_partition_covers_all_fragments() {
+        // 5 fragments, 2 shards: contiguous split 0..2 -> shard 0, 3..4 -> shard 1.
+        let s = SyncStrategy::Streaming { num_shards: 2 };
+        let shards: Vec<u32> = (0..5).map(|f| s.shard_of_fragment(f, 5)).collect();
+        assert_eq!(shards, vec![0, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn pipeline_stage_partition_matches_shard_math() {
+        let p = PipelineConfig { num_stages: 2 };
+        assert_eq!(p.stage_of_fragment(0, 4), 0);
+        assert_eq!(p.stage_of_fragment(1, 4), 0);
+        assert_eq!(p.stage_of_fragment(2, 4), 1);
+        assert_eq!(p.stage_of_fragment(3, 4), 1);
+    }
+
+    #[test]
+    fn quantization_display() {
+        assert_eq!(GradientQuantization::None.to_string(), "none");
+        assert_eq!(GradientQuantization::Int8 { block_size: 256 }.to_string(), "int8/256");
+        assert_eq!(GradientQuantization::Int4 { block_size: 128 }.to_string(), "int4/128");
     }
 }

@@ -81,6 +81,7 @@ Tenzro wires MTP through the full path:
 - **Provider capacity.** `ProviderCapacity.mtp_enabled` advertises drafter co-load. `ProviderCapacity.drafter_vram_gb` advertises the VRAM headroom reserved for the drafter.
 - **Router filter.** When the request carries `params.custom["draft_n"]`, the router filters to MTP-capable providers; when no MTP-capable provider exists for the model, the router falls back to standard autoregressive providers so the caller can degrade.
 - **Runtime.** The MTP variant of llama.cpp consumes the joint head via the vendored `llama-cpp-rs` `MtpSpeculative` wrapper. `generate_speculative` accepts the longest matching prefix on each step.
+- **Drafter auto-load.** `tenzro_serveModel` reads the catalog entry's `drafter_id` and loads the paired drafter automatically. If the drafter GGUF is on disk it loads inline; otherwise a background download starts and the drafter attaches when it completes — the target serves non-speculatively in the meantime. The serve response carries an `mtp` field reporting the outcome: `none` (entry declares no MTP), `inline` (single-file MTP model, the draft head lives inside the target GGUF), `drafter_loaded`, `drafter_downloading`, `drafter_load_failed`, `drafter_unavailable`, or `disabled` (caller passed `"load_drafter": false`). A drafter problem never fails the serve. `tenzro_stopModel` unloads the drafter with its target, and the drafter is re-attached on node restart when the served model is restored.
 
 Shipped in the catalog with `mtp_kind: DraftMtp`: DeepSeek V3 (native MTP head), DeepSeek V4 Pro / Flash, GLM 5.2, Gemma 4 (E2B / E4B / 12B / 26B-A4B / 31B), Qwen 3.5 every size (0.8B / 2B / 4B / 9B / 27B / 35B-A3B / 122B-A10B / 397B-A17B), Qwen 3.6 27B and 35B-A3B. For dense models without a joint head, classical two-model speculative decoding (`MtpKind::Generic`) is wired through the same path.
 
@@ -152,7 +153,23 @@ Members are discovered from the runtime ggml device API (`list_llama_ggml_backen
 
 **Auto-discovery.** Clustering does not require the caller to hand-supply members. An AI-serving node that is willing to join LAN clusters advertises a `ClusterProfile { llama_commit, backend, cap_key }` on its provider announcement (see NETWORK.md); nodes that omit it are never auto-clustered. When `tenzro_serveModel` is called with a `model_shape` but no explicit `cluster_members`, the head gathers candidates from gossip — itself (serving the first stage locally) plus every provider that advertised a `ClusterProfile` — and feeds them to the same fit policy and planner. A peer also seen on the local mDNS segment is treated as `LocalDirect` regardless of its announced WAN tier; the planner's hardware gate and stage ordering drop commit-mismatched, VRAM-starved, or non-data-plane-reachable candidates. Passing `force_single: true` opts out and forces a single-box load; passing explicit `cluster_members` overrides auto-discovery.
 
-### 3.6 RPCs
+### 3.6 Expert-host execution
+
+The dispatch planner in §3.2 decides *where* each token batch goes; the expert-host execution runtime carries the tensors there and runs the math.
+
+Every node embeds a `MoeExpertRuntime` (`tenzro-model::moe_exec`). An expert holder loads expert FFN weights (`ExpertFfn`, gate/up/down projections with SwiGLU activation) and gating networks (`GatingNetwork`, softmax top-k router) from safetensors payloads, keyed by `(model_id, layer, expert)`. Loaded weights are counted against the same memory admission as dense models.
+
+A distributed layer forward (`tenzro_moeForward`) runs in three steps on the coordinating node:
+
+1. **Gate.** The local gating network routes each token's hidden state to its top-k experts (`route_batch`).
+2. **Dispatch.** Routing decisions feed the §3.2 planner, which groups tokens into per-holder batches. Each batch is an `ExpertExecuteRequest` — hidden states as base64-encoded little-endian f32 rows — sent over a three-tier transport: local execution when this node holds the expert, the holder's iroh QUIC endpoint (`tenzro/moe` ALPN, methods `moe/execute` and `moe/status`) when one is advertised, or the holder's HTTP endpoint otherwise.
+3. **Combine.** Per-expert outputs come back as `ExpertExecuteResponse` rows and are recombined per token, weighted by the gate probabilities (`combine_expert_outputs`).
+
+The wire format is identical across all three tiers, so a holder can serve LAN peers, WAN peers, and its own local router with one code path.
+
+### 3.7 RPCs
+
+Planning and topology:
 
 - `tenzro_moeShardMap` — live shard map: per-expert holder list, replication factor, under-replicated experts, hot experts, role counts
 - `tenzro_moePlanDispatch` — given a list of per-token routing decisions, returns the per-holder batch plan plus token-level assignment so the caller can reassemble per-token outputs
@@ -160,7 +177,16 @@ Members are discovered from the runtime ggml device API (`list_llama_ggml_backen
 - `tenzro_moeCatalogShape` — catalog-side MoE topology for a model: `num_experts`, `experts_per_token`, `shared_experts`, `params_per_expert_x10`
 - `tenzro_modelMetadata` — full catalog metadata for a model: `serving` profile (samplers, jinja, reasoning), `multimodal` + `mmproj_filename`, `drafter_id` / `mtp_kind` / `mtp_default_draft_n`, MoE `moe` shape, and `architecture`. The read API over the catalog's single source of truth, consumed by the CLI and SDKs.
 
-### 3.7 Catalog coverage
+Execution:
+
+- `tenzro_moeExpertLoad` / `tenzro_moeExpertUnload` — load or unload one expert FFN's safetensors weights for `(model_id, layer, expert)`
+- `tenzro_moeGateLoad` / `tenzro_moeGateUnload` — load or unload a layer's gating network
+- `tenzro_moeExpertStatus` — resident experts and gates on this node with memory footprint
+- `tenzro_moeRoute` — run the local gating network over a batch of hidden states, returning per-token top-k expert assignments
+- `tenzro_moeExecute` — run a batch of tokens through one locally-resident expert FFN
+- `tenzro_moeForward` — the full distributed layer forward: gate → plan → dispatch to holders (local / iroh / HTTP) → combine
+
+### 3.8 Catalog coverage
 
 Catalog entries that declare a `moe: Some(MoeShape { ... })` topology:
 
@@ -203,6 +229,8 @@ The catalog covers seven ONNX runtimes plus the llama.cpp language path. All ent
 | Video | Vision-fallback encoder over uniformly-sampled frames | `tenzro_videoEmbed` | |
 
 Each modality has a dedicated runtime in `tenzro-model` with model-specific preprocessing (mel-spectrogram for ASR, ImageNet / CLIP / SigLIP normalization for vision, BPE tokenization for text-embed). The runtime dispatch hides the per-family ABI differences (SAM 1 vs SAM 2 decoder, RF-DETR vs D-FINE post-processing, Parakeet RNN-T vs Canary NeMo Conformer-AED).
+
+**Execution providers.** All ONNX runtimes share one session builder that registers hardware execution providers before falling back to CPU. The `onnx-tensorrt`, `onnx-cuda`, and `onnx-coreml` cargo features compile in the corresponding providers; the default registration priority is TensorRT → CUDA → CoreML, restricted to whichever features are compiled in. The `TENZRO_ONNX_EP` environment variable overrides the priority as a comma-separated list drawn from `tensorrt`, `cuda`, `coreml`, `cpu` (`cpu` terminates the list). A provider that fails to register logs a warning and falls through to the next — a GPU-featured binary on a machine without the matching driver still serves on CPU. The CUDA container image and operator setup are covered in the operator guide (`docs/operators/OPERATOR_GUIDE.md`, GPU model serving).
 
 ### 4.1 Vision-language GGUFs (mmproj)
 
@@ -486,7 +514,15 @@ Public-internet feasibility:
 | 7B | 24 | 580 MB | 46s | 4.6s |
 | 70B | 48 | 2.9 GB | 232s | 23s |
 
-For 200M-1B models (covering all current frontier timeseries foundation models), public-internet trainers are entirely viable. For 7B+ language models, geographic clustering or compressed gradients (INT8 or top-k sparsification) become attractive.
+For 200M-1B models (covering all current frontier timeseries foundation models), public-internet trainers are entirely viable at raw f32. For 7B+ language models the protocol carries five communication-efficiency mechanisms, each declared on the `TrainingTaskSpec` and enforced by the syncer:
+
+- **Gradient quantization** (`quantization: GradientQuantization`). Blockwise symmetric compression of the outer-gradient payload: `Int8 { block_size }` stores a 4-byte little-endian f32 scale per block (`scale = max_abs / 127`) followed by one `i8` code per value — 4× smaller than f32; `Int4 { block_size }` uses `scale = max_abs / 7` with codes packed two per byte (low nibble first) — ~8× smaller. `None` is raw little-endian f32. The syncer rejects submissions whose declared quantization differs from the task's, so every trainer and every aggregation round shares one wire format. The Python trainer encodes and decodes the identical format.
+- **Streaming synchronization** (`sync_strategy: SyncStrategy::Streaming { num_shards }`). Instead of synchronizing every fragment every round, fragments are partitioned into contiguous shards and each round synchronizes one shard (`active_shard = round % num_shards`). Per-round transfer drops by `num_shards`× and outer sync overlaps inner compute on the fragments that are not active. The syncer rejects submissions for inactive shards so per-fragment quorum accounting stays scoped. `Full` synchronizes everything every round.
+- **Delayed application** (`delayed_apply: bool`). The aggregate computed at round *r* is applied by trainers at round *r+1*, overlapping the outer synchronization with the next inner-step window instead of stalling on it.
+- **Adaptive outer learning rate** (`AdaptiveLrConfig` on the outer optimizer). The syncer computes the pairwise cosine agreement of submitted outer gradients (`gradient_agreement`) and scales the Nesterov outer step accordingly (`NesterovSgdState::step_with_agreement`) — high agreement earns a larger step, disagreement shrinks it.
+- **Pipeline-parallel trainer groups** (`pipeline: Option<PipelineConfig { num_stages }>`). Trainers enroll as `(group_id, stage)` pairs; a group of `num_stages` trainers jointly holds one model replica, each stage owning the contiguous fragment slice `stage = fragment × num_stages / fragment_count`. Quorum counts distinct **groups** per fragment, so no single trainer needs to fit the whole model.
+
+On the inner-loop side, the Python reference trainer supports **Muon** (momentum orthogonalized by Newton-Schulz) as the inner optimizer: matrix parameters take the Muon update, non-matrix parameters fall back to AdamW inside the same optimizer. As an inner optimizer for low-communication training, Muon converges with fewer outer synchronizations than AdamW at equal quality.
 
 ---
 
@@ -595,7 +631,7 @@ The trainer can run anywhere Python + PyTorch run, including inside a TEE (Verif
 **Phase 3: Multi-region + larger models**
 - 1B-7B language models
 - Cross-region trainers
-- Compressed gradients (INT8, top-k)
+- Quantized gradients (blockwise INT8 / INT4), streaming synchronization, delayed application, adaptive outer LR, pipeline-parallel trainer groups (see §7.5)
 - Goal: scale up
 
 **Phase 4: Multi-modal**
@@ -673,7 +709,9 @@ For Phase 3 language scaling:
 | K (quorum) | 24 |
 | F (fragments) | 24 |
 | H (inner steps) | 24 |
-| Gradient compression | INT8 with stochastic rounding |
+| Gradient compression | `Int8 { block_size: 256 }` blockwise symmetric |
+| Sync strategy | `Streaming { num_shards: 4 }` |
+| Delayed application | enabled |
 | State root commitment | Every 4 rounds |
 
 ---
@@ -682,6 +720,9 @@ For Phase 3 language scaling:
 
 - Douillard et al., *Decoupled DiLoCo: A New Frontier for Resilient Distributed AI Training*, DeepMind, 2025.
 - Douillard et al., *DiLoCo: Distributed Low-Communication Training of Language Models*, 2023.
+- Douillard et al., *Streaming DiLoCo with overlapping communication: Towards a Distributed Free Lunch*, arXiv:2501.18512, 2025.
+- Thérien et al., *MuLoCo: Muon is a practical inner optimizer for DiLoCo*, arXiv:2505.23725, 2025.
+- Qi et al., *DiLoCoX: A Low-Communication Large-Scale Training Framework for Decentralized Cluster*, arXiv:2506.21263, 2025.
 - Das et al., *TimesFM: A decoder-only foundation model for time-series forecasting*, Google, 2024.
 - Ansari et al., *Chronos: Learning the Language of Time Series*, Amazon, 2024.
 - Woo et al., *Moirai: A Time Series Foundation Model for Universal Forecasting*, Salesforce, 2024.

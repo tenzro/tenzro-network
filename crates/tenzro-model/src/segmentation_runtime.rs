@@ -144,7 +144,7 @@ mod onnx_backend {
     use super::*;
     use image::imageops::FilterType;
     use ndarray::{Array2, Array3, Array4};
-    use ort::session::{Session, SessionInputValue, builder::GraphOptimizationLevel};
+    use ort::session::{Session, SessionInputValue};
     use ort::value::Tensor;
     use std::time::Instant;
 
@@ -179,23 +179,11 @@ mod onnx_backend {
             family: SamFamily,
             input_size: u32,
         ) -> Result<Self> {
-            let encoder = Session::builder()
-                .map_err(|e| ModelError::InvalidModel(format!("ORT session builder: {}", e)))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| ModelError::InvalidModel(format!("ORT optimization level: {}", e)))?
-                .commit_from_file(encoder_path.as_ref())
-                .map_err(|e| {
-                    ModelError::ProviderNotAvailable(format!("ORT load encoder: {}", e))
-                })?;
+            let encoder =
+                crate::onnx_session::build_onnx_session(encoder_path.as_ref(), "encoder")?;
 
-            let decoder = Session::builder()
-                .map_err(|e| ModelError::InvalidModel(format!("ORT session builder: {}", e)))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| ModelError::InvalidModel(format!("ORT optimization level: {}", e)))?
-                .commit_from_file(decoder_path.as_ref())
-                .map_err(|e| {
-                    ModelError::ProviderNotAvailable(format!("ORT load decoder: {}", e))
-                })?;
+            let decoder =
+                crate::onnx_session::build_onnx_session(decoder_path.as_ref(), "decoder")?;
 
             let encoder_input_name = encoder
                 .inputs

@@ -73,6 +73,7 @@ pub mod gossip;
 pub mod message;
 pub mod metrics;
 pub mod mpc_relay;
+pub mod peer_binding;
 pub mod peer_manager;
 pub mod peer_status;
 pub mod reachability;
@@ -111,14 +112,19 @@ pub use message::{
     NetworkMessage, PaymentDetails, PricingInfo, ProviderAnnouncementMessage, StatusMessage,
     VoteType,
 };
-pub use peer_manager::{ManagedPeer, PeerManager, PeerManagerStats, ValidatorRegistry, VALIDATOR_ONLY_TOPICS};
+pub use peer_binding::{
+    binding_payload, encode_agent_binding, parse_agent_binding, verify_peer_binding,
+    AGENT_BINDING_PREFIX, PEER_BINDING_DOMAIN,
+};
+pub use peer_manager::{BanStore, ManagedPeer, PeerManager, PeerManagerStats, ValidatorRegistry, VALIDATOR_ONLY_TOPICS};
 pub use peer_status::{PeerStatus as PeerChainStatus, PeerStatusTracker, DEFAULT_FRESHNESS};
 pub use reachability::{
     LocalPeerSet, ReachabilityEvent, ReachabilityTier, ReachabilityTracker, CONFIDENCE_THRESHOLD,
 };
 pub use service::{
-    BlockSyncOutboundError, InboundBlockSync, InboundClusterTunnel, NetworkService,
-    OutboundBlockSyncResult, OutboundClusterTunnelResult, PeerEvent, TenzroNetworkService,
+    load_or_generate_keypair, BlockSyncOutboundError, InboundBlockSync, InboundClusterTunnel,
+    NetworkService, OutboundBlockSyncResult, OutboundClusterTunnelResult, PeerEvent,
+    TenzroNetworkService,
 };
 
 // Re-export libp2p types that are commonly used

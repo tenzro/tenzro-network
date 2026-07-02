@@ -31,12 +31,17 @@ from tenzro_trainer.gradient import (
     TrainerKey,
     build_round_gradients,
     compute_outer_delta,
+    deserialize_fragment_delta,
     partition_state_dict,
     serialize_fragment,
 )
-from tenzro_trainer.inner_loop import run_inner_loop
+from tenzro_trainer.inner_loop import (
+    OuterUpdateScheduler,
+    load_partial_state,
+    run_inner_loop,
+)
 from tenzro_trainer.rpc_bridge import RpcClient, RpcError, pretty
-from tenzro_trainer.types import OuterGradient
+from tenzro_trainer.types import OuterGradient, PipelineAssignment, TrainingTaskSpec
 
 log = logging.getLogger("tenzro-trainer")
 
@@ -68,19 +73,29 @@ def _trainer_address_from_did(trainer_did: str) -> bytes:
     return hashlib.sha256(trainer_did.encode("utf-8")).digest()
 
 
-def _build_adapter_for_modality(modality: str, architecture: dict[str, Any]) -> Any:
+def _build_adapter_for_modality(
+    modality: str,
+    architecture: dict[str, Any],
+    hyperparams: dict[str, Any],
+) -> Any:
+    """Dispatch to the per-modality adapter builder.
+
+    ``hyperparams`` is the task-spec ``metadata`` map — that's how
+    wire-level knobs like ``inner_optimizer`` / ``learning_rate`` reach
+    the adapters.
+    """
     if modality == "Timeseries":
         from tenzro_trainer.adapters.timeseries import build_adapter
 
-        return build_adapter(architecture)
+        return build_adapter(architecture, hyperparams)
     if modality == "Language":
         from tenzro_trainer.adapters.language import build_adapter as build
 
-        return build(architecture)
+        return build(architecture, hyperparams)
     if modality == "Vision":
         from tenzro_trainer.adapters.vision import build_adapter as build
 
-        return build(architecture)
+        return build(architecture, hyperparams)
     raise SystemExit(
         f"unsupported modality {modality!r}; expected Timeseries|Language|Vision"
     )
@@ -107,21 +122,23 @@ def cmd_run(args: argparse.Namespace) -> int:
     key = _load_key(args.seed_file)
     address = _trainer_address_from_did(args.trainer_did)
 
-    # 1. Pull task spec.
+    # 1. Pull + parse the task spec.
     try:
         run_state = rpc.get_run(args.task_id)
     except RpcError as e:
         log.error("get_run(%s) failed: %s", args.task_id, e)
         return 1
-    spec = run_state.get("task_spec") or run_state
-    arch = spec.get("architecture") or {}
-    modality = arch.get("modality")
-    fragment_count = int(arch.get("fragment_count", 1))
-    inner_steps = int(spec.get("inner_steps", 1))
-    max_rounds = int(spec.get("max_rounds", 1))
-    if not modality:
-        log.error("task spec missing architecture.modality")
+    spec_json = run_state.get("task_spec") or run_state
+    try:
+        spec = TrainingTaskSpec.from_json(spec_json)
+    except (KeyError, TypeError, ValueError) as e:
+        log.error("task spec did not parse: %s", e)
         return 1
+    arch_json = spec.architecture.to_json()
+    modality = spec.architecture.modality.value
+    fragment_count = spec.architecture.fragment_count
+    inner_steps = spec.inner_steps
+    max_rounds = spec.max_rounds
 
     # 2. Enroll (idempotent on the Rust side).
     try:
@@ -132,18 +149,50 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 1
         log.info("already enrolled, continuing")
 
-    # 3. Build adapter.
-    adapter = _build_adapter_for_modality(modality, arch)
+    # 3. Pipeline assignment. Bound by the Rust runtime at enrollment and
+    # surfaced on the run's `pipeline_assignments` map — re-fetch to read it.
+    assignment: PipelineAssignment | None = None
+    if spec.pipeline is not None:
+        try:
+            refreshed = rpc.get_run(args.task_id)
+        except RpcError as e:
+            log.error("get_run(%s) after enroll failed: %s", args.task_id, e)
+            return 1
+        raw = (refreshed.get("pipeline_assignments") or {}).get(args.trainer_did)
+        if raw is None:
+            log.error(
+                "pipelined run but no assignment for %s — enrollment did not bind a stage",
+                args.trainer_did,
+            )
+            return 1
+        assignment = PipelineAssignment.from_json(raw)
+        log.info(
+            "pipeline assignment: group %d, stage %d of %d",
+            assignment.group_id,
+            assignment.stage,
+            spec.pipeline.num_stages,
+        )
+
+    # 4. Build adapter. Task-spec metadata rides through as hyperparams so
+    # `inner_optimizer` / `learning_rate` / etc. are wire-selectable.
+    adapter = _build_adapter_for_modality(modality, arch_json, spec.metadata)
+    model = adapter.model()
+    scheduler = OuterUpdateScheduler(delayed=spec.delayed_apply)
     log.info(
-        "running %d round(s) of %d inner steps each on shard %s",
+        "running %d round(s) of %d inner steps each on shard %s "
+        "(sync=%s quantization=%s delayed_apply=%s)",
         max_rounds,
         inner_steps,
         args.shard_uri,
+        spec.sync_strategy.to_json(),
+        spec.quantization.label(),
+        spec.delayed_apply,
     )
 
-    # 4. Per-round inner loop + outer-gradient submission.
+    # 5. Per-round inner loop + outer-gradient submission.
     for round_index in range(max_rounds):
         log.info("--- round %d/%d ---", round_index, max_rounds - 1)
+        scheduler.on_round_start(model)
         pre_state, post_state, report = run_inner_loop(
             adapter, args.shard_uri, inner_steps
         )
@@ -155,9 +204,26 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         delta = compute_outer_delta(pre_state, post_state)
         delta_fragments = partition_state_dict(delta, fragment_count)
+
+        # Fragment eligibility this round: the Streaming DiLoCo shard
+        # rotation, intersected with this trainer's pipeline stage.
+        active = [
+            f
+            for f in range(fragment_count)
+            if spec.sync_strategy.fragment_active(f, fragment_count, round_index)
+            and (
+                assignment is None
+                or spec.pipeline.stage_of_fragment(f, fragment_count)
+                == assignment.stage
+            )
+        ]
+        if not active:
+            log.info("round %d: no fragments due from this trainer", round_index)
+            continue
+
         blobs = [
-            serialize_fragment(f, frag_dict)
-            for f, frag_dict in enumerate(delta_fragments)
+            serialize_fragment(f, delta_fragments[f], spec.quantization)
+            for f in active
         ]
         gradients = build_round_gradients(
             task_id=args.task_id,
@@ -165,6 +231,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             blobs=blobs,
             trainer_did=args.trainer_did,
             trainer_address=address,
+            quantization=spec.quantization,
             inner_step_count=(round_index + 1) * inner_steps,
             key=key,
         )
@@ -181,6 +248,28 @@ def cmd_run(args: argparse.Namespace) -> int:
                 log.error("fragment %d submit failed: %s", g.fragment, e)
                 return 1
 
+        # Reset each synced fragment to θ⁽⁰⁾, then route the *wire-visible*
+        # delta through the scheduler. Immediate mode nets to θ⁽ᴴ⁾ exactly
+        # when unquantized, and to the lossy quantized delta otherwise — the
+        # same values peers and the syncer decode. Delayed mode (DiLoCoX)
+        # buffers the update until the start of round r + 1.
+        revert: dict[str, Any] = {}
+        synced_delta: dict[str, Any] = {}
+        for f, blob in zip(active, blobs):
+            frag_pre = {k: pre_state[k] for k in delta_fragments[f]}
+            revert.update(frag_pre)
+            if spec.quantization.is_none:
+                synced_delta.update(delta_fragments[f])
+            else:
+                synced_delta.update(
+                    deserialize_fragment_delta(
+                        blob.payload, frag_pre, spec.quantization
+                    )
+                )
+        load_partial_state(model, revert)
+        scheduler.on_outer_update(model, synced_delta)
+
+    scheduler.flush(model)
     log.info("trainer loop complete (%d rounds)", max_rounds)
     return 0
 

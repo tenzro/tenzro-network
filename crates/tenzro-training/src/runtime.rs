@@ -31,9 +31,9 @@ use std::sync::Arc;
 use tenzro_storage::{KvStore, CF_TRAINING_RECEIPTS, CF_TRAINING_RUNS};
 use tenzro_types::primitives::{Hash, Timestamp};
 use tenzro_types::training::{
-    AggregationRule, FragmentQuorumStatus, OuterGradient, SealedDatasetManifest, SyncRound,
-    TrainingAttestation, TrainingReceipt, TrainingRun, TrainingRunStatus, TrainingTaskSpec,
-    TrainingTier,
+    AggregationRule, FragmentQuorumStatus, OuterGradient, PipelineAssignment,
+    SealedDatasetManifest, SyncRound, TrainingAttestation, TrainingReceipt, TrainingRun,
+    TrainingRunStatus, TrainingTaskSpec, TrainingTier,
 };
 
 /// Tier × aggregation-rule policy.
@@ -115,6 +115,7 @@ impl SyncerState {
             syncer_did: Some(syncer_did),
             syncer_address: Some(syncer_address),
             trainers: Vec::new(),
+            pipeline_assignments: HashMap::new(),
             current_round: 0,
             round_state_roots: Vec::new(),
             created_at: now,
@@ -138,9 +139,28 @@ impl SyncerState {
         if run.trainers.contains(&trainer_did) {
             return Err(TrainingError::AlreadyEnrolled(trainer_did));
         }
+        // DiLoCoX pipeline-parallel groups: enrollment order determines the
+        // (group, stage) slot. Group g is complete once all num_stages slots
+        // are filled; each complete group acts as one logical trainer for
+        // quorum purposes.
+        if let Some(pipeline) = &self.task_spec.pipeline {
+            let idx = run.trainers.len() as u32;
+            let stages = pipeline.num_stages.max(1);
+            run.pipeline_assignments.insert(
+                trainer_did.clone(),
+                PipelineAssignment {
+                    group_id: idx / stages,
+                    stage: idx % stages,
+                },
+            );
+        }
         run.trainers.push(trainer_did);
         run.last_update = Timestamp::now();
-        if run.trainers.len() as u32 >= self.task_spec.quorum {
+        let logical_trainers = match &self.task_spec.pipeline {
+            Some(p) => run.trainers.len() as u32 / p.num_stages.max(1),
+            None => run.trainers.len() as u32,
+        };
+        if logical_trainers >= self.task_spec.quorum {
             run.status = TrainingRunStatus::Training;
         }
         Ok(())
@@ -167,11 +187,49 @@ impl SyncerState {
             });
         }
         // Fragment in range.
-        if gradient.fragment >= self.task_spec.architecture.fragment_count {
+        let frag_count = self.task_spec.architecture.fragment_count;
+        if gradient.fragment >= frag_count {
             return Err(TrainingError::FragmentOutOfRange {
                 fragment: gradient.fragment,
-                max: self.task_spec.architecture.fragment_count,
+                max: frag_count,
             });
+        }
+        // Quantization must match the task spec's policy — the syncer's
+        // dequantize step is wire-format-specific, so a mismatched payload
+        // would decode to garbage tensors.
+        if gradient.quantization != self.task_spec.quantization {
+            return Err(TrainingError::QuantizationMismatch {
+                expected: self.task_spec.quantization,
+                got: gradient.quantization,
+            });
+        }
+        // Streaming DiLoCo: only fragments in the round's active shard sync
+        // this round; submissions for inactive shards are rejected so the
+        // per-fragment quorum accounting stays scoped to the active shard.
+        let strategy = self.task_spec.sync_strategy;
+        if !strategy.fragment_active(gradient.fragment, frag_count, gradient.round) {
+            return Err(TrainingError::FragmentNotInActiveShard {
+                fragment: gradient.fragment,
+                shard: strategy.shard_of_fragment(gradient.fragment, frag_count),
+                active_shard: strategy.active_shard(gradient.round),
+                round: gradient.round,
+            });
+        }
+        // DiLoCoX pipeline groups: a trainer may only submit gradients for
+        // fragments owned by its assigned pipeline stage.
+        if let Some(pipeline) = &self.task_spec.pipeline {
+            let run = self.run.read();
+            if let Some(assignment) = run.pipeline_assignments.get(&gradient.trainer_did) {
+                let fragment_stage = pipeline.stage_of_fragment(gradient.fragment, frag_count);
+                if assignment.stage != fragment_stage {
+                    return Err(TrainingError::PipelineStageMismatch {
+                        fragment: gradient.fragment,
+                        fragment_stage,
+                        trainer_did: gradient.trainer_did.clone(),
+                        trainer_stage: assignment.stage,
+                    });
+                }
+            }
         }
         // Tier requirement: Verified/Confidential require attestation.
         if matches!(
@@ -196,16 +254,21 @@ impl SyncerState {
         Ok(())
     }
 
-    /// Snapshot the current quorum status for every fragment in `round`.
+    /// Snapshot the current quorum status for every fragment in the round's
+    /// active shard. Under [`SyncStrategy::Full`](tenzro_types::training::SyncStrategy)
+    /// this covers every fragment; under `Streaming` only the active shard's
+    /// fragments appear — the state root for the round commits to exactly
+    /// the fragments that synced.
     pub fn fragment_statuses(
         &self,
         round: u32,
         post_step_hashes: &HashMap<u32, Hash>,
     ) -> Vec<FragmentQuorumStatus> {
         let frag_count = self.task_spec.architecture.fragment_count;
+        let strategy = self.task_spec.sync_strategy;
         let k = self.task_spec.quorum;
         let mut out = Vec::with_capacity(frag_count as usize);
-        for f in 0..frag_count {
+        for f in (0..frag_count).filter(|f| strategy.fragment_active(*f, frag_count, round)) {
             let buf = self.buffers.get(&(round, f));
             let (accepted, accepted_hashes, quorum_met) = match buf {
                 Some(b) => {
@@ -697,7 +760,26 @@ mod tests {
     use super::*;
     use tenzro_storage::MemoryStore;
     use tenzro_types::primitives::Address;
-    use tenzro_types::training::{ArchitectureSpec, TrainingModality};
+    use tenzro_types::training::{
+        ArchitectureSpec, GradientQuantization, PipelineConfig, SyncStrategy, TrainingModality,
+    };
+
+    fn make_gradient(spec: &TrainingTaskSpec, trainer_did: &str, round: u32, fragment: u32) -> OuterGradient {
+        OuterGradient {
+            task_id: spec.task_id.clone(),
+            round,
+            fragment,
+            trainer_did: trainer_did.to_string(),
+            trainer_address: Address::new([2u8; 32]),
+            safetensors_hash: Hash::from_bytes(&[3u8; 32]).unwrap(),
+            payload_bytes: 1024,
+            quantization: spec.quantization,
+            inner_step_count: 100,
+            submitted_at: Timestamp::now(),
+            signature: tenzro_types::primitives::Signature::default(),
+            attestation: None,
+        }
+    }
 
     fn dummy_task() -> TrainingTaskSpec {
         TrainingTaskSpec {
@@ -714,6 +796,10 @@ mod tests {
             },
             tier: TrainingTier::Open,
             aggregation: tenzro_types::training::AggregationRule::Mean,
+            sync_strategy: SyncStrategy::Full,
+            quantization: GradientQuantization::None,
+            delayed_apply: false,
+            pipeline: None,
             trainer_count: 4,
             quorum: 2,
             inner_steps: 100,
@@ -992,6 +1078,149 @@ mod tests {
         assert!(runtime
             .witness_committee("does-not-exist", 0, entropy)
             .is_empty());
+    }
+
+    #[test]
+    fn streaming_rejects_inactive_shard_fragment() {
+        // 4 fragments, 2 shards → shard 0 = {0,1}, shard 1 = {2,3}.
+        // Round 0 activates shard 0, so fragment 2 must be rejected.
+        let mut spec = dummy_task();
+        spec.sync_strategy = SyncStrategy::Streaming { num_shards: 2 };
+        let state = SyncerState::new(
+            spec.clone(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
+        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+
+        let active = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
+        state.accept_outer_gradient(active).unwrap();
+
+        let inactive = make_gradient(&spec, "did:tenzro:machine:t1", 0, 2);
+        let err = state.accept_outer_gradient(inactive);
+        assert!(matches!(
+            err,
+            Err(TrainingError::FragmentNotInActiveShard {
+                fragment: 2,
+                shard: 1,
+                active_shard: 0,
+                round: 0,
+            })
+        ));
+    }
+
+    #[test]
+    fn streaming_fragment_statuses_scope_to_active_shard() {
+        let mut spec = dummy_task();
+        spec.sync_strategy = SyncStrategy::Streaming { num_shards: 2 };
+        let state = SyncerState::new(
+            spec,
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        // Round 0 → shard 0 → fragments {0, 1} only.
+        let statuses = state.fragment_statuses(0, &HashMap::new());
+        let fragments: Vec<u32> = statuses.iter().map(|s| s.fragment).collect();
+        assert_eq!(fragments, vec![0, 1]);
+        // Round 1 → shard 1 → fragments {2, 3} only.
+        let statuses = state.fragment_statuses(1, &HashMap::new());
+        let fragments: Vec<u32> = statuses.iter().map(|s| s.fragment).collect();
+        assert_eq!(fragments, vec![2, 3]);
+    }
+
+    #[test]
+    fn quantization_mismatch_rejected() {
+        let mut spec = dummy_task();
+        spec.quantization = GradientQuantization::Int8 { block_size: 256 };
+        let state = SyncerState::new(
+            spec.clone(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
+        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+
+        let mut gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
+        gradient.quantization = GradientQuantization::None;
+        let err = state.accept_outer_gradient(gradient);
+        assert!(matches!(
+            err,
+            Err(TrainingError::QuantizationMismatch {
+                expected: GradientQuantization::Int8 { block_size: 256 },
+                got: GradientQuantization::None,
+            })
+        ));
+
+        // Matching quantization is accepted.
+        let gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
+        state.accept_outer_gradient(gradient).unwrap();
+    }
+
+    #[test]
+    fn pipeline_enrollment_assigns_groups_and_counts_group_quorum() {
+        // 2 stages, quorum 2 → 4 trainers form 2 complete groups.
+        let mut spec = dummy_task();
+        spec.pipeline = Some(PipelineConfig { num_stages: 2 });
+        let state = SyncerState::new(
+            spec,
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        for i in 0..3 {
+            state
+                .enroll_trainer(format!("did:tenzro:machine:t{}", i))
+                .unwrap();
+        }
+        // 3 trainers = 1 complete group + 1 partial → still enrolling.
+        assert_eq!(state.run.read().status, TrainingRunStatus::Enrolling);
+        state.enroll_trainer("did:tenzro:machine:t3".into()).unwrap();
+        // 4 trainers = 2 complete groups → quorum met.
+        assert_eq!(state.run.read().status, TrainingRunStatus::Training);
+
+        let run = state.run.read();
+        let a0 = run.pipeline_assignments["did:tenzro:machine:t0"];
+        let a1 = run.pipeline_assignments["did:tenzro:machine:t1"];
+        let a2 = run.pipeline_assignments["did:tenzro:machine:t2"];
+        let a3 = run.pipeline_assignments["did:tenzro:machine:t3"];
+        assert_eq!((a0.group_id, a0.stage), (0, 0));
+        assert_eq!((a1.group_id, a1.stage), (0, 1));
+        assert_eq!((a2.group_id, a2.stage), (1, 0));
+        assert_eq!((a3.group_id, a3.stage), (1, 1));
+    }
+
+    #[test]
+    fn pipeline_stage_ownership_enforced_on_submission() {
+        // 4 fragments, 2 stages → stage 0 owns {0,1}, stage 1 owns {2,3}.
+        let mut spec = dummy_task();
+        spec.pipeline = Some(PipelineConfig { num_stages: 2 });
+        let state = SyncerState::new(
+            spec.clone(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        for i in 0..4 {
+            state
+                .enroll_trainer(format!("did:tenzro:machine:t{}", i))
+                .unwrap();
+        }
+        // t0 is (group 0, stage 0): fragment 0 accepted, fragment 2 rejected.
+        let ok = make_gradient(&spec, "did:tenzro:machine:t0", 0, 0);
+        state.accept_outer_gradient(ok).unwrap();
+        let wrong_stage = make_gradient(&spec, "did:tenzro:machine:t0", 0, 2);
+        let err = state.accept_outer_gradient(wrong_stage);
+        assert!(matches!(
+            err,
+            Err(TrainingError::PipelineStageMismatch {
+                fragment: 2,
+                fragment_stage: 1,
+                trainer_stage: 0,
+                ..
+            })
+        ));
+        // t1 is (group 0, stage 1): fragment 2 accepted.
+        let ok = make_gradient(&spec, "did:tenzro:machine:t1", 0, 2);
+        state.accept_outer_gradient(ok).unwrap();
     }
 
     #[test]

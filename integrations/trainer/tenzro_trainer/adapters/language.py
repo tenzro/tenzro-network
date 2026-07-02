@@ -13,6 +13,13 @@ Phi 3 / DeepSeek V3 / Granite / Granite-H) drops in by changing
 ``architecture.metadata.hf_repo`` — no code change. Llama is intentionally
 **not** the default: it is not in the Tenzro registry.
 
+MoE backbones (Qwen3-MoE-class) work out of the box: expert weights are
+ordinary named parameters so the name-sorted fragment partition covers
+them, the router/gating layers train alongside, and the auxiliary
+load-balancing loss is added to the cross-entropy objective when the
+model reports one (``output_router_logits`` is enabled at load time for
+MoE configs).
+
 Wraps cleanly under :class:`torch.distributed.fsdp.FullyShardedDataParallel`
 (FSDP2) when the caller has initialized a process group — see
 ``TRAIN.md §6.3``. Plain DDP and single-GPU paths work out of the box.
@@ -32,6 +39,8 @@ except ImportError:  # pragma: no cover
     nn = None  # type: ignore[assignment]
 
 
+from tenzro_trainer.muon import build_inner_optimizer
+
 log = logging.getLogger(__name__)
 
 
@@ -40,6 +49,47 @@ log = logging.getLogger(__name__)
 # rehearsals. Production runs override this via
 # ``architecture.metadata.hf_repo``.
 DEFAULT_HF_REPO = "Qwen/Qwen3-0.6B"
+
+
+def is_moe_config(config: Any) -> bool:
+    """True when a HF model config describes a mixture-of-experts backbone.
+
+    Covers the attribute names used across the catalog MoE families:
+    Qwen3-MoE (``num_experts``), Mixtral-style (``num_local_experts``),
+    DeepSeek V3 (``n_routed_experts``), and Qwen2-MoE
+    (``moe_intermediate_size``).
+    """
+    for attr in (
+        "num_experts",
+        "num_local_experts",
+        "n_routed_experts",
+        "moe_intermediate_size",
+    ):
+        value = getattr(config, attr, None)
+        if isinstance(value, int) and value > 0:
+            return True
+    return False
+
+
+def moe_parameter_names(model: "nn.Module") -> tuple[list[str], list[str]]:
+    """Split a MoE model's parameter names into ``(expert, router)`` lists.
+
+    Expert weights live under ``.experts.`` submodules; router/gating
+    weights carry ``.gate.`` or ``router`` in their name (Qwen3-MoE uses
+    ``mlp.gate``, Mixtral uses ``block_sparse_moe.gate``, DeepSeek V3 uses
+    ``mlp.gate`` — all covered). Both sets are ordinary named parameters,
+    so the name-sorted fragment partition covers them without special
+    handling; this split exists for diagnostics and tests.
+    """
+    expert_names: list[str] = []
+    router_names: list[str] = []
+    for name, _ in model.named_parameters():
+        lowered = name.lower()
+        if ".experts." in lowered:
+            expert_names.append(name)
+        elif ".gate." in lowered or "router" in lowered:
+            router_names.append(name)
+    return expert_names, router_names
 
 
 @dataclass
@@ -121,11 +171,18 @@ class LanguageAdapter:
         # `transformers` causal-LM heads return a `CausalLMOutput`-style
         # object with `.logits` — `[B, T, V]`. Flatten for cross-entropy.
         logits = out.logits if hasattr(out, "logits") else out[0]
-        return torch.nn.functional.cross_entropy(
+        loss = torch.nn.functional.cross_entropy(
             logits.reshape(-1, logits.shape[-1]),
             y.reshape(-1),
             ignore_index=-100,
         )
+        # MoE backbones surface a router load-balancing auxiliary loss
+        # (already scaled by `router_aux_loss_coef` inside the model) when
+        # `output_router_logits` is on — add it so the gating layers train.
+        aux = getattr(out, "aux_loss", None)
+        if aux is not None:
+            loss = loss + aux
+        return loss
 
 
 def build_adapter(
@@ -136,8 +193,11 @@ def build_adapter(
 
     Reads ``architecture.metadata.hf_repo`` (defaults to ``Qwen3-0.6B``)
     and ``architecture.metadata.dtype`` (``"bf16"`` | ``"fp16"`` | ``"fp32"``,
-    default ``"bf16"``). Hyperparams accepted:
+    default ``"bf16"``). MoE repos (Qwen3-MoE-class) are auto-detected from
+    the config and get ``output_router_logits=True`` so the auxiliary
+    load-balancing loss reaches ``compute_loss``. Hyperparams accepted:
 
+    * ``inner_optimizer`` (``muon`` | ``adamw`` | ``sgd``, default ``adamw``)
     * ``learning_rate`` (default 1e-5 — small for LMs)
     * ``weight_decay`` (default 0.0)
     * ``seq_len`` (default 1024)
@@ -173,12 +233,19 @@ def build_adapter(
         trust_remote_code=True,
     ).to(device)
 
-    opt = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(hp.get("learning_rate", 1e-5)),
-        weight_decay=float(hp.get("weight_decay", 0.0)),
-        betas=(0.9, 0.95),
-    )
+    if is_moe_config(model.config):
+        # Surface the router load-balancing aux loss on every forward so
+        # the gating layers receive gradient (compute_loss adds it to CE).
+        model.config.output_router_logits = True
+        expert_names, router_names = moe_parameter_names(model)
+        log.info(
+            "MoE backbone detected: %d expert params, %d router params "
+            "(aux load-balancing loss enabled)",
+            len(expert_names),
+            len(router_names),
+        )
+
+    opt = build_inner_optimizer(model, md, hp, default_lr=1e-5)
     log.info(
         "built language adapter %r: %d params",
         repo,
@@ -194,4 +261,10 @@ def build_adapter(
     )
 
 
-__all__ = ["LanguageAdapter", "build_adapter", "DEFAULT_HF_REPO"]
+__all__ = [
+    "LanguageAdapter",
+    "build_adapter",
+    "is_moe_config",
+    "moe_parameter_names",
+    "DEFAULT_HF_REPO",
+]

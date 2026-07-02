@@ -12,8 +12,8 @@ website/
 # Entire desktop app (Tauri — not needed for Docker build)
 apps/
 
-# SDK node_modules and build outputs
-sdk/tenzro-ts-sdk/node_modules/
+# node_modules and JS build outputs (any level)
+node_modules/
 sdk/tenzro-ts-sdk/dist/
 sdk/tenzro-ts-sdk/.next/
 

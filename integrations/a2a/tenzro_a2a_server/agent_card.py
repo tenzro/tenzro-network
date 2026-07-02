@@ -1501,19 +1501,25 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "(layer, expert), per-expert replication, under-replicated "
                     "and hot experts, role counts), build a dispatch plan from "
                     "per-token top-k routing decisions, read the "
-                    "governance-tuned replication policy, and read the "
+                    "governance-tuned replication policy, read the "
                     "catalog-side MoE topology (num_experts, experts_per_token, "
-                    "shared_experts)."
+                    "shared_experts), load per-expert and gating weight blobs "
+                    "into the local expert runtime, and run distributed layer "
+                    "forwards that fan hidden states out to expert holders over "
+                    "local, iroh, or HTTP transports and gather gate-weighted "
+                    "outputs."
                 ),
                 "tags": [
                     "moe", "expert-shard", "dispatch", "replication",
-                    "routing", "inference",
+                    "routing", "inference", "expert-execution",
                 ],
                 "examples": [
                     "Show the MoE shard map for model <id>",
                     "Plan dispatch for top-k routings on model <id>",
                     "Read the current MoE replication policy",
                     "Read the catalog MoE topology for model <id>",
+                    "Load an expert weight blob for layer 4 expert 17",
+                    "Run a distributed MoE forward for one layer",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],

@@ -301,6 +301,7 @@ async fn run_cluster(
                                 timeout_certificate,
                                 no_endorsement_certificate,
                                 high_qc_view,
+                                proposer_signature,
                                 ..
                             } => {
                                 let _ = engine
@@ -309,6 +310,7 @@ async fn run_cluster(
                                         timeout_certificate,
                                         no_endorsement_certificate,
                                         high_qc_view,
+                                        &proposer_signature,
                                     )
                                     .await;
                             }

@@ -3111,6 +3111,48 @@ pub struct MoePlanDispatchParams {
     pub allow_cold: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoeExpertLoadParams {
+    #[schemars(description = "Catalog model id")]
+    pub model_id: String,
+    #[schemars(description = "Layer index")]
+    pub layer: u32,
+    #[schemars(description = "Expert index within the layer")]
+    pub expert: u32,
+    #[schemars(description = "Base64 safetensors blob with gate_proj/up_proj/down_proj weights (alternative to uri)")]
+    pub blob_base64: Option<String>,
+    #[schemars(description = "Content-addressed tenzro://blob/<hash> URI to fetch the blob from (alternative to blob_base64)")]
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoeGateLoadParams {
+    #[schemars(description = "Catalog model id")]
+    pub model_id: String,
+    #[schemars(description = "Layer index")]
+    pub layer: u32,
+    #[schemars(description = "Base64 safetensors blob with router.weight (alternative to uri)")]
+    pub blob_base64: Option<String>,
+    #[schemars(description = "Content-addressed tenzro://blob/<hash> URI to fetch the blob from (alternative to blob_base64)")]
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoeForwardParams {
+    #[schemars(description = "Catalog model id")]
+    pub model_id: String,
+    #[schemars(description = "Layer index")]
+    pub layer: u32,
+    #[schemars(description = "Hidden dimension per token")]
+    pub d_model: u32,
+    #[schemars(description = "Base64 of little-endian f32 hidden states, n_tokens x d_model")]
+    pub hidden_states: String,
+    #[schemars(description = "Experts per token; defaults to the catalog experts_per_token for the model")]
+    pub top_k: Option<u32>,
+    #[schemars(description = "Allow dispatch to experts that are not warm-resident (default false)")]
+    pub allow_cold: Option<bool>,
+}
+
 // ─── Local discovery / cluster param structs ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -13869,6 +13911,68 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_moeCatalogShape", payload)
             .await
             .map_err(|e| err_internal(format!("moeCatalogShape failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Load a per-expert safetensors weight blob (gate_proj/up_proj/down_proj) into this node's MoE expert runtime, from an inline base64 blob or a tenzro://blob URI. Returns the resident expert's dimensions and byte footprint.")]
+    async fn moe_expert_load(
+        &self,
+        Parameters(params): Parameters<MoeExpertLoadParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "model_id": params.model_id,
+            "layer": params.layer,
+            "expert": params.expert,
+            "blob_base64": params.blob_base64,
+            "uri": params.uri,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_moeExpertLoad", payload)
+            .await
+            .map_err(|e| err_internal(format!("moeExpertLoad failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Load a gating-network safetensors blob (router.weight) for a model layer into this node's MoE expert runtime, from an inline base64 blob or a tenzro://blob URI.")]
+    async fn moe_gate_load(
+        &self,
+        Parameters(params): Parameters<MoeGateLoadParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "model_id": params.model_id,
+            "layer": params.layer,
+            "blob_base64": params.blob_base64,
+            "uri": params.uri,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_moeGateLoad", payload)
+            .await
+            .map_err(|e| err_internal(format!("moeGateLoad failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Snapshot of this node's resident MoE experts and gating networks with total byte footprint.")]
+    async fn moe_expert_status(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_moeExpertStatus", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("moeExpertStatus failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Run a distributed MoE forward for one layer: gate-route the hidden-state batch locally, fan expert sub-batches out to holders (local runtime, iroh tenzro/moe ALPN, or HTTP JSON-RPC), and gather the gate-weighted combined outputs. hidden_states and outputs are base64 of little-endian f32 bytes.")]
+    async fn moe_forward(
+        &self,
+        Parameters(params): Parameters<MoeForwardParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({
+            "model_id": params.model_id,
+            "layer": params.layer,
+            "d_model": params.d_model,
+            "hidden_states": params.hidden_states,
+            "top_k": params.top_k,
+            "allow_cold": params.allow_cold,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_moeForward", payload)
+            .await
+            .map_err(|e| err_internal(format!("moeForward failed: {}", e)))?;
         json_result(result)
     }
 

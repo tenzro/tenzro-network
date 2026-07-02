@@ -38,6 +38,12 @@ pub struct FinalityTracker {
 
     /// Broadcast channel for finality notifications
     finality_tx: broadcast::Sender<FinalityNotification>,
+
+    /// Wall-clock instant of the most recent `finalize_block` call.
+    /// `None` until the first finalization after process start. Read by
+    /// the `/metrics` exporter as `tenzro_consensus_last_finalized_age_seconds`
+    /// — the primary stall-detection signal for on-call alerting.
+    last_finalized_at: Arc<RwLock<Option<std::time::Instant>>>,
 }
 
 impl FinalityTracker {
@@ -50,6 +56,7 @@ impl FinalityTracker {
             finalized_blocks: Arc::new(DashMap::new()),
             finalized_hashes: Arc::new(DashMap::new()),
             finality_tx,
+            last_finalized_at: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -83,6 +90,7 @@ impl FinalityTracker {
 
         // Update finalized height
         *self.finalized_height.write() = height;
+        *self.last_finalized_at.write() = Some(std::time::Instant::now());
 
         tracing::info!(
             height = %height,
@@ -108,6 +116,14 @@ impl FinalityTracker {
     /// Returns the highest finalized block height
     pub fn finalized_height(&self) -> BlockHeight {
         *self.finalized_height.read()
+    }
+
+    /// Seconds elapsed since the most recent finalization on this
+    /// process, or `None` if nothing has finalized since start. Alerting
+    /// rule of thumb: sustained values well above the block cadence mean
+    /// the chain has stalled from this replica's perspective.
+    pub fn seconds_since_last_finalized(&self) -> Option<u64> {
+        self.last_finalized_at.read().map(|t| t.elapsed().as_secs())
     }
 
     /// Sets the initial finalized height from persistent storage.
@@ -354,7 +370,6 @@ mod tests {
             BlockHeight::from(height),
             Hash::default(),
             VoteType::Commit,
-            vec![],
             0,
             [0u8; 96],
             Vec::new(),
@@ -510,7 +525,6 @@ mod tests {
             BlockHeight::from(3),
             block.hash(),
             VoteType::Prepare,
-            vec![],
             0,
             [0u8; 96],
             Vec::new(),
@@ -523,7 +537,6 @@ mod tests {
             BlockHeight::from(3),
             block.hash(),
             VoteType::Commit,
-            vec![],
             0,
             [0u8; 96],
             Vec::new(),
@@ -537,7 +550,6 @@ mod tests {
             BlockHeight::from(3),
             block.hash(),
             VoteType::Prepare,
-            vec![],
             0,
             [0u8; 96],
             Vec::new(),
@@ -558,7 +570,6 @@ mod tests {
             BlockHeight::from(1),
             block.hash(),
             VoteType::Prepare,
-            vec![],
             0,
             [0u8; 96],
             Vec::new(),

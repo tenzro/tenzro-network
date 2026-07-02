@@ -175,6 +175,7 @@ mod tests {
             trainer_address: Address::new([1u8; 32]),
             safetensors_hash: hash,
             payload_bytes: len,
+            quantization: tenzro_types::training::GradientQuantization::None,
             inner_step_count: 100,
             submitted_at: Timestamp::new(1_700_000_000_000),
             signature: Signature::new(vec![0u8; 64], vec![0u8; 32]),

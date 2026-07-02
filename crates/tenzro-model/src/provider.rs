@@ -78,6 +78,11 @@ pub struct ProviderMetrics {
     pub last_heartbeat: Option<Timestamp>,
     /// Total inference time in milliseconds
     pub total_latency_ms: u64,
+    /// When the last decay pass was applied by
+    /// `ProviderManager::decay_metrics`. Anchors decay to the time elapsed
+    /// since the previous pass, so repeated routing calls decay
+    /// proportionally instead of compounding.
+    pub last_decay: Option<Timestamp>,
     /// Health status
     pub health: ProviderHealth,
 }
@@ -861,43 +866,50 @@ impl ProviderManager {
 
     /// Applies exponential decay to provider metrics to reduce the impact of old data.
     ///
-    /// Uses exponential decay with a half-life of 1 hour: after 1 hour, success/failure
-    /// counts are reduced by 50%, after 2 hours by 75%, etc.
+    /// Half-life is 1 hour of *elapsed time since the previous decay pass*
+    /// (`ProviderMetrics::last_decay`), so calling this before every routing
+    /// decision applies decay proportionally rather than compounding a full
+    /// factor per call. Elapsed intervals shorter than one minute leave
+    /// `last_decay` untouched, letting time accumulate instead of being
+    /// rounded away pass after pass.
     ///
-    /// This ensures that recent performance is weighted more heavily than historical
-    /// performance in routing decisions.
+    /// `total_latency_ms` decays by the same factor as the counts so
+    /// `avg_latency_ms` stays a truthful per-request average.
     pub fn decay_metrics(&self) {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
         const HALF_LIFE_SECS: f64 = 3600.0; // 1 hour
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
+        const MIN_DECAY_INTERVAL_SECS: f64 = 60.0;
+
+        let now = Timestamp::now();
+        let now_secs = now.as_millis() as f64 / 1000.0;
 
         for mut entry in self.providers.iter_mut() {
             let metrics = &mut entry.metrics;
 
-            // Get time since last heartbeat (or 0 if none)
-            let elapsed_secs = if let Some(last_heartbeat) = metrics.last_heartbeat {
-                let last_secs = last_heartbeat.as_millis() as f64 / 1000.0;
-                (now_secs - last_secs).max(0.0)
-            } else {
-                0.0
+            let Some(last_decay) = metrics.last_decay else {
+                // First pass for this provider: anchor the decay clock.
+                metrics.last_decay = Some(now);
+                continue;
             };
+            let elapsed_secs = (now_secs - last_decay.as_millis() as f64 / 1000.0).max(0.0);
+            if elapsed_secs < MIN_DECAY_INTERVAL_SECS {
+                continue;
+            }
 
-            // Calculate decay factor: 0.5^(elapsed / half_life)
             let decay_factor = 0.5_f64.powf(elapsed_secs / HALF_LIFE_SECS);
 
-            // Apply decay to success/failure counts
-            metrics.successful_requests = (metrics.successful_requests as f64 * decay_factor).round() as u64;
-            metrics.failed_requests = (metrics.failed_requests as f64 * decay_factor).round() as u64;
+            metrics.successful_requests =
+                (metrics.successful_requests as f64 * decay_factor).round() as u64;
+            metrics.failed_requests =
+                (metrics.failed_requests as f64 * decay_factor).round() as u64;
             metrics.total_requests = metrics.successful_requests + metrics.failed_requests;
-
-            // Recalculate average latency after decay
-            if metrics.successful_requests > 0 {
-                metrics.avg_latency_ms = metrics.total_latency_ms / metrics.successful_requests;
-            }
+            metrics.total_latency_ms =
+                (metrics.total_latency_ms as f64 * decay_factor).round() as u64;
+            metrics.avg_latency_ms = if metrics.successful_requests > 0 {
+                metrics.total_latency_ms / metrics.successful_requests
+            } else {
+                0
+            };
+            metrics.last_decay = Some(now);
         }
     }
 }

@@ -87,6 +87,20 @@ Feature-gated ONNX runtimes covering 7 modalities. Each runtime caches sessions,
 - **`AudioRuntime`** — ASR. Two ORT-backed `Transcriber` implementations cover the catalog: `MoonshineTranscriber` (raw 16 kHz waveform input, encoder + merged-decoder autoregressive loop with `use_cache_branch` KV-cache, SentencePiece detokenization) and `WhisperTranscriber` (80- or 128-mel log-spectrogram input via Slaney filterbank + Hanning STFT, encoder + merged-decoder autoregressive loop with `use_cache_branch` KV-cache, BPE detokenization, language/SOT/transcribe/no-timestamps prompt prefix). `WhisperFamily::{DistilEn, DistilLargeV3, LargeV3Turbo}` selects mel count and multilingual prompt behavior. Audio decode: `hound` for WAV, `symphonia` for MP3/FLAC/OGG; `rubato` sinc resampler to 16 kHz mono. Catalog: Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo.
 - **`VideoRuntime`** — frame extraction (shell-out to `ffmpeg`) + per-frame embedding via vision encoder fallback (DINOv3/SigLIP2 mean-pooled across frames). Native video catalog (`get_video_catalog()`) returns empty in wave 1 — no permissive ONNX-shippable encoder-only video model exists in the 2026 OSS landscape; runtime scaffolding ships ready for future entries.
 
+### Distributed MoE Execution
+
+Mixture-of-Experts models run distributed across holders with three cooperating modules:
+
+- **`moe_shard`** — `MoeShardView` maps `ExpertId` → `ExpertHolder` assignments under a `ReplicationPolicy` (per-expert replica counts, VRAM-aware placement).
+- **`moe_router`** — `plan_dispatch(routing, shard_view)` turns per-token top-k gating decisions (`TokenRouting` of `TokenSlot`s) into a `DispatchPlan` of per-holder `ExpertBatch`es, grouping tokens by destination so each holder receives one sub-batch per expert it hosts.
+- **`moe_exec`** — `MoeExpertRuntime` hosts the actual weights: `ExpertFfn` (gate/up/down projections, SwiGLU) and `GatingNetwork` (router linear + softmax top-k), both loaded from safetensors — a local file path or a `tenzro://blob/<hash>` URI fetched over iroh-blobs. A forward pass gates locally, fans `ExpertExecuteRequest` sub-batches out to remote holders, executes local experts in-process, and `combine_expert_outputs` merges the gate-weighted expert outputs back into token order.
+
+The node layer exposes planning RPCs (`tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`) and execution RPCs (`tenzro_moeExpertLoad`, `tenzro_moeGateLoad`, `tenzro_moeExpertUnload`, `tenzro_moeGateUnload`, `tenzro_moeExpertStatus`, `tenzro_moeRoute`, `tenzro_moeExecute`, `tenzro_moeForward`); cross-holder transport is the `tenzro/moe` iroh ALPN with HTTP fallback. Catalog entries carry a `MoeShape` describing expert count, top-k, and per-expert dimensions.
+
+### ONNX Execution Providers
+
+All ONNX runtimes build sessions through one shared `onnx_session::build_onnx_session()`, which registers hardware execution providers before falling back to CPU. The `onnx-tensorrt` / `onnx-cuda` / `onnx-coreml` cargo features compile in the corresponding providers; default priority is TensorRT → CUDA → CoreML → CPU. The `TENZRO_ONNX_EP` environment variable overrides the priority as a comma-separated list (`tensorrt`, `cuda`, `coreml`, `cpu` — `cpu` terminates the list). A provider that fails to register logs a warning and falls through to the next rather than erroring.
+
 ### Modality-Aware Inference Routing
 
 `InferenceRouter::route()` reads `model.modality` from the registry and dispatches a typed `InferencePayload` enum (`Chat | Forecast | VisionEmbed | VisionSimilarity | TextEmbed | Segment | Detect | Transcribe | VideoEmbed`) to the correct runtime handle. Pricing/latency/reputation strategies apply per-modality with independent provider pools.
@@ -161,6 +175,7 @@ single end-of-stream settlement charge.
 - Chat interface with session history
 - Streaming and batch inference
 - Hardware detection and capability reporting
+- **Multi-Token Prediction (MTP) speculative decoding** — the runtime keeps a `loaded_drafters` map alongside `loaded_models`; when a drafter is loaded for a target and the request carries `draft_n`, generation runs real speculative decoding: the drafter proposes a block of candidate tokens, the target verifies them in one batched decode, and the accepted prefix advances the stream. Serving a model auto-loads its paired drafter from the catalog's `drafter_id` (downloaded in the background if absent); a drafter problem never fails the serve. `ModelError::MtpUnavailable` is returned only when `draft_n` is requested with no drafter loaded for that target.
 
 ## Usage Examples
 
@@ -323,7 +338,11 @@ The crate is organized into several key modules:
 - `library`: Model discovery and browsing
 - `download`: Model download management
 - `hf_download`: HuggingFace Hub integration with SHA-256 verification
-- `runtime`: Local inference via llama.cpp with GPU acceleration
+- `runtime`: Local inference via llama.cpp with GPU acceleration and MTP speculative decoding
+- `moe_shard`: Expert → holder shard maps and replication policy
+- `moe_router`: Token-to-expert dispatch planning
+- `moe_exec`: Expert FFN + gating network execution from safetensors
+- `onnx_session`: Shared ONNX session builder with hardware execution providers
 - `usage`: Usage tracking and statistics
 - `load`: Load tracking and concurrency management
 - `catalog`: Static catalogs for HuggingFace plus ONNX vision, forecast, text-embedding, segmentation, detection, audio, and video models
@@ -387,7 +406,7 @@ This crate integrates with:
 
 ## Testing
 
-The crate includes 109 unit tests covering registry, routing, pricing, downloads, multi-modal runtimes, license-tier gating, usage tracking, and persistence.
+Unit tests cover registry, routing, pricing, downloads, multi-modal runtimes, MoE dispatch and execution, license-tier gating, usage tracking, and persistence.
 
 ```bash
 cargo test -p tenzro-model
