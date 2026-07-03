@@ -1299,10 +1299,16 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "epoch markers, optional tee_attestation_hash). "
                     "Tenzro Train inspection (training_list_runs, "
                     "training_get_run, training_get_receipt, "
-                    "training_get_sealed_manifest) — read-side view "
-                    "of every active run, sealed receipts for "
-                    "finalized runs, and Confidential-tier sealed-shard "
-                    "manifests. SLA fault-detector inspection "
+                    "training_get_sealed_manifest, training_decide_round) "
+                    "— read-side view of every active run, sealed "
+                    "receipts for finalized runs, Confidential-tier "
+                    "sealed-shard manifests, and the syncer's live round "
+                    "decision (finalize / wait with remaining grace-window "
+                    "ms / no-quorum carry-forward). Inference router "
+                    "observability (get_router_metrics) — total requests "
+                    "routed, hedges dispatched, hedges won, and requests "
+                    "abandoned on the whole-request deadline. SLA "
+                    "fault-detector inspection "
                     "(sla_get_params for the slash threshold, slash "
                     "amount in wei, and validator VRF public key; "
                     "sla_list_outstanding_probes for every in-flight "
@@ -1325,7 +1331,8 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "operability", "sre", "monitoring", "validator",
                     "registry", "training", "tenzro-train", "inspection",
                     "sla", "fault-detector", "probe", "snapshot",
-                    "state-sync", "read-only",
+                    "state-sync", "read-only", "router-metrics",
+                    "tail-latency",
                 ],
                 "examples": [
                     "Show the current active validator set with stake",
@@ -1335,6 +1342,8 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Get Tenzro Train run task-abc123 (status, current_round, state_root)",
                     "Fetch the sealed receipt for finalized run task-abc123",
                     "Fetch the sealed-shard manifest for Confidential-tier run task-xyz789",
+                    "Ask the syncer whether Tenzro Train run task-abc123 should finalize, wait, or advance on no-quorum",
+                    "Read the inference router metrics (requests routed, hedges dispatched, hedges won, deadline-exceeded)",
                     "Show this validator's SLA fault-detector parameters (slash threshold, slash amount, VRF pubkey)",
                     "List every in-flight SLA probe across the network",
                     "Issue an SLA liveness probe to provider did:tenzro:machine:abc for epoch 42 round 3 with deadline +5s",

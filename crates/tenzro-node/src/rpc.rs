@@ -1805,6 +1805,7 @@ async fn dispatch_request(
         "tenzro_training_enrollTrainer" => handle_training_enroll_trainer(node, request.params).await,
         "tenzro_training_submitOuterGradient" => handle_training_submit_outer_gradient(node, request.params).await,
         "tenzro_training_finalizeRound" => handle_training_finalize_round(node, request.params).await,
+        "tenzro_training_decideRound" => handle_training_decide_round(node, request.params).await,
         "tenzro_training_installSealedManifest" => handle_training_install_sealed_manifest(node, request.params).await,
         "tenzro_training_getSealedManifest" => handle_training_get_sealed_manifest(node, request.params).await,
         "tenzro_deleteModel" | "tenzro_deleteModelMcp" => handle_delete_model(node, request.params).await,
@@ -43045,6 +43046,49 @@ async fn handle_training_finalize_round(
         message: format!("serialize sync_round: {}", e),
         data: None,
     })
+}
+
+/// `tenzro_training_decideRound`: report the straggler-soft-timeout outcome
+/// for the current round. A witness polls this to learn whether to keep
+/// waiting for the adaptive grace window, finalize over the gradients that
+/// arrived, or assemble a No-Endorsement Certificate — without inspecting
+/// the raw per-fragment buffers. Slow trainers are soft-timed-out once the
+/// window elapses; their absence never stalls the run.
+async fn handle_training_decide_round(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let task_id = p
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("task_id"))?;
+    let state = node
+        .training_runtime
+        .syncers
+        .get(task_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("training run '{}' not found", task_id),
+            data: None,
+        })?
+        .clone();
+    let decision = state.decide_round(tenzro_types::primitives::Timestamp::now().as_millis());
+    let value = match decision {
+        tenzro_training::RoundDecision::Wait { remaining_ms } => serde_json::json!({
+            "decision": "wait",
+            "remaining_ms": remaining_ms,
+        }),
+        tenzro_training::RoundDecision::Finalize { round } => serde_json::json!({
+            "decision": "finalize",
+            "round": round,
+        }),
+        tenzro_training::RoundDecision::NoQuorum { round } => serde_json::json!({
+            "decision": "no_quorum",
+            "round": round,
+        }),
+    };
+    Ok(value)
 }
 
 /// `tenzro_training_installSealedManifest`: bind a sponsor's sealed-shard

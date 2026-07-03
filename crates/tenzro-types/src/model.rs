@@ -3,6 +3,7 @@
 //! This module defines types for AI model registration, inference requests,
 //! and provider management.
 
+use crate::hardware::HardwareCapabilities;
 use crate::primitives::{Address, Hash, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -880,6 +881,18 @@ pub struct ProviderCapacity {
     /// that owns the layer, so there is no cross-machine all-to-all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lan_cluster: Option<LanCluster>,
+    /// Self-declared hardware the provider serves inference on, detected
+    /// locally via [`HardwareCapabilities::detect`] at announcement time.
+    /// The router treats this as an *advertised* capability: it biases
+    /// work toward higher-declared hardware (via
+    /// [`HardwareCapabilities::class`]), but every advertised claim is
+    /// gated on observed performance (success rate + measured latency),
+    /// so a provider that overclaims is discounted back down as soon as
+    /// its real serving latency and failure rate diverge from what the
+    /// class implies. A provider whose hardware is undetected competes on
+    /// observed metrics alone (neutral bias).
+    #[serde(default)]
+    pub hardware: HardwareCapabilities,
 }
 
 /// Provider's holding declaration for one MoE expert in one model.
@@ -1029,6 +1042,7 @@ impl Default for ProviderCapacity {
             moe_roles: Vec::new(),
             iroh_endpoint_id: None,
             lan_cluster: None,
+            hardware: HardwareCapabilities::default(),
         }
     }
 }

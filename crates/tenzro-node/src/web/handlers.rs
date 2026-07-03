@@ -2087,6 +2087,7 @@ mod tests {
             stream: Some(false),
             max_tokens: None,
             temperature: None,
+            require_signed: None,
         };
 
         let response = chat_completion(State(state), Json(request)).await;

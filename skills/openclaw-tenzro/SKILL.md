@@ -1965,6 +1965,7 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `stop_model` — Stop serving a model
 - `delete_model` — Delete a downloaded model
 - `discover_models` — Discover AI models available on the network
+- `get_router_metrics` — Read the inference router's live metrics: requests routed, hedges dispatched, hedges won, deadline-exceeded requests
 
 **Cross-Chain Bridge:**
 - `bridge_tokens` — Bridge tokens between Tenzro, Ethereum, Solana, Base

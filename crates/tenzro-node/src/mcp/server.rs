@@ -8469,6 +8469,29 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
+    #[tool(description = "Ask the Tenzro Train syncer for its round decision. Returns `{decision: \"wait\", remaining_ms}` while the DiLoCo grace window is open, `{decision: \"finalize\", round}` once a witness quorum endorses the round, or `{decision: \"no_quorum\", round}` when the window elapses without a quorum (the run advances, carrying the prior state root forward). Returns JSON-RPC -32602 when the run is unknown. Read-only — safe for monitoring agents.")]
+    async fn training_decide_round(
+        &self,
+        Parameters(params): Parameters<TrainingTaskIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "task_id": params.task_id });
+        let result = rpc_dispatch(&self.node, "tenzro_training_decideRound", payload)
+            .await
+            .map_err(|e| err_internal(format!("training.decideRound failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read the inference router's live metrics snapshot: total requests routed, hedges dispatched, hedges won, and requests abandoned on the whole-request deadline. Read-only — safe for monitoring agents.")]
+    async fn get_router_metrics(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_getRouterMetrics", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("getRouterMetrics failed: {}", e)))?;
+        json_result(result)
+    }
+
     // ---- Spec 7: adaptive burn-rate governance dial -------------------
 
     #[tool(description = "Show the current adaptive burn-rate config — base/local/paymaster burn bps with their treasury complements. Paymaster is locked at 100% burn. The dial moves only via on-chain governance proposals (see adaptive_burn_get_recommendation).")]

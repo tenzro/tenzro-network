@@ -103,6 +103,15 @@ fn selected_execution_providers() -> Vec<String> {
 /// Returns `true` on success. Registration failures log a warning and
 /// return `false` so the caller falls through to the next provider.
 fn register_execution_provider(name: &str, builder: &mut SessionBuilder) -> bool {
+    // When no ONNX execution-provider feature is enabled, every match arm
+    // that consumes `builder` is cfg'd out, so silence the unused-binding lint
+    // for that configuration only.
+    #[cfg(not(any(
+        feature = "onnx-tensorrt",
+        feature = "onnx-cuda",
+        feature = "onnx-coreml"
+    )))]
+    let _ = &builder;
     match name {
         #[cfg(feature = "onnx-tensorrt")]
         "tensorrt" => {

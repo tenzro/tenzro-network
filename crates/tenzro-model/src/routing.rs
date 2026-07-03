@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tenzro_types::{
+    hardware::HardwareClass,
     model::{InferenceRequest, InferenceResponse, InferenceMetadata, ModelModality},
     primitives::{Address, Timestamp},
 };
@@ -170,8 +171,21 @@ pub struct RoutingConfig {
     pub strategy: RoutingStrategy,
     /// Maximum number of retries on failure
     pub max_retries: u32,
-    /// Request timeout in milliseconds
+    /// Per-HTTP-call timeout in milliseconds. Bounds a single dispatch to
+    /// one provider; it does NOT bound the whole request, which may retry
+    /// across several providers — see `request_deadline_ms`.
     pub timeout_ms: u64,
+    /// Wall-clock deadline for the entire request, in milliseconds,
+    /// spanning provider selection plus every retry. Without it a request
+    /// that keeps hitting slow-but-not-dead providers can silently consume
+    /// `(max_retries + 1) × timeout_ms` of wall time (e.g. 4 × 120 s = 8
+    /// min) before surfacing a failure — unacceptable for interactive
+    /// inference. The router checks the elapsed budget before each attempt
+    /// and stops retrying once it is exhausted ("The Tail at Scale", Dean &
+    /// Barroso 2013: bound the tail explicitly rather than let retries
+    /// compound it). `0` disables the deadline (retry budget governed only
+    /// by `max_retries` × `timeout_ms`).
+    pub request_deadline_ms: u64,
     /// Require TEE provider
     pub require_tee: bool,
     /// Require a provider-signed inference response. When true, routing
@@ -208,6 +222,7 @@ impl Default for RoutingConfig {
             strategy: RoutingStrategy::WeightedScore,
             max_retries: 3,
             timeout_ms: 120_000,
+            request_deadline_ms: 180_000,
             require_tee: false,
             require_signed_response: false,
             preferred_providers: Vec::new(),
@@ -242,9 +257,16 @@ impl RoutingConfig {
         self
     }
 
-    /// Sets the request timeout in milliseconds
+    /// Sets the per-HTTP-call timeout in milliseconds
     pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Sets the whole-request wall-clock deadline in milliseconds spanning
+    /// every retry. `0` disables it.
+    pub fn with_request_deadline_ms(mut self, deadline_ms: u64) -> Self {
+        self.request_deadline_ms = deadline_ms;
         self
     }
 
@@ -267,21 +289,21 @@ impl RoutingConfig {
         self
     }
 
-    /// Computes the hedge delay for a primary provider whose tracked
-    /// average latency is `avg_latency_ms`. A cold provider (no latency
-    /// history) hedges at the midpoint of the configured bounds; a warm
-    /// provider hedges at its own average, clamped to `[floor, ceiling]`.
-    /// Racing at ~the primary's average approximates the p95 tail without
-    /// needing a full latency histogram: by the time the average elapses,
-    /// a healthy primary has almost always replied, so a still-pending
-    /// request is a genuine tail case worth hedging.
-    fn hedge_delay_ms(&self, avg_latency_ms: u64) -> u64 {
+    /// Computes the hedge delay for a primary provider whose observed
+    /// tail latency is `tail_latency_ms` (the P² p95 estimate, or the mean
+    /// during warm-up). A cold provider (no latency history, `0`) hedges at
+    /// the midpoint of the configured bounds; a warm provider hedges at its
+    /// own tail, clamped to `[floor, ceiling]`. Racing at the p95 fires a
+    /// backup only when the primary has genuinely landed in its slow tail,
+    /// which keeps hedge volume proportional to real stragglers instead of
+    /// firing on every request slower than average.
+    fn hedge_delay_ms(&self, tail_latency_ms: u64) -> u64 {
         let floor = self.hedge_delay_floor_ms;
         let ceiling = self.hedge_delay_ceiling_ms.max(floor);
-        if avg_latency_ms == 0 {
+        if tail_latency_ms == 0 {
             return floor + (ceiling - floor) / 2;
         }
-        avg_latency_ms.clamp(floor, ceiling)
+        tail_latency_ms.clamp(floor, ceiling)
     }
 }
 
@@ -381,6 +403,9 @@ pub struct RouterMetrics {
     /// Number of requests where the hedge finished first and its result
     /// was returned. `hedges_won <= hedges_dispatched`.
     hedges_won: AtomicU64,
+    /// Number of requests abandoned because the whole-request wall-clock
+    /// deadline was exhausted before a provider succeeded.
+    deadline_exceeded: AtomicU64,
 }
 
 /// Point-in-time copy of [`RouterMetrics`] counters.
@@ -392,6 +417,8 @@ pub struct RouterMetricsSnapshot {
     pub hedges_dispatched: u64,
     /// Requests where the hedge won the race.
     pub hedges_won: u64,
+    /// Requests abandoned on the whole-request wall-clock deadline.
+    pub deadline_exceeded: u64,
 }
 
 /// Outcome of a single-provider dispatch that did not succeed.
@@ -562,6 +589,7 @@ impl InferenceRouter {
             requests: self.metrics.requests.load(Ordering::Relaxed),
             hedges_dispatched: self.metrics.hedges_dispatched.load(Ordering::Relaxed),
             hedges_won: self.metrics.hedges_won.load(Ordering::Relaxed),
+            deadline_exceeded: self.metrics.deadline_exceeded.load(Ordering::Relaxed),
         }
     }
 
@@ -683,6 +711,30 @@ impl InferenceRouter {
             )));
         }
 
+        // Hardware floor — when the caller pins a minimum hardware class
+        // (via `parameters.custom["min_hardware"]`, same non-churning
+        // mechanism as `draft_n`), drop providers whose advertised class
+        // does not meet it. Undeclared (`Unknown`) providers never satisfy
+        // an explicit floor: a request that sets one is deliberately
+        // opting out of providers that haven't declared their hardware.
+        // Absent the hint, no filter is applied and every class competes
+        // on score — advertised hardware only biases ranking, it does not
+        // exclude, unless the caller explicitly asks it to.
+        if let Some(required) = request
+            .parameters
+            .custom
+            .get("min_hardware")
+            .and_then(|v| HardwareClass::parse_hint(v))
+        {
+            providers.retain(|p| p.provider.capacity.hardware.class().satisfies(required));
+            if providers.is_empty() {
+                return Err(ModelError::NoProvidersAvailable(format!(
+                    "{} (hardware floor {:?})",
+                    request.model_id, required
+                )));
+            }
+        }
+
         // MTP filter — when the caller asked for speculative decoding
         // (Multi-Token Prediction), prefer providers that advertise an
         // MTP-capable runtime (`ProviderCapacity.mtp_enabled = true`).
@@ -747,7 +799,16 @@ impl InferenceRouter {
                 providers.sort_by_key(|p| p.provider.pricing.minimum_price);
             }
             RoutingStrategy::LowestLatency => {
-                providers.sort_by_key(|p| p.metrics.avg_latency_ms);
+                // Steer on the observed p95 tail, falling back to the mean
+                // until the estimator warms up. A provider with a low mean
+                // but a heavy tail delivers worse user-perceived latency
+                // than one whose tail is tight, so the tail is the right
+                // sort key for "lowest latency".
+                providers.sort_by_key(|p| {
+                    p.metrics
+                        .latency_p95_ms()
+                        .unwrap_or(p.metrics.avg_latency_ms)
+                });
             }
             RoutingStrategy::HighestReputation => {
                 providers.sort_by_key(|p| std::cmp::Reverse(p.provider.reputation));
@@ -832,7 +893,31 @@ impl InferenceRouter {
         let mut last_error = None;
         let mut excluded_providers: Vec<Address> = Vec::new();
 
+        let request_start = std::time::Instant::now();
+        let deadline = (config.request_deadline_ms > 0)
+            .then(|| Duration::from_millis(config.request_deadline_ms));
+
         for attempt in 0..=config.max_retries {
+            // Whole-request wall-clock budget: stop retrying once the
+            // deadline is exhausted so a request never silently consumes
+            // (max_retries + 1) × timeout_ms. The first attempt (attempt 0)
+            // always runs — a deadline shorter than a single dispatch is a
+            // misconfiguration, not a reason to reject before trying.
+            if attempt > 0 {
+                if let Some(deadline) = deadline {
+                    if request_start.elapsed() >= deadline {
+                        self.metrics.deadline_exceeded.fetch_add(1, Ordering::Relaxed);
+                        last_error = Some(last_error.take().unwrap_or_else(|| {
+                            ModelError::InferenceError(format!(
+                                "request deadline of {}ms exceeded after {} attempt(s)",
+                                config.request_deadline_ms, attempt
+                            ))
+                        }));
+                        break;
+                    }
+                }
+            }
+
             // Select provider (excluding previously failed ones)
             let provider_address = if attempt == 0 {
                 self.route_request_with_config(request, config)?
@@ -867,12 +952,20 @@ impl InferenceRouter {
 
             match hedge_address {
                 Some(hedge_address) => {
-                    let primary_latency = self
+                    // Hedge at the primary's observed p95 tail, not its
+                    // mean: a still-pending request past the p95 is a
+                    // genuine tail case worth racing. Before the estimator
+                    // warms up, fall back to the mean.
+                    let primary_tail_ms = self
                         .provider_manager
                         .get_metrics(&provider_address)
-                        .map(|m| m.avg_latency_ms)
+                        .ok()
+                        .and_then(|m| {
+                            m.latency_p95_ms()
+                                .or_else(|| (m.avg_latency_ms > 0).then_some(m.avg_latency_ms))
+                        })
                         .unwrap_or(0);
-                    let delay = Duration::from_millis(config.hedge_delay_ms(primary_latency));
+                    let delay = Duration::from_millis(config.hedge_delay_ms(primary_tail_ms));
 
                     match self
                         .dispatch_hedged(request, config, provider_address, hedge_address, delay)
@@ -1580,7 +1673,7 @@ mod tests {
         let config = RoutingConfig::new().with_hedge_delay_bounds(40, 500);
         // Cold provider (no latency history) → midpoint of the band.
         assert_eq!(config.hedge_delay_ms(0), 40 + (500 - 40) / 2);
-        // Warm provider inside the band → its own average.
+        // Warm provider inside the band → its own tail estimate.
         assert_eq!(config.hedge_delay_ms(120), 120);
         // Below floor → floor.
         assert_eq!(config.hedge_delay_ms(5), 40);

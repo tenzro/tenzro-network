@@ -341,13 +341,17 @@ fn scheduler_loop(
                 let idx = batch.n_tokens() - 1;
                 logits_slot.push((idx, slot_idx));
             } else if let Some(tok) = seq.pending_token.take() {
-                // Running sequence: add its just-sampled token at n_past.
+                // Running sequence: add its just-sampled token at n_past (the next
+                // free KV position). n_past advances only after the token is
+                // committed here, mirroring prefill — so the KV cache and the
+                // batch positions stay consecutive (Y = X + 1).
                 if batch.add(tok, seq.n_past, &[seq.seq_id], true).is_err() {
                     // Batch full — leave this token pending for the next step.
                     seq.pending_token = Some(tok);
                     batch_full = true;
                     continue;
                 }
+                seq.n_past += 1;
                 let idx = batch.n_tokens() - 1;
                 logits_slot.push((idx, slot_idx));
             }
@@ -383,7 +387,6 @@ fn scheduler_loop(
 
                 let token = seq.sampler.sample(&ctx, logits_idx);
                 seq.sampler.accept(token);
-                seq.n_past += 1;
 
                 if model.is_eog_token(token) {
                     free_slot = true;
@@ -408,7 +411,9 @@ fn scheduler_loop(
                     }
 
                     if !free_slot {
-                        if seq.n_past >= seq.max_pos {
+                        // Stop once the committed prompt plus everything generated
+                        // so far reaches the ceiling (max_tokens, capped at ctx).
+                        if seq.input_tokens as i32 + seq.output_tokens as i32 >= seq.max_pos {
                             free_slot = true;
                         } else {
                             seq.pending_token = Some(token);
@@ -529,13 +534,18 @@ fn render_prompt(model: &LlamaModel, prompt: &BatchPrompt) -> Result<String> {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let chat_template = model
-                .chat_template(None)
-                .map_err(|e| ModelError::Other(format!("Failed to get chat template: {}", e)))?;
-
-            model
-                .apply_chat_template(&chat_template, &llama_messages, true)
-                .map_err(|e| ModelError::Other(format!("Failed to apply chat template: {}", e)))
+            // Prefer the GGUF's embedded template; fall back to ChatML when it
+            // is missing or renders empty (some Qwen3 templates render to a
+            // zero-length body on this llama.cpp build, which would tokenize to
+            // zero tokens). Keeps both serving modes templating identically.
+            if let Ok(tmpl) = model.chat_template(None) {
+                if let Ok(rendered) = model.apply_chat_template(&tmpl, &llama_messages, true) {
+                    if !rendered.trim().is_empty() {
+                        return Ok(rendered);
+                    }
+                }
+            }
+            Ok(crate::runtime::render_chatml_prompt(messages))
         }
     }
 }

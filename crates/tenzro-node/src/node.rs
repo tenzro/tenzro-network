@@ -1778,6 +1778,20 @@ pub struct TenzroNode {
     /// state). Typically passed via CLI alongside `--state-sync-from`.
     state_sync_anchor: Option<[u8; 32]>,
 
+    /// Weak-subjectivity checkpoint enforced on the *block-sync* path:
+    /// `(height, state_root)`. Distinct from `state_sync_anchor`, which only
+    /// guards the snapshot-bootstrap path (it needs the root, not the height,
+    /// because it takes the newest snapshot and matches the root). Block-sync
+    /// imports blocks one at a time and verifies each block's commit-QC, but a
+    /// node syncing forward from a low height would otherwise accept any
+    /// QC-valid chain — including a forged historical fork signed by an old
+    /// validator supermajority's keys (long-range attack). Pinning the imported
+    /// block at `height` to `state_root` binds the synced chain to the trusted
+    /// checkpoint: any fork diverging before the anchor yields a different
+    /// state root at that height and is rejected at import. `None` disables the
+    /// check (legacy young-chain replay, or snapshot-only bootstrap).
+    weak_subjectivity_anchor: Option<(u64, [u8; 32])>,
+
     /// Live chain tip height — shared with EventLoop for lock-free RPC reads.
     ///
     /// The EventLoop updates this atomically on every finalized block (both local
@@ -2056,6 +2070,7 @@ impl TenzroNode {
             snapshot_store: None,
             state_sync_peer: None,
             state_sync_anchor: None,
+            weak_subjectivity_anchor: None,
             chain_tip: Arc::new(AtomicU64::new(0)),
             peer_status,
             provider_schedule: Arc::new(RwLock::new(ProviderSchedule::default())),
@@ -7643,6 +7658,15 @@ impl TenzroNode {
             self.metrics.clone(),
         );
 
+        // Wire the weak-subjectivity checkpoint (if configured) so the
+        // block-sync import path rejects any historical fork whose committed
+        // state root at the anchor height diverges from the trusted value.
+        let event_loop = if let Some((height, root)) = self.weak_subjectivity_anchor {
+            event_loop.with_weak_subjectivity_anchor(height, tenzro_types::Hash::new(root))
+        } else {
+            event_loop
+        };
+
         // Wire outbound consensus messages into the event loop so that votes
         // and proposals produced by HotStuff-2 are broadcast over gossipsub.
         // `take()` ensures the RX is consumed exactly once.
@@ -7691,6 +7715,14 @@ impl TenzroNode {
 
         // Wire network_providers map for gossipsub-discovered provider merging
         let mut event_loop = event_loop.with_provider_discovery(self.network_providers.clone());
+
+        // Bridge verified provider announcements into the ProviderManager so
+        // the InferenceRouter (which dispatches chat traffic) sees them with
+        // their advertised HardwareCapabilities. Absent on nodes with no
+        // router (light clients that never route inference).
+        if let Some(ref pm) = self.provider_manager {
+            event_loop = event_loop.with_provider_manager(pm.clone());
+        }
 
         // Wire the node's Ed25519 announce signer, loaded once in step 6b.
         // NOTE: this is a DIFFERENT keypair from the libp2p transport key
@@ -9284,6 +9316,25 @@ impl TenzroNode {
     /// `bootstrap_from_peer` refuses to apply any chunks.
     pub fn set_state_sync_anchor(&mut self, anchor: [u8; 32]) {
         self.state_sync_anchor = Some(anchor);
+    }
+
+    /// Set the weak-subjectivity checkpoint enforced on the *block-sync*
+    /// path: `(height, state_root)`. A node that catches up by replaying
+    /// blocks from peers (as opposed to snapshot bootstrap) verifies each
+    /// imported block's commit-QC against the validator set for that
+    /// height, but QC verification alone cannot defeat a *long-range*
+    /// fork: an attacker holding an old validator supermajority's keys can
+    /// forge a self-consistent alternate history from any past epoch. The
+    /// anchor pins one finalized `(height, state_root)` the node trusts a
+    /// priori; when the import path reaches `height`, the block's
+    /// `state_root` must match `state_root` byte-for-byte or the import is
+    /// rejected. Obtained out of band, identical to the snapshot anchor.
+    pub fn set_weak_subjectivity_anchor(
+        &mut self,
+        height: u64,
+        anchor: [u8; 32],
+    ) {
+        self.weak_subjectivity_anchor = Some((height, anchor));
     }
 
     /// Returns the consensus engine if initialized.

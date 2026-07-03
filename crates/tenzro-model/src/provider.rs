@@ -4,6 +4,7 @@
 //! inference providers on Tenzro Network.
 
 use crate::error::{ModelError, Result};
+use crate::latency::LatencyTail;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -72,6 +73,12 @@ pub struct ProviderMetrics {
     pub quarantined_until: Option<Timestamp>,
     /// Average latency in milliseconds
     pub avg_latency_ms: u64,
+    /// Running p95 latency estimate (P² streaming quantile). Hedging keys
+    /// off this tail rather than the mean, so a backup request fires only
+    /// when the primary has landed in its own slow tail — not on every
+    /// request slower than average.
+    #[serde(default)]
+    pub latency_p95: LatencyTail,
     /// Uptime percentage (0-100)
     pub uptime_percentage: f64,
     /// Last heartbeat timestamp
@@ -109,6 +116,7 @@ impl ProviderMetrics {
         self.total_latency_ms += latency_ms;
         self.consecutive_stream_failures = 0;
         self.quarantined_until = None;
+        self.latency_p95.observe(latency_ms);
         self.update_avg_latency();
     }
 
@@ -152,6 +160,12 @@ impl ProviderMetrics {
         if self.successful_requests > 0 {
             self.avg_latency_ms = self.total_latency_ms / self.successful_requests;
         }
+    }
+
+    /// Current p95 latency estimate in milliseconds, or `None` before the
+    /// estimator has warmed up (fewer than five successful requests).
+    pub fn latency_p95_ms(&self) -> Option<u64> {
+        self.latency_p95.estimate_ms()
     }
 
     /// Calculates success rate (0.0 - 1.0)
@@ -201,17 +215,49 @@ impl ProviderWithMetrics {
         }
     }
 
+    /// Normalized observed-performance factor in `[0.0, 1.0]` combining
+    /// success rate and measured latency. This is the gate applied to any
+    /// advertised capability: a provider that claims high-tier hardware
+    /// but returns errors or serves slowly has this factor drop, which
+    /// discounts its advertised bias back toward zero. A provider with no
+    /// history yet (no completed requests) returns `0.5` — neutral, so it
+    /// is neither trusted nor distrusted until it has served traffic.
+    ///
+    /// This is the "gate on observed" half of the trust-advertised /
+    /// gate-on-observed model: advertised class biases initial routing,
+    /// observed behavior corrects it. The correction mirrors the resource-
+    /// matching-then-measured-throughput loop used by volunteer-compute
+    /// schedulers (BOINC) and decentralized-inference dispatchers (Petals
+    /// per-device block assignment, Prime Intellect swarm scheduling),
+    /// where a device's declared capacity seeds assignment and its
+    /// realized service rate continuously reweights it.
+    pub fn observed_factor(&self) -> f64 {
+        if self.metrics.total_requests == 0 {
+            return 0.5;
+        }
+        let success = self.metrics.success_rate();
+        let latency = if self.metrics.avg_latency_ms == 0 {
+            0.5
+        } else {
+            (1000.0 / self.metrics.avg_latency_ms as f64).min(1.0)
+        };
+        // Weight success more heavily than latency: a provider that fails
+        // is useless regardless of how fast it fails.
+        (success * 0.7) + (latency * 0.3)
+    }
+
     /// Calculates a score for provider ranking (0.0 - 100.0)
     pub fn calculate_score(&self) -> f64 {
-        let success_weight = 40.0;
-        let latency_weight = 30.0;
+        let success_weight = 35.0;
+        let latency_weight = 25.0;
         let uptime_weight = 20.0;
         let reputation_weight = 10.0;
+        let hardware_weight = 10.0;
 
-        // Success rate component (0-40 points)
+        // Success rate component
         let success_score = self.metrics.success_rate() * success_weight;
 
-        // Latency component (0-30 points) - lower is better
+        // Latency component - lower is better.
         // Assume 1000ms is baseline, 100ms is excellent
         let latency_score = if self.metrics.avg_latency_ms == 0 {
             0.0
@@ -220,14 +266,22 @@ impl ProviderWithMetrics {
             normalized.min(1.0) * latency_weight
         };
 
-        // Uptime component (0-20 points)
+        // Uptime component
         let uptime_score = (self.metrics.uptime_percentage / 100.0) * uptime_weight;
 
-        // Reputation component (0-10 points)
-        // Normalize reputation to 0-1 range (assuming max 1000)
+        // Reputation component. Normalize to 0-1 range (assuming max 1000)
         let reputation_score = (self.provider.reputation as f64 / 1000.0).min(1.0) * reputation_weight;
 
-        success_score + latency_score + uptime_score + reputation_score
+        // Advertised-hardware component, gated on observed performance. The
+        // provider's declared hardware class sets the ceiling; the observed
+        // factor scales it down toward zero when realized behavior diverges
+        // from what the class implies. An overclaiming provider cannot hold
+        // hardware points it hasn't earned in measured service.
+        let hardware_score = self.provider.capacity.hardware.class().advertised_weight()
+            * self.observed_factor()
+            * hardware_weight;
+
+        success_score + latency_score + uptime_score + reputation_score + hardware_score
     }
 }
 
@@ -346,6 +400,17 @@ impl ProviderManager {
                 Err(e) => {
                     warn!("Failed to serialize provider {}: {}", address, e);
                 }
+            }
+        }
+    }
+
+    /// Deletes a single provider's persisted record (if storage configured).
+    fn delete_persisted_provider(&self, address: &Address) {
+        if let Some(ref storage) = self.storage {
+            let key_hex = format!("{}", address);
+            let storage_key = [PROVIDER_KEY_PREFIX, key_hex.as_bytes()].concat();
+            if let Err(e) = storage.delete(CF_PROVIDERS, &storage_key) {
+                warn!("Failed to delete persisted provider {}: {}", address, e);
             }
         }
     }
@@ -469,6 +534,84 @@ impl ProviderManager {
             Ok(())
         } else {
             Err(ModelError::ProviderNotFound(address.to_string()))
+        }
+    }
+
+    /// Idempotently installs or refreshes a provider discovered off the
+    /// `tenzro/providers` gossip topic.
+    ///
+    /// Gossip announcements are the real membership signal on the network —
+    /// every serving node broadcasts its `served_models`, `rpc_endpoint`, and
+    /// detected `HardwareCapabilities` on a TTL. This is the bridge that lets
+    /// those announcements reach the [`crate::InferenceRouter`] scoring path:
+    /// the router scores over `ProviderManager` entries, so a provider that
+    /// only lives in the node's gossip cache is invisible to routing until it
+    /// is upserted here.
+    ///
+    /// The `capacity.hardware` field is set from the announcement so the
+    /// advertised [`tenzro_types::HardwareClass`] biases assignment and the
+    /// `min_hardware` routing floor can admit or reject the provider.
+    ///
+    /// Unlike [`Self::register_provider`], this never errors on a re-announce:
+    /// an existing entry keeps its accumulated [`ProviderMetrics`] (the whole
+    /// "gate on observed" signal — success rate, latency, quarantine state)
+    /// and only its advertised fields (endpoint, served models, hardware,
+    /// status, TEE bit) are refreshed. A provider that re-announces every TTL
+    /// therefore does not reset its own observed history.
+    pub fn upsert_from_announcement(
+        &self,
+        address: Address,
+        name: String,
+        endpoint_url: Option<String>,
+        models: Vec<String>,
+        hardware: tenzro_types::HardwareCapabilities,
+        status: ProviderStatus,
+        has_tee: bool,
+        signing_pubkey: Option<Vec<u8>>,
+    ) {
+        if let Some(mut entry) = self.providers.get_mut(&address) {
+            // Refresh advertised fields; preserve observed metrics.
+            entry.provider.name = name;
+            entry.provider.endpoint_url = endpoint_url;
+            entry.provider.models = models;
+            entry.provider.capacity.hardware = hardware;
+            entry.provider.status = status;
+            entry.provider.signing_pubkey = signing_pubkey;
+            entry.has_tee = has_tee;
+            let pwm = entry.clone();
+            drop(entry);
+            self.persist_provider(&address, &pwm);
+            debug!("Refreshed gossip-discovered provider: {}", address);
+            return;
+        }
+
+        let mut provider = InferenceProvider::new(address, name);
+        provider.endpoint_url = endpoint_url;
+        provider.models = models;
+        provider.capacity.hardware = hardware;
+        provider.status = status;
+        provider.signing_pubkey = signing_pubkey;
+
+        let pwm = ProviderWithMetrics::new(provider, has_tee);
+        self.persist_provider(&address, &pwm);
+        self.providers.insert(address, pwm);
+        self.persist_index();
+        info!("Installed gossip-discovered provider: {}", address);
+    }
+
+    /// Removes a provider from the routing set.
+    ///
+    /// Used by the provider-heartbeat sweep when a gossip-discovered provider
+    /// exceeds its announcement TTL without a refresh — an expired provider
+    /// must not remain routable. Returns `true` if an entry was removed.
+    pub fn remove_provider(&self, address: &Address) -> bool {
+        if self.providers.remove(address).is_some() {
+            self.delete_persisted_provider(address);
+            self.persist_index();
+            debug!("Removed provider from routing set: {}", address);
+            true
+        } else {
+            false
         }
     }
 

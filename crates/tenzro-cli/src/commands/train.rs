@@ -27,6 +27,9 @@ pub enum TrainCommand {
     SubmitGradient(TrainSubmitGradientCmd),
     /// Finalize the current round (syncer flow)
     FinalizeRound(TrainFinalizeRoundCmd),
+    /// Ask the syncer whether the current round should finalize, wait, or
+    /// advance on a no-endorsement certificate given the DiLoCo grace window
+    DecideRound(TrainDecideRoundCmd),
     /// Install a sponsor's sealed-shard manifest for a Confidential-tier run
     InstallSealedManifest(TrainInstallSealedManifestCmd),
     /// Look up the installed sealed-shard manifest for a task
@@ -43,6 +46,7 @@ impl TrainCommand {
             Self::EnrollTrainer(c) => c.execute().await,
             Self::SubmitGradient(c) => c.execute().await,
             Self::FinalizeRound(c) => c.execute().await,
+            Self::DecideRound(c) => c.execute().await,
             Self::InstallSealedManifest(c) => c.execute().await,
             Self::GetSealedManifest(c) => c.execute().await,
         }
@@ -196,6 +200,56 @@ impl TrainGetRunCmd {
             .await?;
 
         println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decide round
+// ---------------------------------------------------------------------------
+
+/// Query the syncer's round decision. The syncer reports `finalize` once a
+/// quorum of witnesses has endorsed the round, `wait` while the DiLoCo grace
+/// window is still open, or `no_quorum` when the window elapsed without a
+/// quorum (the run then advances carrying the prior state root forward).
+#[derive(Debug, Parser)]
+pub struct TrainDecideRoundCmd {
+    /// Task ID to query
+    #[arg(long)]
+    task_id: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl TrainDecideRoundCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_training_decideRound",
+                serde_json::json!({ "task_id": self.task_id }),
+            )
+            .await?;
+
+        let decision = result.get("decision").and_then(|v| v.as_str()).unwrap_or("?");
+        output::print_field("Decision", decision);
+        match decision {
+            "wait" => {
+                if let Some(ms) = result.get("remaining_ms").and_then(|v| v.as_u64()) {
+                    output::print_field("Grace window remaining (ms)", &ms.to_string());
+                }
+            }
+            "finalize" | "no_quorum" => {
+                if let Some(round) = result.get("round").and_then(|v| v.as_u64()) {
+                    output::print_field("Round", &round.to_string());
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 }
