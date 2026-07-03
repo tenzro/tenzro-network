@@ -652,6 +652,11 @@ pub struct TrainingRun {
     pub current_round: u32,
     /// State roots collected so far (length == current_round).
     pub round_state_roots: Vec<Hash>,
+    /// When the current round opened (round 0 opens at run creation; each
+    /// finalize advances it). The syncer measures the adaptive grace window
+    /// τ (`TrainingTaskSpec::grace_window_ms`) against this timestamp to
+    /// decide when a straggler soft-timeout has elapsed for the round.
+    pub current_round_opened_at: Timestamp,
     pub created_at: Timestamp,
     pub last_update: Timestamp,
 }

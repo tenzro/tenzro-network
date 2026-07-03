@@ -370,6 +370,12 @@ pub struct EventLoop {
     network_agents: Option<Arc<DashMap<String, crate::node::NetworkAgentEntry>>>,
     /// Shared reference to the node's network_providers map for gossipsub provider discovery
     network_providers: Option<Arc<DashMap<String, crate::node::NetworkProviderEntry>>>,
+    /// Shared reference to the node's `ProviderManager`. Verified provider
+    /// announcements are bridged into it (`upsert_from_announcement`) so the
+    /// `InferenceRouter` scoring path — which routes real chat traffic —
+    /// actually sees gossip-discovered providers with their advertised
+    /// `HardwareCapabilities`. `None` on nodes with no router (light clients).
+    provider_manager: Option<Arc<tenzro_model::ProviderManager>>,
     /// Provider announcement broadcast context. When `Some`, the periodic
     /// `provider_heartbeat` tick rebuilds a `ProviderAnnouncementMessage`
     /// from the current `served_models` / `provider_pricing` / hardware
@@ -529,6 +535,16 @@ pub struct EventLoop {
     /// into its iroh blob store. `None` on non-storage nodes — they ignore
     /// replication requests entirely.
     storage_replicas: Option<usize>,
+
+    /// Weak-subjectivity checkpoint `(height, state_root)` enforced on the
+    /// block-sync import path. QC verification proves each imported block
+    /// carries a valid commit certificate, but a long-range fork forged by
+    /// an old validator supermajority is self-consistent under that check.
+    /// The anchor pins one finalized `(height, state_root)` the node trusts
+    /// a priori: when import reaches `height`, the block's `state_root` must
+    /// match or the block (and everything built on it) is rejected. `None`
+    /// disables the check — the historical block-sync behaviour.
+    weak_subjectivity_anchor: Option<(u64, Hash)>,
 }
 
 /// Capacity of [`EventLoop::recent_state_roots`]. Proposer execution lag is
@@ -588,6 +604,7 @@ impl EventLoop {
             swarm_manager: None,
             network_agents: None,
             network_providers: None,
+            provider_manager: None,
             provider_announcement_ctx: None,
             announce_signer: None,
             model_runtime: None,
@@ -612,7 +629,23 @@ impl EventLoop {
             snapshot_store: None,
             recent_state_roots: std::collections::VecDeque::with_capacity(STATE_ROOT_WINDOW),
             storage_replicas: None,
+            weak_subjectivity_anchor: None,
         }
+    }
+
+    /// Pins the weak-subjectivity checkpoint `(height, state_root)` enforced
+    /// on the block-sync import path. When a block-sync import reaches
+    /// `height`, its `state_root` must match `root` byte-for-byte or the
+    /// import is rejected — defeating long-range forks that pass QC
+    /// verification. Left unset, block-sync imports are accepted on QC
+    /// verification alone.
+    pub fn with_weak_subjectivity_anchor(
+        mut self,
+        height: u64,
+        root: Hash,
+    ) -> Self {
+        self.weak_subjectivity_anchor = Some((height, root));
+        self
     }
 
     /// Marks this node as storage-serving with the given per-shard replica
@@ -838,6 +871,18 @@ impl EventLoop {
         network_providers: Arc<DashMap<String, crate::node::NetworkProviderEntry>>,
     ) -> Self {
         self.network_providers = Some(network_providers);
+        self
+    }
+
+    /// Wires the `ProviderManager` so verified provider announcements are
+    /// bridged into the `InferenceRouter` scoring path. Without this, a
+    /// gossip-discovered provider lives only in `network_providers` and is
+    /// invisible to the router that dispatches chat traffic.
+    pub fn with_provider_manager(
+        mut self,
+        provider_manager: Arc<tenzro_model::ProviderManager>,
+    ) -> Self {
+        self.provider_manager = Some(provider_manager);
         self
     }
 
@@ -1633,10 +1678,28 @@ impl EventLoop {
                 _ = provider_heartbeat.tick() => {
                     if let Some(ref np) = self.network_providers {
                         let now = std::time::Instant::now();
+                        // Collect the provider addresses evicted this pass so
+                        // the ProviderManager can prune them too — an expired
+                        // gossip entry must stop being routable, not just
+                        // vanish from the discovery cache.
+                        let mut evicted: Vec<String> = Vec::new();
                         np.retain(|_key, entry| {
                             let ttl = std::time::Duration::from_secs(entry.announcement.ttl_secs);
-                            now.duration_since(entry.last_seen) < ttl
+                            let alive = now.duration_since(entry.last_seen) < ttl;
+                            if !alive {
+                                evicted.push(entry.announcement.provider_address.clone());
+                            }
+                            alive
                         });
+                        if let Some(ref pm) = self.provider_manager {
+                            for addr_hex in &evicted {
+                                if let Ok(address) =
+                                    tenzro_types::primitives::Address::from_hex(addr_hex)
+                                {
+                                    pm.remove_provider(&address);
+                                }
+                            }
+                        }
                     }
 
                     // Broadcast our own provider announcement (only if context +
@@ -2237,6 +2300,49 @@ impl EventLoop {
                                     rpc_endpoint = %ann.rpc_endpoint,
                                     "Network provider discovered via gossipsub"
                                 );
+
+                                // Bridge the verified announcement into the
+                                // ProviderManager so the InferenceRouter can
+                                // score and dispatch to this provider by its
+                                // advertised HardwareCapabilities. Skip
+                                // providers with no reachable endpoint or no
+                                // served models — they cannot be routed to.
+                                if let Some(ref pm) = self.provider_manager
+                                    && !ann.rpc_endpoint.is_empty()
+                                    && !ann.served_models.is_empty()
+                                    && let Ok(address) =
+                                        tenzro_types::primitives::Address::from_hex(&ann.provider_address)
+                                {
+                                    let has_tee = ann.hardware.tee_available
+                                        || ann
+                                            .capabilities
+                                            .iter()
+                                            .any(|c| c.contains("tee"));
+                                    let status = match ann.status.as_str() {
+                                        "active" | "" => {
+                                            tenzro_types::model::ProviderStatus::Active
+                                        }
+                                        "draining" | "inactive" => {
+                                            tenzro_types::model::ProviderStatus::Inactive
+                                        }
+                                        _ => tenzro_types::model::ProviderStatus::Active,
+                                    };
+                                    let signing_pubkey = if ann.pubkey.is_empty() {
+                                        None
+                                    } else {
+                                        Some(ann.pubkey.clone())
+                                    };
+                                    pm.upsert_from_announcement(
+                                        address,
+                                        ann.peer_id.clone(),
+                                        Some(ann.rpc_endpoint.clone()),
+                                        ann.served_models.clone(),
+                                        ann.hardware.clone(),
+                                        status,
+                                        has_tee,
+                                        signing_pubkey,
+                                    );
+                                }
                             }
                         }
                         NodeEvent::BlobAnnouncement(ann) => {
@@ -3058,6 +3164,26 @@ impl EventLoop {
             ))
         })?;
 
+        // (4) Weak-subjectivity checkpoint. A valid commit-QC proves this
+        // block was signed by a supermajority of the validator set active at
+        // its height — but that is exactly what a long-range fork forges: an
+        // attacker holding an old supermajority's keys can build a
+        // self-consistent alternate history from any past epoch, and every
+        // block on it passes step (2). The anchor is the a-priori-trusted
+        // finalized `(height, state_root)`. When import reaches the anchor
+        // height, the block's committed state root must match the anchor
+        // byte-for-byte; a fork diverging before the anchor produces a
+        // different root here and is rejected, taking every block built on it
+        // down with it. Blocks below the anchor height are still QC-verified
+        // (step 2) but not root-pinned — the anchor is the single point the
+        // node trusts without derivation, and the QC chain vouches for the
+        // prefix leading up to it.
+        Self::check_weak_subjectivity_anchor(
+            self.weak_subjectivity_anchor,
+            block.height().as_u64(),
+            block.header.state_root,
+        )?;
+
         debug!(
             height = %block.height(),
             hash = %block_hash,
@@ -3067,6 +3193,40 @@ impl EventLoop {
         );
 
         self.handle_block_finalized_inner(block, true).await
+    }
+
+    /// Enforces the weak-subjectivity checkpoint on a block-sync import.
+    ///
+    /// A no-op unless `anchor` is set and `block_height` equals the anchor
+    /// height. At the anchor height, `block_state_root` must equal the
+    /// trusted root or the import is rejected. Pure over its inputs so the
+    /// rejection/acceptance logic is unit-testable without a consensus
+    /// engine.
+    fn check_weak_subjectivity_anchor(
+        anchor: Option<(u64, Hash)>,
+        block_height: u64,
+        block_state_root: Hash,
+    ) -> Result<()> {
+        let Some((anchor_height, anchor_root)) = anchor else {
+            return Ok(());
+        };
+        if block_height != anchor_height {
+            return Ok(());
+        }
+        if block_state_root != anchor_root {
+            return Err(crate::error::NodeError::Other(format!(
+                "block-sync rejected block at weak-subjectivity anchor height \
+                 {anchor_height}: committed state_root {block_state_root} does \
+                 not match trusted checkpoint {anchor_root} — refusing a \
+                 long-range fork",
+            )));
+        }
+        debug!(
+            height = %anchor_height,
+            root = %anchor_root,
+            "Block-sync: block matches weak-subjectivity checkpoint"
+        );
+        Ok(())
     }
 
     /// Stages the validator-registry transition plan for the next epoch onto
@@ -5820,6 +5980,52 @@ mod tests {
         );
         let pq_sig = pq_key.sign(tx.hash().as_bytes()).to_vec();
         SignedTransaction::new(tx, Signature::default(), pq_sig)
+    }
+
+    #[test]
+    fn weak_subjectivity_disabled_accepts_any_root() {
+        // No anchor configured — every height/root passes.
+        let root = Hash::new([7u8; 32]);
+        assert!(
+            EventLoop::check_weak_subjectivity_anchor(None, 100, root).is_ok()
+        );
+    }
+
+    #[test]
+    fn weak_subjectivity_ignores_non_anchor_heights() {
+        let anchor = Some((100u64, Hash::new([1u8; 32])));
+        // At a height other than the anchor, the committed root is not pinned,
+        // even a mismatching one.
+        let other_root = Hash::new([2u8; 32]);
+        assert!(
+            EventLoop::check_weak_subjectivity_anchor(anchor, 99, other_root)
+                .is_ok()
+        );
+        assert!(
+            EventLoop::check_weak_subjectivity_anchor(anchor, 101, other_root)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn weak_subjectivity_accepts_matching_root_at_anchor() {
+        let root = Hash::new([1u8; 32]);
+        let anchor = Some((100u64, root));
+        assert!(
+            EventLoop::check_weak_subjectivity_anchor(anchor, 100, root).is_ok()
+        );
+    }
+
+    #[test]
+    fn weak_subjectivity_rejects_forked_root_at_anchor() {
+        let anchor = Some((100u64, Hash::new([1u8; 32])));
+        let forked_root = Hash::new([9u8; 32]);
+        // A block at the anchor height whose committed root differs is a
+        // long-range fork and must be rejected.
+        assert!(
+            EventLoop::check_weak_subjectivity_anchor(anchor, 100, forked_root)
+                .is_err()
+        );
     }
 
     #[test]

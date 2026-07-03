@@ -6801,6 +6801,27 @@ def training_get_sealed_manifest(task_id: str) -> dict:
     return _rpc("tenzro_training_getSealedManifest", {"task_id": task_id})
 
 
+def training_decide_round(task_id: str) -> dict:
+    """Ask the syncer for its round decision on a training run.
+
+    The decision follows the DiLoCo grace window: `{decision: "wait",
+    remaining_ms}` while the window is open, `{decision: "finalize", round}`
+    once a witness quorum endorses the round, and `{decision: "no_quorum",
+    round}` when the window elapses without a quorum (the run advances,
+    carrying the prior state root forward).
+    """
+    return _rpc("tenzro_training_decideRound", {"task_id": task_id})
+
+
+def get_router_metrics() -> dict:
+    """Read the inference router's live metrics snapshot.
+
+    Reports total requests routed, hedges dispatched, hedges won, and requests
+    abandoned on the whole-request deadline.
+    """
+    return _rpc("tenzro_getRouterMetrics", {})
+
+
 # ── CLI ───────────────────────────────────────────────────────────
 
 # ---------------------------------------------------------------------------

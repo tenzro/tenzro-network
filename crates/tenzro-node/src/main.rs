@@ -200,6 +200,19 @@ struct Cli {
     #[arg(long, value_name = "HEX", requires = "state_sync_from")]
     state_sync_anchor: Option<String>,
 
+    /// Block height at which `--state-sync-anchor` is the trusted committed
+    /// state root. When set, the block-sync import path also enforces the
+    /// anchor: any block imported at this height whose committed state root
+    /// differs from `--state-sync-anchor` is rejected, defeating a
+    /// long-range fork that would otherwise pass commit-QC verification.
+    /// When omitted, the anchor guards only snapshot bootstrap (the peer's
+    /// manifest), and block-sync imports are accepted on QC verification
+    /// alone — the historical behaviour. Auto state-sync via
+    /// `--bootstrap-dns` derives this from the genesis
+    /// `[weak_subjectivity]` block instead.
+    #[arg(long, value_name = "HEIGHT", requires = "state_sync_anchor")]
+    state_sync_height: Option<u64>,
+
     /// Optional subcommand. When omitted, the binary runs as a full node
     /// using the top-level flags above. Subcommands are administrative
     /// helpers that talk to a *running* node over its JSON-RPC and exit.
@@ -429,6 +442,19 @@ async fn main() -> Result<()> {
             anchor = %format!("0x{}", hex::encode(anchor)),
             "State-sync anchor installed"
         );
+
+        // If the operator also pinned the height, enforce the anchor on the
+        // block-sync import path — not just the snapshot manifest. Without a
+        // height the anchor cannot be located in the block stream, so
+        // block-sync stays QC-only (historical behaviour).
+        if let Some(height) = cli.state_sync_height {
+            node.set_weak_subjectivity_anchor(height, anchor);
+            info!(
+                height = height,
+                anchor = %format!("0x{}", hex::encode(anchor)),
+                "Weak-subjectivity checkpoint installed for block-sync"
+            );
+        }
     } else if auto_state_sync {
         // Auto-derive (peer_url, anchor) for fresh-joiner catchup.
         //
@@ -468,6 +494,23 @@ async fn main() -> Result<()> {
         let mut anchor = [0u8; 32];
         anchor.copy_from_slice(&anchor_bytes);
         node.set_state_sync_anchor(anchor);
+
+        // The genesis anchor carries a height, so the block-sync import path
+        // enforces it too: a rejoining node that catches up by replaying
+        // blocks (rather than snapshot bootstrap) rejects any fork whose
+        // committed state root at the anchor height diverges from genesis.
+        let anchor_height = config
+            .genesis
+            .as_ref()
+            .and_then(|g| g.weak_subjectivity.as_ref())
+            .map(|w| w.height)
+            .expect("auto_state_sync guard ensured weak_subjectivity is set");
+        node.set_weak_subjectivity_anchor(anchor_height, anchor);
+        info!(
+            height = anchor_height,
+            anchor = %format!("0x{}", hex::encode(anchor)),
+            "Weak-subjectivity checkpoint installed for block-sync (genesis)"
+        );
 
         // Derive a peer RPC URL from the first usable bootstrap multiaddr.
         // The mapping is intentionally simple: `/ip4/<X>/...` → `http://<X>:8545`.

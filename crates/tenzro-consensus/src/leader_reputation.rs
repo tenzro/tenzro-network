@@ -59,13 +59,26 @@
 //! anti-grinding pattern Aptos uses; the domain tag prevents replay against
 //! any other Tenzro hash that happens to share the structural inputs.
 //!
-//! # TEE multiplier
+//! # Capability multiplier
 //!
-//! Validators that present a fresh, valid TEE attestation receive a 1.5×
-//! multiplier on their reputation-adjusted weight. This is intentionally
-//! gentler than the prior `2× hard boost` so that a TEE-attested validator
-//! with degraded behaviour can still be deprioritized — TEE attestation
-//! does not exempt a validator from accountability for failed proposals.
+//! On top of stake × observed-behaviour, each validator's draw weight is
+//! scaled by a continuous *capability multiplier* in `[1.0×, 1.5×]`. The
+//! multiplier folds two advertised inputs: the validator's hardware class
+//! (`HardwareClass::Cpu` … `MultiAccelerator`, contributing up to 4000 bps
+//! of the 5000 bps bonus span) and a fresh, valid TEE attestation
+//! (contributing the remaining 1000 bps). The weakest advertised hardware
+//! with no attestation sits at exactly `1.0×` — capability only ever
+//! *bonuses*, never punishes below the stake-and-reputation baseline — and a
+//! TEE-attested `MultiAccelerator` reaches the `1.5×` ceiling.
+//!
+//! Capability is *advertised*, so it is a bias, not a gate: the
+//! observed-behaviour term is what actually stops a flaky validator from
+//! being scheduled, regardless of how strong its self-reported hardware is
+//! ("trust advertised, gate on observed"). A high-capability validator with
+//! degraded behaviour is still deprioritized — capability cannot exempt a
+//! validator from accountability for failed proposals. The `1.5×` ceiling is
+//! the same bound the earlier binary TEE multiplier used, now reached by a
+//! continuous class-plus-attestation curve rather than a hard on/off boost.
 //!
 //! References:
 //! - Aptos LeaderReputation: `aptos-core/consensus/src/liveness/leader_reputation.rs`
@@ -105,12 +118,53 @@ pub const ACTIVE_WEIGHT: u128 = 1000;
 /// gets the punitive weight.
 pub const FAILURE_THRESHOLD_PERCENT: u32 = 10;
 
-/// TEE-attestation multiplier applied to the reputation-adjusted weight.
-/// Stored as basis points so we can do integer arithmetic: 15000 bps = 1.5×.
-pub const TEE_MULTIPLIER_BPS: u128 = 15000;
-/// 1× = 10000 bps. Non-attested validators are multiplied by this (i.e.
-/// no change) so the same code path handles both branches.
-pub const NO_TEE_MULTIPLIER_BPS: u128 = 10000;
+/// Baseline capability multiplier in basis points (1× = 10000 bps). A
+/// validator with the weakest advertised hardware (`HardwareClass::Cpu`)
+/// and no TEE gets exactly this — capability only ever *bonuses* a
+/// validator up from baseline, never below it, so an under-resourced node
+/// is not excluded from proposing, merely less likely to be drawn.
+pub const CAPABILITY_BASELINE_BPS: u128 = 10000;
+
+/// Maximum capability multiplier in basis points (1.5× = 15000 bps). The
+/// strongest advertised hardware class (`MultiAccelerator`) reaches this;
+/// the TEE bonus is folded inside this ceiling rather than stacking on top,
+/// so no validator's advertised capability can push its draw weight beyond
+/// 1.5× its stake-and-reputation baseline. This is the same ceiling the
+/// earlier binary TEE multiplier used, now reached by a continuous class
+/// score rather than a single bit.
+pub const CAPABILITY_MAX_BPS: u128 = 15000;
+
+/// Share of the capability bonus span (`CAPABILITY_MAX_BPS -
+/// CAPABILITY_BASELINE_BPS`) attributable to TEE attestation. The rest is
+/// attributable to the advertised hardware class. 4000 bps of the 5000 bps
+/// span comes from the hardware class and 1000 bps from TEE, so a
+/// TEE-attested `MultiAccelerator` reaches the full 1.5× and a
+/// non-attested one reaches 1.4×.
+pub const CAPABILITY_TEE_SPAN_BPS: u128 = 1000;
+
+/// Compute a validator's continuous capability multiplier in basis points,
+/// in `[CAPABILITY_BASELINE_BPS, CAPABILITY_MAX_BPS]`.
+///
+/// The advertised [`HardwareClass`] contributes a fraction of the bonus
+/// span via its `advertised_weight()` (`[0.2, 1.0]`), rescaled so that the
+/// top class contributes the full class portion; TEE attestation
+/// contributes `CAPABILITY_TEE_SPAN_BPS` on top. Both are advertised
+/// claims — the observed-reputation tier (ACTIVE/INACTIVE/FAILED) is the
+/// gate that stops an over-stated capability from actually helping a flaky
+/// validator, per "trust advertised, gate on observed".
+pub fn capability_multiplier_bps(
+    hardware: &tenzro_types::hardware::HardwareCapabilities,
+    tee_attested: bool,
+) -> u128 {
+    let class_span = CAPABILITY_MAX_BPS - CAPABILITY_BASELINE_BPS - CAPABILITY_TEE_SPAN_BPS;
+    // advertised_weight() is in [0.2, 1.0]; rescale to [0.0, 1.0] so CPU-only
+    // contributes no class bonus and MultiAccelerator contributes all of it.
+    let w = hardware.class().advertised_weight();
+    let class_frac = ((w - 0.2) / 0.8).clamp(0.0, 1.0);
+    let class_bonus = (class_frac * class_span as f64) as u128;
+    let tee_bonus = if tee_attested { CAPABILITY_TEE_SPAN_BPS } else { 0 };
+    (CAPABILITY_BASELINE_BPS + class_bonus + tee_bonus).min(CAPABILITY_MAX_BPS)
+}
 
 /// One entry in the per-round proposer history. Records the leader of a
 /// round that has since been finalized (or definitively timed out).
@@ -332,25 +386,29 @@ pub struct ValidatorWeights {
 pub struct LeaderReputation {
     proposer_history: RwLock<ProposerHistory>,
     voter_history: RwLock<VoterHistory>,
-    /// TEE multiplier in basis points. Default `TEE_MULTIPLIER_BPS` (15000
-    /// = 1.5×) but exposed as a config knob for tests and future tuning.
-    tee_multiplier_bps: u128,
+    /// Scaling knob for the continuous capability multiplier, in basis
+    /// points. `CAPABILITY_BASELINE_BPS` (10000) applies the per-class
+    /// multiplier as computed; `0` collapses every validator to a flat 1×
+    /// (pure stake × reputation, capability axis disabled). Exposed for
+    /// tests and future governance tuning.
+    capability_scale_bps: u128,
 }
 
 impl LeaderReputation {
-    /// Builds a new reputation engine sized for a `n`-validator active set.
+    /// Builds a new reputation engine sized for a `n`-validator active set,
+    /// applying the capability multiplier at full scale.
     pub fn new(n: usize) -> Self {
-        Self::with_tee_multiplier(n, TEE_MULTIPLIER_BPS)
+        Self::with_capability_scale(n, CAPABILITY_BASELINE_BPS)
     }
 
-    /// Builds a reputation engine with a custom TEE multiplier (basis
-    /// points). Use `NO_TEE_MULTIPLIER_BPS` (10000) to disable the boost
-    /// entirely.
-    pub fn with_tee_multiplier(n: usize, tee_multiplier_bps: u128) -> Self {
+    /// Builds a reputation engine with a custom capability scale (basis
+    /// points). Pass `0` to disable the capability bias entirely (every
+    /// validator draws on stake × reputation alone).
+    pub fn with_capability_scale(n: usize, capability_scale_bps: u128) -> Self {
         Self {
             proposer_history: RwLock::new(ProposerHistory::new(n)),
             voter_history: RwLock::new(VoterHistory::new(n)),
-            tee_multiplier_bps,
+            capability_scale_bps,
         }
     }
 
@@ -466,13 +524,20 @@ impl LeaderReputation {
             let stake = v.stake.max(1); // every active validator counts
             let raw = behavioural.saturating_mul(stake);
 
-            let multiplier = if v.has_valid_tee_attestation() {
-                self.tee_multiplier_bps
-            } else {
-                NO_TEE_MULTIPLIER_BPS
-            };
+            // Continuous capability bias: advertised hardware class + TEE,
+            // folded into a single multiplier in [1.0×, 1.5×]. Replaces the
+            // earlier binary TEE bit. The `capability_scale_bps` knob (default
+            // full 10000 = "apply the multiplier as computed") lets tests and
+            // future tuning damp the whole capability axis toward 1× without
+            // changing the per-class shape.
+            let capability = capability_multiplier_bps(&v.capability, v.has_valid_tee_attestation());
+            // Interpolate between baseline (1×) and the computed multiplier by
+            // capability_scale_bps: scale=10000 → full multiplier, scale=0 → 1×.
+            let excess = capability.saturating_sub(CAPABILITY_BASELINE_BPS);
+            let multiplier = CAPABILITY_BASELINE_BPS
+                + excess.saturating_mul(self.capability_scale_bps) / CAPABILITY_BASELINE_BPS;
             // weight = raw * multiplier / 10000
-            let scaled = raw.saturating_mul(multiplier) / NO_TEE_MULTIPLIER_BPS;
+            let scaled = raw.saturating_mul(multiplier) / CAPABILITY_BASELINE_BPS;
             let final_weight = scaled.max(1);
 
             weights.insert(v.address, final_weight);
@@ -829,30 +894,89 @@ mod tests {
         assert!(v4_count <= 5, "v4 was selected {} times out of 1000", v4_count);
     }
 
-    #[test]
-    fn tee_multiplier_lifts_attested_validator() {
-        // Construct two equally-weighted validators; mark v1 TEE-attested.
-        let v1 = validator(1000);
-        let v2 = validator(1000);
+    fn caps(vram_gb: u32) -> tenzro_types::hardware::HardwareCapabilities {
+        tenzro_types::hardware::HardwareCapabilities {
+            vram_gb,
+            ..Default::default()
+        }
+    }
 
-        let mut info1 = v1.clone();
-        info1 = info1.with_tee_attestation(
-            tenzro_types::tee::AttestationReport::default(),
-            tenzro_types::tee::AttestationResult::success(
-                tenzro_types::tee::TeeVendor::IntelTdx,
-                vec![0u8; 32],
-            ),
+    #[test]
+    fn capability_multiplier_spans_baseline_to_ceiling() {
+        use tenzro_types::hardware::HardwareCapabilities;
+        // CPU-only, no TEE → exactly baseline (1×).
+        assert_eq!(
+            capability_multiplier_bps(&caps(0), false),
+            CAPABILITY_BASELINE_BPS
         );
-        let set = vset(vec![info1.clone(), v2.clone()]);
+        // Top hardware class + TEE → exactly the ceiling (1.5×).
+        assert_eq!(
+            capability_multiplier_bps(&caps(200), true),
+            CAPABILITY_MAX_BPS
+        );
+        // TEE alone on CPU hardware lifts only by the TEE span.
+        assert_eq!(
+            capability_multiplier_bps(&caps(0), true),
+            CAPABILITY_BASELINE_BPS + CAPABILITY_TEE_SPAN_BPS
+        );
+        // Top hardware without TEE reaches ceiling minus the TEE span.
+        assert_eq!(
+            capability_multiplier_bps(&caps(200), false),
+            CAPABILITY_MAX_BPS - CAPABILITY_TEE_SPAN_BPS
+        );
+        // Monotonic in hardware class: consumer < datacenter < multi.
+        let consumer = capability_multiplier_bps(&HardwareCapabilities { vram_gb: 16, ..Default::default() }, false);
+        let datacenter = capability_multiplier_bps(&HardwareCapabilities { vram_gb: 80, ..Default::default() }, false);
+        let multi = capability_multiplier_bps(&caps(200), false);
+        assert!(consumer < datacenter);
+        assert!(datacenter < multi);
+    }
+
+    #[test]
+    fn capability_weight_lifts_stronger_validator() {
+        // Two equally-staked validators; v1 declares top hardware + TEE, v2
+        // declares CPU-only, no TEE. v1's draw weight is exactly 1.5× v2's.
+        let v1 = validator(1000)
+            .with_capability(caps(200))
+            .with_tee_attestation(
+                tenzro_types::tee::AttestationReport::default(),
+                tenzro_types::tee::AttestationResult::success(
+                    tenzro_types::tee::TeeVendor::IntelTdx,
+                    vec![0u8; 32],
+                ),
+            );
+        let v2 = validator(1000).with_capability(caps(0));
+
+        let set = vset(vec![v1.clone(), v2.clone()]);
         let lr = LeaderReputation::new(2);
         let weights = lr.compute_weights(5, &set); // bootstrap window
 
-        // Both get INACTIVE × stake. v1 then × 1.5 (TEE), v2 × 1.0.
-        let v1_w = weights.weights[&info1.address];
+        let v1_w = weights.weights[&v1.address];
         let v2_w = weights.weights[&v2.address];
-        // v1 should be exactly 1.5× v2.
-        assert_eq!(v1_w, INACTIVE_WEIGHT * 1000 * 15000 / 10000);
+        assert_eq!(v1_w, INACTIVE_WEIGHT * 1000 * CAPABILITY_MAX_BPS / CAPABILITY_BASELINE_BPS);
         assert_eq!(v2_w, INACTIVE_WEIGHT * 1000);
         assert_eq!(v1_w, v2_w * 3 / 2);
+    }
+
+    #[test]
+    fn capability_scale_zero_disables_the_bias() {
+        // With capability_scale_bps = 0, the strongest and weakest validators
+        // draw identically — capability axis is off, stake × reputation only.
+        let v1 = validator(1000)
+            .with_capability(caps(200))
+            .with_tee_attestation(
+                tenzro_types::tee::AttestationReport::default(),
+                tenzro_types::tee::AttestationResult::success(
+                    tenzro_types::tee::TeeVendor::IntelTdx,
+                    vec![0u8; 32],
+                ),
+            );
+        let v2 = validator(1000).with_capability(caps(0));
+
+        let set = vset(vec![v1.clone(), v2.clone()]);
+        let lr = LeaderReputation::with_capability_scale(2, 0);
+        let weights = lr.compute_weights(5, &set);
+
+        assert_eq!(weights.weights[&v1.address], weights.weights[&v2.address]);
     }
 }

@@ -1305,6 +1305,15 @@ impl ModelRuntime {
             .str_to_token(prompt, AddBos::Always)
             .map_err(|e| ModelError::Other(format!("Tokenization failed: {}", e)))?;
 
+        // A zero-length token stream would leave the prompt batch empty and
+        // make `llama_decode` fail with an opaque `n_tokens == 0`. Surface a
+        // clear error instead of that internal panic-adjacent message.
+        if tokens_list.is_empty() {
+            return Err(ModelError::InferenceError(
+                "prompt tokenized to zero tokens".to_string(),
+            ));
+        }
+
         let input_tokens = tokens_list.len() as u32;
 
         // Use the context length determined at load time (catalog-aware or default)
@@ -1463,6 +1472,11 @@ impl ModelRuntime {
             .model
             .str_to_token(prompt, AddBos::Always)
             .map_err(|e| ModelError::Other(format!("Tokenization failed: {}", e)))?;
+        if tokens_list.is_empty() {
+            return Err(ModelError::InferenceError(
+                "prompt tokenized to zero tokens".to_string(),
+            ));
+        }
         let input_tokens = tokens_list.len() as u32;
 
         let n_ctx_target = NonZeroU32::new(loaded.context_length)
@@ -1776,13 +1790,42 @@ fn render_chat_prompt(model: &LlamaModel, messages: &[ChatMessage]) -> Result<St
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let chat_template = model
-        .chat_template(None)
-        .map_err(|e| ModelError::Other(format!("Failed to get chat template: {}", e)))?;
+    // First choice: the GGUF's embedded chat template, rendered by
+    // llama.cpp's minja engine. Some modern templates (Qwen3's 4.9 KB
+    // Jinja with tool/reasoning branches) render to an empty string on
+    // this llama.cpp build instead of erroring — minja returns success
+    // with a zero-length body. An empty prompt tokenizes to zero tokens
+    // and `llama_decode` then fails with `n_tokens == 0`. Treat an
+    // empty/whitespace render as a miss and fall back to ChatML.
+    if let Ok(tmpl) = model.chat_template(None) {
+        if let Ok(rendered) = model.apply_chat_template(&tmpl, &llama_messages, true) {
+            if !rendered.trim().is_empty() {
+                return Ok(rendered);
+            }
+            warn!("GGUF chat template rendered empty; falling back to ChatML");
+        }
+    }
 
-    model
-        .apply_chat_template(&chat_template, &llama_messages, true)
-        .map_err(|e| ModelError::Other(format!("Failed to apply chat template: {}", e)))
+    Ok(render_chatml_prompt(messages))
+}
+
+/// Family-agnostic ChatML fallback used when the model's embedded GGUF
+/// template is absent or renders empty. ChatML (`<|im_start|>role\n…
+/// <|im_end|>`) is the format Qwen, Yi, and most modern instruct models
+/// were trained on; the special tokens are in their vocab, so tokenizing
+/// this string with `parse_special = true` recovers the intended token
+/// stream. Ends with the assistant open turn so generation continues.
+pub(crate) fn render_chatml_prompt(messages: &[ChatMessage]) -> String {
+    let mut out = String::new();
+    for m in messages {
+        out.push_str("<|im_start|>");
+        out.push_str(&m.role);
+        out.push('\n');
+        out.push_str(&m.content);
+        out.push_str("<|im_end|>\n");
+    }
+    out.push_str("<|im_start|>assistant\n");
+    out
 }
 
 /// Render a list of tool schemas into a system-prompt preamble that
@@ -2000,6 +2043,22 @@ mod tests {
         };
         assert_eq!(msg.role, "user");
         assert_eq!(msg.content, "Hello");
+    }
+
+    #[test]
+    fn chatml_fallback_renders_turns_and_open_assistant() {
+        let messages = vec![
+            ChatMessage { role: "system".to_string(), content: "be terse".to_string() },
+            ChatMessage { role: "user".to_string(), content: "hi".to_string() },
+        ];
+        let rendered = render_chatml_prompt(&messages);
+        assert_eq!(
+            rendered,
+            "<|im_start|>system\nbe terse<|im_end|>\n\
+             <|im_start|>user\nhi<|im_end|>\n\
+             <|im_start|>assistant\n"
+        );
+        assert!(!rendered.trim().is_empty());
     }
 
     #[test]

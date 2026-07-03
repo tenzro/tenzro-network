@@ -77,7 +77,8 @@ pub use payload_store::{
 };
 pub use quantization::{dequantize, encoded_len, quantize};
 pub use runtime::{
-    min_tier_for_rule, validate_aggregation_for_tier, FragmentBuffer, SyncerState, TrainingRuntime,
+    min_tier_for_rule, validate_aggregation_for_tier, FragmentBuffer, RoundDecision, SyncerState,
+    TrainingRuntime,
 };
 
 // Re-export the protocol-level types from `tenzro-types` for convenience —

@@ -1006,6 +1006,7 @@ mod tests {
             served_models: vec!["qwen3-0.6b".to_string()],
             capabilities: vec!["inference".to_string()],
             rpc_endpoint: "http://10.0.0.1:8545".to_string(),
+            iroh_endpoint_id: String::new(),
             status: "active".to_string(),
             timestamp: 1_700_000_000_000,
             ttl_secs: 120,

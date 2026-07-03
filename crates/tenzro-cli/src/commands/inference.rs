@@ -11,6 +11,9 @@ pub enum InferenceCommand {
     Request(InferenceRequestCmd),
     /// Stream a chat completion, optionally billed against a payment channel.
     Stream(InferenceStreamCmd),
+    /// Read the inference router's live metrics (requests routed, hedges
+    /// dispatched, hedges won, deadline-exceeded requests).
+    RouterMetrics(RouterMetricsCmd),
 }
 
 impl InferenceCommand {
@@ -18,7 +21,45 @@ impl InferenceCommand {
         match self {
             Self::Request(cmd) => cmd.execute().await,
             Self::Stream(cmd) => cmd.execute().await,
+            Self::RouterMetrics(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Read the inference router's live metrics snapshot.
+#[derive(Debug, Parser)]
+pub struct RouterMetricsCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl RouterMetricsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getRouterMetrics", serde_json::json!({}))
+            .await?;
+
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        output::print_header("Inference Router Metrics");
+        if let Some(obj) = result.as_object() {
+            for (k, v) in obj {
+                output::print_field(k, &v.to_string());
+            }
+        } else {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Ok(())
     }
 }
 

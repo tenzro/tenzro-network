@@ -119,6 +119,7 @@ pub mod external_engine;
 pub mod gguf_shape;
 pub mod error;
 pub mod hf_download;
+pub mod latency;
 pub mod library;
 pub mod load;
 pub mod moe_exec;
@@ -143,6 +144,7 @@ pub mod vision_runtime;
 
 // Re-export commonly used types
 pub use error::{ModelError, Result};
+pub use latency::LatencyTail;
 pub use registry::{ModelFilter, ModelRegistry, RegistryEvent};
 pub use provider::{ProviderManager, ProviderMetrics, ProviderWithMetrics};
 pub use routing::{

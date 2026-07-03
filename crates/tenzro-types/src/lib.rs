@@ -136,7 +136,7 @@ pub use principal_chain::{
     PrincipalRole, MAX_DELEGATION_DEPTH,
 };
 pub use kill_switch::{KillSwitchAction, KillSwitchReceipt};
-pub use hardware::HardwareCapabilities;
+pub use hardware::{HardwareCapabilities, HardwareClass};
 pub use intent_7683::{
     compute_order_id, fill_storage_key, order_storage_key, u128_to_uint256_be,
     uint256_be_to_u128, BridgeFeeHint, CrossChainOrder, FillInstruction, FillRecord,

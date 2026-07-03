@@ -1517,7 +1517,31 @@ struct EventLoopState {
     /// without a peer id). The Identify handshake learns the real peer id on
     /// the first successful connect, after which Kademlia takes over.
     bootstrap_addrs_peerless: Vec<Multiaddr>,
+
+    /// Per-bootstrap-target reconnection schedule (decorrelated jitter),
+    /// keyed by the target multiaddr. Gates the cleanup-tick re-dial so an
+    /// unreachable bootstrap node is probed on a backing-off, jittered
+    /// cadence instead of a synchronized fixed 60s pulse across every joiner.
+    /// A target's schedule is reset the moment a connection to it succeeds.
+    bootstrap_backoff: HashMap<Multiaddr, crate::discovery::ReconnectBackoff>,
+
+    /// Mid-session peer recovery table. When a non-bootstrap peer we had a
+    /// live connection to drops, we retain its last-known dial address here
+    /// so the cleanup tick can re-dial it (under a per-peer jittered backoff)
+    /// while the node is below its target peer count. Entries are removed on
+    /// successful reconnect or once the node is comfortably meshed — Identify
+    /// and Kademlia handle steady-state discovery; this table only covers the
+    /// gap where a small mesh loses a peer and would otherwise wait for a slow
+    /// DHT walk to notice.
+    peer_redial: HashMap<PeerId, (Multiaddr, crate::discovery::ReconnectBackoff)>,
 }
+
+/// Target minimum number of live peer connections below which mid-session
+/// peer recovery re-dials known-but-dropped peers. Not a topology assumption:
+/// it is a lower bound that applies identically to a 4-node mesh and a
+/// 10,000-node network — above it, steady-state discovery (Identify/Kademlia)
+/// is sufficient and re-dialing would only add churn.
+const PEER_RECOVERY_FLOOR: usize = 8;
 
 /// Number of distinct peers that must independently report the same
 /// `observed_addr` via Identify before we promote it to an external-address
@@ -1765,8 +1789,15 @@ async fn run_event_loop(
         cluster_tunnel_inbound_inflight: HashMap::new(),
         observed_addrs: HashMap::new(),
         advertised_external_addrs: preconfigured_external,
+        bootstrap_backoff: bootstrap_peers
+            .iter()
+            .map(|(_, addr)| addr.clone())
+            .chain(bootstrap_addrs_peerless.iter().cloned())
+            .map(|addr| (addr, crate::discovery::ReconnectBackoff::default_schedule()))
+            .collect(),
         bootstrap_peers,
         bootstrap_addrs_peerless,
+        peer_redial: HashMap::new(),
     };
 
     // Create periodic cleanup timer (every 60 seconds)
@@ -1872,26 +1903,35 @@ async fn run_event_loop(
                 // this sweep, peers will keep dialing the stale ephemeral
                 // port and never re-converge until manually restarted.
                 //
-                // Mirrors Lighthouse's `recurring_boot_dial` and
-                // Substrate's periodic bootnode dial. The configured
-                // bootstrap multiaddr is the operator's authoritative
-                // ground truth; the swarm's dial selector should always
-                // try it in addition to whatever was learned via Identify.
+                // Mirrors Lighthouse's `recurring_boot_dial` and Substrate's
+                // periodic bootnode dial, but each target is gated behind its
+                // own decorrelated-jitter backoff (`bootstrap_backoff`) so an
+                // unreachable boot node is not hammered on a synchronized 60s
+                // pulse by every joiner at once. The configured bootstrap
+                // multiaddr is the operator's authoritative ground truth; the
+                // swarm's dial selector should still try it in addition to
+                // whatever was learned via Identify — just on a backing-off,
+                // per-node-jittered cadence.
+                //
+                // Collect the due targets first (immutable read of
+                // bootstrap_peers + mutable stamp of bootstrap_backoff) so we
+                // don't hold a borrow across the swarm dial below.
+                let mut due_boot_dials: Vec<(Option<PeerId>, Multiaddr)> = Vec::new();
                 for (peer_id, addr) in &state.bootstrap_peers {
-                    if !state.swarm.is_connected(peer_id) {
-                        match state.swarm.dial(dial_opts_new_port(addr.clone())) {
-                            Ok(()) => tracing::info!(
-                                %peer_id,
-                                %addr,
-                                "Re-dialing configured bootstrap peer (not connected)"
-                            ),
-                            Err(e) => tracing::debug!(
-                                %peer_id,
-                                %addr,
-                                error = %e,
-                                "Bootstrap re-dial skipped"
-                            ),
+                    if state.swarm.is_connected(peer_id) {
+                        continue;
+                    }
+                    let due = state
+                        .bootstrap_backoff
+                        .get(addr)
+                        .map(|b| b.due())
+                        .unwrap_or(true);
+                    if due {
+                        if let Some(b) = state.bootstrap_backoff.get_mut(addr) {
+                            let delay = b.record_attempt();
+                            tracing::debug!(%addr, ?delay, "Bootstrap re-dial due (backoff advanced)");
                         }
+                        due_boot_dials.push((Some(*peer_id), addr.clone()));
                     }
                 }
 
@@ -1899,23 +1939,83 @@ async fn run_event_loop(
                 // specific peer id. The only available connection signal is the
                 // global connected count: if it's zero, the node is isolated and
                 // its single startup dial must have failed (DNS hiccup, boot node
-                // restart mid-handshake, transient timeout). Re-dial every
-                // peerless boot addr to recover. Once ANY connection is up,
-                // Identify + Kademlia take over peer discovery, so we stop —
-                // avoiding a redundant dial storm against an already-reachable
-                // fleet.
+                // restart mid-handshake, transient timeout). Re-dial peerless
+                // boot addrs — still under per-target backoff — while the node
+                // has ZERO live connections. Once ANY connection is up, Identify
+                // + Kademlia take over peer discovery.
                 let live_connections = state.swarm.connected_peers().count();
-                if live_connections == 0 && !state.bootstrap_addrs_peerless.is_empty() {
-                    for addr in &state.bootstrap_addrs_peerless {
+                if live_connections == 0 {
+                    let peerless: Vec<Multiaddr> = state.bootstrap_addrs_peerless.clone();
+                    for addr in peerless {
+                        let due = state
+                            .bootstrap_backoff
+                            .get(&addr)
+                            .map(|b| b.due())
+                            .unwrap_or(true);
+                        if due {
+                            if let Some(b) = state.bootstrap_backoff.get_mut(&addr) {
+                                b.record_attempt();
+                            }
+                            due_boot_dials.push((None, addr));
+                        }
+                    }
+                }
+
+                for (peer_id, addr) in due_boot_dials {
+                    match state.swarm.dial(dial_opts_new_port(addr.clone())) {
+                        Ok(()) => tracing::info!(
+                            ?peer_id,
+                            %addr,
+                            "Re-dialing bootstrap target (backoff-gated)"
+                        ),
+                        Err(e) => tracing::debug!(
+                            ?peer_id,
+                            %addr,
+                            error = %e,
+                            "Bootstrap re-dial skipped"
+                        ),
+                    }
+                }
+
+                // Mid-session peer recovery. When a non-bootstrap peer we had a
+                // live connection to drops, its last-known dial address is kept
+                // in `peer_redial`. While the node is below its peer-count
+                // floor, re-dial those peers on the same jittered backoff so a
+                // small mesh that loses a member recovers in seconds rather than
+                // waiting for a slow DHT walk. Above the floor, drop the table:
+                // steady-state discovery is sufficient and re-dialing would only
+                // add churn.
+                if live_connections >= PEER_RECOVERY_FLOOR {
+                    if !state.peer_redial.is_empty() {
+                        state.peer_redial.clear();
+                    }
+                } else if !state.peer_redial.is_empty() {
+                    let mut due_peer_dials: Vec<(PeerId, Multiaddr)> = Vec::new();
+                    for (peer_id, (addr, backoff)) in state.peer_redial.iter_mut() {
+                        if state.swarm.is_connected(peer_id) {
+                            continue;
+                        }
+                        if backoff.due() {
+                            backoff.record_attempt();
+                            due_peer_dials.push((*peer_id, addr.clone()));
+                        }
+                    }
+                    // Drop any peer that has meanwhile reconnected.
+                    state
+                        .peer_redial
+                        .retain(|peer_id, _| !state.swarm.is_connected(peer_id));
+                    for (peer_id, addr) in due_peer_dials {
                         match state.swarm.dial(dial_opts_new_port(addr.clone())) {
                             Ok(()) => tracing::info!(
+                                %peer_id,
                                 %addr,
-                                "Re-dialing peerless bootstrap addr (node isolated, 0 peers)"
+                                "Re-dialing dropped peer (mid-session recovery, below floor)"
                             ),
                             Err(e) => tracing::debug!(
+                                %peer_id,
                                 %addr,
                                 error = %e,
-                                "Peerless bootstrap re-dial skipped"
+                                "Mid-session peer re-dial skipped"
                             ),
                         }
                     }
@@ -3271,6 +3371,25 @@ async fn handle_swarm_event(
                 );
             }
 
+            // Reset reconnection backoff on success. A bootstrap target that
+            // just connected should start its next (hypothetical) recovery
+            // from the floor, not carry forward a long stale backoff; and a
+            // peer that flapped back out of `peer_redial` no longer needs
+            // re-dialing. Bootstrap targets are keyed by the *configured*
+            // multiaddr, which may differ from the observed remote (ephemeral
+            // port), so reset by peer id where we can and by exact addr match
+            // otherwise.
+            state.peer_redial.remove(&peer_id);
+            for (addr, backoff) in state.bootstrap_backoff.iter_mut() {
+                let addr_matches_peer = state
+                    .bootstrap_peers
+                    .iter()
+                    .any(|(pid, a)| *pid == peer_id && a == addr);
+                if addr_matches_peer || *addr == remote_addr {
+                    backoff.reset();
+                }
+            }
+
             // Fan out a `PeerEvent::Connected` exactly once per peer — only
             // when this is the first physical connection. Subsequent
             // multiplexed connections to the same peer don't re-emit. If
@@ -3292,6 +3411,7 @@ async fn handle_swarm_event(
             peer_id,
             cause,
             num_established,
+            endpoint,
             ..
         } => {
             tracing::info!(
@@ -3308,6 +3428,30 @@ async fn handle_swarm_event(
                 state
                     .peer_manager
                     .update_status(&peer_id, PeerStatus::Disconnected);
+
+                // Mid-session recovery bookkeeping. When a non-bootstrap peer
+                // fully drops, retain its last-known dial address so the
+                // cleanup tick can re-dial it (under backoff) while the node
+                // is below its peer-count floor. Bootstrap peers are skipped —
+                // they have their own authoritative re-dial path from the
+                // operator-configured ground truth. Peers reached only via an
+                // inbound listener have no dial address we can re-use, so only
+                // record dialer endpoints.
+                let is_bootstrap = state
+                    .bootstrap_peers
+                    .iter()
+                    .any(|(pid, _)| *pid == peer_id);
+                if !is_bootstrap
+                    && let libp2p::core::ConnectedPoint::Dialer { address, .. } = &endpoint
+                {
+                    state.peer_redial.insert(
+                        peer_id,
+                        (
+                            address.clone(),
+                            crate::discovery::ReconnectBackoff::default_schedule(),
+                        ),
+                    );
+                }
 
                 // Last physical connection dropped — fan out
                 // `PeerEvent::Disconnected` so subscribers can evict this

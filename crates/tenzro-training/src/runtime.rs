@@ -96,6 +96,22 @@ impl FragmentBuffer {
     }
 }
 
+/// Outcome of a straggler-soft-timeout check on the current round
+/// ([`SyncerState::decide_round`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundDecision {
+    /// The adaptive grace window has not yet elapsed. Poll again after
+    /// `remaining_ms`.
+    Wait { remaining_ms: u64 },
+    /// The grace window elapsed with at least one fragment at quorum.
+    /// Aggregate over the accepted gradients and finalize this `round`.
+    Finalize { round: u32 },
+    /// The grace window elapsed with no fragment at quorum. Assemble a
+    /// No-Endorsement Certificate for this `round` and carry the prior
+    /// state root forward.
+    NoQuorum { round: u32 },
+}
+
 /// In-memory state for one active training run held by the elected syncer.
 pub struct SyncerState {
     pub task_spec: TrainingTaskSpec,
@@ -118,6 +134,7 @@ impl SyncerState {
             pipeline_assignments: HashMap::new(),
             current_round: 0,
             round_state_roots: Vec::new(),
+            current_round_opened_at: now,
             created_at: now,
             last_update: now,
         };
@@ -353,6 +370,56 @@ impl SyncerState {
         })
     }
 
+    /// Decide the outcome of the current round once the adaptive grace
+    /// window has elapsed, per the DiLoCo straggler model: a round is bound
+    /// by wall-clock time, not by waiting for every enrolled trainer. Slow
+    /// or dead trainers are soft-timed-out — their absence never stalls the
+    /// run.
+    ///
+    /// Returns:
+    /// - `RoundDecision::Wait` while the grace window `τ` has not yet
+    ///   elapsed since the round opened (`current_round_opened_at`). The
+    ///   caller polls again later.
+    /// - `RoundDecision::Finalize` once `τ` has elapsed **and** at least one
+    ///   active fragment reached quorum (`k` of the enrolled trainers
+    ///   submitted). The caller runs aggregation over the accepted
+    ///   gradients — stragglers who missed the window are simply excluded
+    ///   from this round; they may rejoin next round.
+    /// - `RoundDecision::NoQuorum` once `τ` has elapsed and **no** active
+    ///   fragment reached quorum. The caller assembles a No-Endorsement
+    ///   Certificate via [`build_nec_sync_round`](Self::build_nec_sync_round)
+    ///   and carries the prior state root forward, so a stalled round still
+    ///   advances rather than hanging the run.
+    ///
+    /// Pure w.r.t. `now_ms` (caller-supplied wall clock) so it is unit
+    /// testable without sleeping. `grace_window_ms == 0` means "no grace
+    /// window": the decision is taken immediately on the current buffer
+    /// contents.
+    pub fn decide_round(&self, now_ms: i64) -> RoundDecision {
+        let (round, opened_at_ms) = {
+            let run = self.run.read();
+            (run.current_round, run.current_round_opened_at.as_millis())
+        };
+        let grace = self.task_spec.grace_window_ms as i64;
+        let elapsed = now_ms.saturating_sub(opened_at_ms);
+        if elapsed < grace {
+            return RoundDecision::Wait {
+                remaining_ms: (grace - elapsed) as u64,
+            };
+        }
+        // Grace window elapsed (or disabled): decide on current buffers.
+        let empty = HashMap::new();
+        let any_quorum = self
+            .fragment_statuses(round, &empty)
+            .iter()
+            .any(|s| s.quorum_met);
+        if any_quorum {
+            RoundDecision::Finalize { round }
+        } else {
+            RoundDecision::NoQuorum { round }
+        }
+    }
+
     /// Advance to the next round. Records the round's state root in the run
     /// and clears its buffers.
     ///
@@ -406,7 +473,9 @@ impl SyncerState {
         // round == current_round: advance.
         run.round_state_roots.push(state_root);
         run.current_round = round + 1;
-        run.last_update = Timestamp::now();
+        let now = Timestamp::now();
+        run.current_round_opened_at = now;
+        run.last_update = now;
         if run.current_round >= self.task_spec.max_rounds {
             run.status = TrainingRunStatus::Completed;
         }
@@ -1241,5 +1310,86 @@ mod tests {
             min_tier_for_rule(AggregationRule::Krum { f: 1 }),
             TrainingTier::Verified
         );
+    }
+
+    fn training_state() -> SyncerState {
+        let state = SyncerState::new(
+            dummy_task(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
+        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+        state
+    }
+
+    #[test]
+    fn decide_round_waits_within_grace_window() {
+        let state = training_state();
+        let opened = state.run.read().current_round_opened_at.as_millis();
+        // 1s into a 5s grace window.
+        match state.decide_round(opened + 1_000) {
+            RoundDecision::Wait { remaining_ms } => assert_eq!(remaining_ms, 4_000),
+            other => panic!("expected Wait, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_round_no_quorum_after_window_with_empty_buffers() {
+        let state = training_state();
+        let opened = state.run.read().current_round_opened_at.as_millis();
+        // Past the 5s window, nobody submitted.
+        assert_eq!(
+            state.decide_round(opened + 5_000),
+            RoundDecision::NoQuorum { round: 0 }
+        );
+    }
+
+    #[test]
+    fn decide_round_finalizes_after_window_when_quorum_met() {
+        let state = training_state();
+        let spec = dummy_task();
+        // Quorum is 2; two trainers submit for fragment 0.
+        state
+            .accept_outer_gradient(make_gradient(&spec, "did:tenzro:machine:t1", 0, 0))
+            .unwrap();
+        state
+            .accept_outer_gradient(make_gradient(&spec, "did:tenzro:machine:t2", 0, 0))
+            .unwrap();
+        let opened = state.run.read().current_round_opened_at.as_millis();
+        assert_eq!(
+            state.decide_round(opened + 6_000),
+            RoundDecision::Finalize { round: 0 }
+        );
+    }
+
+    #[test]
+    fn decide_round_soft_timeouts_a_straggler() {
+        // Quorum is 2 of the enrolled trainers. Only one of the two
+        // submits before the window closes — the round still resolves
+        // (NoQuorum) rather than hanging for the slow trainer.
+        let state = training_state();
+        let spec = dummy_task();
+        state
+            .accept_outer_gradient(make_gradient(&spec, "did:tenzro:machine:t1", 0, 0))
+            .unwrap();
+        let opened = state.run.read().current_round_opened_at.as_millis();
+        assert_eq!(
+            state.decide_round(opened + 5_001),
+            RoundDecision::NoQuorum { round: 0 }
+        );
+    }
+
+    #[test]
+    fn decide_round_advances_opened_at_on_finalize() {
+        let state = training_state();
+        let opened0 = state.run.read().current_round_opened_at.as_millis();
+        let root = Hash::from_bytes(&[7u8; 32]).unwrap();
+        state.finalize_round(0, root).unwrap();
+        let opened1 = state.run.read().current_round_opened_at.as_millis();
+        // The round-open clock is reset on advance so the next round's
+        // grace window is measured from finalize, not run creation.
+        assert!(opened1 >= opened0);
+        assert_eq!(state.run.read().current_round, 1);
     }
 }

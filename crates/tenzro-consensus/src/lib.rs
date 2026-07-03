@@ -131,9 +131,10 @@ pub use hotstuff2::{
     BlockProvider, ConsensusOutMessage, HotStuff2Engine, Phase, StateRootProvider,
 };
 pub use leader_reputation::{
-    proposer_window, reputation_seed, voter_window, LeaderReputation, ProposerHistory,
-    ProposerRecord, ValidatorWeights, VoterHistory, VoterRecord, ACTIVE_WEIGHT, FAILED_WEIGHT,
-    FAILURE_THRESHOLD_PERCENT, INACTIVE_WEIGHT, NO_TEE_MULTIPLIER_BPS, TEE_MULTIPLIER_BPS,
+    capability_multiplier_bps, proposer_window, reputation_seed, voter_window, LeaderReputation,
+    ProposerHistory, ProposerRecord, ValidatorWeights, VoterHistory, VoterRecord, ACTIVE_WEIGHT,
+    CAPABILITY_BASELINE_BPS, CAPABILITY_MAX_BPS, CAPABILITY_TEE_SPAN_BPS, FAILED_WEIGHT,
+    FAILURE_THRESHOLD_PERCENT, INACTIVE_WEIGHT,
 };
 pub use mempool::{Mempool, MempoolStats};
 pub use proposer::BlockProposer;

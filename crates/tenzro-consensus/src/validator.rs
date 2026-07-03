@@ -22,6 +22,7 @@ pub const BLS_G1_COMPRESSED_LEN: usize = 48;
 /// above this cap is redistributed proportionally across the uncapped
 /// validators. 1,000 bps = 10%.
 pub const MAX_VALIDATOR_WEIGHT_BPS: u32 = 1_000;
+use tenzro_types::hardware::HardwareCapabilities;
 use tenzro_types::primitives::{Address, Hash, Timestamp};
 use tenzro_types::tee::{AttestationReport, AttestationResult};
 
@@ -98,6 +99,18 @@ pub struct ValidatorInfo {
     /// TEE attestation verification result
     pub tee_attestation_result: Option<AttestationResult>,
 
+    /// Advertised hardware envelope of this validator. Self-reported at
+    /// registration (via [`HardwareCapabilities::detect`]) and gossiped
+    /// with the rest of the validator record. Consumed by the
+    /// proposer-election engine as a *continuous* leader-weight bias
+    /// (see [`crate::leader_reputation::LeaderReputation::compute_weights`]),
+    /// replacing the earlier binary TEE multiplier. The claim is advertised,
+    /// not proven — proposer reputation (observed QC-formation success) is
+    /// the gate that keeps a validator that over-states its hardware from
+    /// benefiting, mirroring the "trust advertised, gate on observed" model
+    /// the inference router uses for provider selection.
+    pub capability: HardwareCapabilities,
+
     /// Validator status
     pub status: ValidatorStatus,
 
@@ -151,10 +164,20 @@ impl ValidatorInfo {
             stake,
             tee_attestation: None,
             tee_attestation_result: None,
+            capability: HardwareCapabilities::default(),
             status: ValidatorStatus::Active,
             registered_at: Timestamp::now(),
             last_attestation_update: None,
         }
+    }
+
+    /// Sets the advertised hardware envelope for this validator. Chainable
+    /// with the other `with_*` builders. Callers pass the value detected via
+    /// [`HardwareCapabilities::detect`] for the local node, or the gossiped
+    /// value for a remote peer.
+    pub fn with_capability(mut self, capability: HardwareCapabilities) -> Self {
+        self.capability = capability;
+        self
     }
 
     /// Returns the composite (classical + PQ) public key for this validator,

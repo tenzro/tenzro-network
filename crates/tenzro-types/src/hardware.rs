@@ -7,6 +7,73 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Coarse hardware class the router uses to bias work assignment.
+///
+/// Deliberately coarse — the router does not need an exact accelerator
+/// SKU, only enough to bias assignment toward providers that can serve a
+/// given model class at all, then let observed latency separate the rest.
+/// The ordering is the routing preference order for a request with no
+/// stricter requirement: an accelerator beats many CPUs on token latency
+/// for transformer decode regardless of core count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum HardwareClass {
+    /// Class not declared / undetected. Routed on observed metrics only.
+    #[default]
+    Unknown,
+    /// CPU-only serving (no inference accelerator).
+    Cpu,
+    /// Consumer / workstation GPU (a single desktop-class card).
+    ConsumerGpu,
+    /// Datacenter inference accelerator (a serving-class GPU/TPU).
+    DatacenterGpu,
+    /// Multiple datacenter accelerators on one node.
+    MultiAccelerator,
+}
+
+impl HardwareClass {
+    /// Routing weight in `[0.0, 1.0]` this class contributes before the
+    /// observed-performance gate is applied. `Unknown` is neutral (`0.5`)
+    /// so an undetected provider is neither rewarded nor punished on the
+    /// advertised axis and competes purely on observed metrics.
+    pub fn advertised_weight(&self) -> f64 {
+        match self {
+            HardwareClass::Unknown => 0.5,
+            HardwareClass::Cpu => 0.2,
+            HardwareClass::ConsumerGpu => 0.5,
+            HardwareClass::DatacenterGpu => 0.8,
+            HardwareClass::MultiAccelerator => 1.0,
+        }
+    }
+
+    /// Parses the wire form used on `InferenceParameters.custom` under the
+    /// `min_hardware` key (case-insensitive). Returns `None` for an
+    /// unrecognized value so a malformed hint is ignored rather than
+    /// silently dropping every provider.
+    pub fn parse_hint(s: &str) -> Option<HardwareClass> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cpu" => Some(HardwareClass::Cpu),
+            "consumer_gpu" | "consumergpu" => Some(HardwareClass::ConsumerGpu),
+            "datacenter_gpu" | "datacentergpu" | "gpu" => Some(HardwareClass::DatacenterGpu),
+            "multi_accelerator" | "multiaccelerator" => Some(HardwareClass::MultiAccelerator),
+            _ => None,
+        }
+    }
+
+    /// Whether a provider of this class satisfies a request that requires
+    /// at least `required`. `Unknown` never satisfies an explicit minimum —
+    /// a request that sets a hardware floor is deliberately opting out of
+    /// undetected providers.
+    pub fn satisfies(&self, required: HardwareClass) -> bool {
+        if required == HardwareClass::Unknown {
+            return true;
+        }
+        if *self == HardwareClass::Unknown {
+            return false;
+        }
+        *self >= required
+    }
+}
+
 /// Hardware capabilities advertised by a provider node.
 ///
 /// Used both as a local provisioning input (in `tenzro-model::ModelProvisioner`)
@@ -81,6 +148,25 @@ impl HardwareCapabilities {
         }
 
         caps
+    }
+
+    /// Derives the coarse [`HardwareClass`] the router uses for work
+    /// assignment from the detected envelope. VRAM is the deciding axis
+    /// for transformer serving: a node with no accelerator VRAM is
+    /// CPU-class regardless of core count, and accelerator tiers separate
+    /// on total VRAM. The thresholds are intentionally wide bands, not
+    /// exact SKU boundaries — the router only needs enough resolution to
+    /// bias assignment, and observed latency does the fine separation.
+    pub fn class(&self) -> HardwareClass {
+        match self.vram_gb {
+            0 => HardwareClass::Cpu,
+            // A single consumer card tops out around 24 GiB.
+            1..=24 => HardwareClass::ConsumerGpu,
+            // A single datacenter accelerator sits in the 32–96 GiB band.
+            25..=96 => HardwareClass::DatacenterGpu,
+            // Beyond one datacenter card's VRAM implies multiple devices.
+            _ => HardwareClass::MultiAccelerator,
+        }
     }
 }
 

@@ -4,7 +4,7 @@ use libp2p::{
     kad::{store::MemoryStore, Behaviour as Kademlia, Config as KademliaConfig, Mode},
     Multiaddr, PeerId,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tenzro_types::network::NetworkRole;
 
 /// Creates a Kademlia DHT behaviour for peer discovery
@@ -193,6 +193,89 @@ impl BootstrapConfig {
     }
 }
 
+/// Per-target reconnection schedule using decorrelated jitter.
+///
+/// Re-dialing an unreachable peer on a fixed interval is a thundering-herd
+/// hazard: when a bootstrap node restarts, every joiner that lost it re-dials
+/// in lockstep on the same cadence, and the recovering node is hit by a
+/// synchronized dial storm exactly when it is least able to absorb it. This
+/// schedule spreads retries out and backs off geometrically per target.
+///
+/// The backoff follows the "decorrelated jitter" formula from the AWS
+/// Architecture Blog ("Exponential Backoff And Jitter", Brooker 2015), which
+/// is the same shape libp2p, Ethereum discv5, and the `backoff` crate use:
+///
+/// ```text
+/// delay = min(cap, random_between(base, prev_delay * 3))
+/// ```
+///
+/// Each target owns its own schedule. `due()` reports whether the next
+/// scheduled attempt time has passed; `record_attempt()` advances the delay
+/// and stamps the next-due time; `reset()` is called on a successful connect
+/// so a peer that flaps back does not inherit a long stale backoff.
+///
+/// This is permissionless by construction: `base`/`cap` are wall-clock
+/// bounds, not topology assumptions. A 4-node LAN and a 10,000-node WAN use
+/// the same schedule — the jitter simply de-synchronizes whoever is present.
+#[derive(Debug, Clone)]
+pub struct ReconnectBackoff {
+    base: Duration,
+    cap: Duration,
+    current: Duration,
+    next_due: Instant,
+}
+
+impl ReconnectBackoff {
+    /// Create a schedule with the given floor and ceiling. The first attempt
+    /// is due immediately (`next_due` = now) so a freshly-lost peer is
+    /// re-dialed on the next sweep without waiting a full `base`.
+    pub fn new(base: Duration, cap: Duration) -> Self {
+        Self {
+            base,
+            cap,
+            current: base,
+            next_due: Instant::now(),
+        }
+    }
+
+    /// Default schedule: 2s floor, 5min ceiling. Suits both bootstrap re-dial
+    /// and mid-session peer recovery — fast enough to recover from a transient
+    /// blip in seconds, slow enough that a peer that is down for good is
+    /// probed at most every 5 minutes.
+    pub fn default_schedule() -> Self {
+        Self::new(Duration::from_secs(2), Duration::from_secs(300))
+    }
+
+    /// Whether the next scheduled attempt time has arrived.
+    pub fn due(&self) -> bool {
+        Instant::now() >= self.next_due
+    }
+
+    /// Record that an attempt was just made: draw the next delay via
+    /// decorrelated jitter and stamp `next_due`. Returns the delay chosen so
+    /// callers can log it.
+    pub fn record_attempt(&mut self) -> Duration {
+        use rand::Rng;
+        let upper = self.current.saturating_mul(3).min(self.cap);
+        let lower = self.base.min(upper);
+        let delay = if upper <= lower {
+            lower
+        } else {
+            let millis = rand::thread_rng().gen_range(lower.as_millis()..=upper.as_millis());
+            Duration::from_millis(millis as u64)
+        };
+        self.current = delay;
+        self.next_due = Instant::now() + delay;
+        delay
+    }
+
+    /// Reset to the floor after a successful connect.
+    pub fn reset(&mut self) {
+        self.current = self.base;
+        self.next_due = Instant::now();
+    }
+}
+
 /// Discovery configuration
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
@@ -270,6 +353,54 @@ mod tests {
         let config = BootstrapConfig::mainnet();
         assert_eq!(config.boot_nodes.len(), 3);
         assert!(config.enable_reconnect);
+    }
+
+    #[test]
+    fn test_reconnect_backoff_first_attempt_due_immediately() {
+        let b = ReconnectBackoff::new(Duration::from_secs(2), Duration::from_secs(300));
+        // A freshly-lost peer must be dialable on the next sweep.
+        assert!(b.due());
+    }
+
+    #[test]
+    fn test_reconnect_backoff_grows_and_caps() {
+        let base = Duration::from_millis(10);
+        let cap = Duration::from_millis(200);
+        let mut b = ReconnectBackoff::new(base, cap);
+        let mut prev = base;
+        // Each attempt draws in [base, min(prev*3, cap)] and never exceeds cap.
+        for _ in 0..20 {
+            let d = b.record_attempt();
+            assert!(d >= base, "delay {:?} below base {:?}", d, base);
+            assert!(d <= cap, "delay {:?} above cap {:?}", d, cap);
+            assert!(
+                d <= prev.saturating_mul(3).max(base) || d <= cap,
+                "delay {:?} exceeded decorrelated bound (prev {:?})",
+                d,
+                prev
+            );
+            prev = d;
+        }
+    }
+
+    #[test]
+    fn test_reconnect_backoff_not_due_after_attempt() {
+        let mut b = ReconnectBackoff::new(Duration::from_secs(60), Duration::from_secs(300));
+        b.record_attempt();
+        // Next-due is stamped ≥60s out, so it is not immediately due again.
+        assert!(!b.due());
+    }
+
+    #[test]
+    fn test_reconnect_backoff_reset_returns_to_floor() {
+        let base = Duration::from_secs(1);
+        let mut b = ReconnectBackoff::new(base, Duration::from_secs(300));
+        for _ in 0..5 {
+            b.record_attempt();
+        }
+        b.reset();
+        assert!(b.due(), "reset must make the target immediately dialable");
+        assert_eq!(b.current, base, "reset must return the delay to the floor");
     }
 
     #[test]

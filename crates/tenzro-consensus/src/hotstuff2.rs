@@ -124,6 +124,149 @@ struct ViewState {
     view_start_time: Instant,
 }
 
+/// Streaming quantile estimator using the P² algorithm (Jain & Chlamtac,
+/// "The P² Algorithm for Dynamic Calculation of Quantiles and Histograms
+/// Without Storing Observations", CACM 1985).
+///
+/// The view timer needs the *tail* of quorum-formation latency, not its
+/// mean — per the tail-at-scale insight (Dean & Barroso, "The Tail at
+/// Scale", CACM 2013), the mean systematically under-provisions the
+/// timeout for slow rounds, so a mean-derived timeout trips spurious
+/// view changes whenever a round lands in the tail. P² tracks a chosen
+/// quantile (e.g. p99) in O(1) memory and O(1) per-observation work by
+/// maintaining five markers and adjusting them with a piecewise-parabolic
+/// interpolation as each observation arrives. No stored history, no
+/// windowing — it converges to the true quantile of the running stream.
+#[derive(Debug, Clone)]
+struct P2Quantile {
+    /// Target quantile in `(0, 1)`, e.g. `0.99` for p99.
+    p: f64,
+    /// Observation count. The estimator warms up on the first five.
+    count: usize,
+    /// The five initial observations, kept sorted, used to seed markers.
+    init: Vec<f64>,
+    /// Marker heights (the estimated values at each marker position).
+    q: [f64; 5],
+    /// Marker positions (1-indexed integer counts of observations).
+    n: [f64; 5],
+    /// Desired marker positions (fractional).
+    np: [f64; 5],
+    /// Increments to the desired positions per observation.
+    dn: [f64; 5],
+}
+
+impl P2Quantile {
+    fn new(p: f64) -> Self {
+        Self {
+            p,
+            count: 0,
+            init: Vec::with_capacity(5),
+            q: [0.0; 5],
+            n: [0.0; 5],
+            np: [0.0; 5],
+            dn: [0.0; 5],
+        }
+    }
+
+    /// Records one observation and updates the running quantile estimate.
+    fn observe(&mut self, x: f64) {
+        if self.count < 5 {
+            self.init.push(x);
+            self.count += 1;
+            if self.count == 5 {
+                self.init
+                    .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                for i in 0..5 {
+                    self.q[i] = self.init[i];
+                    self.n[i] = (i + 1) as f64;
+                }
+                self.np = [
+                    1.0,
+                    1.0 + 2.0 * self.p,
+                    1.0 + 4.0 * self.p,
+                    3.0 + 2.0 * self.p,
+                    5.0,
+                ];
+                self.dn = [0.0, self.p / 2.0, self.p, (1.0 + self.p) / 2.0, 1.0];
+            }
+            return;
+        }
+
+        self.count += 1;
+
+        // Locate the cell k such that q[k] <= x < q[k+1], clamping the ends.
+        let k = if x < self.q[0] {
+            self.q[0] = x;
+            0
+        } else if x >= self.q[4] {
+            self.q[4] = x;
+            3
+        } else {
+            let mut cell = 0;
+            for i in 0..4 {
+                if self.q[i] <= x && x < self.q[i + 1] {
+                    cell = i;
+                    break;
+                }
+            }
+            cell
+        };
+
+        for i in (k + 1)..5 {
+            self.n[i] += 1.0;
+        }
+        for i in 0..5 {
+            self.np[i] += self.dn[i];
+        }
+
+        // Adjust the three interior markers.
+        for i in 1..4 {
+            let d = self.np[i] - self.n[i];
+            let can_up = d >= 1.0 && (self.n[i + 1] - self.n[i]) > 1.0;
+            let can_down = d <= -1.0 && (self.n[i - 1] - self.n[i]) < -1.0;
+            if can_up || can_down {
+                let dsign = if d >= 0.0 { 1.0 } else { -1.0 };
+                let parabolic = self.parabolic(i, dsign);
+                if self.q[i - 1] < parabolic && parabolic < self.q[i + 1] {
+                    self.q[i] = parabolic;
+                } else {
+                    self.q[i] = self.linear(i, dsign);
+                }
+                self.n[i] += dsign;
+            }
+        }
+    }
+
+    fn parabolic(&self, i: usize, d: f64) -> f64 {
+        let a = d / (self.n[i + 1] - self.n[i - 1]);
+        let b = (self.n[i] - self.n[i - 1] + d) * (self.q[i + 1] - self.q[i])
+            / (self.n[i + 1] - self.n[i])
+            + (self.n[i + 1] - self.n[i] - d) * (self.q[i] - self.q[i - 1])
+                / (self.n[i] - self.n[i - 1]);
+        self.q[i] + a * b
+    }
+
+    fn linear(&self, i: usize, d: f64) -> f64 {
+        let j = if d >= 0.0 { i + 1 } else { i - 1 };
+        self.q[i] + d * (self.q[j] - self.q[i]) / (self.n[j] - self.n[i])
+    }
+
+    /// Current quantile estimate, or `None` before warm-up completes
+    /// (fewer than five observations).
+    fn estimate(&self) -> Option<f64> {
+        if self.count < 5 {
+            // During warm-up, the best available estimate is the max seen —
+            // conservative for a tail quantile (never under-estimates).
+            self.init
+                .iter()
+                .copied()
+                .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.max(v))))
+        } else {
+            Some(self.q[2])
+        }
+    }
+}
+
 /// Manages view change timeouts with exponential backoff AND adaptive
 /// base-timeout tuning.
 ///
@@ -136,11 +279,16 @@ struct ViewState {
 /// with a single-datacenter testnet.
 ///
 /// **Algorithm**: every successful view (Commit QC observed) records
-/// the wall-clock time it took from view-start to QC-formation. An
-/// EWMA tracks the rolling mean; the base timeout is set to
-/// `multiplier × ewma`, clamped to `[base_floor, base_ceiling]`. The
-/// multiplier is intentionally generous (2× by default) so a single
-/// slow view doesn't trigger premature view-change on the next.
+/// the wall-clock time it took from view-start to QC-formation. Two
+/// statistics track the stream: an EWMA of the mean and a P² estimate
+/// of the p99 tail. The base timeout is set to
+/// `max(safety_multiplier × ewma, p99_tail)`, clamped to
+/// `[base_floor, base_ceiling]`. Taking the max of a mean-multiple and
+/// a measured tail means the timeout tracks the actual slow-round
+/// latency rather than approximating it with a static floor — the
+/// tail-at-scale correction. The mean-multiple still dominates when the
+/// distribution is tight; the measured p99 takes over when the tail is
+/// heavy (cross-region, congested links).
 ///
 /// **Convergence**: when the cluster composition shifts (validator
 /// joins or leaves, region distribution changes), the EWMA tracks the
@@ -149,11 +297,10 @@ struct ViewState {
 /// PRESERVED unchanged) absorbs spikes.
 ///
 /// **Safety floor + ceiling**: `base_floor` (default 1000ms, set from
-/// `ConsensusConfig::adaptive_timeout_floor_ms`) keeps the timeout above
-/// the *tail* of cross-region quorum latency so successful-round EWMA
-/// tuning can't drive it below the slow rounds and trip spurious view
-/// changes; `base_ceiling=10000ms` prevents runaway when an outlier delay
-/// would otherwise push the EWMA into the seconds range.
+/// `ConsensusConfig::adaptive_timeout_floor_ms`) is now a pure lower
+/// clamp against tight loops — the measured p99 does the job the floor
+/// used to approximate. `base_ceiling=10000ms` prevents runaway when an
+/// outlier delay would otherwise push the estimate into the seconds range.
 #[derive(Debug, Clone)]
 struct ViewChangeTimer {
     /// Adaptive base timeout, retuned after every successful view.
@@ -174,6 +321,11 @@ struct ViewChangeTimer {
     /// EWMA of observed view-to-QC formation latency, in milliseconds.
     /// `None` until the first successful view completes.
     observed_latency_ewma_ms: Option<f64>,
+
+    /// P² streaming estimate of the p99 tail of view-to-QC latency, in
+    /// milliseconds. Provides the measured tail the base timeout must
+    /// clear so a slow round doesn't trip a spurious view change.
+    p99_latency: P2Quantile,
 
     /// Smoothing factor for the EWMA. 0.15 = ~6-7 view memory.
     ewma_alpha: f64,
@@ -225,6 +377,7 @@ impl ViewChangeTimer {
             backoff_multiplier: 2.0,
             consecutive_timeouts: 0,
             observed_latency_ewma_ms: None,
+            p99_latency: P2Quantile::new(0.99),
             ewma_alpha: 0.15,
             safety_multiplier: 2.0,
             base_floor,
@@ -284,8 +437,17 @@ impl ViewChangeTimer {
             None => observed_ms,
         };
         self.observed_latency_ewma_ms = Some(new_ewma);
+        self.p99_latency.observe(observed_ms);
 
-        let target_ms = new_ewma * self.safety_multiplier;
+        // The target must clear both the mean-derived estimate and the
+        // measured tail. `safety_multiplier × ewma` handles the tight
+        // (single-datacenter) case; the p99 estimate takes over when the
+        // distribution is heavy-tailed (cross-region) — this is the
+        // tail-at-scale correction that a static floor could only
+        // approximate.
+        let mean_target_ms = new_ewma * self.safety_multiplier;
+        let tail_target_ms = self.p99_latency.estimate().unwrap_or(0.0);
+        let target_ms = mean_target_ms.max(tail_target_ms);
         let target = Duration::from_millis(target_ms as u64)
             .max(self.base_floor)
             .min(self.base_ceiling);
@@ -295,6 +457,7 @@ impl ViewChangeTimer {
                 old_base_ms = self.base_timeout.as_millis(),
                 new_base_ms = target.as_millis(),
                 ewma_ms = new_ewma,
+                p99_ms = tail_target_ms,
                 observed_ms = observed_ms,
                 "Adaptive view_timeout retuned from observed cluster latency"
             );
@@ -4599,21 +4762,37 @@ mod tests {
 
         let (engine, proposer_kp, proposer_pq, proposer_addr) = build_test_engine(3).await;
 
+        // Find a view the proposer is actually elected to lead. Leader
+        // election is a seeded weighted draw, so the concrete view number is
+        // incidental to what this test checks (view-sync on a next-view
+        // proposal) — hardcoding a magic view couples the test to the exact
+        // weighting math. Scan for the first view >= 2 that elects the
+        // proposer; drive local view to `proposer_view - 1`.
+        let proposer_view = (2u64..1000)
+            .find(|&v| {
+                engine
+                    .leader_for_view(v)
+                    .map(|l| l == proposer_addr)
+                    .unwrap_or(false)
+            })
+            .expect("proposer is elected leader for some view in range");
+        let local_view = proposer_view - 1;
+
         // Simulate the testnet failure mode: this node's local view is one
         // behind the proposer's (the canonical happy-path next-view case;
         // larger view jumps require a TC and are covered in a dedicated
         // safe_to_extend test).
         {
             let mut state = engine.view_state.write();
-            state.view = 16;
+            state.view = local_view;
             state.height = BlockHeight::from(1);
             state.phase = Phase::Prepare;
         }
 
-        // Build a proposal at height=1, view=17 from `proposer_addr`.
+        // Build a proposal at height=1, view=proposer_view from `proposer_addr`.
         let header = BlockHeader::new_at_view(
             BlockHeight::from(1),
-            17, // proposer's view
+            proposer_view,
             Hash::default(),
             Hash::default(),
             Hash::default(),
@@ -4632,8 +4811,8 @@ mod tests {
         // The vote MUST be stamped at the proposer's view, not the stale
         // local view. This is the entire point of the fix.
         assert_eq!(
-            vote.view, 17,
-            "vote must be stamped at proposer's view (17), got {} — \
+            vote.view, proposer_view,
+            "vote must be stamped at proposer's view ({proposer_view}), got {} — \
              without view-sync, votes from drifted-view validators never \
              form a quorum (testnet height=0 bug)",
             vote.view
@@ -4642,9 +4821,8 @@ mod tests {
         // Local view state must have been advanced.
         let final_view = engine.view_state.read().view;
         assert_eq!(
-            final_view, 17,
-            "local view must advance to proposer's view, got {}",
-            final_view
+            final_view, proposer_view,
+            "local view must advance to proposer's view, got {final_view}",
         );
     }
 
