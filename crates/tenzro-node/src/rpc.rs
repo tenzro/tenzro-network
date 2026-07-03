@@ -1424,6 +1424,7 @@ async fn dispatch_request(
         "tenzro_listSeedAgents" => handle_list_seed_agents(node, request.params).await,
         "tenzro_refillSeedAgent" => handle_refill_seed_agent(node, request.params).await,
         "tenzro_getSeedAgentDaemonStatus" => handle_get_seed_agent_daemon_status(node).await,
+        "tenzro_getTrainerDaemonStatus" => handle_get_trainer_daemon_status(node).await,
         "tenzro_getNetworkActivity" => handle_get_network_activity(node, request.params).await,
 
         // Treasury multisig: config mutations are admin-token-gated;
@@ -10618,6 +10619,23 @@ async fn handle_get_seed_agent_daemon_status(
     Ok(serde_json::json!({
         "running": true,
         "last_outcome": last_outcome,
+    }))
+}
+
+async fn handle_get_trainer_daemon_status(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let Some(daemon) = node.trainer_daemon() else {
+        return Ok(serde_json::json!({
+            "running": false,
+            "live_trainers": 0,
+        }));
+    };
+    Ok(serde_json::json!({
+        "running": true,
+        "trainer_did": daemon.trainer_did(),
+        "live_trainers": daemon.live_trainer_count(),
+        "max_concurrent_trainers": daemon.max_concurrent_trainers(),
     }))
 }
 

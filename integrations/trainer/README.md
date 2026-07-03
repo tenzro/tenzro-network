@@ -78,6 +78,15 @@ tenzro-trainer run \
     --modality timeseries
 ```
 
+The invocation above is the direct developer path. In production the trainer is
+not launched by hand: a node with `[training] enabled = true` runs an
+auto-provisioning daemon that discovers active runs and spawns one trainer
+subprocess per run (deriving the trainer identity from the node key, supervising
+restarts with exponential backoff). Operators pull the separate trainer image
+built from `Dockerfile.trainer` — the base node image ships without this
+package to stay lean. See `../../docs/AI.md` §7.7.5 for the daemon config,
+identity derivation, crash policy, and the `tenzro_getTrainerDaemonStatus` RPC.
+
 ## Module layout
 
 | Module | Purpose |

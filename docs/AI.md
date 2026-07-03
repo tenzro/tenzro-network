@@ -657,6 +657,79 @@ The trainer can run anywhere Python + PyTorch run, including inside a TEE (Verif
 - TEE-resident training with sealed data
 - Goal: enable privacy-preserving training as a product
 
+#### 7.7.5 Running a trainer node
+
+Operators do not launch trainer subprocesses by hand. A node with training
+enabled runs an auto-provisioning daemon that discovers active runs from the
+local `tenzro-training` runtime and manages a Python trainer subprocess per
+run.
+
+**Enabling.** The daemon is off by default. Turn it on in the node config:
+
+```toml
+[training]
+enabled = true
+```
+
+With only `enabled = true`, the daemon resolves the Python interpreter in
+order: `python_executable`, then `<venv_path>/bin/python`, then
+`$TENZRO_TRAINING_VENV_PATH/bin/python`, then `python3` / `python` on `PATH` —
+and requires the `tenzro_trainer` package to be importable. If no such
+interpreter is found, the daemon logs a warning and stays disabled; the node
+otherwise runs normally. This is why the base node image ships without a Python
+trainer runtime (see below) — a validator, RPC provider, or light client never
+carries the multi-GB PyTorch dependency unless it opts into training.
+
+**Task discovery.** On each poll tick the daemon lists runs from the runtime
+and provisions a trainer for every run in `Enrolling` or `Training` status, up
+to `max_concurrent_trainers`. Additional eligible runs wait for a free slot.
+There is no manual assignment step.
+
+**Trainer identity.** The trainer's Ed25519 signing key is derived
+deterministically from the node's TDIP validator seed via HKDF-SHA256 under a
+dedicated domain label, materialised once to `<data_dir>/trainer/trainer.seed`
+(mode `0600`), and passed to the trainer as `--seed-file`. The DID is
+`did:tenzro:machine:trainer:<node-address>`. Deriving from the node seed means
+no second secret to manage and stable reward attribution across restarts. If
+the node identity key is unavailable, the trainer falls back to an ephemeral
+key (reward attribution is then unstable, but Open-tier training still
+proceeds).
+
+**Crash policy.** Trainers are supervised with exponential-backoff restart. A
+trainer that exits (crash or non-zero status) is evicted and respawned no
+sooner than `backoff_base_ms * 2^(retries-1)`, capped at `backoff_max_ms`.
+After `max_restarts` consecutive restarts for the same run, the daemon stops
+respawning it until the run's state changes or the node restarts — so a
+permanently-broken trainer cannot pin a subprocess slot in a tight loop.
+
+**Config reference (`[training]`):**
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Master enable for the daemon. |
+| `python_executable` | — | Explicit interpreter path (highest priority). |
+| `venv_path` | — | Virtualenv root; daemon uses `<venv_path>/bin/python`. |
+| `max_concurrent_trainers` | `1` | Cap on concurrent trainer subprocesses. |
+| `poll_interval_secs` | `30` | Seconds between reconcile ticks. |
+| `backoff_base_ms` | `2000` | Base restart backoff. |
+| `backoff_max_ms` | `300000` | Restart backoff ceiling. |
+| `max_restarts` | `8` | Consecutive restarts per run before giving up. |
+| `trainer_extra_args` | `[]` | Extra CLI args appended to every trainer invocation. |
+
+**Status.** The JSON-RPC method `tenzro_getTrainerDaemonStatus` reports whether
+the daemon is running, the derived `trainer_did`, the live trainer count, and
+`max_concurrent_trainers`. When the daemon is disabled it returns
+`{ "running": false, "live_trainers": 0 }`.
+
+**Trainer image.** Because the base node image carries no Python trainer, a
+separate opt-in image bundles the reference trainer venv on top of the base
+node image, built from `Dockerfile.trainer`. The node binary is identical to
+the base; the image sets `TENZRO_TRAINING_VENV_PATH` so the daemon resolves the
+interpreter with no extra node config beyond `[training] enabled = true`. The
+`TRAINER_EXTRAS` build arg selects the pip extras (default:
+`language,vision,timeseries,confidential`). Operators who run training pull this
+image; everyone else runs the lean base image.
+
 ---
 
 ### 7.8 Comparison with Existing Approaches

@@ -17,7 +17,7 @@ The architecture spec carries ``fragment_count``; we shard the model's
 state-dict keys (sorted lexicographically) into that many roughly-equal-byte
 buckets. Both the trainer and the syncer must agree on this partition — it is
 deterministic per (architecture.family, architecture.fragment_count) and
-documented in TRAIN.md §5.2.
+documented in docs/AI.md §7.4 (per-modality fragment partitioning).
 """
 
 from __future__ import annotations
