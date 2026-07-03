@@ -126,6 +126,7 @@ pub mod spt_revocation_dispatcher;
 pub mod streaming;
 #[cfg(feature = "visa-tap")]
 pub mod tap_reputation_dispatcher;
+pub mod trainer_daemon;
 pub mod web;
 pub mod workflow_runtime;
 

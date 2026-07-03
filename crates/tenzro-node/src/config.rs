@@ -271,6 +271,77 @@ impl std::fmt::Debug for CortexWorkerConfig {
     }
 }
 
+/// Configuration for the Tenzro Train auto-provisioning daemon.
+///
+/// When enabled, the node runs a leader-gated poll loop that discovers
+/// every active training run held in the local `TrainingRuntime` and
+/// spawns the Python reference trainer (`tenzro-trainer run`) as a
+/// supervised subprocess for each run this node participates in. The
+/// trainer speaks JSON-RPC back to the node's local RPC endpoint to
+/// enroll, submit outer gradients, and finalize rounds — the node never
+/// links a tensor library; all tensor math stays in the Python process.
+///
+/// Disabled by default. Opt-in per operator. Initialization failure is
+/// non-fatal: a mis-configured trainer runtime logs and continues so it
+/// cannot block the rest of node startup.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrainingConfig {
+    /// Master enable flag for the trainer auto-provisioning daemon.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to the Python interpreter that has `tenzro-trainer` installed.
+    /// When `None`, the daemon resolves in order: `<venv_path>/bin/python`
+    /// (if `venv_path` is set), then `python3`, then `python` on `PATH`.
+    #[serde(default)]
+    pub python_executable: Option<String>,
+
+    /// Path to a Python virtual environment root that has the
+    /// `tenzro-trainer` package installed. When set, the daemon prefers
+    /// `<venv_path>/bin/python` as the interpreter.
+    #[serde(default)]
+    pub venv_path: Option<String>,
+
+    /// Maximum number of trainer subprocesses this node runs concurrently.
+    /// Bounds resource use on a node that participates in many runs at
+    /// once; additional eligible runs wait for a free slot.
+    #[serde(default = "default_max_concurrent_trainers")]
+    pub max_concurrent_trainers: usize,
+
+    /// Poll interval in seconds between reconcile ticks.
+    #[serde(default = "default_trainer_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+
+    /// Base backoff in milliseconds for the supervised-restart schedule.
+    /// A trainer that exits (crash or non-zero status) is respawned no
+    /// sooner than `backoff_base_ms * 2^(retries-1)`, capped at
+    /// `backoff_max_ms`.
+    #[serde(default = "default_trainer_backoff_base_ms")]
+    pub backoff_base_ms: u64,
+
+    /// Ceiling for the exponential restart backoff in milliseconds.
+    #[serde(default = "default_trainer_backoff_max_ms")]
+    pub backoff_max_ms: u64,
+
+    /// Maximum consecutive restarts per run before the daemon gives up on
+    /// that run and stops respawning it (until the run's state changes or
+    /// the node restarts). Guards against a permanently-broken trainer
+    /// pinning a subprocess slot in a restart loop.
+    #[serde(default = "default_trainer_max_restarts")]
+    pub max_restarts: u32,
+
+    /// Extra CLI arguments appended verbatim to every `tenzro-trainer run`
+    /// invocation (e.g. adapter-specific flags). Empty by default.
+    #[serde(default)]
+    pub trainer_extra_args: Vec<String>,
+}
+
+fn default_max_concurrent_trainers() -> usize { 1 }
+fn default_trainer_poll_interval_secs() -> u64 { 30 }
+fn default_trainer_backoff_base_ms() -> u64 { 2_000 }
+fn default_trainer_backoff_max_ms() -> u64 { 300_000 }
+fn default_trainer_max_restarts() -> u32 { 8 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
     /// Whether the bridge subsystem is enabled.
@@ -1125,6 +1196,13 @@ pub struct NodeConfig {
     #[serde(default)]
     pub cortex: CortexConfig,
 
+    /// Tenzro Train auto-provisioning daemon. When enabled, the node
+    /// discovers active training runs it participates in and spawns the
+    /// Python reference trainer as a supervised subprocess per run.
+    /// Disabled by default.
+    #[serde(default)]
+    pub training: TrainingConfig,
+
     /// Allowed CORS origins for RPC/Web/A2A servers.
     /// Empty list means allow all origins (development mode).
     /// In production, set to specific domains like `["https://app.tenzro.com"]`.
@@ -1307,6 +1385,7 @@ impl NodeConfig {
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
+            training: TrainingConfig::default(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
@@ -1345,6 +1424,7 @@ impl NodeConfig {
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
+            training: TrainingConfig::default(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
@@ -1383,6 +1463,7 @@ impl NodeConfig {
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
+            training: TrainingConfig::default(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
@@ -1421,6 +1502,7 @@ impl NodeConfig {
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
+            training: TrainingConfig::default(),
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,

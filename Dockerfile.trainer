@@ -1,0 +1,70 @@
+# Opt-in Tenzro Train image: the lean node image plus a Python virtualenv
+# carrying the reference trainer. Only operators who run training pull this;
+# the base `tenzro-node` image stays free of the multi-GB PyTorch dependency
+# so it remains cheap for validators, RPC providers, and light clients.
+#
+# Build (base image must already exist in the registry):
+#   docker build -f Dockerfile.trainer \
+#     --build-arg BASE_IMAGE=us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:<tag> \
+#     -t us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node-trainer:<tag> .
+#
+# The node binary is identical to the base image; the trainer auto-provisioning
+# daemon resolves the interpreter via TENZRO_TRAINING_VENV_PATH, so no extra
+# node config is needed beyond `[training] enabled = true`.
+
+ARG BASE_IMAGE=us-central1-docker.pkg.dev/tenzro-infra/tenzro/tenzro-node:latest
+
+# ---------------------------------------------------------------------------
+# Stage 1: build the trainer virtualenv on a full Debian so build tooling
+# (pip, wheels) is available, then copy just the venv into the runtime stage.
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS venv-builder
+
+# TRAINER_EXTRAS selects the pip extras installed into the venv. Default pulls
+# every modality adapter; override to trim (e.g. "timeseries" for a
+# timeseries-only trainer) or extend (e.g. "all" to add hivemind).
+ARG TRAINER_EXTRAS="language,vision,timeseries,confidential"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-venv \
+    python3-pip \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt
+COPY integrations/trainer/ /opt/tenzro-trainer-src/
+
+RUN python3 -m venv /opt/tenzro-trainer-venv \
+    && /opt/tenzro-trainer-venv/bin/pip install --no-cache-dir --upgrade pip wheel setuptools \
+    && /opt/tenzro-trainer-venv/bin/pip install --no-cache-dir \
+       "/opt/tenzro-trainer-src[${TRAINER_EXTRAS}]" \
+    && /opt/tenzro-trainer-venv/bin/python -c "import tenzro_trainer" \
+    && rm -rf /opt/tenzro-trainer-src
+
+# ---------------------------------------------------------------------------
+# Stage 2: the node image + a minimal Python runtime + the trainer venv.
+# ---------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS runtime
+
+USER root
+
+# Only the Python runtime shared libs — no build toolchain in the final image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=venv-builder /opt/tenzro-trainer-venv /opt/tenzro-trainer-venv
+RUN chown -R tenzro:tenzro /opt/tenzro-trainer-venv
+
+# The trainer daemon resolves its interpreter from this path (see
+# resolve_python in trainer_daemon.rs). Operators still gate the daemon with
+# `[training] enabled = true` in the node config.
+ENV TENZRO_TRAINING_VENV_PATH=/opt/tenzro-trainer-venv
+
+USER tenzro
+WORKDIR /home/tenzro
+
+ENTRYPOINT ["tenzro-node"]
+CMD ["--data-dir", "/data/tenzro", "--log-level", "info"]

@@ -1425,6 +1425,10 @@ pub struct TenzroNode {
     /// `Arc` is retained so `tenzro_getSeedAgentDaemonStatus` can return
     /// the most recent tick outcome.
     seed_agent_daemon: Option<Arc<tenzro_token::SeedAgentDaemon>>,
+    /// Trainer auto-provisioning daemon. Polls active training runs and
+    /// supervises a Python reference-trainer subprocess per run. `Arc` is
+    /// retained so `tenzro_getTrainerDaemonStatus` can report live counts.
+    trainer_daemon: Option<Arc<crate::trainer_daemon::TrainerDaemon>>,
     /// Liquid staking pool (stTNZO). Persists holder balances, validator
     /// delegations, withdrawal requests, and aggregate totals to CF_TOKENS
     /// via `LiquidStakingPool::with_storage`. Surfaced through
@@ -1986,6 +1990,7 @@ impl TenzroNode {
             seed_agent_manager: None,
             seed_agent_gossip_tx: None,
             seed_agent_daemon: None,
+            trainer_daemon: None,
             liquid_staking_pool: None,
             governance: None,
             treasury: None,
@@ -5735,6 +5740,69 @@ impl TenzroNode {
                 }
             }
             self.training_runtime = training_runtime;
+
+            // Trainer auto-provisioning daemon (Task #41). Polls the hydrated
+            // runtime for runs in Enrolling / Training status and supervises
+            // one Python reference-trainer subprocess per active run, up to
+            // `[training].max_concurrent_trainers`. Dead trainers are reaped
+            // and respawned on the next poll with exponential backoff. The
+            // trainer's Ed25519 identity is HKDF-derived from the node's TDIP
+            // seed (domain-separated) so reward attribution is stable across
+            // restarts without provisioning a second on-disk secret.
+            if self.config.training.enabled {
+                let rpc_url = format!(
+                    "http://{}",
+                    self.config
+                        .rpc_addr
+                        .replacen("0.0.0.0", "127.0.0.1", 1)
+                );
+                let (seed, address_hex) =
+                    match crate::keygen::load_validator_keypair(&self.config.data_dir) {
+                        Ok(keypair) => {
+                            let seed_bytes = keypair.secret_key().as_bytes();
+                            let seed = if seed_bytes.len() == 32 {
+                                let mut s = [0u8; 32];
+                                s.copy_from_slice(seed_bytes);
+                                Some(s)
+                            } else {
+                                None
+                            };
+                            (seed, keypair.address().to_hex())
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Could not load validator keypair for trainer identity ({}); \
+                                 trainer will run with an ephemeral key",
+                                e
+                            );
+                            (None, "ephemeral".to_string())
+                        }
+                    };
+
+                if let Some(daemon) = crate::trainer_daemon::TrainerDaemon::new(
+                    self.config.training.clone(),
+                    self.training_runtime.clone(),
+                    rpc_url,
+                    &self.config.data_dir,
+                    seed,
+                    address_hex,
+                ) {
+                    let daemon = if let Some(consensus) = self.consensus.clone() {
+                        // Leader-gate provisioning so only one validator in the
+                        // fleet supervises trainers per run; convergence on the
+                        // finalized round-state happens over `tenzro/training`.
+                        let gate: crate::trainer_daemon::TickAuthorityFn =
+                            Arc::new(move || consensus.is_leader_in_next_views(32));
+                        daemon.with_tick_authority(gate)
+                    } else {
+                        daemon
+                    };
+                    let daemon_arc = Arc::new(daemon);
+                    daemon_arc.clone().spawn();
+                    self.trainer_daemon = Some(daemon_arc);
+                    info!("Trainer auto-provisioning daemon spawned");
+                }
+            }
         }
 
         self.health_monitor.mark_healthy("ai");
@@ -9601,6 +9669,14 @@ impl TenzroNode {
         &self,
     ) -> Option<&Arc<tenzro_token::SeedAgentDaemon>> {
         self.seed_agent_daemon.as_ref()
+    }
+
+    /// Returns the trainer auto-provisioning daemon (Task #41). `None` when
+    /// `[training].enabled` is false or no Python trainer could be resolved.
+    pub fn trainer_daemon(
+        &self,
+    ) -> Option<&Arc<crate::trainer_daemon::TrainerDaemon>> {
+        self.trainer_daemon.as_ref()
     }
 
     /// Returns the OAuth 2.1 + DPoP + RAR auth engine if initialized.

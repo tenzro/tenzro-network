@@ -22,7 +22,7 @@ MoE configs).
 
 Wraps cleanly under :class:`torch.distributed.fsdp.FullyShardedDataParallel`
 (FSDP2) when the caller has initialized a process group — see
-``TRAIN.md §6.3``. Plain DDP and single-GPU paths work out of the box.
+``docs/AI.md §7.7.1``. Plain DDP and single-GPU paths work out of the box.
 """
 
 from __future__ import annotations
