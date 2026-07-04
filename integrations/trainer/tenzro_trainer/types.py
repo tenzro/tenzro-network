@@ -334,6 +334,7 @@ class TrainingTaskSpec:
     architecture: ArchitectureSpec
     tier: TrainingTier
     aggregation: str | dict[str, Any]
+    clip_l2_norm: float | None
     sync_strategy: SyncStrategy
     quantization: GradientQuantization
     delayed_apply: bool
@@ -358,6 +359,7 @@ class TrainingTaskSpec:
             "architecture": self.architecture.to_json(),
             "tier": self.tier.value,
             "aggregation": self.aggregation,
+            "clip_l2_norm": self.clip_l2_norm,
             "sync_strategy": self.sync_strategy.to_json(),
             "quantization": self.quantization.to_json(),
             "delayed_apply": self.delayed_apply,
@@ -384,6 +386,11 @@ class TrainingTaskSpec:
             architecture=ArchitectureSpec.from_json(j["architecture"]),
             tier=TrainingTier(j["tier"]),
             aggregation=j["aggregation"],
+            clip_l2_norm=(
+                float(j["clip_l2_norm"])
+                if j.get("clip_l2_norm") is not None
+                else None
+            ),
             sync_strategy=SyncStrategy.from_json(j["sync_strategy"]),
             quantization=GradientQuantization.from_json(j["quantization"]),
             delayed_apply=bool(j["delayed_apply"]),

@@ -125,6 +125,7 @@ pub mod spending_policy_bridge;
 pub mod spt_ceiling_bridge;
 pub mod spt_revocation_dispatcher;
 pub mod streaming;
+pub mod train_slashing_bridge;
 #[cfg(feature = "visa-tap")]
 pub mod tap_reputation_dispatcher;
 pub mod trainer_daemon;

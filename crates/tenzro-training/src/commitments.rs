@@ -7,7 +7,7 @@
 
 use sha2::{Digest, Sha256};
 use tenzro_types::primitives::Hash;
-use tenzro_types::training::{FragmentQuorumStatus, SyncRound};
+use tenzro_types::training::{FragmentQuorumStatus, OuterGradient, SyncRound};
 
 /// Compute the per-round state root.
 ///
@@ -93,6 +93,29 @@ pub fn sync_round_signing_bytes(round: &SyncRound) -> Vec<u8> {
     buf.extend_from_slice(&round.round.to_be_bytes());
     buf.extend_from_slice(round.state_root.as_bytes());
     buf.extend_from_slice(&round.published_at.as_millis().to_be_bytes());
+    buf
+}
+
+/// Canonical preimage the trainer signs over an [`OuterGradient`].
+///
+/// Byte-identical to the Python reference trainer's `gradient_signing_bytes`
+/// (`integrations/trainer/tenzro_trainer/gradient.py`): domain tag, then the
+/// gradient fields in struct order (minus the signature), big-endian encoded.
+/// The quantization is bound as its canonical display label
+/// (`none` / `int8/N` / `int4/N`). `submitted_at` is the two's-complement i64
+/// milliseconds, matching Python's `to_bytes(8, "big", signed=True)`.
+pub fn outer_gradient_signing_bytes(grad: &OuterGradient) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(96 + grad.task_id.len() + grad.trainer_did.len());
+    buf.extend_from_slice(b"tenzro/train/outer-gradient");
+    buf.extend_from_slice(grad.task_id.as_bytes());
+    buf.extend_from_slice(&grad.round.to_be_bytes());
+    buf.extend_from_slice(&grad.fragment.to_be_bytes());
+    buf.extend_from_slice(grad.trainer_did.as_bytes());
+    buf.extend_from_slice(grad.safetensors_hash.as_bytes());
+    buf.extend_from_slice(&grad.payload_bytes.to_be_bytes());
+    buf.extend_from_slice(grad.quantization.to_string().as_bytes());
+    buf.extend_from_slice(&grad.inner_step_count.to_be_bytes());
+    buf.extend_from_slice(&grad.submitted_at.as_millis().to_be_bytes());
     buf
 }
 

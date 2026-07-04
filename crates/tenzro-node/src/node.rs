@@ -4898,22 +4898,39 @@ impl TenzroNode {
             tenzro_agent::memory::TantivyTextBackend::new(&memory_root),
         ) {
             (Ok(vec_backend), Ok(text_backend)) => {
-                // Phase D1 (#222): prefer iroh-blobs as the DA backend for
-                // agent-memory archival when the iroh resolver is bound — the
-                // canonical archive payload becomes a BLAKE3-addressed blob
-                // reachable from any node via `tenzro://memory/<did>/<uuid>`
-                // (resolved against the same iroh endpoint). Falls back to
-                // `InlineFallbackBackend` when iroh is disabled so the agent
-                // memory tier still works on minimal nodes.
-                let da: Arc<dyn tenzro_storage::da::DaBackend> =
-                    if let Some(ref resolver) = self.iroh_resolver {
-                        info!(
-                            "Agent memory tier wired with iroh-blobs DA backend (Phase D1)"
-                        );
-                        tenzro_iroh::IrohBlobsDaBackend::arc(resolver.clone())
-                    } else {
+                // Agent-memory archival DA backend, selected by
+                // `NodeConfig::da_backend`. `Auto` prefers iroh-blobs when the
+                // resolver is bound (the canonical archive payload becomes a
+                // BLAKE3-addressed blob reachable from any node via
+                // `tenzro://memory/<did>/<uuid>`) and falls back to the
+                // in-process inline store when iroh is disabled. `Inline`
+                // always uses the inline store. `IrohBlobs` requires the
+                // resolver and refuses to start without it.
+                let da: Arc<dyn tenzro_storage::da::DaBackend> = match self.config.da_backend {
+                    crate::config::DaBackendSelector::Inline => {
+                        info!("Agent memory tier wired with inline DA backend (da_backend=inline)");
                         Arc::new(tenzro_storage::da::InlineFallbackBackend::new())
-                    };
+                    }
+                    crate::config::DaBackendSelector::IrohBlobs => match self.iroh_resolver {
+                        Some(ref resolver) => {
+                            info!("Agent memory tier wired with iroh-blobs DA backend (da_backend=iroh_blobs)");
+                            tenzro_iroh::IrohBlobsDaBackend::arc(resolver.clone())
+                        }
+                        None => {
+                            return Err(NodeError::Other(
+                                "da_backend=iroh_blobs requires the iroh resolver, but it is not bound".to_string(),
+                            ));
+                        }
+                    },
+                    crate::config::DaBackendSelector::Auto => {
+                        if let Some(ref resolver) = self.iroh_resolver {
+                            info!("Agent memory tier wired with iroh-blobs DA backend (da_backend=auto)");
+                            tenzro_iroh::IrohBlobsDaBackend::arc(resolver.clone())
+                        } else {
+                            Arc::new(tenzro_storage::da::InlineFallbackBackend::new())
+                        }
+                    }
+                };
                 let mgr = Arc::new(tenzro_agent::memory::MemoryManager::new(
                     Arc::new(vec_backend),
                     Arc::new(text_backend),
@@ -5746,6 +5763,28 @@ impl TenzroNode {
             let mut training_runtime = tenzro_training::TrainingRuntime::with_storage(
                 storage.clone() as Arc<dyn tenzro_storage::KvStore>,
             );
+            // Slash-and-evict bridge: a contribution that fails accept-time
+            // verification, or a buffered gradient outside the round's
+            // norm/agreement band, evicts the trainer from the run and slashes
+            // its compute bond (terminal, no rehabilitation). Requires both a
+            // consensus engine (finalized-height source for the audit event)
+            // and a compute-bond manager; on nodes without either, eviction
+            // still removes the DID from the active set but debits no bond.
+            if let (Some(consensus), Some(bonds)) =
+                (self.consensus.clone(), self.compute_bond_manager.clone())
+            {
+                let height_fn: crate::train_slashing_bridge::BlockHeightFn = {
+                    let consensus = consensus.clone();
+                    Arc::new(move || consensus.current_finalized_height().0)
+                };
+                let bridge = Arc::new(
+                    crate::train_slashing_bridge::TrainerComputeBondSlashingBridge::new(
+                        bonds, height_fn,
+                    ),
+                );
+                training_runtime = training_runtime.with_slashing_callback(bridge);
+                info!("TrainingRuntime wired with slash-and-evict ComputeBond bridge");
+            }
             if let Some(ref resolver) = self.iroh_resolver {
                 training_runtime = training_runtime.with_payload_store(
                     tenzro_iroh::IrohGradientStore::arc(resolver.clone()),

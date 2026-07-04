@@ -17,7 +17,7 @@
 //! At run completion the syncer calls [`finalize_run`](SyncerState::finalize_run)
 //! which builds and persists a [`TrainingReceipt`].
 
-use crate::commitments::{compute_run_root, compute_state_root};
+use crate::commitments::{compute_run_root, compute_state_root, outer_gradient_signing_bytes};
 use crate::confidential::{
     validate_confidential_enrollment, verify_manifest_binding, SealedManifestStore,
     SealedShardStore,
@@ -119,6 +119,15 @@ pub struct SyncerState {
     /// Per-round, per-fragment outer-gradient buffers.
     /// Keyed first by round, then by fragment id.
     pub buffers: DashMap<(u32, u32), FragmentBuffer>,
+    /// Optional slash-and-evict hook. When wired by the node, a contribution
+    /// that fails verification (accept-time) or falls outside the round's
+    /// norm/agreement band (post-aggregation) slashes the trainer's bond and
+    /// evicts it from the run. `None` on Open-tier local-dev runs with no
+    /// bonding backend, in which case eviction still removes the DID from the
+    /// active set but no bond is debited. Interior-mutable so the runtime can
+    /// inject the node's bridge into an already-`Arc`-wrapped state at
+    /// `register_run` / `hydrate` time.
+    slashing: RwLock<Option<Arc<dyn crate::slashing::TrainerSlashingCallback>>>,
 }
 
 impl SyncerState {
@@ -142,7 +151,29 @@ impl SyncerState {
             task_spec,
             run: RwLock::new(run),
             buffers: DashMap::new(),
+            slashing: RwLock::new(None),
         }
+    }
+
+    /// Wire the slash-and-evict callback (builder). The node bridges this to
+    /// its staking / compute-bond primitives; absent it, eviction still
+    /// removes the trainer from the active set but debits no bond.
+    pub fn with_slashing_callback(
+        self,
+        callback: Arc<dyn crate::slashing::TrainerSlashingCallback>,
+    ) -> Self {
+        *self.slashing.write() = Some(callback);
+        self
+    }
+
+    /// Inject the slash-and-evict callback into an already-`Arc`-wrapped state.
+    /// Used by [`TrainingRuntime::register_run`] / `hydrate` to attach the
+    /// node's bridge centrally, regardless of where the state was constructed.
+    pub fn set_slashing_callback(
+        &self,
+        callback: Arc<dyn crate::slashing::TrainerSlashingCallback>,
+    ) {
+        *self.slashing.write() = Some(callback);
     }
 
     pub fn enroll_trainer(&self, trainer_did: String) -> Result<()> {
@@ -257,6 +288,16 @@ impl SyncerState {
             return Err(TrainingError::AttestationRequired(self.task_spec.tier));
         }
 
+        // Signature binding (fail-closed): the submission must be signed by the
+        // key it claims to submit under. The trainer's key is carried as
+        // `trainer_address` (32-byte Ed25519 public key); the signature's own
+        // `public_key` must equal it, and the Ed25519 signature must verify
+        // over the canonical `outer_gradient_signing_bytes` preimage (byte-
+        // identical to the Python reference trainer's `gradient_signing_bytes`).
+        // Without this a Verified-tier attacker could submit poison gradients
+        // under any enrolled trainer's DID by simply copying its address.
+        Self::verify_gradient_signature(&gradient)?;
+
         let key = (gradient.round, gradient.fragment);
         let mut entry = self.buffers.entry(key).or_default();
         // Idempotency: don't double-count the same trainer.
@@ -269,6 +310,94 @@ impl SyncerState {
         }
         entry.accepted.push(gradient);
         Ok(())
+    }
+
+    /// Verify an [`OuterGradient`]'s Ed25519 signature binds it to the key it
+    /// claims. Two invariants: (1) the signature's `public_key` equals the
+    /// `trainer_address` the gradient submits under, and (2) the signature
+    /// verifies over [`outer_gradient_signing_bytes`]. Fail-closed.
+    pub fn verify_gradient_signature(gradient: &OuterGradient) -> Result<()> {
+        // The submitting address IS the trainer's Ed25519 public key; the
+        // signature must be produced by that same key.
+        if gradient.signature.public_key.as_slice() != gradient.trainer_address.as_bytes() {
+            return Err(TrainingError::InvalidSignature {
+                what: "outer gradient: signature public_key does not match trainer_address",
+            });
+        }
+        let public_key = tenzro_crypto::keys::PublicKey::new(
+            tenzro_crypto::keys::KeyType::Ed25519,
+            gradient.signature.public_key.clone(),
+        );
+        let signature = tenzro_crypto::signatures::Signature::new(
+            tenzro_crypto::keys::KeyType::Ed25519,
+            gradient.signature.bytes.clone(),
+        );
+        let message = outer_gradient_signing_bytes(gradient);
+        tenzro_crypto::signatures::verify(&public_key, &message, &signature).map_err(|_| {
+            TrainingError::InvalidSignature {
+                what: "outer gradient: Ed25519 signature verification failed",
+            }
+        })
+    }
+
+    /// Remove `trainer_did` from the run's active trainer set (and its pipeline
+    /// assignment, if any) and fire the slash-and-evict callback. Idempotent:
+    /// evicting an already-evicted trainer is a no-op that does not re-fire the
+    /// callback. Eviction is terminal for the run — the DID must re-enroll in a
+    /// future run to participate again, and `enroll_trainer` is closed once the
+    /// run reaches `Training`, so eviction is effectively permanent per run.
+    pub async fn evict_trainer(&self, trainer_did: &str, reason: crate::slashing::EvictionReason) {
+        let removed = {
+            let mut run = self.run.write();
+            let before = run.trainers.len();
+            run.trainers.retain(|d| d != trainer_did);
+            let removed = run.trainers.len() != before;
+            if removed {
+                run.pipeline_assignments.remove(trainer_did);
+                run.last_update = Timestamp::now();
+            }
+            removed
+        };
+        if !removed {
+            return;
+        }
+        // Drop any gradients this trainer already buffered this round so an
+        // evicted contribution can't still be folded into the aggregate.
+        for mut entry in self.buffers.iter_mut() {
+            entry.accepted.retain(|g| g.trainer_did != trainer_did);
+        }
+        // Clone the callback out before awaiting so we never hold the lock
+        // guard across the await point.
+        let callback = self.slashing.read().clone();
+        if let Some(cb) = callback {
+            cb.slash_and_evict(&self.task_spec.task_id, trainer_did, reason)
+                .await;
+        }
+    }
+
+    /// Post-aggregation eviction pass. `contributors` pairs each accepted
+    /// trainer DID (in aggregation order) with its `was_clipped` flag (from
+    /// [`clip_gradients`](crate::aggregation::clip_gradients)) and its cosine
+    /// agreement with the round aggregate (from
+    /// [`gradient_agreement`](crate::outer_optimizer::gradient_agreement)).
+    /// `agreement_floor` is the minimum acceptable cosine similarity.
+    ///
+    /// Runs [`eviction_decisions`](crate::slashing::eviction_decisions) to pick
+    /// the offenders, then evicts each — clipping is attributed to the norm
+    /// budget, disagreement to the agreement floor. Returns the evicted DIDs
+    /// paired with the reason, so the caller can log or attribute the round.
+    /// Called by the syncer after it has the decoded per-trainer gradients and
+    /// the aggregate for the round (typically alongside `finalize_round`).
+    pub async fn evict_post_aggregation(
+        &self,
+        contributors: &[(String, bool, f32)],
+        agreement_floor: f32,
+    ) -> Vec<(String, crate::slashing::EvictionReason)> {
+        let decisions = crate::slashing::eviction_decisions(contributors, agreement_floor);
+        for (did, reason) in &decisions {
+            self.evict_trainer(did, *reason).await;
+        }
+        decisions
     }
 
     /// Snapshot the current quorum status for every fragment in the round's
@@ -547,6 +676,10 @@ pub struct TrainingRuntime {
     /// ships `IrohSealedShardStore` in `tenzro-iroh`.
     sealed_shard_store: Option<Arc<dyn SealedShardStore>>,
     storage: Option<Arc<dyn KvStore>>,
+    /// Node-provided slash-and-evict bridge, injected into every syncer state
+    /// at `register_run` / `hydrate` time. `None` on Open-tier local-dev with
+    /// no bonding backend.
+    slashing: Option<Arc<dyn crate::slashing::TrainerSlashingCallback>>,
 }
 
 impl Default for TrainingRuntime {
@@ -557,6 +690,7 @@ impl Default for TrainingRuntime {
             payload_store: None,
             sealed_shard_store: None,
             storage: None,
+            slashing: None,
         }
     }
 }
@@ -576,7 +710,18 @@ impl TrainingRuntime {
             payload_store: None,
             sealed_shard_store: None,
             storage: Some(storage),
+            slashing: None,
         }
+    }
+
+    /// Attach the node's slash-and-evict bridge (builder). Injected into every
+    /// syncer state registered or hydrated after this call.
+    pub fn with_slashing_callback(
+        mut self,
+        callback: Arc<dyn crate::slashing::TrainerSlashingCallback>,
+    ) -> Self {
+        self.slashing = Some(callback);
+        self
     }
 
     /// Attach a content-addressed payload store (builder). Consumed by the
@@ -645,6 +790,9 @@ impl TrainingRuntime {
                 syncer_addr,
             ));
             *state.run.write() = run;
+            if let Some(cb) = &self.slashing {
+                state.set_slashing_callback(cb.clone());
+            }
             self.syncers.insert(task_id, state);
             count += 1;
         }
@@ -668,6 +816,9 @@ impl TrainingRuntime {
                 "Confidential-tier task {} must use a tee:// dataset_ref, got '{}'",
                 state.task_spec.task_id, state.task_spec.dataset_ref
             )));
+        }
+        if let Some(cb) = &self.slashing {
+            state.set_slashing_callback(cb.clone());
         }
         let task_id = state.task_spec.task_id.clone();
         self.persist_run(&state)?;
@@ -834,12 +985,26 @@ mod tests {
     };
 
     fn make_gradient(spec: &TrainingTaskSpec, trainer_did: &str, round: u32, fragment: u32) -> OuterGradient {
-        OuterGradient {
+        use tenzro_crypto::signatures::Signer;
+        // Deterministic per-DID Ed25519 key so repeated calls for the same
+        // trainer produce a stable address (idempotency tests re-submit).
+        let mut seed = [0u8; 32];
+        for (i, b) in trainer_did.bytes().enumerate() {
+            seed[i % 32] ^= b;
+        }
+        let keypair = tenzro_crypto::keys::KeyPair::from_bytes(
+            tenzro_crypto::keys::KeyType::Ed25519,
+            &seed,
+        )
+        .unwrap();
+        let pubkey_bytes = keypair.public_key().as_bytes().to_vec();
+        let signer = tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair).unwrap();
+        let mut gradient = OuterGradient {
             task_id: spec.task_id.clone(),
             round,
             fragment,
             trainer_did: trainer_did.to_string(),
-            trainer_address: Address::new([2u8; 32]),
+            trainer_address: Address::from_bytes(&pubkey_bytes).unwrap(),
             safetensors_hash: Hash::from_bytes(&[3u8; 32]).unwrap(),
             payload_bytes: 1024,
             quantization: spec.quantization,
@@ -847,7 +1012,12 @@ mod tests {
             submitted_at: Timestamp::now(),
             signature: tenzro_types::primitives::Signature::default(),
             attestation: None,
-        }
+        };
+        let msg = outer_gradient_signing_bytes(&gradient);
+        let sig = signer.sign(&msg).unwrap();
+        gradient.signature =
+            tenzro_types::primitives::Signature::new(sig.to_bytes(), pubkey_bytes);
+        gradient
     }
 
     fn dummy_task() -> TrainingTaskSpec {
@@ -865,6 +1035,7 @@ mod tests {
             },
             tier: TrainingTier::Open,
             aggregation: tenzro_types::training::AggregationRule::Mean,
+            clip_l2_norm: None,
             sync_strategy: SyncStrategy::Full,
             quantization: GradientQuantization::None,
             delayed_apply: false,
@@ -1222,6 +1393,56 @@ mod tests {
         ));
 
         // Matching quantization is accepted.
+        let gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
+        state.accept_outer_gradient(gradient).unwrap();
+    }
+
+    #[test]
+    fn signature_public_key_mismatch_rejected() {
+        let spec = dummy_task();
+        let state = SyncerState::new(
+            spec.clone(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
+        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+
+        // Swap the signature's public_key so it no longer equals trainer_address.
+        let mut gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
+        gradient.signature.public_key = vec![0u8; 32];
+        let err = state.accept_outer_gradient(gradient);
+        assert!(matches!(
+            err,
+            Err(TrainingError::InvalidSignature {
+                what: "outer gradient: signature public_key does not match trainer_address",
+            })
+        ));
+    }
+
+    #[test]
+    fn tampered_signature_bytes_rejected() {
+        let spec = dummy_task();
+        let state = SyncerState::new(
+            spec.clone(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
+        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+
+        // Keep a matching public_key/address pair but corrupt the signature.
+        let mut gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
+        gradient.signature.bytes[0] ^= 0xff;
+        let err = state.accept_outer_gradient(gradient);
+        assert!(matches!(
+            err,
+            Err(TrainingError::InvalidSignature {
+                what: "outer gradient: Ed25519 signature verification failed",
+            })
+        ));
+
+        // A well-formed gradient from the same trainer is still accepted.
         let gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
         state.accept_outer_gradient(gradient).unwrap();
     }

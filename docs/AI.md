@@ -397,6 +397,12 @@ Sponsors pay for what they use: Open is the cheap default, Verified adds an atte
 
 **Stake bonding.** Every trainer escrows TNZO before being assigned fragments. Misbehavior — invalid signatures, missed deadlines, divergent outputs under redundant assignment, or losing a fraud-proof challenge — is slashed proportionally.
 
+**Gradient norm clipping.** The task carries an optional `clip_l2_norm` cap. Before aggregation the syncer scales any accepted outer gradient whose global L2 norm exceeds the cap back down to exactly the cap; smaller gradients pass through untouched. This bounds the influence a single trainer — honest or adversarial — can exert on the aggregate in one round, independent of the aggregation rule, and is the cheapest first line of defense against a runaway or crafted gradient. The Python reference trainer honors the identical cap when producing its local outer gradient, so an honest trainer is never clipped at the syncer; a gradient the syncer has to clip is one whose producer ignored the budget.
+
+**Gradient signature binding.** Every `OuterGradient` carries the trainer's Ed25519 signature over a domain-separated encoding of its own fields. At accept time the syncer checks that the signing public key equals the declared `trainer_address` and that the signature verifies over that encoding; the Python reference trainer produces a byte-identical encoding when it signs. A submission with a mismatched key or a tampered payload is rejected before it can be buffered, so a trainer cannot forge a contribution under another trainer's identity.
+
+**Slash-and-evict on rejected contribution.** A submission that deviates from the task spec the trainer enrolled under — bad signature, wrong quantization, out-of-stage fragment, missing attestation at a tier that requires it, or a malformed / hash-mismatched payload — is not merely dropped: the trainer is evicted from the run for the remainder of the run and its bond is slashed. The same applies post-aggregation to a buffered gradient the syncer had to clip (it exceeded the round's norm budget) or whose cosine agreement with the round aggregate fell below the run's floor. Benign timing or scope races an honest trainer can lose — a straggler submitting for a stale round, or for a fragment outside the current active shard — are dropped but never slashed. Eviction is terminal within a run; there is no down-weighted reputation and no rehabilitation, so an evicted trainer must re-enroll in a future run to participate again.
+
 **Byzantine-robust aggregation.** A trainer might submit a numerically valid but adversarially crafted gradient (e.g., to insert a backdoor). The syncer applies one of:
 - **Trimmed mean** — discard the top and bottom α% of gradients per parameter, mean the rest.
 - **Coordinate-wise median** — robust to up to f < M/2 Byzantine learners.
@@ -546,6 +552,7 @@ Sponsor escrows `R` TNZO per `TrainingTask`. After each round in which a trainer
 
 #### 7.6.2 Slashing Conditions
 
+- **Rejected contribution** → a submission that deviates from the enrolled task spec (bad signature, wrong quantization, out-of-stage fragment, missing required attestation, malformed payload), or a buffered gradient over the round's norm budget or below the agreement floor, slashes the trainer's bond and evicts it from the run. Terminal for the run.
 - **Failed TEE attestation** → trainer's stake is slashed proportional to rounds completed.
 - **Divergent gradient on redundant assignment** → outlier trainer slashed, model state rolled back to last unanimous round.
 - **Syncer fraud proof accepted** → syncer's stake fully slashed, run paused for re-election.

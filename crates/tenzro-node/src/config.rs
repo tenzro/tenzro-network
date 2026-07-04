@@ -1107,6 +1107,33 @@ impl CantonIdentityProvidersConfig {
     }
 }
 
+/// Which data-availability backend the node uses for off-loaded receipt and
+/// agent-memory payloads.
+///
+/// Only the async DA consumers (agent-memory archival) honor `IrohBlobs`; the
+/// settlement-channel receipt path is a synchronous storage trait and always
+/// uses the in-process inline store regardless of this setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaBackendSelector {
+    /// Use the iroh-blobs backend when the iroh resolver is bound, otherwise
+    /// fall back to the in-process inline store. This is the default.
+    Auto,
+    /// Force the in-process inline store even when iroh is available. Useful
+    /// for minimal single-node operators who do not want blobs advertised on
+    /// the iroh data plane.
+    Inline,
+    /// Require the iroh-blobs backend. Node startup fails if the iroh resolver
+    /// is not bound.
+    IrohBlobs,
+}
+
+impl Default for DaBackendSelector {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -1250,6 +1277,12 @@ pub struct NodeConfig {
     #[serde(default)]
     pub iroh: tenzro_iroh::TenzroIrohConfig,
 
+    /// Data-availability backend selector for off-loaded payloads (agent-memory
+    /// archival). `Auto` (default) prefers iroh-blobs when the resolver is
+    /// bound; `Inline` forces the in-process store; `IrohBlobs` requires iroh.
+    #[serde(default)]
+    pub da_backend: DaBackendSelector,
+
     /// Optional Canton/DAML ERC-8004 mirror wiring. When present, every
     /// TDIP machine registration also buffers (or, with a wired
     /// `DamlMirrorTransport`, submits) a `RegistryAdmin.Register`
@@ -1391,6 +1424,7 @@ impl NodeConfig {
             external_mcp_addr: None,
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
         }
@@ -1430,6 +1464,7 @@ impl NodeConfig {
             external_mcp_addr: None,
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
         }
@@ -1469,6 +1504,7 @@ impl NodeConfig {
             external_mcp_addr: None,
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
         }
@@ -1508,6 +1544,7 @@ impl NodeConfig {
             external_mcp_addr: None,
             geography: None,
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
+            da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
         }

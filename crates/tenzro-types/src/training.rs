@@ -316,6 +316,16 @@ pub struct TrainingTaskSpec {
     pub tier: TrainingTier,
     /// Aggregation rule the syncer must apply.
     pub aggregation: AggregationRule,
+    /// Per-fragment L2-norm cap applied to every accepted outer gradient
+    /// before aggregation. `None` disables clipping. A gradient whose L2
+    /// norm exceeds this value is scaled down to exactly this norm; smaller
+    /// gradients pass through unchanged. This is the first line of Byzantine
+    /// defense: it bounds the influence any single learner (honest or
+    /// adversarial) can exert on the aggregate in one round, independent of
+    /// the aggregation rule. The Python reference trainer honors the same cap
+    /// when producing its local outer gradient, so an honest trainer never
+    /// gets clipped at the syncer.
+    pub clip_l2_norm: Option<f32>,
     /// Fragment sync scheduling (full every round vs. Streaming DiLoCo
     /// shard rotation).
     pub sync_strategy: SyncStrategy,

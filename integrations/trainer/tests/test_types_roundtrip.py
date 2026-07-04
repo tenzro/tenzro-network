@@ -183,6 +183,7 @@ def test_training_task_spec_roundtrip():
         ),
         tier=TrainingTier.OPEN,
         aggregation=AggregationRule.mean(),
+        clip_l2_norm=0.08,
         sync_strategy=SyncStrategy.streaming(4),
         quantization=GradientQuantization.int4(64),
         delayed_apply=True,
@@ -205,6 +206,7 @@ def test_training_task_spec_roundtrip():
     assert j["delayed_apply"] is True
     assert j["pipeline"] == {"num_stages": 2}
     assert j["min_throughput"] is None
+    assert j["clip_l2_norm"] == 0.08
     assert TrainingTaskSpec.from_json(j) == spec
     # Full/None/no-pipeline variant.
     spec2 = TrainingTaskSpec.from_json(

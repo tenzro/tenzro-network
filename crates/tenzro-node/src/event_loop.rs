@@ -2526,7 +2526,11 @@ impl EventLoop {
                                     let fragment = g.fragment;
                                     let trainer_did = g.trainer_did.clone();
                                     if let Some(ref runtime) = self.training_runtime {
-                                        match runtime.syncers.get(&task_id) {
+                                        // Clone the Arc out of the DashMap before any
+                                        // `.await` so we never hold a `Ref` guard across
+                                        // the eviction await (DashMap deadlock safety).
+                                        let state = runtime.syncers.get(&task_id).map(|s| s.clone());
+                                        match state {
                                             Some(state) => match state.accept_outer_gradient(g) {
                                                 Ok(()) => info!(
                                                     %task_id,
@@ -2535,12 +2539,35 @@ impl EventLoop {
                                                     %trainer_did,
                                                     "Ingested OuterGradient from gossip"
                                                 ),
-                                                Err(e) => warn!(
-                                                    %task_id,
-                                                    %trainer_did,
-                                                    error = %e,
-                                                    "Failed to accept gossiped OuterGradient"
-                                                ),
+                                                Err(e) => {
+                                                    // A submission that deviates from the task
+                                                    // spec it enrolled under (bad signature,
+                                                    // wrong quantization, out-of-stage fragment,
+                                                    // missing attestation, malformed payload) is
+                                                    // slashed + evicted. Benign timing/scope
+                                                    // races (stale round, inactive shard) are not.
+                                                    if e.is_slashable_rejection() {
+                                                        warn!(
+                                                            %task_id,
+                                                            %trainer_did,
+                                                            error = %e,
+                                                            "Slashing + evicting trainer for poison OuterGradient"
+                                                        );
+                                                        state
+                                                            .evict_trainer(
+                                                                &trainer_did,
+                                                                tenzro_training::slashing::EvictionReason::AcceptRejected,
+                                                            )
+                                                            .await;
+                                                    } else {
+                                                        warn!(
+                                                            %task_id,
+                                                            %trainer_did,
+                                                            error = %e,
+                                                            "Failed to accept gossiped OuterGradient"
+                                                        );
+                                                    }
+                                                }
                                             },
                                             None => debug!(
                                                 %task_id,
