@@ -84,7 +84,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **Identity (TDIP):** `register_identity`, `resolve_did`, `set_username`, `resolve_username`, `import_identity`, `list_identities`
 
-**AI Models & Inference:** `list_models`, `chat`, `inference_request`, `serve_model`, `stop_model`, `download_model`, `list_model_endpoints`. `serve_model` auto-clusters a model that exceeds one host — it reads the GGUF header for shape, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline; pass `force_cluster` to split even when it fits one host, `force_single` to pin it to one host, or `visibility="private"` to keep it local/LAN-only instead of gossiping it to the network.
+**AI Models & Inference:** `list_models`, `chat`, `inference_request`, `serve_model`, `stop_model`, `download_model`, `list_model_endpoints`, `get_provenance`. `serve_model` auto-clusters a model that exceeds one host — it reads the GGUF header for shape, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline; pass `force_cluster` to split even when it fits one host, `force_single` to pin it to one host, or `visibility="private"` to keep it local/LAN-only instead of gossiping it to the network. `list_model_endpoints` returns each service's `iroh_endpoint_id` (the serving node's iroh `EndpointId`, empty for local-only); cross-node inference routes to it over the `tenzro/infer` ALPN. `get_provenance` resolves the cached synthetic-content manifest (EU AI Act Art. 50(2)) for generated output by its `content_hash`.
 
 **Multi-Modal Inference (17 wrappers across 7 modalities):**
 - **Forecast** — `list_forecast_catalog`, `list_forecast_models`, `load_forecast_model`, `forecast` (TimesFM 2.5)
@@ -127,7 +127,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **Distributed MoE Serving:** `moe_shard_map`, `moe_plan_dispatch`, `moe_replication_policy`, `moe_catalog_shape` — expert-shard placement, top-k dispatch planning, and replication policy across providers.
 
-**Tenzro Train Inspection:** `training_list_runs`, `training_get_run`, `training_get_receipt`, `training_get_sealed_manifest` — read-side view of decentralized training runs: run state per task, sealed receipts for finalized runs, and Confidential-tier sealed-shard manifests.
+**Tenzro Train Inspection:** `training_list_runs`, `training_get_run`, `training_get_receipt`, `training_get_sealed_manifest`, `get_trainer_daemon_status` — read-side view of decentralized training runs: run state per task, sealed receipts for finalized runs, Confidential-tier sealed-shard manifests, and the trainer auto-provisioning daemon's running state and live trainer count.
 
 **Local Discovery & LAN Clustering:** `local_peers`, `node_reachability`, `node_profile`, `cluster_plan`, `cluster_preview` — same-segment peers via mDNS, the node's reachability tier, its hardware self-profile, and the layer-wise pipeline plan when a model needs more than one box. `cluster_preview` previews placement for a downloaded model from the node's live view (derives shape from the GGUF header, discovers LAN members) — no manual dimensions required; `cluster_plan` is the lower-level form taking explicit dimensions + a members list.
 

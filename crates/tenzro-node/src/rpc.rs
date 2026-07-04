@@ -6838,10 +6838,11 @@ async fn handle_iroh_list_alpns(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let _ = iroh_resolver_or_err(node)?;
-    // The shared router binds three ALPNs at startup (see
-    // `init_ai_infrastructure`): iroh-blobs (data plane), and the two
-    // JSON-RPC ALPNs (A2A always; MCP follow-up). Report A2A as bound
-    // iff the deferred dispatcher slot exists on the node.
+    // The shared router binds these ALPNs at bind time (see the resolver's
+    // `bind_with_jsonrpc`): iroh-blobs (data plane) plus the JSON-RPC ALPNs
+    // for A2A, MCP, MoE, and inference. All are registered whenever the
+    // resolver is present — the JSON-RPC ones via bind-time trampolines that
+    // main.rs later fills with the node-backed dispatchers.
     let mut alpns = vec![
         serde_json::json!({
             "alpn": "iroh-blobs",
@@ -6852,6 +6853,22 @@ async fn handle_iroh_list_alpns(
         alpns.push(serde_json::json!({
             "alpn": String::from_utf8_lossy(tenzro_iroh::ALPN_A2A).to_string(),
             "description": "A2A JSON-RPC 2.0 over iroh (mirrors POST /a2a)",
+        }));
+    }
+    if node.iroh_mcp_handler.is_some() {
+        alpns.push(serde_json::json!({
+            "alpn": String::from_utf8_lossy(tenzro_iroh::ALPN_MCP).to_string(),
+            "description": "MCP JSON-RPC over iroh (mirrors the MCP server)",
+        }));
+    }
+    alpns.push(serde_json::json!({
+        "alpn": String::from_utf8_lossy(tenzro_iroh::ALPN_MOE).to_string(),
+        "description": "Mixture-of-experts expert dispatch over iroh",
+    }));
+    if node.iroh_infer_dispatcher.is_some() {
+        alpns.push(serde_json::json!({
+            "alpn": String::from_utf8_lossy(tenzro_iroh::ALPN_INFER).to_string(),
+            "description": "Inference JSON-RPC over iroh (mirrors tenzro_chat)",
         }));
     }
     Ok(serde_json::json!({ "alpns": alpns }))
@@ -6867,6 +6884,13 @@ async fn handle_iroh_get_info(
     let mut alpns = vec!["iroh-blobs"];
     if node.iroh_a2a_dispatcher.is_some() {
         alpns.push("tenzro/a2a");
+    }
+    if node.iroh_mcp_handler.is_some() {
+        alpns.push("tenzro/mcp");
+    }
+    alpns.push("tenzro/moe");
+    if node.iroh_infer_dispatcher.is_some() {
+        alpns.push("tenzro/infer");
     }
     Ok(serde_json::json!({
         "endpoint_id": id.to_string(),
@@ -18214,6 +18238,11 @@ async fn handle_serve_model(
                 let api_endpoint_c = api_endpoint.clone();
                 let model_id_c = model_id.to_string();
                 let visibility_c = visibility.clone();
+                let iroh_endpoint_id_c = node
+                    .iroh_resolver
+                    .as_ref()
+                    .map(|r| r.endpoint_id().to_string())
+                    .unwrap_or_default();
                 tokio::spawn(async move {
                     // No local weights to hash for an external engine; peers
                     // route to the upstream via the node's RPC, integrity is
@@ -18238,6 +18267,7 @@ async fn handle_serve_model(
                         timestamp: chrono::Utc::now().timestamp_millis(),
                         withdrawn: false,
                         rpc_endpoint: api_endpoint_c,
+                        iroh_endpoint_id: iroh_endpoint_id_c,
                         weights_sha256: String::new(),
                         ..Default::default()
                     };
@@ -18593,6 +18623,11 @@ async fn handle_serve_model(
         let api_endpoint_c = api_endpoint.clone();
         let model_id_c = model_id.to_string();
         let gguf_path_c = gguf_path.clone();
+        let iroh_endpoint_id_c = node
+            .iroh_resolver
+            .as_ref()
+            .map(|r| r.endpoint_id().to_string())
+            .unwrap_or_default();
         tokio::spawn(async move {
             // Hash the served weights off the async executor — a GGUF can be
             // multiple GB. Empty hash on failure is a soft signal (peers can
@@ -18623,6 +18658,7 @@ async fn handle_serve_model(
                 timestamp: chrono::Utc::now().timestamp_millis(),
                 withdrawn: false,
                 rpc_endpoint: api_endpoint_c,
+                iroh_endpoint_id: iroh_endpoint_id_c,
                 weights_sha256,
                 ..Default::default()
             };
@@ -19547,12 +19583,9 @@ async fn handle_load_text_segmentation_model(
         data: None,
     })?;
 
-    // Resolve models_dir (same pattern as node.rs:3964-3975).
-    let models_dir = node.config().models_dir.clone().unwrap_or_else(|| {
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/tenzro".into()))
-            .join(".tenzro")
-            .join("models")
-    });
+    // Weights land on the persistent data_dir volume (see
+    // NodeConfig::effective_models_dir) so they survive a restart.
+    let models_dir = node.config().effective_models_dir();
     std::fs::create_dir_all(&models_dir).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("failed to create models dir: {}", e),
@@ -20304,6 +20337,119 @@ fn sign_local_response(
     }
 }
 
+/// Forward a `tenzro_chat` JSON-RPC frame to a network model provider.
+///
+/// Peer-identity path first: when the provider advertised an iroh
+/// `EndpointId`, dial it on the `tenzro/infer` ALPN (Pkarr-resolved,
+/// NAT-agnostic). This is the only path that reaches a provider whose
+/// `rpc_endpoint` is a loopback address — which is every non-RPC-public
+/// and every NATed node. HTTP is the fallback, tried only when there is no
+/// iroh id or the iroh dial fails at the transport layer, and it is bounded
+/// by a short connect timeout so a wrong/unreachable address fails fast
+/// instead of hanging the caller.
+/// Resolve the iroh `EndpointId` a network provider advertised for `model_id`,
+/// skipping this node's own announcement so we never self-dial. Returns `None`
+/// when no peer advertises the model with a non-empty iroh endpoint id (the
+/// caller then falls back to the announced HTTP `rpc_endpoint`).
+fn network_provider_iroh_endpoint(node: &Arc<TenzroNode>, model_id: &str) -> Option<String> {
+    let own = node
+        .iroh_resolver
+        .as_ref()
+        .map(|r| r.endpoint_id().to_string());
+    for entry in node.network_models_snapshot() {
+        let reg = &entry.registration;
+        if reg.model_id != model_id || reg.iroh_endpoint_id.is_empty() {
+            continue;
+        }
+        if own.as_deref() == Some(reg.iroh_endpoint_id.as_str()) {
+            continue;
+        }
+        return Some(reg.iroh_endpoint_id.clone());
+    }
+    None
+}
+
+async fn forward_network_chat(
+    node: &Arc<TenzroNode>,
+    iroh_endpoint_id: Option<&str>,
+    http_endpoint: &str,
+    provider_name: &str,
+    forward_body: &Value,
+) -> std::result::Result<Value, JsonRpcError> {
+    // iroh first.
+    if let (Some(endpoint_id_str), Some(resolver)) = (iroh_endpoint_id, node.iroh_resolver.as_ref())
+    {
+        match endpoint_id_str.parse::<tenzro_iroh::EndpointId>() {
+            Ok(endpoint_id) => {
+                let frame = bytes::Bytes::from(serde_json::to_vec(forward_body).map_err(|e| {
+                    JsonRpcError {
+                        code: -32603,
+                        message: format!("encode infer frame: {e}"),
+                        data: None,
+                    }
+                })?);
+                match tenzro_iroh::jsonrpc_call(
+                    resolver.endpoint(),
+                    endpoint_id,
+                    tenzro_iroh::ALPN_INFER,
+                    frame,
+                )
+                .await
+                {
+                    Ok(resp_bytes) => {
+                        return serde_json::from_slice(&resp_bytes).map_err(|e| JsonRpcError {
+                            code: -32000,
+                            message: format!("parse provider infer response: {e}"),
+                            data: None,
+                        });
+                    }
+                    Err(e) => {
+                        // Transport-level failure only — fall through to HTTP.
+                        tracing::debug!(
+                            provider = %provider_name,
+                            "infer iroh dispatch failed, falling back to http: {e}"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    provider = %provider_name,
+                    endpoint_id = endpoint_id_str,
+                    "provider advertised unparseable iroh endpoint id: {e}"
+                );
+            }
+        }
+    }
+
+    // HTTP fallback. A loopback `rpc_endpoint` will refuse the connection
+    // fast; a wrong public address is bounded by the connect timeout rather
+    // than the (long) total-request timeout, so the caller is never pinned
+    // for two minutes on an unreachable peer.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let resp = client
+        .post(http_endpoint)
+        .json(forward_body)
+        .send()
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to reach provider {provider_name} at {http_endpoint}: {e}"),
+            data: None,
+        })?;
+
+    resp.json().await.map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to parse provider response: {e}"),
+        data: None,
+    })
+}
+
 async fn handle_chat_simple(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -20355,10 +20501,39 @@ async fn handle_chat_simple(
     let mut service = node.get_model_service(model_query)
         .or_else(|| node.find_model_service_by_model_id(model_query));
 
+    // Sibling to `service` for network-resolved models: the provider's iroh
+    // `EndpointId` (hex) carried in the signed announcement. Threaded here
+    // because `ModelServiceInstance` has no iroh field — the network branch
+    // dials this identity over the `tenzro/infer` ALPN before falling back to
+    // the loopback-only `api_endpoint`.
+    let mut net_iroh_endpoint_id: Option<String> = None;
+
     if service.is_none() && !node.served_models.contains_key(model_query) {
+        // Identity of this node's own iroh endpoint, if bound — used to skip
+        // any announcement that resolves back to us (self-dial guard).
+        let own_endpoint_id = node
+            .iroh_resolver
+            .as_ref()
+            .map(|r| r.endpoint_id().to_string());
+
         for entry in node.network_models_snapshot() {
             let reg = &entry.registration;
             if reg.model_id == model_query {
+                // Self-dial guard: never treat our own announcement as a
+                // remote provider. A node that both serves and consumes would
+                // otherwise dial its own loopback endpoint and hang.
+                let is_self = own_endpoint_id
+                    .as_deref()
+                    .is_some_and(|own| !reg.iroh_endpoint_id.is_empty()
+                        && reg.iroh_endpoint_id == own);
+                if is_self {
+                    continue;
+                }
+                net_iroh_endpoint_id = if reg.iroh_endpoint_id.is_empty() {
+                    None
+                } else {
+                    Some(reg.iroh_endpoint_id.clone())
+                };
                 service = Some(tenzro_types::model::ModelServiceInstance {
                     instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
                     model_id: reg.model_id.clone(),
@@ -20382,6 +20557,7 @@ async fn handle_chat_simple(
                         .unwrap_or_default()
                         .as_secs(),
                     load_info: None,
+                    iroh_endpoint_id: reg.iroh_endpoint_id.clone(),
                 });
                 break;
             }
@@ -20539,42 +20715,36 @@ async fn handle_chat_simple(
             "tenzro_provenance": provenance,
         }))
     } else if let Some(ref svc) = service {
-        // === Network model — forward to remote provider via JSON-RPC ===
-        let remote_url = &svc.api_endpoint;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
+        // === Network model — forward to remote provider ===
+        //
+        // Peer-identity path first: dial the provider's iroh `EndpointId`
+        // (Pkarr-resolved, NAT-agnostic) on the `tenzro/infer` ALPN. This is
+        // the only path that works when the provider advertises a loopback
+        // `rpc_endpoint` (every non-RPC-public and every NATed node does).
+        // HTTP is the fallback, and only for providers that advertise a
+        // genuinely reachable `rpc_endpoint`.
+        let forward_params = serde_json::json!({
+            "model_id": svc.model_id,
+            "message": message,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+            "require_signed": require_signed,
+        });
         let forward_body = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "tenzro_chat",
-            "params": {
-                "model_id": svc.model_id,
-                "message": message,
-                "max_tokens": config.max_tokens,
-                "temperature": config.temperature,
-                "require_signed": require_signed,
-            },
+            "params": forward_params,
             "id": 1,
         });
 
-        let resp = client
-            .post(remote_url)
-            .json(&forward_body)
-            .send()
-            .await
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Failed to reach provider at {}: {}", remote_url, e),
-                data: None,
-            })?;
-
-        let body: Value = resp.json().await.map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Failed to parse provider response: {}", e),
-            data: None,
-        })?;
+        let body: Value = forward_network_chat(
+            node,
+            net_iroh_endpoint_id.as_deref(),
+            &svc.api_endpoint,
+            &svc.provider_name,
+            &forward_body,
+        )
+        .await?;
 
         // Extract output from JSON-RPC response
         let rpc_result = body.get("result").unwrap_or(&body);
@@ -20748,10 +20918,33 @@ async fn handle_chat_rich(
     let mut service = node.get_model_service(model_query)
         .or_else(|| node.find_model_service_by_model_id(model_query));
 
+    // Provider iroh `EndpointId` for a network-resolved model (see the
+    // simple-shape handler for the full rationale). Threaded as a sibling
+    // because `ModelServiceInstance` carries no iroh field.
+    let mut net_iroh_endpoint_id: Option<String> = None;
+
     if service.is_none() && !node.served_models.contains_key(model_query) {
+        let own_endpoint_id = node
+            .iroh_resolver
+            .as_ref()
+            .map(|r| r.endpoint_id().to_string());
+
         for entry in node.network_models_snapshot() {
             let reg = &entry.registration;
             if reg.model_id == model_query {
+                // Self-dial guard: skip our own announcement.
+                let is_self = own_endpoint_id
+                    .as_deref()
+                    .is_some_and(|own| !reg.iroh_endpoint_id.is_empty()
+                        && reg.iroh_endpoint_id == own);
+                if is_self {
+                    continue;
+                }
+                net_iroh_endpoint_id = if reg.iroh_endpoint_id.is_empty() {
+                    None
+                } else {
+                    Some(reg.iroh_endpoint_id.clone())
+                };
                 service = Some(tenzro_types::model::ModelServiceInstance {
                     instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
                     model_id: reg.model_id.clone(),
@@ -20776,6 +20969,7 @@ async fn handle_chat_rich(
                         .unwrap_or_default()
                         .as_secs(),
                     load_info: None,
+                    iroh_endpoint_id: reg.iroh_endpoint_id.clone(),
                 });
                 break;
             }
@@ -21017,13 +21211,8 @@ async fn handle_chat_rich(
         // ── network forwarding path ──────────────────────────────────
         // Spec requires the rich shape to forward intact — no
         // down-conversion. We forward `messages`, `system`, `tools`, and
-        // generation config verbatim.
-        let remote_url = &svc.api_endpoint;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
+        // generation config verbatim. Peer-identity (iroh) first, then HTTP
+        // fallback — see `forward_network_chat`.
         let mut forward_params = serde_json::Map::new();
         forward_params.insert("model_id".to_string(), serde_json::json!(svc.model_id));
         forward_params.insert("messages".to_string(), messages_value.clone());
@@ -21057,22 +21246,14 @@ async fn handle_chat_rich(
             "id": 1,
         });
 
-        let resp = client
-            .post(remote_url)
-            .json(&forward_body)
-            .send()
-            .await
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Failed to reach provider at {}: {}", remote_url, e),
-                data: None,
-            })?;
-
-        let body: Value = resp.json().await.map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Failed to parse provider response: {}", e),
-            data: None,
-        })?;
+        let body: Value = forward_network_chat(
+            node,
+            net_iroh_endpoint_id.as_deref(),
+            &svc.api_endpoint,
+            &svc.provider_name,
+            &forward_body,
+        )
+        .await?;
 
         node.metrics().record_inference();
 
@@ -21558,8 +21739,64 @@ async fn handle_openai_chat_completions(
     }
 
     // Resolve the model: try instance_id, then model_id in service registry, then served_models
-    let service = node.get_model_service(model_query)
+    let mut service = node.get_model_service(model_query)
         .or_else(|| node.find_model_service_by_model_id(model_query));
+
+    // Provider's iroh EndpointId for the network path (NAT-agnostic dispatch).
+    // Populated only when the model is served by a remote peer.
+    let mut net_iroh_endpoint_id: Option<String> = None;
+    if service.is_none() && !node.served_models.contains_key(model_query) {
+        let own_endpoint_id = node
+            .iroh_resolver
+            .as_ref()
+            .map(|r| r.endpoint_id().to_string());
+        for entry in node.network_models_snapshot() {
+            let reg = &entry.registration;
+            if reg.model_id.as_str() != model_query.as_str() {
+                continue;
+            }
+            // Never resolve to our own announcement — that would dial our
+            // own loopback endpoint.
+            let is_self = own_endpoint_id.as_deref().is_some_and(|own| {
+                !reg.iroh_endpoint_id.is_empty() && reg.iroh_endpoint_id == own
+            });
+            if is_self {
+                continue;
+            }
+            net_iroh_endpoint_id = if reg.iroh_endpoint_id.is_empty() {
+                None
+            } else {
+                Some(reg.iroh_endpoint_id.clone())
+            };
+            service = Some(tenzro_types::model::ModelServiceInstance {
+                instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
+                model_id: reg.model_id.clone(),
+                model_name: reg.name.clone(),
+                provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider)
+                    .unwrap_or_default(),
+                provider_name: reg.provider.clone(),
+                location: tenzro_types::model::ModelLocation::Network,
+                api_endpoint: reg.rpc_endpoint.clone(),
+                mcp_endpoint: String::new(),
+                status: tenzro_types::model::ServiceStatus::Online,
+                parameters: reg.parameters.clone(),
+                pricing: tenzro_types::model::PricingConfig {
+                    price_per_input_token: reg.pricing.per_token.unwrap_or(0),
+                    price_per_output_token: reg.pricing.per_token.unwrap_or(0),
+                    minimum_price: reg.pricing.per_request,
+                    pricing_model: tenzro_types::model::PricingModel::PerToken,
+                },
+                created_at: 0,
+                last_seen: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                load_info: None,
+                iroh_endpoint_id: reg.iroh_endpoint_id.clone(),
+            });
+            break;
+        }
+    }
 
     // Determine if this is a local or network model
     let is_local = if let Some(ref svc) = service {
@@ -21867,8 +22104,15 @@ async fn handle_openai_chat_completions(
         }
     } else if let Some(ref svc) = service {
         // === NETWORK MODEL — forward to remote provider ===
+        // A fast connect timeout means a loopback/unreachable `rpc_endpoint`
+        // fails within seconds rather than pinning the caller on the default
+        // (long) request timeout. No total-request timeout is set — a
+        // legitimate SSE stream may run for minutes.
         let remote_url = format!("{}/chat/completions", svc.api_endpoint);
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         let forward_body = serde_json::json!({
             "model": svc.model_id,
@@ -22109,63 +22353,58 @@ async fn handle_openai_chat_completions(
             }
         } else {
             // === NON-STREAMING for network model ===
-            match client.post(&remote_url).json(&forward_body).send().await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    match resp.json::<Value>().await {
-                        Ok(mut body) => {
-                            // Best-effort verification of any provider-attached
-                            // provenance manifest against the pinned
-                            // announcement key. Invalid manifests are stripped
-                            // so callers never see an unverified stamp.
-                            if let Some(prov) = body
-                                .get("tenzro_provenance")
-                                .filter(|v| !v.is_null())
-                                .cloned()
-                            {
-                                let content = body
-                                    .get("choices")
-                                    .and_then(|c| c.get(0))
-                                    .and_then(|c| c.get("message"))
-                                    .and_then(|m| m.get("content"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let pinned = pinned_announcement_pubkey(
-                                    &node,
-                                    &svc.model_id,
-                                    &svc.provider_name,
-                                );
-                                if verify_forwarded_provenance(
-                                    Some(&prov),
-                                    content.as_bytes(),
-                                    &svc.model_id,
-                                    pinned.as_deref(),
-                                    &svc.provider_name,
-                                )
-                                .is_none()
-                                    && let Some(obj) = body.as_object_mut()
-                                {
-                                    obj.remove("tenzro_provenance");
-                                }
-                            }
-                            (
-                                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK),
-                                Json(body),
-                            )
-                                .into_response()
+            // iroh-first (NAT-agnostic, addressed by the provider's advertised
+            // EndpointId) with HTTP fallback to the announced `rpc_endpoint`.
+            match forward_network_chat(
+                &node,
+                net_iroh_endpoint_id.as_deref(),
+                &remote_url,
+                &svc.provider_name,
+                &forward_body,
+            )
+            .await
+            {
+                Ok(mut body) => {
+                    // Best-effort verification of any provider-attached
+                    // provenance manifest against the pinned announcement key.
+                    // Invalid manifests are stripped so callers never see an
+                    // unverified stamp.
+                    if let Some(prov) = body
+                        .get("tenzro_provenance")
+                        .filter(|v| !v.is_null())
+                        .cloned()
+                    {
+                        let content = body
+                            .get("choices")
+                            .and_then(|c| c.get(0))
+                            .and_then(|c| c.get("message"))
+                            .and_then(|m| m.get("content"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let pinned = pinned_announcement_pubkey(
+                            &node,
+                            &svc.model_id,
+                            &svc.provider_name,
+                        );
+                        if verify_forwarded_provenance(
+                            Some(&prov),
+                            content.as_bytes(),
+                            &svc.model_id,
+                            pinned.as_deref(),
+                            &svc.provider_name,
+                        )
+                        .is_none()
+                            && let Some(obj) = body.as_object_mut()
+                        {
+                            obj.remove("tenzro_provenance");
                         }
-                        Err(e) => json_error_response(
-                            StatusCode::BAD_GATEWAY,
-                            &format!("Failed to parse provider response: {}", e),
-                            "server_error",
-                            "bad_gateway",
-                        ),
                     }
+                    (StatusCode::OK, Json(body)).into_response()
                 }
                 Err(e) => json_error_response(
                     StatusCode::BAD_GATEWAY,
-                    &format!("Failed to reach provider at {}: {}", remote_url, e),
+                    &format!("Failed to reach provider: {}", e.message),
                     "server_error",
                     "provider_unreachable",
                 ),
@@ -22365,9 +22604,21 @@ pub async fn handle_chat_stream_rich(
         .get_model_service(&model_query)
         .or_else(|| node.find_model_service_by_model_id(&model_query));
     if service.is_none() && !node.served_models.contains_key(&model_query) {
+        let own_endpoint_id = node
+            .iroh_resolver
+            .as_ref()
+            .map(|r| r.endpoint_id().to_string());
         for entry in node.network_models_snapshot() {
             let reg = &entry.registration;
             if reg.model_id == model_query {
+                // Never resolve to our own announcement — that would proxy
+                // the SSE stream back into our own loopback endpoint.
+                let is_self = own_endpoint_id.as_deref().is_some_and(|own| {
+                    !reg.iroh_endpoint_id.is_empty() && reg.iroh_endpoint_id == own
+                });
+                if is_self {
+                    continue;
+                }
                 service = Some(tenzro_types::model::ModelServiceInstance {
                     instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
                     model_id: reg.model_id.clone(),
@@ -22392,6 +22643,7 @@ pub async fn handle_chat_stream_rich(
                         .unwrap_or_default()
                         .as_secs(),
                     load_info: None,
+                    iroh_endpoint_id: reg.iroh_endpoint_id.clone(),
                 });
                 break;
             }
@@ -22772,6 +23024,7 @@ async fn handle_list_model_endpoints(
                 .unwrap_or_default()
                 .as_secs(),
             load_info: None,
+            iroh_endpoint_id: reg.iroh_endpoint_id.clone(),
         });
     }
     let entries: Vec<Value> = services
@@ -22785,6 +23038,7 @@ async fn handle_list_model_endpoints(
                 "location": svc.location.to_string(),
                 "api_endpoint": svc.api_endpoint,
                 "mcp_endpoint": svc.mcp_endpoint,
+                "iroh_endpoint_id": svc.iroh_endpoint_id,
                 "status": svc.status.to_string(),
                 "parameters": svc.parameters,
                 "pricing": {
@@ -34698,35 +34952,32 @@ async fn handle_agent_payment_pipeline(
 
         (result.text.clone(), result.input_tokens, result.output_tokens)
     } else if let Some(ref svc) = service {
-        // Remote inference via network provider
-        let chat_url = format!("{}/v1/chat/completions", svc.api_endpoint);
-        let client = reqwest::Client::new();
+        // Remote inference via network provider — iroh-first (NAT-agnostic,
+        // addressed by the provider's advertised EndpointId) with an HTTP
+        // fallback to the announced `rpc_endpoint`. The iroh endpoint id is
+        // resolved from the gossip snapshot because `ModelServiceInstance`
+        // carries no iroh field.
+        let iroh_id = network_provider_iroh_endpoint(node, &model_id);
+        let http_endpoint = format!("{}/v1/chat/completions", svc.api_endpoint);
         let body = serde_json::json!({
             "model": model_id,
             "messages": [{"role": "user", "content": message}],
             "max_tokens": max_tokens,
             "temperature": temperature,
         });
-        let resp = client
-            .post(&chat_url)
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(120))
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::warn!(model = %model_id, endpoint = %svc.api_endpoint, error = %e, "Remote inference request failed");
-                JsonRpcError {
-                    code: -32000,
-                    message: "remote provider unavailable".to_string(),
-                    data: None,
-                }
-            })?;
-
-        let resp_json: Value = resp.json().await.map_err(|e| {
-            tracing::warn!(model = %model_id, endpoint = %svc.api_endpoint, error = %e, "Failed to parse remote inference response");
+        let resp_json = forward_network_chat(
+            node,
+            iroh_id.as_deref(),
+            &http_endpoint,
+            &svc.provider_name,
+            &body,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(model = %model_id, endpoint = %svc.api_endpoint, error = %e.message, "Remote inference request failed");
             JsonRpcError {
                 code: -32000,
-                message: "remote provider returned an invalid response".to_string(),
+                message: "remote provider unavailable".to_string(),
                 data: None,
             }
         })?;

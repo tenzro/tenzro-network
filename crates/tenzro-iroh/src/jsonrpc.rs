@@ -78,6 +78,16 @@ pub const ALPN_MCP: &[u8] = b"tenzro/mcp";
 /// ALPN (`moe/execute`) and probe resident experts (`moe/status`).
 pub const ALPN_MOE: &[u8] = b"tenzro/moe";
 
+/// ALPN for single-model inference dispatch JSON-RPC 2.0 over iroh.
+///
+/// A consumer routing a chat request to a network-served model dials the
+/// serving peer by its iroh `EndpointId` on this ALPN and forwards a
+/// `tenzro_chat` request. Peer-identity addressing works across NAT
+/// without a reachable public HTTP endpoint, so a home/mobile provider
+/// can serve inference even when it can only advertise a loopback
+/// `rpc_endpoint`.
+pub const ALPN_INFER: &[u8] = b"tenzro/infer";
+
 /// Hard cap on a single JSON-RPC frame (request or response).
 ///
 /// 4 MiB matches the per-message ceiling used by the libp2p gossipsub
@@ -209,6 +219,14 @@ impl JsonRpcProtocol {
         Self {
             dispatcher,
             alpn_label: "moe",
+        }
+    }
+
+    /// Wrap a dispatcher for the single-model inference ALPN.
+    pub fn infer(dispatcher: Arc<dyn JsonRpcDispatcher>) -> Self {
+        Self {
+            dispatcher,
+            alpn_label: "infer",
         }
     }
 }

@@ -34,6 +34,8 @@ pub enum TrainCommand {
     InstallSealedManifest(TrainInstallSealedManifestCmd),
     /// Look up the installed sealed-shard manifest for a task
     GetSealedManifest(TrainGetSealedManifestCmd),
+    /// Report the trainer auto-provisioning daemon status on the node
+    DaemonStatus(TrainDaemonStatusCmd),
 }
 
 impl TrainCommand {
@@ -49,6 +51,7 @@ impl TrainCommand {
             Self::DecideRound(c) => c.execute().await,
             Self::InstallSealedManifest(c) => c.execute().await,
             Self::GetSealedManifest(c) => c.execute().await,
+            Self::DaemonStatus(c) => c.execute().await,
         }
     }
 }
@@ -537,6 +540,54 @@ impl TrainGetSealedManifestCmd {
             return Ok(());
         }
         println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trainer daemon status
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Parser)]
+pub struct TrainDaemonStatusCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl TrainDaemonStatusCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_getTrainerDaemonStatus", serde_json::json!({}))
+            .await?;
+
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        output::print_header("Trainer Daemon");
+        let running = result.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+        output::print_field("running", &running.to_string());
+        if !running {
+            output::print_info("No [training] section (or enabled=false) on this node.");
+            return Ok(());
+        }
+        if let Some(did) = result.get("trainer_did").and_then(|v| v.as_str()) {
+            output::print_field("trainer_did", did);
+        }
+        let live = result.get("live_trainers").and_then(|v| v.as_u64()).unwrap_or(0);
+        output::print_field("live_trainers", &live.to_string());
+        if let Some(max) = result.get("max_concurrent_trainers").and_then(|v| v.as_u64()) {
+            output::print_field("max_concurrent_trainers", &max.to_string());
+        }
         Ok(())
     }
 }

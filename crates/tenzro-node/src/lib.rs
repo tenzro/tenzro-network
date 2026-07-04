@@ -101,6 +101,7 @@ pub mod workflow_executor;
 pub mod workflow_dispatcher;
 pub mod delegation_scope_oracle;
 pub mod epoch_state_store;
+pub mod infer;
 pub mod metrics;
 pub mod model_blob_fetcher_bridge;
 pub mod moe;

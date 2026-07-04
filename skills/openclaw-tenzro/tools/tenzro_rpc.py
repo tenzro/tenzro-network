@@ -6813,6 +6813,17 @@ def training_decide_round(task_id: str) -> dict:
     return _rpc("tenzro_training_decideRound", {"task_id": task_id})
 
 
+def get_trainer_daemon_status() -> dict:
+    """Report the trainer auto-provisioning daemon status.
+
+    When the node has no `[training]` section (or `enabled = false`),
+    `running` is `false` and the DID / concurrency fields are absent.
+    Otherwise returns `{running, trainer_did, live_trainers,
+    max_concurrent_trainers}`.
+    """
+    return _rpc("tenzro_getTrainerDaemonStatus", {})
+
+
 def get_router_metrics() -> dict:
     """Read the inference router's live metrics snapshot.
 
@@ -8485,6 +8496,7 @@ COMMANDS = {
     "training_get_run": lambda args: training_get_run(args[0]),
     "training_get_receipt": lambda args: training_get_receipt(args[0]),
     "training_get_sealed_manifest": lambda args: training_get_sealed_manifest(args[0]),
+    "get_trainer_daemon_status": lambda args: get_trainer_daemon_status(),
     # ── Burn quota & mempool (Specs 3 + 6) ──
     "get_burn_quota": lambda args: get_burn_quota(),
     "get_mempool_stats": lambda args: get_mempool_stats(),

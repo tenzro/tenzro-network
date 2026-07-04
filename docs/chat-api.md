@@ -172,6 +172,10 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | -32022 | `require_signed` was set but no verifiable signed response is available — the serving node has no response signer, or the provider's provenance manifest failed verification. |
 | -32023 | Settlement failed — channel debit or token transfer rejected. `data` carries `cost_wei` and `unpaid_key` (a persisted unpaid-settlement marker for retry). Never a silent free inference. |
 
+### Provenance lookup
+
+The `tenzro_provenance` manifest attached to a chat response is also cached on the serving node keyed by its `content_hash`, so a relying party can retrieve it later without re-running inference. `tenzro_getProvenance` takes `{ "content_hash": "<32-byte hex, 0x optional>" }` and returns the same manifest, or error `-32004` when no manifest is cached for that hash. The manifest is the machine-readable synthetic-content marker for generated output (EU AI Act Art. 50(2)). Wrappers: Rust SDK `inference().get_provenance(hash)`, TS SDK `inference.getProvenance(hash)`, MCP `get_provenance` tool, A2A verification skill (`content_hash` metadata), CLI `tenzro provenance get`.
+
 ---
 
 ## Rich shape
@@ -466,6 +470,8 @@ async fn handle_chat(node, params) -> Result<Value, JsonRpcError> {
 ### Network forwarding
 
 When a node receives `tenzro_chat` for a model it does not serve, it forwards to a peer per the existing logic in `handle_chat`. The forwarded payload **must** preserve the request shape — a rich-shape forward goes out as rich, not down-converted to simple. Down-conversion would silently drop tools, system prompts, and content blocks.
+
+The forward travels over the `tenzro/infer` ALPN on the node's iroh endpoint. The serving peer is addressed by its iroh `EndpointId` (resolved via Pkarr — never by IP), which is published as the `iroh_endpoint_id` field on the model's endpoint record. Inspect it with `tenzro_listModelEndpoints` (or the MCP `list_model_endpoints` tool): a non-empty `iroh_endpoint_id` identifies the serving node; an empty string means the service is local-only. A response returned this way carries `location: "network"` and the serving `provider`.
 
 ### Billing
 

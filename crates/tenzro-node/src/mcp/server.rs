@@ -2939,6 +2939,12 @@ pub struct TrainingTaskIdParams {
     pub task_id: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetProvenanceParams {
+    #[schemars(description = "32-byte hex content hash (with or without 0x prefix)")]
+    pub content_hash: String,
+}
+
 // ─── Workflow stack params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -8489,6 +8495,33 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_getRouterMetrics", serde_json::json!({}))
             .await
             .map_err(|e| err_internal(format!("getRouterMetrics failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Report the trainer auto-provisioning daemon status. When the node has no [training] config section (or enabled=false), running is false. Otherwise returns {running, trainer_did, live_trainers, max_concurrent_trainers}. Read-only.")]
+    async fn get_trainer_daemon_status(
+        &self,
+        Parameters(_): Parameters<EmptyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getTrainerDaemonStatus",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getTrainerDaemonStatus failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Look up the cached provenance manifest for generated content by its 32-byte hex content_hash (with or without 0x prefix). This is the machine-readable synthetic-content marker per EU AI Act Art. 50(2). Returns JSON-RPC -32004 when no manifest is cached for the hash. Read-only.")]
+    async fn get_provenance(
+        &self,
+        Parameters(params): Parameters<GetProvenanceParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "content_hash": params.content_hash });
+        let result = rpc_dispatch(&self.node, "tenzro_getProvenance", payload)
+            .await
+            .map_err(|e| err_internal(format!("getProvenance failed: {}", e)))?;
         json_result(result)
     }
 
