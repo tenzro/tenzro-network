@@ -23111,6 +23111,7 @@ async fn handle_get_model_endpoint(
             "location": svc.location.to_string(),
             "api_endpoint": svc.api_endpoint,
             "mcp_endpoint": svc.mcp_endpoint,
+            "iroh_endpoint_id": svc.iroh_endpoint_id,
             "status": svc.status.to_string(),
             "parameters": svc.parameters,
             "pricing": {
