@@ -1,4 +1,4 @@
-//! BurnQuota primitive (Agent-Swarm Spec 3 — wave 1).
+//! BurnQuota primitive (Agent-Swarm Spec 3).
 //!
 //! The full spec ([dual-rail-gas.md](../../../docs/architecture/agent-swarm/dual-rail-gas.md))
 //! describes a stablecoin paymaster that sponsors TNZO gas to the EntryPoint
@@ -7,7 +7,7 @@
 //! `try_drain` / `refill` operations, write-through persistence under
 //! `CF_TOKENS`, and read access via `state()`.
 //!
-//! Wave 1 ships only the primitive — the `StablecoinPaymaster`,
+//! Ships only the primitive — the `StablecoinPaymaster`,
 //! Chainlink/Pyth oracle, and AMM TWAP swap-and-burn refill loop are
 //! deferred until the bridge mesh (Wormhole NTT USDC pool) and oracle
 //! integrations land. Once those are in place, the paymaster will plug into
@@ -224,7 +224,7 @@ impl BurnQuotaManager {
     }
 
     /// Top up the quota with `amount` TNZO at `now`. Used by the daily
-    /// replenisher after a successful TWAP swap-and-burn (or, in wave 1,
+    /// replenisher after a successful TWAP swap-and-burn (or, currently,
     /// by the genesis bootstrap and operator-controlled refill RPC).
     ///
     /// Refills above `cap` are clamped — the excess is reported via the

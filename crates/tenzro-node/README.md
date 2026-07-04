@@ -4,7 +4,7 @@ Full node implementation for Tenzro Network — the AI-Native, Agentic Settlemen
 
 ## Overview
 
-The `tenzro-node` crate provides the complete node binary that integrates all Tenzro Network subsystems into a unified, production-ready node capable of participating in the network in various roles.
+The `tenzro-node` crate provides the complete node binary that integrates all Tenzro Network subsystems into a unified node capable of participating in the network in various roles.
 
 ## Features
 

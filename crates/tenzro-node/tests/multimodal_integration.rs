@@ -1,7 +1,7 @@
 //! Multi-modal AI integration tests
 //!
-//! Exercises the registry-driven, modality-aware serving plane shipped in
-//! Wave 1 (forecast / vision / text-embed / segmentation / detection /
+//! Exercises the registry-driven, modality-aware serving plane
+//! (forecast / vision / text-embed / segmentation / detection /
 //! audio ASR / video). These tests stay above the ONNX runtime layer —
 //! they validate registry, persistence, modality dispatch, and catalog
 //! shape rather than running real inference (which requires gigabytes of
@@ -9,7 +9,7 @@
 //! flags).
 //!
 //! Coverage:
-//! 1. Catalog discovery — every wave-1 catalog returns valid entries.
+//! 1. Catalog discovery — every catalog returns valid entries.
 //! 2. Register / lookup / deactivate / remove for every modality.
 //! 3. Restart rehydration — register through `with_storage`, drop the
 //!    registry, reopen at the same `Arc<dyn KvStore>`, assert all rows
@@ -95,7 +95,7 @@ fn make_model(model_id: &str, modality: ModelModality, seed: u8) -> ModelInfo {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 1. Catalog discovery — every wave-1 catalog returns valid entries
+// 1. Catalog discovery — every catalog returns valid entries
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]

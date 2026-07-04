@@ -226,7 +226,7 @@ match result.status {
 
 ## Production Status
 
-Production-ready components:
+Components:
 - **On-chain escrow primitive** with consensus-mediated `CreateEscrow` /
   `ReleaseEscrow` / `RefundEscrow` transactions, derived vault addresses,
   privileged-VM payout, payer-only authorization, RocksDB write-through to

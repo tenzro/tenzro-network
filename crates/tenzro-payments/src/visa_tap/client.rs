@@ -108,7 +108,7 @@ impl VisaTapClient {
         );
 
         // Sign with wallet if available, otherwise generate an ephemeral Ed25519 keypair.
-        // Wave 3d cascade: wallet returns a hybrid signature; the RFC 9421
+        // Hybrid cascade: wallet returns a hybrid signature; the RFC 9421
         // signature-input header only carries the classical leg today.
         let signature_bytes = if let (Some(wallet_service), Some(wallet_id)) = (&self.wallet_service, &self.wallet_id) {
             let hybrid_sig = wallet_service

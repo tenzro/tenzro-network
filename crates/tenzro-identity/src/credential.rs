@@ -93,13 +93,13 @@ impl CredentialProof {
     /// Returns `Ok(true)` if signature is valid, `Ok(false)` if invalid,
     /// or an error if the proof type is unsupported.
     ///
-    /// # Hybrid (Wave 3d) credentials
+    /// # Hybrid credentials
     ///
     /// Hybrid credentials use [`CredentialProof::verify_hybrid`] instead —
     /// the `proof_value` field of a hybrid credential is the
     /// bincode-serialized [`tenzro_crypto::composite::CompositeSignature`]
     /// rather than a raw classical signature, so the legacy `verify()` path
-    /// would mis-interpret the bytes. Pre-Wave-3d Ed25519 / Secp256k1
+    /// would mis-interpret the bytes. Classical-only Ed25519 / Secp256k1
     /// credentials still verify here unchanged.
     pub fn verify(&self, message: &[u8], issuer_pubkey: &[u8]) -> crate::error::Result<bool> {
         use tenzro_crypto::{KeyType, PublicKey, Signature};
@@ -161,7 +161,7 @@ impl CredentialProof {
         }
     }
 
-    /// Verify a hybrid (Wave 3d) credential proof.
+    /// Verify a hybrid credential proof.
     ///
     /// Used when `proof_type == "HybridEd25519MlDsa65Signature2026"` and
     /// `proof_value` is the `bincode`-serialized
@@ -365,7 +365,7 @@ impl VerifiableCredential {
         proof.verify(&message, issuer_pubkey)
     }
 
-    /// Verify a hybrid (Wave 3d) credential proof against an issuer's
+    /// Verify a hybrid credential proof against an issuer's
     /// composite public key.
     ///
     /// The credential must carry a proof whose `proof_type` is

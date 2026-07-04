@@ -1339,8 +1339,8 @@ pub struct TenzroNode {
     /// `EntryPoint::validate_user_op` before bundling. Constructed in
     /// `init_ai_infrastructure` once `identity_registry` and `agent_runtime`
     /// are up so the bound `IdentityScopeOracle` can do a fresh
-    /// `IdentityRegistry::resolve(did)` on every validation. Wave-1 in-memory
-    /// only; later wave will rebuild the per-account install set from
+    /// `IdentityRegistry::resolve(did)` on every validation. In-memory
+    /// only; a later revision will rebuild the per-account install set from
     /// on-chain `InstalledModule` logs on restart.
     aa_validator_registry: Option<Arc<tenzro_vm::aa_validators::ValidatorRegistry>>,
     /// ERC-4337 smart-account factory shared across passkey-first enrollment,
@@ -1397,10 +1397,10 @@ pub struct TenzroNode {
     /// receipts to `CF_AGENTS` under the `aa/nonce/` and `aa/receipt/`
     /// prefixes. Backed by the same `RocksDbStore` as the rest of the node.
     aa_entry_point: Option<Arc<tenzro_vm::EntryPoint>>,
-    /// BurnQuota singleton (Agent-Swarm Spec 3 — wave 1). Tracks the
+    /// BurnQuota singleton (Agent-Swarm Spec 3). Tracks the
     /// protocol-side TNZO budget the stablecoin paymaster will draw from
     /// once the dual-rail-gas paymaster + oracle + AMM swap loop lands.
-    /// In wave 1 only the read RPC `tenzro_getBurnQuota` is wired;
+    /// Currently only the read RPC `tenzro_getBurnQuota` is wired;
     /// `try_drain` / `refill` are public on the manager but no caller
     /// invokes them yet. Persists to CF_TOKENS via
     /// `BurnQuotaManager::with_storage`.
@@ -1409,8 +1409,8 @@ pub struct TenzroNode {
     /// current `BurnRateConfig`, the `SupplyTargets` thresholds, and the
     /// most recent `SupplyMetricsSnapshot`. Read-only RPCs surface the
     /// recommendation produced by `compute_recommendation`; the
-    /// auto-proposal generator and EIP-1559 fee-market consumer land in a
-    /// later wave alongside the governance executor wiring. Persists to
+    /// auto-proposal generator and EIP-1559 fee-market consumer land
+    /// alongside the governance executor wiring. Persists to
     /// CF_TOKENS via `BurnRateConfigManager::with_storage`.
     burn_rate_manager: Option<Arc<tenzro_token::adaptive_burn::BurnRateConfigManager>>,
     /// SeedAgent treasury earmark manager (Agent-Swarm Spec 10). Owns the
@@ -1419,7 +1419,7 @@ pub struct TenzroNode {
     /// 12-month bootstrap traffic. Read-only RPCs surface earmark balance,
     /// charter listings, and per-agent status; the off-chain provisioning
     /// daemon, monthly decay enforcement, and governance-executor mutation
-    /// paths land in a later wave. Persists to CF_TOKENS via
+    /// paths persist to CF_TOKENS via
     /// `SeedAgentEarmarkManager::with_storage`.
     seed_agent_manager: Option<Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>>,
     /// Gossip sender created at `init_token_economics` time and consumed by
@@ -3263,7 +3263,7 @@ impl TenzroNode {
         };
         self.staking = Some(staking);
 
-        // Initialize liquid staking pool (stTNZO). Wave 1 ships the pool
+        // Initialize liquid staking pool (stTNZO). Ships the pool
         // with default config (10% protocol fee, 7-day unbonding, 0.1 TNZO
         // min deposit). Persists holder balances + withdrawal requests +
         // aggregate totals to CF_TOKENS so the pool survives restarts.
@@ -3357,10 +3357,10 @@ impl TenzroNode {
         };
         self.validator_registry = Some(validator_registry);
 
-        // Initialize BurnQuota singleton (Agent-Swarm Spec 3 — wave 1).
-        // The full dual-rail-gas paymaster ships in a later wave once the
+        // Initialize BurnQuota singleton (Agent-Swarm Spec 3).
+        // The full dual-rail-gas paymaster ships later once the
         // bridge mesh (Wormhole NTT USDC pool) and Chainlink/Pyth oracles
-        // are in place; in this wave we land the on-chain accounting
+        // are in place; for now we land the on-chain accounting
         // primitive only, persisted under CF_TOKENS so genesis and any
         // operator-initiated refill survive restarts.
         let burn_quota_manager = if let Some(storage) = &self.storage {
@@ -3382,9 +3382,9 @@ impl TenzroNode {
         self.burn_quota_manager = Some(burn_quota_manager);
 
         // Initialize adaptive burn governance dial (Agent-Swarm Spec 8).
-        // Wave 1 lands the protocol primitives + read RPCs; the
+        // Lands the protocol primitives + read RPCs; the
         // auto-proposal generator and the EIP-1559 fee-market consumer
-        // ship alongside the governance executor wiring in a later wave.
+        // ship alongside the governance executor wiring later.
         let burn_rate_manager = if let Some(storage) = &self.storage {
             match tenzro_token::adaptive_burn::BurnRateConfigManager::with_storage(
                 storage.clone() as Arc<dyn KvStore>,
@@ -3416,10 +3416,10 @@ impl TenzroNode {
         }
 
         // Initialize SeedAgent treasury earmark manager (Agent-Swarm Spec 10).
-        // Wave 1 lands the protocol primitives, persistence, and read-only
+        // Lands the protocol primitives, persistence, and read-only
         // RPCs. The off-chain provisioning daemon, monthly decay enforcement,
         // sunset wind-down sweep, and governance-executor mutation paths land
-        // in a later wave.
+        // later.
         let seed_agent_manager = if let Some(storage) = &self.storage {
             match tenzro_token::seed_agent::SeedAgentEarmarkManager::with_storage(
                 storage.clone() as Arc<dyn KvStore>,
@@ -4322,8 +4322,8 @@ impl TenzroNode {
 
         // Load-or-generate a per-node signing secret. Storing it in the
         // data dir (chmod 600 isn't enforced here — operators are
-        // expected to run the node under a dedicated user with mode-0700
-        // data dir per `deploy/kubernetes` manifests).
+        // expected to run the node under a dedicated user with a
+        // mode-0700 data dir).
         let secret_path = self.config.data_dir.join("auth_secret.bin");
         let signing_secret: Vec<u8> = match std::fs::read(&secret_path) {
             Ok(bytes) if bytes.len() >= 32 => {
@@ -6102,8 +6102,8 @@ impl TenzroNode {
 
     /// Builds an `EvmTransactionSigner` from a [`BridgeAdapterConfig`],
     /// dispatching in priority order:
-    ///   1. `mpc_threshold` → DKLS23 t-of-n threshold ECDSA (Phase D wave 2)
-    ///   2. `tee_sealed`    → TEE-derived single-key (Phase D wave 1)
+    ///   1. `mpc_threshold` → DKLS23 t-of-n threshold ECDSA
+    ///   2. `tee_sealed`    → TEE-derived single-key
     ///   3. raw / env       → in-memory secp256k1 key (dev only)
     ///
     /// Returns `None` when none of the above produce a working signer —
@@ -6871,8 +6871,8 @@ impl TenzroNode {
         // not under `[bridge.*]`.
         if self.config.canton.enabled {
             // Three Canton profiles:
-            //  (1) Tenzro-operated devnet — fixed host + Auth0 issuer +
-            //      shared `tenzro-validator-1` party.
+            //  (1) Operator-hosted devnet — fixed host + Auth0 issuer +
+            //      operator's shared validator party.
             //  (2) Operator-run validator — operator's host:port, with
             //      either operator-supplied OAuth2 client-credentials or
             //      a long-lived static JWT.
@@ -7333,9 +7333,9 @@ impl TenzroNode {
             // B.3.5 acceptance criterion). Same `(identity_registry,
             // agent_runtime)` Arcs as AgentKit — same guarantees apply.
             //
-            // The registry is in-memory in this wave: per-account installs are
-            // re-built from on-chain `InstalledModule` logs in the wave that
-            // wires `EntryPoint` through the EVM execution path (#165).
+            // The registry is in-memory: per-account installs are
+            // re-built from on-chain `InstalledModule` logs once
+            // `EntryPoint` is wired through the EVM execution path (#165).
             let scope_oracle = Arc::new(
                 crate::delegation_scope_oracle::IdentityScopeOracle::new(
                     identity_registry,
@@ -9722,7 +9722,7 @@ impl TenzroNode {
         self.recovery_pending.as_ref()
     }
 
-    /// Returns the BurnQuota manager if initialized (Agent-Swarm Spec 3 wave 1).
+    /// Returns the BurnQuota manager if initialized (Agent-Swarm Spec 3).
     pub fn burn_quota_manager(
         &self,
     ) -> Option<&Arc<tenzro_token::burn_quota::BurnQuotaManager>> {

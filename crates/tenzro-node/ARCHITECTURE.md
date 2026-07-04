@@ -4,7 +4,7 @@ This document describes the architecture and design of the Tenzro Network full n
 
 ## Overview
 
-The `tenzro-node` crate is the top-level integration crate that orchestrates all Tenzro Network subsystems into a cohesive, production-ready blockchain node. It acts as the "main" binary that users run to participate in Tenzro Network, operating on Tenzro Ledger (the L1 settlement layer).
+The `tenzro-node` crate is the top-level integration crate that orchestrates all Tenzro Network subsystems into a cohesive blockchain node. It acts as the "main" binary that users run to participate in Tenzro Network, operating on Tenzro Ledger (the L1 settlement layer).
 
 ## Design Principles
 
@@ -558,4 +558,4 @@ The node adapts its behavior based on the configured role:
 
 ## Conclusion
 
-The `tenzro-node` crate provides a production-ready, feature-complete full node implementation for Tenzro Network. Its modular architecture, comprehensive health monitoring, multi-role support, and durable AI infrastructure persistence make it suitable for diverse deployment scenarios from local development to large-scale production networks.
+The `tenzro-node` crate provides a full node implementation for Tenzro Network. Its modular architecture, comprehensive health monitoring, multi-role support, and durable AI infrastructure persistence make it suitable for diverse deployment scenarios from local development to large-scale networks.

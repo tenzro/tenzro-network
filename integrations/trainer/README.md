@@ -46,8 +46,10 @@ training loop for Decoupled DiLoCo, paired with the Rust protocol layer in
   data — `tenzro_trainer.confidential` unwraps sealed dataset shards inside
   the trainer's enclave via HPKE RFC 9180 + AES-256-GCM).
 - **Aggregation:** the *Rust* syncer applies the task's `AggregationRule`
-  (Mean on Open; Mean / TrimmedMean / CoordinateMedian / Krum on Verified +
-  Confidential) to the outer gradients submitted by all enrolled trainers.
+  (Mean and LoraAlternating on Open — LoraAlternating is the alternating-freeze
+  rule for LoRA/QLoRA adapter runs; Mean / LoraAlternating / TrimmedMean /
+  CoordinateMedian / Krum on Verified + Confidential) to the outer gradients
+  submitted by all enrolled trainers.
   The Python trainer never sees other trainers' gradients — it only ever
   produces its own and submits the safetensors hash.
 - **Inner optimizer:** selectable per task via `architecture.metadata.inner_optimizer`

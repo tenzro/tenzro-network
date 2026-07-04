@@ -97,8 +97,7 @@ pub struct ApiKeyCreateCmd {
     /// the node forwards canton-scoped calls with that user's primary
     /// party as `actAs`. Canton's AuthService enforces per-user
     /// CanActAs rights — keys without this binding fall back to the
-    /// operator's primary party. See
-    /// `docs/operators/CANTON_MULTITENANT.md`.
+    /// operator's primary party.
     #[arg(long)]
     canton_user_id: Option<String>,
 

@@ -366,7 +366,7 @@ Test coverage: extensive (`cargo test -p tenzro-bridge` for the current count).
 
 ## Production Status
 
-Production-ready components:
+Components:
 - Real Ed25519/Secp256k1 message signing via `tenzro-crypto`
 - Real signature verification via `tenzro_crypto::signatures::verify()`
 - Nonce-based replay protection via `NonceTracker`

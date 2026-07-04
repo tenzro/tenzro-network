@@ -177,7 +177,7 @@ Test coverage: 54 tests passing.
 
 ## Production Status
 
-Production-ready components:
+Components:
 - RocksDB-persisted token supply and balances via CF_ACCOUNTS
 - Stake-weighted governance with real voting power tracking
 - Multisig treasury with approval threshold enforcement

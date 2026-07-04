@@ -37,7 +37,7 @@ Tenzro is the **interop substrate beneath** the frameworks. The agent's framewor
 
 Think of it the way TLS sits beneath HTTP/SMTP/IMAP — each application protocol keeps its own semantics; TLS handles identity + integrity once for all of them.
 
-## State-of-the-art reference: the four-protocol stack
+## Reference: the four-protocol stack
 
 The May 2025 academic work *Towards Multi-Agent Economies: Enhancing the A2A Protocol with Ledger-Anchored Identities and x402 Micropayments for AI Agents* (arXiv 2507.19550) is the closest published reference to what Tenzro is building. The MolTrust Protocol (March 2026, Base L2) is a real production deployment of the same idea — VC-anchored agent identities cross-platform, eight verticals.
 

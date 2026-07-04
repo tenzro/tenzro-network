@@ -1,4 +1,4 @@
-//! SeedAgent provisioning daemon (Agent-Swarm Spec 10 — wave 2, Task #42).
+//! SeedAgent provisioning daemon (Agent-Swarm Spec 10, Task #42).
 //!
 //! Drives the per-month draw against every Active SeedAgent's
 //! [`SeedAgentEarmarkManager`], applies charter sunset / disable rules, and

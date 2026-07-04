@@ -1,6 +1,6 @@
 # Performance hard-threshold gate for criterion benchmarks.
 #
-# Each entry pins the p99 / op bound from docs/operators/BENCHMARKS.md.
+# Each entry pins the p99 / op bound for a criterion bench target.
 # CI runs the matching criterion bench and fails the build when the
 # measured value exceeds `max_ns` (or falls below `min_ops_per_sec` for
 # throughput-shaped targets).

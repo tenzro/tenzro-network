@@ -3,7 +3,7 @@
 //! This module defines a universal message format that can be used across all bridge
 //! protocols for consistent cross-chain communication in the Tenzro Network.
 //!
-//! # Post-Quantum Migration (Wave 3d): EXTERNAL_LOCKED
+//! # Post-Quantum Migration: EXTERNAL_LOCKED
 //!
 //! `TenzroMessage` is the wire format spoken to **external** chains
 //! (LayerZero V2, Chainlink CCIP, Wormhole, deBridge, Canton). Those

@@ -26,7 +26,13 @@ dependencies = [
 
 [project.optional-dependencies]
 hivemind = ["hivemind>=1.1.10"]
-language = ["transformers>=4.45", "datasets>=2.20", "tokenizers>=0.19"]
+language = [
+    "transformers>=4.45",
+    "datasets>=2.20",
+    "tokenizers>=0.19",
+    "peft>=0.13",
+    "bitsandbytes>=0.44",
+]
 vision = ["timm>=1.0", "Pillow>=10.0"]
 timeseries = ["pandas>=2.2"]
 # Confidential-tier shard unwrap (HPKE per RFC 9180 + AES-256-GCM).

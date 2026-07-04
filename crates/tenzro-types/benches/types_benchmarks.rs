@@ -1,5 +1,5 @@
-//! Criterion benches for tenzro-types hot paths pinned in
-//! `docs/operators/BENCHMARKS.md` and gated by `tools/bench-gate/`.
+//! Criterion benches for tenzro-types hot paths. Bounds are pinned in
+//! `tools/bench-gate/thresholds.toml`.
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use tenzro_types::intent_7683::{compute_order_id, CrossChainOrder};

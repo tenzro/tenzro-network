@@ -28,7 +28,7 @@ Wraps cleanly under :class:`torch.distributed.fsdp.FullyShardedDataParallel`
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 try:
@@ -92,6 +92,24 @@ def moe_parameter_names(model: "nn.Module") -> tuple[list[str], list[str]]:
     return expert_names, router_names
 
 
+def lora_factor_names(model: "nn.Module") -> tuple[list[str], list[str]]:
+    """Split a PEFT-wrapped model's trainable params into ``(a_names, b_names)``.
+
+    PEFT names LoRA matrices ``...lora_A.<adapter>.weight`` and
+    ``...lora_B.<adapter>.weight``. Under ADF-LoRA alternating aggregation we
+    freeze one factor per round; this split tells :meth:`set_round` which
+    parameters to toggle.
+    """
+    a_names: list[str] = []
+    b_names: list[str] = []
+    for name, _ in model.named_parameters():
+        if "lora_A" in name:
+            a_names.append(name)
+        elif "lora_B" in name:
+            b_names.append(name)
+    return a_names, b_names
+
+
 @dataclass
 class LanguageAdapter:
     """Real HF-backed causal-LM adapter.
@@ -102,6 +120,12 @@ class LanguageAdapter:
     labels)`` tensors of fixed ``seq_len``. Standard causal-LM loss:
     next-token cross-entropy with ``ignore_index=-100`` on the padding
     positions of the final block.
+
+    When ``lora_alternating`` is set (the model was wrapped with PEFT and the
+    task selected ``AggregationRule::LoraAlternating``), :meth:`set_round`
+    freezes one low-rank factor per round so each round's transmitted delta is
+    a single factor — the shape the Rust syncer's per-coordinate mean is
+    correct for.
     """
 
     _model: "nn.Module"
@@ -110,12 +134,35 @@ class LanguageAdapter:
     seq_len: int = 1024
     batch_size: int = 1
     device: str = "cpu"
+    lora_alternating: bool = False
+    _lora_a_names: list[str] = field(default_factory=list)
+    _lora_b_names: list[str] = field(default_factory=list)
 
     def model(self) -> "nn.Module":
         return self._model
 
     def optimizer(self) -> "torch.optim.Optimizer":
         return self._optimizer
+
+    def set_round(self, round_index: int) -> None:
+        """ADF-LoRA alternating freeze: sync B on even rounds, A on odd rounds.
+
+        No-op unless ``lora_alternating`` is on. On an even round we freeze the
+        A factors (``requires_grad=False``) and leave B trainable, so only B is
+        snapshotted and transmitted; on an odd round the roles swap. Holding
+        the other factor fixed across all contributors is what makes a plain
+        per-coordinate mean of the active factor correct.
+        """
+        if not self.lora_alternating:
+            return
+        train_b = round_index % 2 == 0
+        params = dict(self._model.named_parameters())
+        for name in self._lora_a_names:
+            if name in params:
+                params[name].requires_grad_(not train_b)
+        for name in self._lora_b_names:
+            if name in params:
+                params[name].requires_grad_(train_b)
 
     def shard_batches(self, shard_uri: str) -> Iterable[object]:
         if torch is None:
@@ -203,6 +250,21 @@ def build_adapter(
     * ``seq_len`` (default 1024)
     * ``batch_size`` (default 1)
     * ``device`` (default ``"cuda"`` if available else ``"cpu"``)
+
+    LoRA/QLoRA is opt-in via ``architecture.metadata.lora``. When present, the
+    base is frozen and PEFT injects low-rank adapter matrices; only those
+    matrices carry gradient, so the outer-gradient snapshot transmits adapter
+    deltas alone. Recognized ``lora`` sub-keys:
+
+    * ``r`` (rank, default 16)
+    * ``alpha`` (default ``2*r``)
+    * ``dropout`` (default 0.0)
+    * ``target_modules`` (default ``["q_proj","k_proj","v_proj","o_proj",
+      "gate_proj","up_proj","down_proj"]`` — the attention + MLP projections
+      shared across the catalog decoder families)
+    * ``quantize`` (``"nf4"`` for QLoRA 4-bit base, else full-precision base)
+    * ``alternating`` (default ``True`` — ADF-LoRA per-round factor freeze,
+      matching :class:`AggregationRule::LoraAlternating` on the syncer side)
     """
     if torch is None:
         raise RuntimeError("PyTorch is required")
@@ -224,14 +286,35 @@ def build_adapter(
         "fp32": torch.float32,
     }.get(dtype_str, torch.bfloat16)
     device = str(hp.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"))
+    lora_cfg = md.get("lora")
+
+    load_kwargs: dict[str, Any] = {
+        "torch_dtype": dtype,
+        "trust_remote_code": True,
+    }
+    quantize = str((lora_cfg or {}).get("quantize", "")).lower()
+    if lora_cfg is not None and quantize == "nf4":
+        # QLoRA: 4-bit NF4 base, adapters trained in bf16 on top.
+        try:
+            from transformers import BitsAndBytesConfig
+        except ImportError as e:
+            raise ImportError(
+                "QLoRA (lora.quantize='nf4') requires `bitsandbytes`. "
+                "Install with: `pip install tenzro-trainer[language]`"
+            ) from e
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=dtype,
+        )
 
     log.info("loading causal LM %r (dtype=%s, device=%s) ...", repo, dtype_str, device)
     tokenizer = AutoTokenizer.from_pretrained(repo, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        repo,
-        torch_dtype=dtype,
-        trust_remote_code=True,
-    ).to(device)
+    model = AutoModelForCausalLM.from_pretrained(repo, **load_kwargs)
+    # A 4-bit base is placed by the quantizer; only move a full-precision base.
+    if "quantization_config" not in load_kwargs:
+        model = model.to(device)
 
     if is_moe_config(model.config):
         # Surface the router load-balancing aux loss on every forward so
@@ -243,6 +326,58 @@ def build_adapter(
             "(aux load-balancing loss enabled)",
             len(expert_names),
             len(router_names),
+        )
+
+    lora_alternating = False
+    lora_a_names: list[str] = []
+    lora_b_names: list[str] = []
+    if lora_cfg is not None:
+        try:
+            from peft import LoraConfig, get_peft_model
+        except ImportError as e:
+            raise ImportError(
+                "LoRA (architecture.metadata.lora) requires the `peft` package. "
+                "Install with: `pip install tenzro-trainer[language]`"
+            ) from e
+        if quantize == "nf4":
+            from peft import prepare_model_for_kbit_training
+
+            model = prepare_model_for_kbit_training(model)
+        rank = int(lora_cfg.get("r", 16))
+        peft_config = LoraConfig(
+            r=rank,
+            lora_alpha=int(lora_cfg.get("alpha", 2 * rank)),
+            lora_dropout=float(lora_cfg.get("dropout", 0.0)),
+            target_modules=list(
+                lora_cfg.get(
+                    "target_modules",
+                    [
+                        "q_proj",
+                        "k_proj",
+                        "v_proj",
+                        "o_proj",
+                        "gate_proj",
+                        "up_proj",
+                        "down_proj",
+                    ],
+                )
+            ),
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, peft_config)
+        lora_a_names, lora_b_names = lora_factor_names(model)
+        lora_alternating = bool(lora_cfg.get("alternating", True))
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        log.info(
+            "LoRA enabled (r=%d, %d A-factors, %d B-factors, "
+            "alternating=%s, quantize=%s): %d trainable params",
+            rank,
+            len(lora_a_names),
+            len(lora_b_names),
+            lora_alternating,
+            quantize or "none",
+            trainable,
         )
 
     opt = build_inner_optimizer(model, md, hp, default_lr=1e-5)
@@ -258,6 +393,9 @@ def build_adapter(
         seq_len=int(hp.get("seq_len", 1024)),
         batch_size=int(hp.get("batch_size", 1)),
         device=device,
+        lora_alternating=lora_alternating,
+        _lora_a_names=lora_a_names,
+        _lora_b_names=lora_b_names,
     )
 
 

@@ -126,7 +126,7 @@ pub struct SchemeRegistry {
 
 impl SchemeRegistry {
     /// Create an empty registry. Use [`SchemeRegistry::with_defaults`] for the
-    /// production wave-1 set.
+    /// default set.
     pub fn empty() -> Self {
         Self {
             backends: HashMap::new(),
@@ -222,7 +222,7 @@ impl Default for SchemeRegistry {
 
 // ─── Tenzro hybrid backend (default) ──────────────────────────────────────
 
-/// Wave-1 internal Tenzro x402 scheme: Ed25519 + ML-DSA-65 hybrid signature
+/// Internal Tenzro x402 scheme: Ed25519 + ML-DSA-65 hybrid signature
 /// over `challenge_id || payer_did || amount_le || asset`.
 ///
 /// Mirrors the inline verification logic that lived on `X402PaymentServer`
@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn registry_does_not_alias_legacy_exact_to_hybrid() {
-        // Per pre-launch hygiene: no backcompat shims. The wave-1 internal
+        // Per pre-launch hygiene: no backcompat shims. The internal
         // Tenzro path is `tenzro-hybrid` only; `"exact"` is reserved for
         // future schemes that match the upstream x402 V2 naming.
         let r = SchemeRegistry::with_defaults();

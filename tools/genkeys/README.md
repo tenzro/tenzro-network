@@ -1,19 +1,17 @@
 # tenzro-genkeys — offline validator key generator
 
-Generates the cryptographic material for the 10-validator Phase A GCE
-deploy: per-validator Ed25519 consensus seed, ML-DSA-65 post-quantum seed,
-and libp2p Ed25519 P2P keypair, plus a ready-to-commit `genesis-prod.toml`.
+Generates the cryptographic material for a validator set: per-validator
+Ed25519 consensus seed, ML-DSA-65 post-quantum seed, and libp2p Ed25519
+P2P keypair, plus a ready-to-commit `genesis.toml`.
 
-This tool runs **once**, on a **trusted laptop** that is air-gapped or at
-least off corporate WiFi. The seeds it produces are the long-term identity
-of the production testnet validators — they must not touch CI, shared
-disks, or any service that backs up to the cloud unencrypted.
+This tool runs **once**, on a **trusted machine** that is air-gapped or at
+least off shared networks. The seeds it produces are the long-term identity
+of your validators — they must not touch CI, shared disks, or any service
+that backs up to the cloud unencrypted.
 
 ## Prerequisites
 
 - Rust toolchain (`rustup`, matching `rust-toolchain.toml`)
-- `gcloud` CLI authenticated as a principal with
-  `roles/secretmanager.admin` on project `tenzro-operator-project`
 - `shred` (GNU coreutils) or equivalent secure-erase tool
 
 ## Run
@@ -22,13 +20,13 @@ From the workspace root:
 
 ```bash
 cargo run --release -p tenzro-genkeys -- \
-    --out ~/tenzro-phaseA-keys \
-    --count 10 \
-    --chain-id 1338 \
+    --out ~/validator-keys \
+    --count 4 \
+    --chain-id 1337 \
     --stake-per-validator 1000
 ```
 
-This creates `~/tenzro-phaseA-keys/` with:
+This creates `~/validator-keys/` with:
 
 ```
 validator-0/
@@ -38,9 +36,9 @@ validator-0/
     consensus.pub    # hex of 32-byte Ed25519 public key
     pq.pub           # hex of 1952-byte ML-DSA-65 verifying key
     peer_id.txt      # base58 multihash libp2p peer ID
-validator-1/  ...  validator-9/
-genesis-prod.toml    # version=2, all 10 validators, faucet + seed accounts
-PEER_IDS.txt         # summary list — copy validator-0 into Terraform
+validator-1/  ...  validator-N/
+genesis.toml         # all N validators, faucet + seed accounts
+PEER_IDS.txt         # summary list — copy validator-0 into your boot config
 ```
 
 All directories are mode `0700`, all `*.seed` files are mode `0600`.
@@ -55,99 +53,69 @@ below).
 Before uploading, eyeball one validator to sanity-check the byte counts:
 
 ```bash
-wc -c ~/tenzro-phaseA-keys/validator-0/{consensus,pq,p2p}.seed
+wc -c ~/validator-keys/validator-0/{consensus,pq,p2p}.seed
 # consensus.seed: 32
 # pq.seed:        32
 # p2p.seed:       ~40-80 (libp2p protobuf, variable but stable across runs)
 ```
 
-And confirm the hex public keys in `genesis-prod.toml` match what the
+And confirm the hex public keys in `genesis.toml` match what the
 per-validator `*.pub` files contain:
 
 ```bash
-grep -A2 'validator-0' ~/tenzro-phaseA-keys/genesis-prod.toml
-diff <(cat ~/tenzro-phaseA-keys/validator-0/consensus.pub) \
-     <(grep -m1 'public_key' ~/tenzro-phaseA-keys/genesis-prod.toml | \
+grep -A2 'validator-0' ~/validator-keys/genesis.toml
+diff <(cat ~/validator-keys/validator-0/consensus.pub) \
+     <(grep -m1 'public_key' ~/validator-keys/genesis.toml | \
        sed -E 's/.*"([0-9a-f]+)".*/\1/')
 ```
 
 ## Commit the genesis (no seeds)
 
 ```bash
-cp ~/tenzro-phaseA-keys/genesis-prod.toml \
-   ~/AI/tenzronetwork/config/genesis-prod.toml
+cp ~/validator-keys/genesis.toml config/genesis.toml
 ```
 
-Review the file diff before committing.
+Review the file diff before committing. Only the genesis (public keys)
+goes into the repo — never the seeds.
 
-## Upload secrets to GCP Secret Manager
+## Distribute the seeds to your validators
 
-The tool prints the exact `gcloud` commands at the end of its run. They
-look like:
+Each validator needs its own three seeds (`consensus.seed`, `pq.seed`,
+`p2p.seed`) delivered to a root-only path (e.g. `/var/lib/tenzro/`) before
+`tenzro-node` starts. How you deliver them — a secrets manager, an
+encrypted transfer, a hardware token — is up to your infrastructure. The
+boot-time fetch pattern (a oneshot unit that writes the seeds, required-by
+`tenzro-node.service`) is described in
+[`deploy/validator-deployment.md`](../../deploy/validator-deployment.md).
 
-```bash
-gcloud secrets versions add tenzro-validator-0-consensus \
-    --data-file=~/tenzro-phaseA-keys/validator-0/consensus.seed \
-    --project=tenzro-operator-project
-gcloud secrets versions add tenzro-validator-0-pq \
-    --data-file=~/tenzro-phaseA-keys/validator-0/pq.seed \
-    --project=tenzro-operator-project
-gcloud secrets versions add tenzro-validator-0-p2p \
-    --data-file=~/tenzro-phaseA-keys/validator-0/p2p.seed \
-    --project=tenzro-operator-project
-# ... repeated for validator-1 through validator-9
-```
-
-The Secret Manager **containers** are created by
-`deploy/terraform/gce_validators/` — `terraform apply` must run **before**
-you upload payloads. After `apply`, the containers exist with zero
-versions; `gcloud secrets versions add` populates them.
-
-Each `gcloud secrets versions add` invocation writes a new secret
-version. Run them one at a time and verify the per-VM payload is
-correct before proceeding to the next.
-
-## Set the Terraform bootstrap peer ID
-
-Open `PEER_IDS.txt`, copy the `validator-0:` line, and set it in
-`deploy/terraform/gce_validators/terraform.tfvars`:
-
-```hcl
-bootstrap_peer_id = "12D3KooW..."
-```
-
-This is the libp2p peer ID validators 1–9 dial as their `--boot-nodes`.
+Set the bootstrap peer ID your other validators dial: copy the
+`validator-0:` line from `PEER_IDS.txt` into their `--boot-nodes`.
 
 ## Secure wipe
 
-Once the seeds are confirmed uploaded to Secret Manager and the genesis
-file is committed, **delete every `*.seed` file**:
+Once the seeds are confirmed delivered and the genesis file is committed,
+**delete every `*.seed` file**:
 
 ```bash
-shred -uvz ~/tenzro-phaseA-keys/validator-*/*.seed
-rm -rf ~/tenzro-phaseA-keys
+shred -uvz ~/validator-keys/validator-*/*.seed
+rm -rf ~/validator-keys
 ```
 
 `shred -u` overwrites then unlinks; `-v` is verbose; `-z` zeros the final
 pass to hide that shredding occurred. On encrypted-volume filesystems
 (APFS with FileVault, LUKS) `shred` is overkill but harmless.
 
-If your laptop has a backup running (Time Machine, Arq, restic) make sure
-the backup either excludes `~/tenzro-phaseA-keys` or that you suspend it
-for the duration. **A backup of `*.seed` defeats the entire offline-key
+If your machine has a backup running (Time Machine, Arq, restic) make sure
+the backup either excludes `~/validator-keys` or that you suspend it for
+the duration. **A backup of `*.seed` defeats the entire offline-key
 model.**
 
 ## What this tool does NOT do
 
 - No HSM integration — seeds are written to disk in cleartext. The 0600
-  permissions + filesystem encryption + immediate-wipe-after-upload model
-  is what protects them.
-- No threshold/MPC split — each validator's seed is a single ed25519 /
-  ML-DSA-65 keypair. Phase B may move to threshold consensus signatures;
-  the on-disk format stays the same so existing seeds carry forward.
-- No automatic upload — uploading to Secret Manager is a separate
-  deliberate step the operator runs, so the boundary is auditable.
-- No re-randomization on partial failure — if `gcloud secrets versions
-  add` fails mid-way, fix the auth/network issue and resume from the
-  failed validator. There is no harm in re-uploading the same seed (it
-  just creates a new version; the loader always reads `latest`).
+  permissions + filesystem encryption + immediate-wipe-after-delivery
+  model is what protects them.
+- No threshold/MPC split — each validator's seed is a single Ed25519 /
+  ML-DSA-65 keypair.
+- No automatic upload — delivering the seeds is a separate deliberate step
+  the operator runs, so the boundary is auditable.

@@ -223,7 +223,7 @@ pub enum ValidatorRegistryStatus {
     /// [`DEFAULT_REENTRY_COOLDOWN_EPOCHS`] epochs.
     Exited,
     /// Slashed for misbehaviour. Stays jailed until governance re-instates
-    /// (out of scope for this wave; jailed validators stay jailed).
+    /// (out of scope for now; jailed validators stay jailed).
     Jailed,
 }
 
@@ -712,10 +712,8 @@ impl ValidatorRegistry {
             )));
         }
         // Derive the genesis validator's tier from its self-stake.
-        // The genesis-prod.toml may seed validators at any tier; the
-        // first Tenzro Labs validator is Tier 3 (RPC provider) per
-        // the canonical model, others may be Tier 1 / 2 / 3 depending
-        // on the genesis allocation.
+        // Genesis may seed validators at any tier; the RPC-provider tier
+        // requires the higher stake, the base tier the lower one.
         let cfg = *self.config.read();
         let tier = ValidatorTier::from_stake(self_stake, &cfg);
         let entry = ValidatorRegistryEntry {

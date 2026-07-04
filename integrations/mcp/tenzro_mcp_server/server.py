@@ -3351,7 +3351,7 @@ async def canton_list_api_key_analytics(key_id: str | None = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Wave 7/9/12 — institutional primitives: uRWA / IVMS101 / attested
+# Institutional primitives: uRWA / IVMS101 / attested
 # clock / SignedAgentCard / Wormhole NTT / bridge-fee-in-TNZO
 # ---------------------------------------------------------------------------
 

@@ -33,7 +33,7 @@
 //! can retry against B; B independently applies its own bucket. Net
 //! per-controller throughput is bounded by `N × spec'd_rate` where N is the
 //! validator count — acceptable for testnet. Mainnet may need
-//! gossip-coordinated buckets; out of scope for wave 1.
+//! gossip-coordinated buckets; out of scope for now.
 //!
 //! ## Restart semantics
 //!

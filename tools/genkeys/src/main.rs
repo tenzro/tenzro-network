@@ -1,4 +1,4 @@
-//! Offline validator-key generator for Phase A (10 GCE validators).
+//! Offline validator-key generator.
 //!
 //! Produces, for each validator index 0..N-1:
 //!   - `consensus.seed` (32 bytes, raw Ed25519 seed)
@@ -8,13 +8,12 @@
 //!   - `pq.pub`         (hex, 1952-byte ML-DSA-65 verifying key)
 //!   - `peer_id.txt`    (multihash-encoded libp2p peer ID, base58)
 //!
-//! Plus a single `genesis-prod.toml` at the output root with all N validators
+//! Plus a single `genesis.toml` at the output root with all N validators
 //! pre-populated (stake = `--stake-per-validator`, default 1000 TNZO each).
 //!
-//! Run on a trusted laptop, NOT in CI. Upload the *.seed files to GCP Secret
-//! Manager with `gcloud secrets versions add`, then commit
-//! `config/genesis-prod.toml` and copy the validator-0 peer ID into the
-//! Terraform `bootstrap_peer_id` variable.
+//! Run on a trusted machine, NOT in CI. Deliver the *.seed files to each
+//! validator's secret storage, then commit `config/genesis.toml` and copy the
+//! validator-0 peer ID into your boot configuration's bootstrap peer.
 
 use std::fs;
 use std::io::Write;
@@ -116,13 +115,13 @@ fn print_help() {
     println!(
         "tenzro-genkeys — offline validator key generator\n\n\
          USAGE:\n  \
-           tenzro-genkeys --out <DIR> [--count 10] [--chain-id 1338] \\\n  \
+           tenzro-genkeys --out <DIR> [--count 4] [--chain-id 1337] \\\n  \
            [--stake-per-validator 1000] [--stakes 100000,0,0,0]\n\n\
          Produces per-validator subdirs under <DIR>/validator-{{i}}/ plus a top-level\n\
-         genesis-prod.toml. Files have permission 0600.\n\n\
+         genesis.toml. Files have permission 0600.\n\n\
          --stakes accepts a comma-separated list of per-validator stakes (length\n\
-         must match --count). Use this to model the three-tier model at genesis:\n  \
-           --stakes 100000,0,0,0  → v0 Tier 3 (RPC provider), v1..v3 Tier 1\n\
+         must match --count). Use this to set per-validator stakes at genesis:\n  \
+           --stakes 100000,0,0,0  → v0 an RPC-provider stake tier, v1..v3 the base tier\n\
          When --stakes is unset, all validators receive --stake-per-validator.\n"
     );
 }
@@ -197,9 +196,7 @@ fn main() -> Result<()> {
         write_public(&vdir.join("peer_id.txt"), &peer_id)?;
 
         // 4) BLS12-381 (min_pk) — for consensus QC signature aggregation.
-        //    Genesis schema v3 requires `bls_public_key` per validator;
-        //    the running fleet has been on v3 since the genesis schema
-        //    rev shipped in the PQ wave.
+        //    Genesis schema v3 requires `bls_public_key` per validator.
         let bls_kp = BlsKeyPair::generate().context("generate BLS12-381 keypair")?;
         let bls_seed = bls_kp.secret_key().to_bytes();
         let bls_pub_hex = hex::encode(bls_kp.public_key().to_bytes());
@@ -238,7 +235,7 @@ fn main() -> Result<()> {
         peer_id_summary.push((i, peer_id));
     }
 
-    // Assemble the full genesis-prod.toml. Schema must match
+    // Assemble the full genesis.toml. Schema must match
     // crates/tenzro-node/src/config.rs (Genesis struct, version = 3 with
     // three pubkeys per validator: Ed25519 + ML-DSA-65 + BLS12-381).
     let mut genesis = String::new();
@@ -267,11 +264,11 @@ fn main() -> Result<()> {
          enabled = true\n",
     );
 
-    fs::write(args.out_dir.join("genesis-prod.toml"), &genesis)?;
+    fs::write(args.out_dir.join("genesis.toml"), &genesis)?;
 
-    // Peer-id summary — operator copies validator-0's into Terraform.
+    // Peer-id summary — operator copies validator-0's into their boot config.
     let mut summary = String::new();
-    summary.push_str("# Validator peer IDs (for Terraform bootstrap_peer_id + cookbook)\n");
+    summary.push_str("# Validator peer IDs (copy validator-0 into your bootstrap peer)\n");
     for (i, pid) in &peer_id_summary {
         summary.push_str(&format!("validator-{i}: {pid}\n"));
     }
@@ -284,36 +281,27 @@ fn main() -> Result<()> {
     );
     eprintln!();
     eprintln!("Next steps:");
-    eprintln!("  1. Inspect {}/genesis-prod.toml", args.out_dir.display());
+    eprintln!("  1. Inspect {}/genesis.toml", args.out_dir.display());
     eprintln!(
-        "  2. Copy it: cp {0}/genesis-prod.toml config/genesis-prod.toml",
+        "  2. Copy it: cp {0}/genesis.toml config/genesis.toml",
         args.out_dir.display()
     );
     eprintln!(
-        "  3. Set Terraform var bootstrap_peer_id={}",
+        "  3. Set your bootstrap peer to validator-0: {}",
         peer_id_summary[0].1
     );
-    eprintln!("  4. Upload secrets:");
-    for i in 0..args.count {
-        eprintln!(
-            "       gcloud secrets versions add tenzro-validator-{i}-consensus \\\n         --data-file={0}/validator-{i}/consensus.seed --project=tenzro-operator-project",
-            args.out_dir.display()
-        );
-        eprintln!(
-            "       gcloud secrets versions add tenzro-validator-{i}-pq \\\n         --data-file={0}/validator-{i}/pq.seed --project=tenzro-operator-project",
-            args.out_dir.display()
-        );
-        eprintln!(
-            "       gcloud secrets versions add tenzro-validator-{i}-p2p \\\n         --data-file={0}/validator-{i}/p2p.seed --project=tenzro-operator-project",
-            args.out_dir.display()
-        );
-        eprintln!(
-            "       gcloud secrets versions add tenzro-validator-{i}-bls \\\n         --data-file={0}/validator-{i}/bls.seed --project=tenzro-operator-project",
-            args.out_dir.display()
-        );
-    }
+    eprintln!(
+        "  4. Deliver each validator's seeds (consensus/pq/p2p/bls) to its own"
+    );
+    eprintln!(
+        "     root-only secret storage before tenzro-node starts. How you deliver"
+    );
+    eprintln!(
+        "     them (secrets manager, encrypted transfer, hardware token) is up to"
+    );
+    eprintln!("     your infrastructure.");
     eprintln!();
-    eprintln!("After upload, securely wipe {} (the seeds must not", args.out_dir.display());
+    eprintln!("After delivery, securely wipe {} (the seeds must not", args.out_dir.display());
     eprintln!("remain on disk):  shred -uvz {}/validator-*/*.seed", args.out_dir.display());
 
     Ok(())

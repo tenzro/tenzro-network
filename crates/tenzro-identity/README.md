@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Production Features
 
-All features confirmed production-ready (85 passing tests):
+All features confirmed (85 passing tests):
 
 1. **Delegation Enforcement**: `enforce_operation()` returns typed `DelegationViolation` specifying max_value, protocol, chain, or time_bound violations
 2. **Pluggable Resolution**: `DidResolutionBackend` trait for blockchain/RPC fallback when DIDs not found locally

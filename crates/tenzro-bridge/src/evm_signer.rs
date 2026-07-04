@@ -33,8 +33,8 @@ use tracing::{debug, info};
 ///   `SignSession` over libp2p. The handle is constructed by the node
 ///   layer (which owns the keyshare store, sealer, transport, and chain
 ///   entropy source) and passed in via [`Self::with_threshold_signer`].
-///   This is the production posture for bridge custody once Phase D
-///   wave 2 is fully wired.
+///   This is the production posture for bridge custody once threshold
+///   signing is fully wired.
 ///
 /// All three variants expose the same `sign_prehash` interface and produce
 /// the same 20-byte Ethereum address derivation (Keccak-256 of the
@@ -47,7 +47,7 @@ pub enum SignerBackend {
     RawKey(SigningKey),
     /// TEE-sealed secp256k1 key (single-key production custody).
     SealedKey(SealedSecp256k1Key),
-    /// DKLS23 threshold signer handle (Phase D wave 2 production custody).
+    /// DKLS23 threshold signer handle (threshold-ECDSA production custody).
     ThresholdKey(Arc<dyn ThresholdSigner>),
 }
 
@@ -229,7 +229,7 @@ impl EvmTransactionSigner {
     /// the handle's group public key — no secret material crosses this
     /// API.
     ///
-    /// This is the production posture for Phase D wave 2 bridge custody:
+    /// This is the production posture for threshold bridge custody:
     /// no single party holds the full private scalar; signatures are
     /// produced by a quorum drawn from the MPC group.
     pub fn with_threshold_signer(
@@ -253,7 +253,7 @@ impl EvmTransactionSigner {
     }
 
     /// Returns whether the underlying key is a DKLS23 threshold signer
-    /// (Phase D wave 2 production posture — no single party holds the
+    /// (threshold production posture — no single party holds the
     /// full private scalar).
     pub fn is_threshold(&self) -> bool {
         matches!(self.backend, SignerBackend::ThresholdKey(_))

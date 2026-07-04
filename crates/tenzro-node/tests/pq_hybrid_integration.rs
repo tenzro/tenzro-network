@@ -1,4 +1,4 @@
-//! Wave 3f: Post-quantum hybrid integration tests.
+//! Post-quantum hybrid integration tests.
 //!
 //! Per the migration plan (`docs/security/quantum-resistance-migration-plan.md` §6.1)
 //! these tests exercise the end-to-end PQ-hybrid surface that Waves 3a–3d
@@ -120,7 +120,7 @@ fn legacy_classical_only_tx_rejected() {
     let classical_pk_bytes = vec![0x42u8; 32];
 
     // (a) Payload with `pq_signature` and `pq_public_key` entirely missing
-    //     (mirrors the pre-Wave-3c wire format).
+    //     (mirrors the classical-only wire format).
     let legacy_no_pq = serde_json::json!({
         "transaction": {
             "chain_id": 1337,
@@ -214,7 +214,7 @@ fn legacy_classical_only_tx_rejected() {
 /// handle. The genesis block must carry `protocol_version ==
 /// PQ_HYBRID_PROTOCOL_VERSION` — this is exactly the value
 /// `genesis::load_genesis_block` reads on the next process start, and it is
-/// what gates the refusal-to-start check there. Wave 3f cannot reopen the
+/// what gates the refusal-to-start check there. This test cannot reopen the
 /// same RocksDB path within the same test process (background tasks retain
 /// the lock), so we assert against the canonical persisted block instead;
 /// the next-process behavior is exercised in production startup paths.

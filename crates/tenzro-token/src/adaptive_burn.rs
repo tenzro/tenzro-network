@@ -19,7 +19,7 @@
 //! - [`SupplyMetricsSnapshot`] — observed metrics for an epoch (or rolling
 //!   window). Persisted under `burn_metrics:latest`. The epoch observer
 //!   that aggregates these from `UsageTracker` and the burn ledger lands
-//!   alongside this primitive — wave 1 ships the storage shape and a
+//!   alongside this primitive — this ships the storage shape and a
 //!   no-op default snapshot.
 //! - [`compute_recommendation`] — the pure transfer function. Reads a
 //!   snapshot + targets + gain, returns a [`BurnRateRecommendation`] with
@@ -28,7 +28,7 @@
 //!   `BurnQuotaManager`'s pattern. Constructed in-memory for tests, with
 //!   `Arc<dyn KvStore>` for production. Hydrates on construction.
 //!
-//! Wave 1 deferrals:
+//! Deferrals:
 //!
 //! - The `AutoProposalGenerator` and the `tenzro/burn-rate-changed`
 //!   gossipsub topic land alongside the governance executor wiring.
@@ -99,7 +99,7 @@ pub const DEFAULT_ALARM_TIMELOCK_HOURS: u32 = 6;
 
 /// Live burn-rate dials. Each pair `*_burn_bps + *_treasury_bps` must sum to
 /// 10_000 — the burn share is what's destroyed; the treasury share is what
-/// flows to `NetworkTreasury`. Wave 1 surfaces only the burn shares (the
+/// flows to `NetworkTreasury`. Surfaces only the burn shares (the
 /// treasury share is the complement) to keep the wire shape compact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BurnRateConfig {
@@ -557,7 +557,7 @@ impl BurnRateConfigManager {
     /// governance executor when an adaptive-burn proposal passes.
     pub fn apply_config(&self, new_config: BurnRateConfig) -> Result<()> {
         new_config.validate()?;
-        // Wave-1 invariant: paymaster burn pct is locked at 100%. The
+        // Invariant: paymaster burn pct is locked at 100%. The
         // function never adjusts it; we also reject explicit governance
         // updates that drop it below 100% to keep that invariant
         // discoverable from one place.

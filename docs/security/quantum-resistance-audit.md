@@ -150,7 +150,7 @@ The `ProofType` enum exposes only `Plonky3`.
 | `slh-dsa` | `0.2.0-rc.4` | FIPS 205, optional defense-in-depth |
 | `rustls` | `0.23.39` | `prefer-post-quantum` default-on for aws-lc-rs |
 | `aws-lc-rs` | `1.16.3` | X25519MLKEM768 in stable `kx_group` namespace |
-| `libp2p-tls` | `0.6.2` | Production-ready PQ-capable transport |
+| `libp2p-tls` | `0.6.2` | PQ-capable transport |
 | `p3-poseidon2` | `0.5.2` | For STARK follow-up; expect 0.x churn |
 
 **Composite signature wire format:** No production-grade Rust crate publishes `draft-ietf-lamps-pq-composite-sigs-16`. Hand-roll per draft §4 (`Ed25519||ML-DSA-65` SEQUENCE-of-BIT-STRING with OID `id-MLDSA65-Ed25519`); test against Bouncy Castle vectors.

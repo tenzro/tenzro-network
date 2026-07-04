@@ -43,7 +43,7 @@ pub trait DidResolutionBackend: Send + Sync {
 }
 
 /// A revocation entry signed by the revoker's hybrid (Ed25519 + ML-DSA-65)
-/// keys (Wave 3d post-quantum migration).
+/// keys (post-quantum migration).
 ///
 /// Replaces the unsigned `RevocationEntry` payload that was previously
 /// gossiped between nodes — under the no-backward-compat hybrid migration,
@@ -105,7 +105,7 @@ impl SignedRevocationEntry {
 ///
 /// When an identity is revoked locally, the registry calls this broadcaster
 /// so that other nodes in the network can update their caches and the
-/// revocation can eventually be anchored on-chain. Under the Wave 3d
+/// revocation can eventually be anchored on-chain. Under the
 /// hybrid PQ migration the broadcaster receives a [`SignedRevocationEntry`]
 /// — every gossiped revocation carries an Ed25519 + ML-DSA-65 composite
 /// signature that downstream nodes verify before applying.
@@ -1790,7 +1790,7 @@ impl IdentityRegistry {
 
     /// Revokes an identity and, for humans, cascades to all controlled machines.
     ///
-    /// HIGH #96 + Wave 3d hybrid PQ migration: every revocation event is
+    /// HIGH #96 + hybrid PQ migration: every revocation event is
     /// signed by the revoker's hybrid (Ed25519 + ML-DSA-65) keys via the
     /// supplied [`HybridSigner`]. After the local cascade completes, the
     /// configured [`RevocationBroadcaster`] (if any) receives one
@@ -1867,7 +1867,7 @@ impl IdentityRegistry {
 
         // HIGH #96: broadcast to peers (best effort — failures are logged
         // but do not roll back the local revocation, which is authoritative
-        // for this node). Wave 3d: every broadcast carries a hybrid
+        // for this node). Every broadcast carries a hybrid
         // (Ed25519 + ML-DSA-65) signature.
         if let Some(ref broadcaster) = self.revocation_broadcaster {
             match SignedRevocationEntry::sign(entry.clone(), revoker_signer) {
@@ -1906,7 +1906,7 @@ impl IdentityRegistry {
     /// Records a revocation that arrived from a remote node (HIGH #96).
     ///
     /// This is the inbound counterpart of
-    /// [`RevocationBroadcaster::broadcast_revocation`]. Wave 3d: the entry
+    /// [`RevocationBroadcaster::broadcast_revocation`]. The entry
     /// is verified via its embedded hybrid (Ed25519 + ML-DSA-65) signature
     /// before any local state mutation. Verification failure returns
     /// `IdentityError::VerificationFailed` and leaves the cache untouched.
@@ -2412,8 +2412,8 @@ impl IdentityRegistry {
 
     /// Provisions a wallet or returns default values if no binder is configured.
     ///
-    /// Returns `(address, wallet_id, pq_verifying_key_bytes)`. Wave 3d hybrid
-    /// migration: every identity carries a mandatory ML-DSA-65 verifying key.
+    /// Returns `(address, wallet_id, pq_verifying_key_bytes)`. Under the hybrid
+    /// migration, every identity carries a mandatory ML-DSA-65 verifying key.
     /// When a `WalletBinder` is configured, the key comes from the wallet's
     /// keystore; otherwise we generate an ephemeral one so the identity still
     /// satisfies the structural invariant (test/no-binder paths only).
@@ -3429,7 +3429,7 @@ mod tests {
         let dids: Vec<&str> = sent.iter().map(|s| s.entry.did.as_str()).collect();
         assert!(dids.contains(&human.did_string().as_str()));
         assert!(dids.contains(&machine.did_string().as_str()));
-        // Wave 3d: every broadcast carries a verifiable hybrid signature.
+        // Every broadcast carries a verifiable hybrid signature.
         for s in sent.iter() {
             s.verify().expect("signed revocation must verify");
             assert!(!s.signature.pq.is_empty(), "must carry PQ leg");

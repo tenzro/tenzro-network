@@ -137,6 +137,16 @@ pub enum AggregationRule {
     /// Krum / Multi-Krum: pick gradient(s) with lowest sum-of-distances to
     /// nearest neighbors.
     Krum { f: u32 },
+    /// Alternating low-rank aggregation for LoRA/QLoRA adapter deltas
+    /// (ADF-LoRA, arXiv 2511.18291). Only the low-rank adapter matrices are
+    /// trained and transmitted; on each round the trainer freezes one of the
+    /// two factors and syncs the other, so the arriving fragment tensors are a
+    /// single factor per round and a plain per-coordinate mean over them is
+    /// correct. Naive averaging of *both* factors at once is not: the useful
+    /// update is the product `B·A`, and `mean(Bᵢ·Aᵢ) ≠ (mean Bᵢ)·(mean Aᵢ)`.
+    /// Which factor syncs is chosen by the trainer as `round % 2`, so the
+    /// syncer sees only the active factor and does not need to know the rank.
+    LoraAlternating,
 }
 
 // ---------------------------------------------------------------------------

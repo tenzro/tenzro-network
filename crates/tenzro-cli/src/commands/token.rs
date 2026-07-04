@@ -23,7 +23,7 @@ pub enum TokenCommand {
     Transfer(TokenTransferCmd),
     /// Swap tokens via DEX
     Swap(TokenSwapCmd),
-    /// Inspect the dual-rail gas burn quota (Agent-Swarm Spec 3 wave 1)
+    /// Inspect the dual-rail gas burn quota (Agent-Swarm Spec 3)
     BurnQuota(TokenBurnQuotaCmd),
 }
 
@@ -402,7 +402,7 @@ impl TokenSwapCmd {
 
 /// Inspect the dual-rail gas burn quota singleton.
 ///
-/// In wave 1 the quota is read-only over RPC. Once the StablecoinPaymaster
+/// The quota is currently read-only over RPC. Once the StablecoinPaymaster
 /// and QuotaReplenisher land, this command will gain refill / drain
 /// inspection subcommands; for now it prints the current state only.
 #[derive(Debug, Parser)]

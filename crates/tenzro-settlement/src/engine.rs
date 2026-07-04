@@ -527,7 +527,7 @@ impl SettlementEngine {
                 .get(tenzro_storage::CF_SETTLEMENTS, &key)
                 .map_err(|e| SettlementError::StorageError(e.to_string()))?
             {
-                // Wave 7: receipts are wrapped in `ReceiptEnvelope`. Decode the
+                // Receipts are wrapped in `ReceiptEnvelope`. Decode the
                 // envelope, validate it, then deserialize the inline payload
                 // back into a `SettlementReceipt`.
                 match serde_json::from_slice::<ReceiptEnvelope>(&bytes) {

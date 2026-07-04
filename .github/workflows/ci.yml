@@ -78,10 +78,9 @@ jobs:
         run: cargo bench --workspace --exclude tenzro-desktop -- --save-baseline main
 
       # Performance hard-threshold gate. Reads tools/bench-gate/thresholds.toml
-      # (each entry pins a public reference bound from
-      # docs/operators/BENCHMARKS.md) and fails the build if any bench
-      # exceeds its ceiling or falls below its floor. Runs on every PR
-      # so regressions caught here are absolute, not relative.
+      # (each entry pins a public reference bound for the target) and fails the
+      # build if any bench exceeds its ceiling or falls below its floor. Runs on
+      # every PR so regressions caught here are absolute, not relative.
       - uses: actions/setup-python@v5
         if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
         with:

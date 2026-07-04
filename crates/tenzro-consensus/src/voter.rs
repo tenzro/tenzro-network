@@ -40,8 +40,8 @@ mod bls_aggregate_serde {
 /// Wire-format version for the [`Vote`] payload.
 ///
 /// History:
-/// - `1`: pre-Wave-3d classical-only votes (Ed25519 only). Rejected.
-/// - `2`: Wave 3d hybrid (classical + ML-DSA-65). Rejected after #171.
+/// - `1`: classical-only votes (Ed25519 only). Rejected.
+/// - `2`: hybrid (classical + ML-DSA-65). Rejected after #171.
 /// - `3`: #171 SyncInfo piggyback — `high_qc_view` field added and bound into
 ///   the signing payload so a downgrade attempt that strips the field would
 ///   produce a different signing target than the legitimate signer used.
@@ -520,7 +520,7 @@ impl VoteCollector {
     /// # Security
     ///
     /// This method implements critical security checks (Issues #13, #14 - RESOLVED):
-    /// 1. **Wave 3d hybrid signature verification**: The vote carries a composite
+    /// 1. **Hybrid signature verification**: The vote carries a composite
     ///    (Ed25519 + ML-DSA-65) signature plus the public key it was signed under.
     ///    Both legs must validate. Additionally the embedded `vote.public_key`
     ///    MUST match the validator's registered classical and PQ keys exactly —
@@ -532,7 +532,7 @@ impl VoteCollector {
     ///
     /// All checks are performed BEFORE accepting the vote into the quorum.
     pub fn add_vote(&self, vote: Vote) -> Result<Option<QuorumCertificate>> {
-        // Wave 3d: refuse any vote whose wire-format version is not the current
+        // Refuse any vote whose wire-format version is not the current
         // hybrid version. There is no fallback path — a peer that sends a v1
         // (classical-only) vote is gossiping pre-migration data and must be
         // dropped.
@@ -578,7 +578,7 @@ impl VoteCollector {
             )));
         }
 
-        // Wave 3d: bind the embedded composite public key against the
+        // Bind the embedded composite public key against the
         // validator's registered hybrid keys. Refuse any mismatch — a vote
         // signed under a different key pair is a forgery attempt even if the
         // signature itself would otherwise verify.

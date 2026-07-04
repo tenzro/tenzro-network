@@ -926,7 +926,7 @@ tenzro token transfer --token <token_id> --to <address> --amount <amount>
 # Swap tokens via DEX
 tenzro token swap --from <token_id> --to <token_id> --amount <amount>
 
-# Inspect the dual-rail gas burn quota (Agent-Swarm Spec 3 wave 1)
+# Inspect the dual-rail gas burn quota (Agent-Swarm Spec 3)
 tenzro token burn-quota
 ```
 

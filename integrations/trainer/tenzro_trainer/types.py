@@ -90,13 +90,17 @@ class AggregationRule:
     (``{"TrimmedMean": {"alpha_bps": 1000}}``).
 
     Tier policy (enforced by the Rust runtime at task registration):
-    ``Mean`` admits at all tiers; ``TrimmedMean`` / ``CoordinateMedian`` /
-    ``Krum`` require ``TrainingTier.VERIFIED`` or higher.
+    ``Mean`` and ``LoraAlternating`` admit at all tiers; ``TrimmedMean`` /
+    ``CoordinateMedian`` / ``Krum`` require ``TrainingTier.VERIFIED`` or higher.
     """
 
     @staticmethod
     def mean() -> str:
         return "Mean"
+
+    @staticmethod
+    def lora_alternating() -> str:
+        return "LoraAlternating"
 
     @staticmethod
     def trimmed_mean(alpha_bps: int) -> dict[str, Any]:

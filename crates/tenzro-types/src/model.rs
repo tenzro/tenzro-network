@@ -475,7 +475,7 @@ pub struct AudioParameters {
 /// per-frame spatial size, the number of frames consumed per inference,
 /// the target frames-per-second the model was trained on (used for
 /// stride during preprocessing), and the output embedding dimensionality.
-/// Wave 1 ships the type but the catalog is empty until a permissive
+/// Ships the type but the catalog is empty until a permissive
 /// + ONNX-shippable encoder lands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoParameters {

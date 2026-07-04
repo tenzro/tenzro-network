@@ -79,7 +79,7 @@ Located under `reference_templates/`. They are loaded at node startup by `tenzro
 | `timeseries_forecaster.json` | specialist | free | Timeseries forecasting via `tenzro_forecast` (TimesFM 2.5) |
 | `vision_indexer.json` | specialist | free | Image embedding + similarity indexing via `tenzro_visionEmbed` (CLIP, SigLIP2, DINOv3) |
 | `audio_transcriber.json` | specialist | free | Audio ASR via `tenzro_transcribe` (Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT, Canary) |
-| `video_analyst.json` | specialist | free | Video frame embedding via `tenzro_videoEmbed` (encoder scaffolding — wave 1) |
+| `video_analyst.json` | specialist | free | Video frame embedding via `tenzro_videoEmbed` (encoder scaffolding) |
 | `language_trainer.json` | autonomous | free | Coordinates language-model training runs over the Tenzro Train protocol |
 | `vision_trainer.json` | autonomous | free | Coordinates vision-model training runs over the Tenzro Train protocol |
 | `timeseries_trainer.json` | autonomous | free | Coordinates timeseries-model training runs over the Tenzro Train protocol |

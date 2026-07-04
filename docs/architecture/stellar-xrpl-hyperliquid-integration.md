@@ -34,7 +34,7 @@ This document maps out how to do that without breaking the `MultiVmRuntime` inva
 
 So the work goes into `tenzro-bridge` (adapter layer), `tenzro-payments` (mandate envelope), and `tenzro-identity` (`allowed_chains` whitelist), not into `tenzro-vm`.
 
-## State-of-the-art reference: NEAR Chain Signatures
+## Reference: NEAR Chain Signatures
 
 NEAR shipped the leading pattern in 2024 and it has held up: **one home account, derivation paths, MPC ceremony, target-chain signature**.
 
@@ -52,7 +52,7 @@ home_account: tenzro_did                     (Tenzro DID — controls the key sh
 
 NEAR's MPC uses **additive HD key derivation**: `sk_target = sk_home + e`, where `e = H(home_account, derivation_path)`. Public, deterministic, reproducible. The same `home_account + path` always produces the same target-chain address. **This is what we need.**
 
-Tenzro already has the threshold-signing primitive (`tenzro_bridge::mpc::sign::ThresholdSigner` + DKLS23 driver shipped in Phase D wave 2). What we don't yet have is the **derivation layer** that turns one TDIP identity into many target-chain addresses.
+Tenzro already has the threshold-signing primitive (`tenzro_bridge::mpc::sign::ThresholdSigner` + DKLS23 driver). What we don't yet have is the **derivation layer** that turns one TDIP identity into many target-chain addresses.
 
 ## Tenzro adaptation
 

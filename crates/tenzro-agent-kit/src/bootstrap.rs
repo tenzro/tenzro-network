@@ -100,12 +100,12 @@ fn load_bundled_manifests() -> Result<Vec<AgentTemplate>, AgentKitError> {
         include_str!("../reference_templates/timeseries_trainer.json"),
         include_str!("../reference_templates/language_trainer.json"),
         include_str!("../reference_templates/vision_trainer.json"),
-        // Multi-modal inference (wave 1)
+        // Multi-modal inference
         include_str!("../reference_templates/timeseries_forecaster.json"),
         include_str!("../reference_templates/vision_indexer.json"),
         include_str!("../reference_templates/audio_transcriber.json"),
         include_str!("../reference_templates/video_analyst.json"),
-        // Wave 3 + 4 — institutional + DvP saga (brand-clean,
+        // Institutional + DvP saga (brand-clean,
         // generic-descriptor templates).
         include_str!("../reference_templates/agentic_nav_calculator.json"),
         include_str!("../reference_templates/agentic_lc_examiner.json"),

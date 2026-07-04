@@ -66,7 +66,7 @@ fn fresh_settlement_engine() -> (Arc<SettlementEngine>, Address) {
 /// and verifies an Ed25519 signature whose public key is encoded as a hex
 /// string under `credential.extra["public_key"]`.
 /// Returns `(classical_pubkey, classical_sig, pq_pubkey, pq_sig)` for the
-/// hybrid `PaymentCredential` schema (Wave 3d).
+/// hybrid `PaymentCredential` schema.
 fn sign_mpp_credential(
     challenge_id: &str,
     payer_did: &str,

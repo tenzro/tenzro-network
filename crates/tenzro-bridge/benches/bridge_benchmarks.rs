@@ -121,7 +121,7 @@ fn bench_encode_decode(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------- Wave 9/11 fee-in-TNZO + ERC-7683 benches ----------
+// ---------- fee-in-TNZO + ERC-7683 benches ----------
 
 use std::sync::Arc;
 use tenzro_bridge::fee_oracle::{

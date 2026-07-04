@@ -236,7 +236,7 @@ Every node exposes a Prometheus `/metrics` endpoint with per-subsystem counters.
 - `tenzro_block_sync_blocks_served_total` / `_blocks_received_total`
 - `tenzro_consensus_direct_messages_sent_total` / `_received_total`
 
-A bundled Grafana dashboard (`docs/operators/dashboards/`) consumes these so operators can monitor mesh size, validator reachability, request/response saturation, and gossipsub message rate per topic without writing PromQL by hand.
+These Prometheus metrics let operators monitor mesh size, validator reachability, request/response saturation, and gossipsub message rate per topic.
 
 ---
 

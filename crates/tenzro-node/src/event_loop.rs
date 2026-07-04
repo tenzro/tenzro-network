@@ -5581,7 +5581,7 @@ fn decode_validator_metadata_update_log(
 
 /// Verifies the hybrid (classical + ML-DSA-65) signature of a transaction.
 ///
-/// Per Wave 3d of the post-quantum migration, every admitted transaction must
+/// Per the post-quantum migration, every admitted transaction must
 /// satisfy both legs of the composite signature:
 ///
 /// 1. Classical Ed25519 over `Transaction::hash()` using the public key carried

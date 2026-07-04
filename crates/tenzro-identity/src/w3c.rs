@@ -48,8 +48,8 @@ pub fn identity_to_did_document(identity: &TenzroIdentity) -> DidDocument {
         doc.add_verification_method(method);
     }
 
-    // Add the post-quantum ML-DSA-65 verification method. Wave 3d hybrid
-    // migration: every TenzroIdentity carries an ML-DSA-65 verifying key
+    // Add the post-quantum ML-DSA-65 verification method. Under the hybrid
+    // migration, every TenzroIdentity carries an ML-DSA-65 verifying key
     // alongside its classical key, so the DID Document exports both. The
     // method type follows the draft "MlDsa65VerificationKey2026" suite name.
     if !identity.pq_verifying_key.is_empty() {

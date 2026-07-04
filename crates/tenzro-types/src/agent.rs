@@ -222,7 +222,7 @@ impl Default for ResourceLimits {
 
 /// A message between agents on Tenzro Network
 ///
-/// Wave 3d hybrid signing: signed messages carry BOTH `signature` (Ed25519
+/// Hybrid signing: signed messages carry BOTH `signature` (Ed25519
 /// classical) and `pq_signature` (ML-DSA-65). When the message is signed,
 /// both legs are `Some(_)`. When the message is unsigned (trusted
 /// single-process tests), both legs are `None`. Mixing — one `Some`, one
@@ -279,7 +279,7 @@ impl AgentMessage {
 
     /// Adds a classical-only signature to the message.
     ///
-    /// Wave 3d hybrid signing: this is the classical (Ed25519) leg only.
+    /// Hybrid signing: this is the classical (Ed25519) leg only.
     /// Production agent message production should call `with_hybrid_signature`
     /// instead so both legs are populated; the router rejects messages with
     /// only the classical leg present.

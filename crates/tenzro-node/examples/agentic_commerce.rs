@@ -66,7 +66,7 @@ fn fresh_settlement_engine() -> (Arc<SettlementEngine>, Address) {
 ///
 /// Canonical message: `challenge_id ++ payer_did ++ amount.to_le_bytes() ++ asset`
 /// Returns `(classical_pubkey, classical_sig, pq_pubkey, pq_sig)` so callers
-/// can populate the full hybrid `PaymentCredential` (Wave 3d).
+/// can populate the full hybrid `PaymentCredential`.
 fn sign_mpp_credential(
     challenge_id: &str,
     payer_did: &str,

@@ -19,13 +19,13 @@
 //! ### What this does NOT give you
 //!
 //! - **Sub-transaction privacy** — that requires the Canton Merkle-tree-of-views
-//!   model and is delivered when the workflow is mirrored to Canton (Wave 5).
+//!   model and is delivered when the workflow is mirrored to Canton.
 //!   Privacy domains are the Tenzro-native primitive for receipt confidentiality
 //!   and ACL gating; they are *complementary* to Canton's sub-transaction model,
 //!   not a replacement.
 //! - **Forward secrecy** — recipient keys are long-lived. If a recipient's key
 //!   is compromised, all prior receipts they could decrypt are exposed. We can
-//!   layer key rotation on top in a follow-up; not in this wave.
+//!   layer key rotation on top in a follow-up; not currently.
 
 use std::sync::Arc;
 

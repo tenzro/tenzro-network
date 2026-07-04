@@ -1,5 +1,5 @@
-//! Criterion benches for the TEE keystore hot paths. Bound is pinned in
-//! `docs/operators/BENCHMARKS.md` and gated by `tools/bench-gate/`.
+//! Criterion benches for the TEE keystore hot paths. Bounds are pinned in
+//! `tools/bench-gate/thresholds.toml`.
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use ed25519_dalek::SigningKey;

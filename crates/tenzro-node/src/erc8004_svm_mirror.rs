@@ -35,7 +35,7 @@
 //! Today the workspace does not depend on `solana-sdk` / `solana-client`;
 //! a real `SvmMirrorTransport` impl lives in a future operator-facing
 //! crate that pulls those in only when the SVM cluster is configured.
-//! The trait + indirection are the production-ready seam.
+//! The trait + indirection are the integration seam.
 
 use std::sync::Arc;
 

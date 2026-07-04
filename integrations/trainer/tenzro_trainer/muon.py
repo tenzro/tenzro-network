@@ -238,11 +238,16 @@ def build_inner_optimizer(
             lr,
         )
         return Muon(groups, momentum=momentum, weight_decay=wd)
+    # Optimize only parameters that carry gradient. For a full fine-tune that
+    # is every parameter (unchanged behavior); for a LoRA/QLoRA model the base
+    # is frozen and only the adapter matrices are trainable, so the optimizer
+    # never allocates moment buffers over the frozen base.
+    trainable = [p for p in model.parameters() if p.requires_grad]
     if choice == "sgd":
         momentum = float(hp.get("momentum", 0.9))
         log.info("inner optimizer: sgd (lr=%g, momentum=%g)", lr, momentum)
         return torch.optim.SGD(
-            model.parameters(),
+            trainable,
             lr=lr,
             momentum=momentum,
             nesterov=momentum > 0.0,
@@ -251,7 +256,7 @@ def build_inner_optimizer(
     if choice == "adamw":
         log.info("inner optimizer: adamw (lr=%g, weight_decay=%g)", lr, wd)
         return torch.optim.AdamW(
-            model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.95)
+            trainable, lr=lr, weight_decay=wd, betas=(0.9, 0.95)
         )
     raise ValueError(
         f"unrecognized inner_optimizer {choice!r}; expected muon|adamw|sgd"

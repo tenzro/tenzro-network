@@ -1193,7 +1193,7 @@ impl EntryPoint {
         //       app-level paymaster) → legacy behaviour: skip the sender
         //       debit. The bundler is responsible for the operator's
         //       paymaster integration; the EntryPoint does not double-
-        //       debit. This branch is unchanged from before this wave.
+        //       debit. This branch is unchanged.
         let mut success = exec_success;
         if success {
             if !op.has_paymaster() {

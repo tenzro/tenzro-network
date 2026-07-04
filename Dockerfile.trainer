@@ -5,14 +5,14 @@
 #
 # Build (base image must already exist in the registry):
 #   docker build -f Dockerfile.trainer \
-#     --build-arg BASE_IMAGE=us-central1-docker.pkg.dev/tenzro-operator-project/tenzro/tenzro-node:<tag> \
-#     -t us-central1-docker.pkg.dev/tenzro-operator-project/tenzro/tenzro-node-trainer:<tag> .
+#     --build-arg BASE_IMAGE=YOUR_REGISTRY/tenzro-node:<tag> \
+#     -t YOUR_REGISTRY/tenzro-node-trainer:<tag> .
 #
 # The node binary is identical to the base image; the trainer auto-provisioning
 # daemon resolves the interpreter via TENZRO_TRAINING_VENV_PATH, so no extra
 # node config is needed beyond `[training] enabled = true`.
 
-ARG BASE_IMAGE=us-central1-docker.pkg.dev/tenzro-operator-project/tenzro/tenzro-node:latest
+ARG BASE_IMAGE=YOUR_REGISTRY/tenzro-node:latest
 
 # ---------------------------------------------------------------------------
 # Stage 1: build the trainer virtualenv on a full Debian so build tooling

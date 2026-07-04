@@ -38,7 +38,7 @@
     {
       "description": "10-second clip, no native video encoder available",
       "user_input": "Embed this 10s clip and forward to the search agent",
-      "expected_output": "Video catalog empty in wave 1 — fell back to vision pooling. Used dinov3-vitb16 over 10 frames (stride 30). Pooled 768-dim mean vector. Forwarded to agent did:tenzro:machine:search-001. Task t-789."
+      "expected_output": "Video catalog empty — fell back to vision pooling. Used dinov3-vitb16 over 10 frames (stride 30). Pooled 768-dim mean vector. Forwarded to agent did:tenzro:machine:search-001. Task t-789."
     }
   ],
   "tags": ["video", "embedding", "vjepa", "videomae", "ai", "a2a"],

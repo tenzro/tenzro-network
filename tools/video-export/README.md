@@ -9,15 +9,15 @@ artifacts compatible with the Tenzro `VideoRuntime`
 
 V-JEPA 2 base is MIT-licensed per Meta's model cards
 (`facebook/vjepa2-vitl-fpc64-256` and sibling repos), so the licensing
-blocker that kept the video catalog empty in wave 1 is resolved. ONNX
+blocker that kept the video catalog empty is resolved. ONNX
 export is still non-trivial (custom 3D-conv stem, predictor head must
 be skipped) so this harness produces the artifact once, the maintainer
 publishes it to `tenzro/vjepa2-vitl-fpc64-256-onnx`, and the catalog
 entry in `crates/tenzro-model/src/catalog.rs::get_video_catalog` is
 flipped on.
 
-The runtime + RPC + CLI surfaces ship empty in wave 1; this harness
-populates them in wave 2.
+The runtime + RPC + CLI surfaces ship empty; this harness
+populates them.
 
 ## Targets
 

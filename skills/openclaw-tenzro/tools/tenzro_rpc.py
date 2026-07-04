@@ -5723,7 +5723,7 @@ def cct_get_pool(chain: str) -> dict:
     return _rpc("tenzro_cctGetPool", {"chain": chain})
 
 
-# ── Multi-modal inference (wave 1) ────────────────────────────────
+# ── Multi-modal inference ─────────────────────────────────────────
 #
 # Wraps the JSON-RPC surface added by Layer A. Each modality follows
 # the same shape: list catalog (curated entries), list (loaded models),
@@ -5880,7 +5880,7 @@ def transcribe(model_id: str, audio_b64: str, language: str = None,
 # Video -----------------------------------------------------------------
 
 def list_video_catalog() -> dict:
-    """List the curated video catalog (empty in wave 1 — license/export gap)."""
+    """List the curated video catalog (currently empty — license/export gap)."""
     return _rpc("tenzro_listVideoCatalog", {})
 
 
@@ -5903,7 +5903,7 @@ def video_embed(model_id: str, video_b64: str,
 #
 # Symmetric load/unload pair per modality. `load_*_model` registers an
 # ONNX file with the node's runtime; `unload_*_model` drops the ORT
-# session. For wave-1 stubbed modalities (text-embed, segmentation,
+# session. For stubbed modalities (text-embed, segmentation,
 # detection, video) the underlying RPC handler returns JSON-RPC -32004
 # until the ONNX loader for that modality lands — wrappers are exposed
 # for surface symmetry so agent code can detect availability uniformly.
@@ -5950,7 +5950,7 @@ def unload_vision_model(model_id: str) -> dict:
 
 def load_text_embedding_model(model_id: str, path: str,
                               catalog_id: str = None) -> dict:
-    """Load a text-embedding ONNX. Wave-1 stub: returns -32004 until ONNX loader lands."""
+    """Load a text-embedding ONNX. Stub: returns -32004 until the ONNX loader is wired."""
     params = {"model_id": model_id, "path": path}
     if catalog_id is not None: params["catalog_id"] = catalog_id
     return _rpc("tenzro_loadTextEmbeddingModel", params)
@@ -5964,7 +5964,7 @@ def unload_text_embedding_model(model_id: str) -> dict:
 def load_segmentation_model(model_id: str, encoder_path: str,
                             decoder_path: str, family: str = None,
                             catalog_id: str = None) -> dict:
-    """Load a segmenter (SAM 2 / EdgeSAM / MobileSAM). Wave-1 stub."""
+    """Load a segmenter (SAM 2 / EdgeSAM / MobileSAM). Loader stub."""
     params = {
         "model_id": model_id,
         "encoder_path": encoder_path,
@@ -5982,7 +5982,7 @@ def unload_segmentation_model(model_id: str) -> dict:
 
 def load_detection_model(model_id: str, path: str, family: str = None,
                          catalog_id: str = None) -> dict:
-    """Load a detector (RF-DETR / D-FINE). Wave-1 stub."""
+    """Load a detector (RF-DETR / D-FINE). Loader stub."""
     params = {"model_id": model_id, "path": path}
     if family is not None: params["family"] = family
     if catalog_id is not None: params["catalog_id"] = catalog_id
@@ -6019,7 +6019,7 @@ def unload_audio_model(model_id: str) -> dict:
 
 def load_video_model(model_id: str, path: str,
                      catalog_id: str = None) -> dict:
-    """Load a video encoder ONNX. Wave-1 stub: catalog ships empty pending license clearance."""
+    """Load a video encoder ONNX. Loader stub: catalog ships empty pending license clearance."""
     params = {"model_id": model_id, "path": path}
     if catalog_id is not None: params["catalog_id"] = catalog_id
     return _rpc("tenzro_loadVideoModel", params)
@@ -6297,7 +6297,7 @@ def get_treasury_earmark(name: str = None) -> dict:
 
     Returns the genesis-funded TNZO allocation, decay schedule, remaining
     balance, drawn-to-date, and master `enabled` switch. Only one earmark
-    exists in wave 1 (`name == "SeedAgent"`); the optional `name` arg is a
+    exists (`name == "SeedAgent"`); the optional `name` arg is a
     forward-compat filter.
     """
     params = {}
@@ -6493,7 +6493,7 @@ def get_burn_quota() -> dict:
 
     Returns balance / cap / daily_target / min_reserve_bps / min_reserve /
     last_refill / total_drained / total_refilled / deficit / can_drain_one.
-    Wave-1 is read-only — drains/refills happen in-process.
+    This is read-only — drains/refills happen in-process.
     """
     return _rpc("tenzro_getBurnQuota", {})
 
@@ -6535,7 +6535,7 @@ def get_account_contention(address: str) -> dict:
 def get_da_backends() -> dict:
     """List configured DA backends and their health status.
 
-    Wave-1 ships only `inline_fallback`; EigenDA / Celestia / Avail entries
+    Only `inline_fallback` ships today; EigenDA / Celestia / Avail entries
     appear when their feature-gated adapters land.
     """
     return _rpc("tenzro_getDaBackends", {})
@@ -6665,7 +6665,7 @@ def get_provider_reputation(provider_address: str) -> dict:
 def get_provenance(content_hash: str) -> dict:
     """Look up a cached ProvenanceManifest by 32-byte hex `content_hash`.
 
-    Wave-1 read path for the EU AI Act Art. 50(2) machine-readable
+    Read path for the EU AI Act Art. 50(2) machine-readable
     synthetic-content marker. The store is bounded LRU-by-signed_at, so a
     `not found` does not prove the response was never signed.
     """
@@ -6991,7 +6991,7 @@ def mirror_workflow_to_canton(workflow_id: str) -> dict:
     return _rpc("tenzro_mirrorWorkflowToCanton", {"workflow_id": workflow_id})
 
 
-# ── Wave 7/9/12 — institutional primitives ────────────────────────
+# ── Institutional primitives ──────────────────────────────────────
 
 
 def urwa_is_kill_switched(token_id_hex: str) -> dict:
@@ -7877,7 +7877,7 @@ COMMANDS = {
     "get_stable_asset": lambda args: get_stable_asset(args[0], args[1]),
     "mint_stable_asset": lambda args: mint_stable_asset(args[0], args[1], args[2]),
     "redeem_stable_asset": lambda args: redeem_stable_asset(args[0], args[1], args[2]),
-    # ── Wave 7/9/12 — institutional primitives ──
+    # ── Institutional primitives ──
     "urwa_is_kill_switched": lambda args: urwa_is_kill_switched(args[0]),
     "urwa_get_frozen_tokens": lambda args: urwa_get_frozen_tokens(args[0], args[1]),
     "urwa_set_frozen_tokens": lambda args: urwa_set_frozen_tokens(

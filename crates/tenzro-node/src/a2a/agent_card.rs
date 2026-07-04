@@ -879,7 +879,7 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 input_modes: vec!["application/json".to_string()],
                 output_modes: vec!["application/json".to_string()],
             },
-            // Wave 7/9/12 — institutional primitives.
+            // Institutional primitives.
             AgentSkill {
                 id: "urwa".to_string(),
                 name: "ERC-7943 (uRWA) Compliance".to_string(),

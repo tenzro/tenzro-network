@@ -716,8 +716,8 @@ Trainers are paid proportional to their accepted outer-gradient count, weighted 
 
 Three trust tiers:
 
-- **Open** — anyone can train; only Mean aggregation; lowest sponsor barrier; default bond.
-- **Verified** — trainers must hold a verified credential; all four aggregators (Mean / TrimmedMean / CoordinateMedian / Krum) admitted; higher bond.
+- **Open** — anyone can train; Mean and LoraAlternating aggregation (LoraAlternating is the alternating-freeze rule for LoRA/QLoRA adapter runs); lowest sponsor barrier; default bond.
+- **Verified** — trainers must hold a verified credential; all aggregators admitted (Mean / LoraAlternating / TrimmedMean / CoordinateMedian / Krum); higher bond.
 - **Confidential** — training data is sealed (HPKE RFC 9180 wrapped); trainer must run inside an attested enclave; highest bond.
 
 The sponsor picks the tier; the tier sets aggregation policy and trainer requirements.

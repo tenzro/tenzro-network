@@ -38,7 +38,7 @@
 //! crate; a real `DamlMirrorTransport` impl lives in a future
 //! operator-facing crate that pulls those in only when a Canton
 //! participant is configured. The trait + indirection are the
-//! production-ready seam.
+//! integration seam.
 
 use std::sync::Arc;
 

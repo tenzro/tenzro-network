@@ -30,7 +30,7 @@ pub struct PaymentChallenge {
 
 /// A payment credential submitted by a client
 ///
-/// Wave 3d hybrid signing: every internal Tenzro credential carries BOTH
+/// Hybrid signing: every internal Tenzro credential carries BOTH
 /// classical (Ed25519) and post-quantum (ML-DSA-65) signatures plus the
 /// corresponding public keys. External-protocol passthroughs (Stripe,
 /// Coinbase, EIP-3009) leave the PQ leg empty and are verified through

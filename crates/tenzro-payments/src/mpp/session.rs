@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 
 /// A signed voucher for incremental payment within an MPP session
 ///
-/// Wave 3d hybrid signing: every voucher carries BOTH classical (Ed25519)
+/// Hybrid signing: every voucher carries BOTH classical (Ed25519)
 /// and post-quantum (ML-DSA-65) signatures, plus the corresponding public
 /// keys. Verification fails closed if either leg is missing or invalid.
 #[derive(Debug, Clone, Serialize, Deserialize)]

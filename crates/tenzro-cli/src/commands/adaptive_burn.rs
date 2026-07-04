@@ -9,7 +9,7 @@
 //! - `tenzro adaptive-burn proposals`        — in-flight governance proposals
 //!
 //! Write-side (auto-proposal generator + EIP-1559 fee-market consumer) lands
-//! with the governance executor wiring in a later wave.
+//! with the governance executor wiring.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

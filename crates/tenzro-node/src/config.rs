@@ -532,7 +532,7 @@ pub struct BridgeAdapterConfig {
     #[serde(default)]
     pub tee_label: Option<String>,
 
-    /// DKLS23 t-of-n threshold-ECDSA backend (Phase D wave 2).
+    /// DKLS23 t-of-n threshold-ECDSA backend.
     ///
     /// When set, takes precedence over both `tee_sealed` and the raw-key
     /// paths: the bridge signer dispatches every signing request through
@@ -1252,7 +1252,7 @@ pub struct NodeConfig {
     pub external_mcp_addr: Option<String>,
 
     /// Geographic locality of this node (free-form identifier such as
-    /// `us-central1-a`, `eu-west`, `ap-southeast-1`). Carried through to
+    /// `us-east`, `eu-west`, `ap-southeast`). Carried through to
     /// the gossiped `ProviderAnnouncementMessage::geography` so peers can
     /// route inference / TEE work by region. `None` means the operator
     /// declined to declare; consumers must treat `None` as "unknown",

@@ -22,7 +22,7 @@
 //!
 //! # Status
 //!
-//! This wave ships the **trait + receipt + in-memory pool primitive**.
+//! This module provides the **trait + receipt + in-memory pool primitive**.
 //! Wiring against the live `NetworkTreasury` + per-adapter solver
 //! claim path lands in a subsequent wave; this is the structural
 //! foundation.
