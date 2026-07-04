@@ -356,7 +356,7 @@ realfft = "3.4"
 # hand a path to the CLI without exposing AVIO callbacks for in-memory bytes.
 tempfile = "3"
 
-# DKLS23 threshold-ECDSA (t-of-n MPC) bridge signer. Phase D wave 2.
+# DKLS23 threshold-ECDSA (t-of-n MPC) bridge signer.
 #
 # Upstream: 0xCarbon's `dkls23-secp256k1` (Apache-2.0 / MIT,
 # repo github.com/0xCarbon/DKLs23). Picked over:

@@ -66,7 +66,7 @@ pub struct MpcMessage {
 /// - **Best-effort broadcast.** When `MpcMessage::to == None`, the transport
 ///   fans out to every other party in the committee.
 ///
-/// Concrete transports planned for the Phase D wave 2:
+/// Concrete transports planned for the threshold-signing path:
 ///
 /// - `Libp2pMpcTransport` — request-response over the existing libp2p stack
 ///   (consensus-direct overlay), keyed by party-DID → PeerId.
@@ -183,7 +183,7 @@ impl MpcTransport for InMemoryMpcTransport {
 /// Skeleton signer for CGGMP24 t-of-n threshold-ECDSA over secp256k1.
 ///
 /// This is the foundation seam where the live distributed signing flow
-/// will be wired in the Phase D wave 2 — at which point the `_keyshare`
+/// will be wired for distributed signing — at which point the `_keyshare`
 /// will hold a real `cggmp24_keygen::IncompleteKeyShare<...>` produced by
 /// the UC-secure DKG, and `sign_prehash` will drive a round-based
 /// `cggmp24::signing` execution over the configured `MpcTransport`.

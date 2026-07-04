@@ -2,7 +2,7 @@
 //!
 //! Tenzro mediates access to credentials that clients should not hold
 //! directly — most notably the Canton devnet JWT, which authorizes the
-//! shared Splice validator party `tenzro-validator-1`. External callers
+//! operator's shared Splice validator party. External callers
 //! authenticate to the Tenzro node via an API key (presented in the
 //! `X-Tenzro-Api-Key` HTTP header on REST routes, or as the `api_key`
 //! parameter on the corresponding JSON-RPC methods); the node then
@@ -296,9 +296,8 @@ pub struct ApiKeyRecord {
     /// (e.g. `tenzro-labs@clients`). When set, the node forwards Canton
     /// calls with `actAs = primaryParty(canton_user_id)` and Canton's
     /// AuthService enforces per-user CanActAs rights. When `None`, the
-    /// node falls back to the operator's primary party (legacy shared
-    /// path). See `docs/operators/CANTON_MULTITENANT.md` for the
-    /// multi-tenant architecture decision.
+    /// node falls back to the operator's primary party (shared
+    /// path).
     #[serde(default)]
     pub canton_user_id: Option<String>,
 
@@ -674,8 +673,7 @@ impl ApiKeyManager {
     /// Management Service user id (e.g. `tenzro-labs@clients`). When
     /// present, the node uses this user's primary party as `actAs` for
     /// every canton-scoped call made with this key, and Canton's
-    /// AuthService enforces per-user CanActAs rights. See
-    /// `docs/operators/CANTON_MULTITENANT.md`.
+    /// AuthService enforces per-user CanActAs rights.
     pub fn issue(
         &self,
         subject: Option<String>,

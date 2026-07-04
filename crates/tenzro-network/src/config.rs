@@ -92,11 +92,10 @@ impl Default for NetworkConfig {
             //     constant close+redial churn and degrades the gossipsub mesh from
             //     full N-1 to 0-4 peers over an hour, stalling consensus (observed
             //     on GCE multi-region 2026-05-14).
-            // (2) GCE's VPC fabric (Andromeda) silently evicts idle conntrack
-            //     entries at 10 minutes WITHOUT sending RST. Keeping libp2p's
-            //     idle timeout at or above 600s, combined with kernel TCP keepalive
-            //     set to fire every ~120s (configured at the host layer in
-            //     deploy/terraform/gce_validators/cloud-init.yaml), keeps the
+            // (2) many NAT/VPC fabrics silently evict idle conntrack entries
+            //     at ~10 minutes WITHOUT sending RST. Keeping libp2p's idle
+            //     timeout at or above 600s, combined with kernel TCP keepalive
+            //     set to fire every ~120s at the host layer, keeps the
             //     conntrack entries warm before either side drops the connection.
             connection_idle_timeout: Duration::from_secs(600),
             // Ethereum-class 700ms heartbeat for sub-second gossip propagation.

@@ -29,6 +29,13 @@ pub fn aggregator_for(rule: AggregationRule) -> Box<dyn Aggregator> {
         AggregationRule::TrimmedMean { alpha_bps } => Box::new(TrimmedMeanAggregator { alpha_bps }),
         AggregationRule::CoordinateMedian => Box::new(CoordinateMedianAggregator),
         AggregationRule::Krum { f } => Box::new(KrumAggregator { f }),
+        // ADF-LoRA (arXiv 2511.18291): each round only one low-rank factor is
+        // live, so the fragment tensors that arrive are a single factor across
+        // contributors and per-coordinate mean is the correct aggregation. The
+        // "alternating" logic — which of A/B is frozen this round — lives in
+        // the Python trainer (it names only the active factor's tensors in the
+        // round's delta state-dict); the syncer just means what it receives.
+        AggregationRule::LoraAlternating => Box::new(MeanAggregator),
     }
 }
 
@@ -284,6 +291,18 @@ mod tests {
             .aggregate(&[a.view(), b.view(), c.view()])
             .expect("mean ok");
         assert_eq!(out.as_slice().unwrap(), &[4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn lora_alternating_means_single_factor() {
+        // Under ADF-LoRA the syncer receives one low-rank factor per round
+        // across contributors; the rule is a plain per-coordinate mean.
+        let a = arr1(&[2.0_f32, 4.0]);
+        let b = arr1(&[4.0_f32, 8.0]);
+        let agg = aggregator_for(AggregationRule::LoraAlternating);
+        assert_eq!(agg.rule(), AggregationRule::Mean);
+        let out = agg.aggregate(&[a.view(), b.view()]).expect("lora ok");
+        assert_eq!(out.as_slice().unwrap(), &[3.0, 6.0]);
     }
 
     #[test]

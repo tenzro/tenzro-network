@@ -49,7 +49,13 @@ use tenzro_types::training::{
 /// Returns the minimum tier required to use `rule`.
 pub fn min_tier_for_rule(rule: AggregationRule) -> TrainingTier {
     match rule {
-        AggregationRule::Mean => TrainingTier::Open,
+        // Mean and LoraAlternating are correctness rules, not Byzantine
+        // defenses — both are per-coordinate means over the arriving fragment
+        // tensors. LoRA fine-tuning is exactly the commodity/home-GPU profile
+        // the Open tier targets, so it is admitted there; a run that also wants
+        // Byzantine robustness over adapter deltas layers Verified-tier
+        // attestation on top and selects a robust rule instead.
+        AggregationRule::Mean | AggregationRule::LoraAlternating => TrainingTier::Open,
         AggregationRule::TrimmedMean { .. }
         | AggregationRule::CoordinateMedian
         | AggregationRule::Krum { .. } => TrainingTier::Verified,
@@ -1530,6 +1536,12 @@ mod tests {
         assert_eq!(
             min_tier_for_rule(AggregationRule::Krum { f: 1 }),
             TrainingTier::Verified
+        );
+        // LoRA alternating aggregation is a correctness rule, not a Byzantine
+        // defense — admitted at Open like Mean.
+        assert_eq!(
+            min_tier_for_rule(AggregationRule::LoraAlternating),
+            TrainingTier::Open
         );
     }
 

@@ -25,7 +25,7 @@ case "${COMMAND}" in
                 --count 3 \
                 --chain-id 1337 \
                 --stake-per-validator 1000
-            cp "${tmpdir}/genesis-prod.toml" "${PROJECT_DIR}/config/genesis-local.toml"
+            cp "${tmpdir}/genesis.toml" "${PROJECT_DIR}/config/genesis-local.toml"
             echo "Wrote ${PROJECT_DIR}/config/genesis-local.toml"
         fi
 

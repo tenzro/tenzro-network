@@ -109,7 +109,7 @@ let commitment = compute_zk_commitment(
 
 ## Production Status
 
-Production-ready:
+Components:
 - Plonky3 STARK proving + verification across the three AIRs
 - Commitment-attestation registry wired into the EVM `ZK_VERIFY` precompile
 - TEE-in-ZK hybrid execution

@@ -29,7 +29,7 @@ use tenzro_types::tee::{AttestationReport, AttestationResult};
 /// Deserialize an ML-DSA-65 verifying key, rejecting any byte string that does
 /// not match the FIPS 204 length (1952 bytes). This prevents downgrade or
 /// truncation attacks at the wire level — every validator MUST advertise a
-/// well-formed PQ key per the Wave 3d migration.
+/// well-formed PQ key per the hybrid migration.
 fn deserialize_pq_verifying_key<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
@@ -75,7 +75,7 @@ pub struct ValidatorInfo {
 
     /// Validator's ML-DSA-65 verifying key (1952 bytes, FIPS 204) for the
     /// post-quantum signing leg. Mandatory: every validator in the active set
-    /// must advertise a hybrid key per the Wave 3d migration.
+    /// must advertise a hybrid key per the hybrid migration.
     #[serde(deserialize_with = "deserialize_pq_verifying_key")]
     pub pq_public_key: Vec<u8>,
 

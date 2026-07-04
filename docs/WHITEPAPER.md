@@ -383,7 +383,7 @@ Inner steps are PyTorch. Outer steps — gradient aggregation, state-root finali
 
 ### Aggregation rules
 
-Four aggregators ship: Mean (the Open trust tier default), Trimmed Mean, Coordinate Median, and Krum (Byzantine-robust). The Open tier admits Mean only; the Verified and Confidential tiers admit all four. Tier-policy admission is a pure function at enrollment time.
+Five aggregators ship: Mean (the Open trust tier default), LoraAlternating (the alternating-freeze rule for LoRA/QLoRA adapter runs), Trimmed Mean, Coordinate Median, and Krum (Byzantine-robust). The Open tier admits Mean and LoraAlternating; the Verified and Confidential tiers admit all five. Tier-policy admission is a pure function at enrollment time.
 
 ### Multi-syncer coordination
 

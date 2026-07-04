@@ -433,8 +433,7 @@ async def handle_validator_lifecycle(text: str, metadata: dict = None) -> str:
                 "new_pq_pubkey (1952-byte hex), new_bls_pubkey (48-byte "
                 "hex), nonce (u64), signature (64-byte hex). The "
                 "signature is produced offline with the current "
-                "consensus key over the canonical preimage. See "
-                "docs/operators/OPERATOR_GUIDE.md §9.3."
+                "consensus key over the canonical preimage."
             )
         result = await rpc_call(
             "tenzro_rotateValidatorKey",

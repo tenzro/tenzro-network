@@ -2835,7 +2835,7 @@ pub struct LoadTextEmbeddingModelParams {
     pub model_id: String,
     #[schemars(description = "Filesystem path to the ONNX file")]
     pub path: String,
-    #[schemars(description = "Optional catalog id (e.g. 'qwen3-embedding-0.6b'). Wave-1 RPC stub: returns -32004 until ONNX loader lands.")]
+    #[schemars(description = "Optional catalog id (e.g. 'qwen3-embedding-0.6b'). RPC stub: returns -32004 until the ONNX loader is wired.")]
     pub catalog_id: Option<String>,
 }
 
@@ -2849,7 +2849,7 @@ pub struct LoadSegmentationModelParams {
     pub decoder_path: String,
     #[schemars(description = "SAM family: 'sam1' or 'sam2'")]
     pub family: Option<String>,
-    #[schemars(description = "Optional catalog id. Wave-1 RPC stub: returns -32004 until ONNX loader lands.")]
+    #[schemars(description = "Optional catalog id. RPC stub: returns -32004 until the ONNX loader is wired.")]
     pub catalog_id: Option<String>,
 }
 
@@ -2875,7 +2875,7 @@ pub struct LoadDetectionModelParams {
     pub path: String,
     #[schemars(description = "Detector family: 'rf-detr' or 'd-fine'")]
     pub family: Option<String>,
-    #[schemars(description = "Optional catalog id. Wave-1 RPC stub: returns -32004 until ONNX loader lands.")]
+    #[schemars(description = "Optional catalog id. RPC stub: returns -32004 until the ONNX loader is wired.")]
     pub catalog_id: Option<String>,
 }
 
@@ -3801,7 +3801,7 @@ pub struct PasskeyListPendingRecoveriesParams {
     pub account_address: String,
 }
 
-// ─── Wave 7 / 9 Params structs ───
+// ─── Institutional-primitive Params structs ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct UrwaTokenIdParams {
@@ -8551,7 +8551,7 @@ impl TenzroMcpServer {
         json_result(v)
     }
 
-    #[tool(description = "List pending and historical adaptive-burn governance proposals. Wave 1 returns an empty list — the auto-proposal generator + governance executor wiring lands alongside the EIP-1559 fee-market consumer.")]
+    #[tool(description = "List pending and historical adaptive-burn governance proposals.")]
     async fn adaptive_burn_list_proposals(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
@@ -10991,7 +10991,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    // ─── Wave-7 + Wave-9 Tools (Wave 1-5 primitives + BridgeFeeOracle) ───
+    // ─── Institutional-primitive tools + BridgeFeeOracle ───
 
     #[tool(description = "Read the ERC-7943 (uRWA) kill-switch state for a given token_id (32-byte hex). Returns the kill-switch active flag, the canonical 4-byte selectors for the standard uRWA functions, and the precompile addresses backing the on-chain enforcement path.")]
     async fn urwa_is_kill_switched(
@@ -12904,7 +12904,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a text-embedding ONNX model. Wave-1: the underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality lands. Exposed for surface symmetry; agents should branch on the catalog (which ships empty in wave 1) rather than calling this blind.")]
+    #[tool(description = "Load a text-embedding ONNX model. The underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality is wired. Exposed for surface symmetry; agents should branch on the catalog rather than calling this blind.")]
     async fn load_text_embedding_model(
         &self,
         Parameters(params): Parameters<LoadTextEmbeddingModelParams>,
@@ -12988,7 +12988,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a segmenter ONNX (SAM 2 base/large, EdgeSAM, MobileSAM). Wave-1: the underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality lands. Exposed for surface symmetry — agents should branch on the catalog status before calling.")]
+    #[tool(description = "Load a segmenter ONNX (SAM 2 base/large, EdgeSAM, MobileSAM). The underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality is wired. Exposed for surface symmetry — agents should branch on the catalog status before calling.")]
     async fn load_segmentation_model(
         &self,
         Parameters(params): Parameters<LoadSegmentationModelParams>,
@@ -13157,7 +13157,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a detector ONNX (RF-DETR, D-FINE). Wave-1: the underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality lands. Exposed for surface symmetry.")]
+    #[tool(description = "Load a detector ONNX (RF-DETR, D-FINE). The underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality is wired. Exposed for surface symmetry.")]
     async fn load_detection_model(
         &self,
         Parameters(params): Parameters<LoadDetectionModelParams>,
@@ -13224,7 +13224,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX ASR catalog: Moonshine v2 (tiny/base, MIT, on-device), Distil-Whisper (small.en/medium.en/large-v3, MIT), Whisper Large-v3-turbo (MIT, flagship), Parakeet-TDT-0.6B-v3 (CC-BY-4.0, 25 European langs), Canary-1B-Flash (CC-BY-4.0, multilingual). The catalog is stable; the ORT-backed transcribers ship in the next wave (today the runtime returns ProviderNotAvailable).")]
+    #[tool(description = "Browse the curated ONNX ASR catalog: Moonshine v2 (tiny/base, MIT, on-device), Distil-Whisper (small.en/medium.en/large-v3, MIT), Whisper Large-v3-turbo (MIT, flagship), Parakeet-TDT-0.6B-v3 (CC-BY-4.0, 25 European langs), Canary-1B-Flash (CC-BY-4.0, multilingual). The catalog is stable; the ORT-backed transcribers are feature-gated (default builds return ProviderNotAvailable).")]
     async fn list_audio_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -13279,7 +13279,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Transcribe an audio clip (WAV/MP3/FLAC, base64-encoded) with a registered ASR model. Optional language hint, per-segment timestamps, and decoding temperature. Note: the ORT-backed transcriber lands in the next wave — today this call returns ProviderNotAvailable.")]
+    #[tool(description = "Transcribe an audio clip (WAV/MP3/FLAC, base64-encoded) with a registered ASR model. Optional language hint, per-segment timestamps, and decoding temperature. Note: the ORT-backed transcriber is feature-gated — default builds return ProviderNotAvailable.")]
     async fn transcribe(
         &self,
         Parameters(params): Parameters<TranscribeParams>,
@@ -14251,21 +14251,21 @@ impl ServerHandler for TenzroMcpServer {
              • text_embed — Strings → dense vectors (Qwen3-Embedding, EmbeddingGemma, BGE-M3)\n\
              • list_text_embedding_models — List loaded text encoders\n\
              • list_text_embedding_catalog — Browse curated text-embedding catalog\n\
-             • load_text_embedding_model — Register a text encoder ONNX (wave-1 stub)\n\
+             • load_text_embedding_model — Register a text encoder ONNX (loader stub)\n\
              • unload_text_embedding_model — Drop a text encoder\n\n\
              Multi-modal AI — Segmentation:\n\
              • segment — Prompt-driven mask segmentation (SAM 2, EdgeSAM, MobileSAM)\n\
              • list_segmentation_models — List loaded segmenters\n\
              • list_segmentation_catalog — Browse curated segmentation catalog\n\
-             • load_segmentation_model — Register a segmenter ONNX (wave-1 stub)\n\
+             • load_segmentation_model — Register a segmenter ONNX (loader stub)\n\
              • unload_segmentation_model — Drop a segmenter\n\n\
              Multi-modal AI — Detection:\n\
              • detect — Object detection (RF-DETR, D-FINE)\n\
              • list_detection_models — List loaded detectors\n\
              • list_detection_catalog — Browse curated detection catalog\n\
-             • load_detection_model — Register a detector ONNX (wave-1 stub)\n\
+             • load_detection_model — Register a detector ONNX (loader stub)\n\
              • unload_detection_model — Drop a detector\n\n\
-             Multi-modal AI — Audio (ASR, scaffolding — ORT-backed transcribers ship next wave):\n\
+             Multi-modal AI — Audio (ASR, ORT-backed transcribers feature-gated):\n\
              • transcribe — Speech-to-text (catalog: Whisper, Distil-Whisper, Moonshine, Parakeet, Canary; today returns ProviderNotAvailable)\n\
              • list_audio_models — List loaded ASR models\n\
              • list_audio_catalog — Browse curated ASR catalog\n\

@@ -30,6 +30,10 @@
 //! - Aggregation rules:
 //!   - [`AggregationRule::Mean`] — admitted at all tiers, default for
 //!     Open-tier runs.
+//!   - [`AggregationRule::LoraAlternating`] — for LoRA/QLoRA adapter runs;
+//!     the trainer freezes one low-rank factor per round so each round's
+//!     delta is a single factor and per-coordinate mean is correct. Reuses
+//!     the mean aggregator; admitted at all tiers like [`AggregationRule::Mean`].
 //!   - [`AggregationRule::TrimmedMean`],
 //!     [`AggregationRule::CoordinateMedian`],
 //!     [`AggregationRule::Krum`] — Byzantine-robust; admitted only at

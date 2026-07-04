@@ -1017,7 +1017,7 @@ pub fn get_forecast_model_by_id(id: &str) -> Option<OnnxForecastEntry> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Text embedding catalog (NEW for wave 1).
+// Text embedding catalog.
 // ─────────────────────────────────────────────────────────────────────
 
 /// A curated ONNX text-embedding entry.
@@ -1066,7 +1066,7 @@ pub struct OnnxTextEmbeddingEntry {
 
 /// Get the curated ONNX text-embedding catalog.
 ///
-/// Verified 2026 state-of-the-art additions: Qwen3-Embedding family (#1 on MTEB
+/// Verified 2026 additions: Qwen3-Embedding family (#1 on MTEB
 /// multilingual June 2025), EmbeddingGemma 300M (Matryoshka edge-tier),
 /// and BGE-M3 (multilingual retrieval classic).
 pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
@@ -1088,7 +1088,7 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             min_ram_gb: 3,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
-            description: "Qwen3-Embedding 0.6B — state-of-the-art multilingual text embeddings, edge-tier".into(),
+            description: "Qwen3-Embedding 0.6B — multilingual text embeddings, edge-tier".into(),
         },
         OnnxTextEmbeddingEntry {
             id: "qwen3-embedding-4b".into(),
@@ -1171,7 +1171,7 @@ pub fn get_text_embedding_model_by_id(id: &str) -> Option<OnnxTextEmbeddingEntry
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Segmentation catalog (NEW for wave 1).
+// Segmentation catalog.
 // ─────────────────────────────────────────────────────────────────────
 
 /// A curated ONNX segmentation model entry.
@@ -1372,7 +1372,7 @@ pub fn get_text_segmentation_model_by_id(id: &str) -> Option<OnnxTextSegmentatio
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Detection catalog (NEW for wave 1).
+// Detection catalog.
 // ─────────────────────────────────────────────────────────────────────
 
 /// A curated ONNX object-detection entry.
@@ -1409,7 +1409,7 @@ pub struct OnnxDetectionEntry {
 
 /// Get the curated ONNX detection catalog.
 ///
-/// RF-DETR is the 2026 state-of-the-art: first real-time detector >60 AP on COCO
+/// RF-DETR is a 2026 real-time detector achieving >60 AP on COCO
 /// (ICLR 2026). D-FINE retained as a secondary baseline. Avoids
 /// AGPL-licensed Ultralytics YOLO and demoted RT-DETRv2.
 pub fn get_detection_catalog() -> Vec<OnnxDetectionEntry> {
@@ -1555,7 +1555,7 @@ pub fn get_detection_model_by_id(id: &str) -> Option<OnnxDetectionEntry> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Audio (ASR) catalog (NEW for wave 1).
+// Audio (ASR) catalog.
 // ─────────────────────────────────────────────────────────────────────
 
 /// A curated ONNX audio-ASR entry.
@@ -2214,7 +2214,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 16_740_812_704,
         min_ram_gb: 20,
         license: "Apache 2.0".into(),
-        description: "Flagship Qwen 3.5 model with state-of-the-art performance".into(),
+        description: "Flagship Qwen 3.5 model".into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,

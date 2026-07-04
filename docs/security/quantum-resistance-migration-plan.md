@@ -8,41 +8,41 @@
 
 ---
 
-## 1. Wave ordering and parallelism
+## 1. Step ordering and parallelism
 
 ```
                     ┌──────────────────────────────────────┐
-                    │ Wave 3a — tenzro-crypto + rustls     │
-                    │  (foundation for everything below)   │
+                    │ Crypto foundation — tenzro-crypto    │
+                    │  + rustls (base for everything below)│
                     └──────────────┬───────────────────────┘
                                    │
               ┌────────────────────┼────────────────────┐
               │                    │                    │
    ┌──────────▼──────────┐ ┌──────▼─────────┐ ┌────────▼────────┐
-   │ Wave 3b             │ │ Wave 3c        │ │  (ZK migration  │
-   │ libp2p-noise → tls  │ │ Tx wire format │ │   = follow-up)  │
+   │ Transport           │ │ Tx wire format │ │  (ZK migration  │
+   │ libp2p-noise → tls  │ │ (forward-compat)│ │   = follow-up)  │
    └──────────┬──────────┘ └──────┬─────────┘ └─────────────────┘
               │                   │
               │         ┌─────────▼──────────┐
-              │         │ Wave 3d            │
               │         │ Wire consumers +   │
               │         │ revocation signing │
+              │         │                    │
               │         └─────────┬──────────┘
               │                   │
               └─────────┬─────────┘
                         │
               ┌─────────▼──────────┐
-              │ Wave 3f            │
               │ Integration tests  │
               │ + restart survives │
+              │                    │
               └────────────────────┘
 ```
 
-3b and 3c can run in parallel after 3a lands. 3d depends on 3c. 3f depends on 3b + 3d.
+Transport and Tx wire format can run in parallel after the crypto foundation lands. Wire consumers depend on the Tx wire format. Integration tests depend on transport + wire consumers.
 
 ---
 
-## 2. Wave 3a — tenzro-crypto + rustls foundation
+## 2. tenzro-crypto + rustls foundation
 
 ### 2.1 Cargo dependencies (workspace `Cargo.toml`)
 
@@ -131,7 +131,7 @@ With OID `id-MLDSA65-Ed25519`. Round-trip test against Bouncy Castle vectors (BC
 
 ---
 
-## 3. Wave 3b — libp2p-noise → libp2p-tls
+## 3. libp2p-noise → libp2p-tls
 
 ### 3.1 `crates/tenzro-network/src/transport.rs`
 
@@ -149,7 +149,7 @@ let tcp = libp2p::tcp::tokio::Transport::new(libp2p::tcp::Config::default())
 
 The QUIC transport stays — it uses rustls internally and once we install aws-lc-rs as the default provider, QUIC inherits PQ-hybrid KEX automatically.
 
-**Why not keep Noise:** libp2p-noise has no upstream PQ path and no spec is in flight. libp2p-tls + rustls-aws-lc-rs is the only production-ready PQ-capable libp2p transport in April 2026.
+**Why not keep Noise:** libp2p-noise has no upstream PQ path and no spec is in flight. libp2p-tls + rustls-aws-lc-rs is the only PQ-capable libp2p transport in April 2026.
 
 ### 3.2 No protocol-version bump needed
 
@@ -157,7 +157,7 @@ libp2p multistream selection happens before the security handshake; legacy Noise
 
 ---
 
-## 4. Wave 3c — forward-compatible Transaction wire format
+## 4. Forward-compatible Transaction wire format
 
 ### 4.1 `crates/tenzro-types/src/transaction.rs`
 
@@ -204,7 +204,7 @@ fn compose_pubkey_for_hash(pk: &Option<CompositePublicKey>) -> Vec<u8> {
 
 ---
 
-## 5. Wave 3d — wire consumers + revocation signing
+## 5. Wire consumers + revocation signing
 
 ### 5.1 `tenzro-wallet`
 
@@ -254,7 +254,7 @@ Persistent keystore (`tenzro-wallet/src/keystore.rs`): bump format version, stor
 
 ---
 
-## 6. Wave 3f — integration tests
+## 6. Integration tests
 
 ### 6.1 New test: `crates/tenzro-node/tests/pq_hybrid_integration.rs`
 

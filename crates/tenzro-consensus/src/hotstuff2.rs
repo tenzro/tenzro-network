@@ -552,7 +552,7 @@ pub struct HotStuff2Engine {
     keypair: Arc<KeyPair>,
 
     /// Node's ML-DSA-65 signing key (FIPS 204). Used for the post-quantum leg
-    /// of the composite vote signature. Mandatory under Wave 3d — there is no
+    /// of the composite vote signature. Mandatory — there is no
     /// classical-only fallback.
     pq_signing_key: Arc<MlDsaSigningKey>,
 
@@ -2107,7 +2107,7 @@ impl HotStuff2Engine {
 
     /// Creates a vote for a block.
     ///
-    /// Wave 3d hybrid path: rebuilds an `InMemoryHybridSigner` from this
+    /// Hybrid path: rebuilds an `InMemoryHybridSigner` from this
     /// node's classical keypair and ML-DSA-65 signing key, signs the canonical
     /// vote payload with both legs, and embeds the composite public key into
     /// the resulting `Vote` so receiving validators can bind it against the

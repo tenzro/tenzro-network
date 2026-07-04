@@ -1,4 +1,4 @@
-//! # MPC threshold-ECDSA bridge signer (Phase D wave 2)
+//! # MPC threshold-ECDSA bridge signer
 //!
 //! DKLS23 t-of-n threshold signing wiring for `EvmTransactionSigner`. Replaces
 //! the single-key bridge signer (`SealedSecp256k1Key`) with a distributed

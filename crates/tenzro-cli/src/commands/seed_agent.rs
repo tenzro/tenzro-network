@@ -11,7 +11,7 @@
 //! - `tenzro seed-agent activity`           — network activity baseline
 //! - `tenzro seed-agent refill`             — refill an agent monthly allocation
 //!
-//! Write-side (provisioning daemon, sunset wind-down) lands in a later wave.
+//! Write-side (provisioning daemon, sunset wind-down) is handled in-process.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

@@ -93,7 +93,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 - **Segmentation** — `list_segmentation_catalog`, `segment` (SAM 3 / 3.1, SAM 2, EdgeSAM, MobileSAM)
 - **Detection** — `list_detection_catalog`, `detect` (RF-DETR, D-FINE)
 - **Audio (ASR)** — `list_audio_catalog`, `transcribe` (Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT, Canary)
-- **Video** — `list_video_catalog`, `video_embed` (encoder scaffolding — wave 1 catalog empty)
+- **Video** — `list_video_catalog`, `video_embed` (encoder scaffolding — catalog currently empty)
 
 **Token Registry:** `create_token`, `list_tokens`, `get_token_info`, `get_token_balance`, `wrap_tnzo`, `cross_vm_transfer`, `deploy_contract`
 

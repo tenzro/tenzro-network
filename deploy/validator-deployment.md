@@ -6,7 +6,8 @@ canonical per-VM software install is captured here; the infrastructure layer
 (Terraform / Pulumi / Ansible / hand-rolled) is yours to write.
 
 For the per-node config reference, observability, upgrade procedures, and
-incident response, see [`docs/operators/OPERATOR_GUIDE.md`](../docs/operators/OPERATOR_GUIDE.md).
+incident response, see [`crates/tenzro-node/QUICKSTART.md`](../crates/tenzro-node/QUICKSTART.md)
+and the node's `--help` output.
 
 ## What you're deploying
 
@@ -192,9 +193,9 @@ cargo run --release -p tenzro-genkeys -- \
 ```
 
 This produces:
-- `validator-{0..N-1}/{consensus,pq,p2p}.seed` — upload to your KMS,
-  one per VM
-- `genesis-prod.toml` — commit to your repo, embed in all N VMs
+- `validator-{0..N-1}/{consensus,pq,p2p,bls}.seed` — deliver to each
+  validator's secret storage, one per VM
+- `genesis.toml` — commit to your repo, embed in all N VMs
 - `PEER_IDS.txt` — copy validator-0's peer ID for the boot-nodes flag
 
 **Never let `*.seed` files touch CI, shared disks, or any unencrypted
@@ -202,7 +203,7 @@ backup.** See the genkeys README for the secure-wipe procedure after upload.
 
 ## Genesis file
 
-Every validator must load the **same** `genesis-prod.toml` (schema v3 —
+Every validator must load the **same** `genesis.toml` (schema v3 —
 three pubkeys per validator: Ed25519 + ML-DSA-65 + BLS12-381). Mount it at
 the path your config or CLI expects, typically `/var/lib/tenzro/genesis.toml`.
 
@@ -277,32 +278,20 @@ env vars enable it:
 External callers reach Canton through Tenzro's API-key gate
 (`X-Tenzro-Api-Key` header with the `canton` scope). The operator mints
 keys via `tenzro_createApiKey` (admin-token-gated) and hands them to devs
-out-of-band — no self-service portal. See
-[`docs/operators/OPERATOR_GUIDE.md` §8 "Canton bridge" and "API key issuance"](../docs/operators/OPERATOR_GUIDE.md#canton-bridge)
-for the full enablement procedure and per-call examples.
+out-of-band — no self-service portal.
 
 **Validators 1..N-1 must NOT carry any of these env vars** — they should
 return `-32004` on `tenzro_*Canton*` calls (scope gate) and `-32001` on
 admin RPCs (admin-token unset), which is the intended fail-closed posture
 for non-RPC nodes.
 
-The recommended secret-fetch pattern (boot-time oneshot systemd unit →
-root-only `EnvironmentFile` consumed by `tenzro-node.service`) is shown end
-to end in `deploy/terraform/gce_validators/cloud-init.yaml`
-(`tenzro-fetch-canton-config.service`).
-
-## Where the example fleet topology lives
-
-The legacy Kubernetes example under [`deploy/kubernetes/`](kubernetes/) and
-the GKE Terraform under [`deploy/terraform/`](terraform/) (excluding the
-`gce_validators/` subdirectory, which is operator-specific) are kept as
-reference material for operators who prefer Kubernetes.
+The recommended secret-fetch pattern is a boot-time oneshot systemd unit
+that writes a root-only `EnvironmentFile` consumed by `tenzro-node.service`.
+Operators provision this through their own infrastructure tooling; the unit
+only needs read access to wherever the operator stores its secrets.
 
 ## Next steps
 
-- Read [`docs/operators/OPERATOR_GUIDE.md`](../docs/operators/OPERATOR_GUIDE.md)
-  for per-node config reference, key rotation, snapshot/state-sync, and
-  incident response.
 - Read [`tools/genkeys/README.md`](../tools/genkeys/README.md) for the
   offline key generation + secrets-upload procedure.
 - Read [`crates/tenzro-node/QUICKSTART.md`](../crates/tenzro-node/QUICKSTART.md)

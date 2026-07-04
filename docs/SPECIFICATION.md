@@ -2324,7 +2324,7 @@ Sponsors select a trust tier at task posting; the tier determines what the train
 
 | Tier | Trainer Hardware | Trust Source | Default Aggregation |
 |---|---|---|---|
-| **Open** (Phase 1 default) | Any GPU or CPU, no TEE required for training compute | Stake bonding + redundant fragment assignment + Mean aggregation across `K`-of-`M` | `Mean` |
+| **Open** (Phase 1 default) | Any GPU or CPU, no TEE required for training compute | Stake bonding + redundant fragment assignment + Mean aggregation across `K`-of-`M` | `Mean`, `LoraAlternating` |
 | **Verified** | Trainer posts a per-round TEE attestation binding `{program_hash, shard_hash, model_hash, DID}` | Hardware attestation (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA CC) | Byzantine-robust (TrimmedMean / CoordinateMedian / Krum, Phase 2) |
 | **Confidential** | TEE-resident training; data sealed to the enclave; host OS never sees cleartext | Hardware attestation + sealed datasets | Byzantine-robust (Phase 2) |
 
@@ -2346,7 +2346,7 @@ Tenzro Train is split across two layers, each owning what it does best:
 
 **Python reference trainer** (`integrations/trainer/`, PyTorch FSDP2 + Hivemind + safetensors):
 - Inner training loop (forward, backward, optimizer step) per modality
-- Modality adapters: timeseries (TimesFM-class), language (Llama-class), vision (ViT-class)
+- Modality adapters: timeseries (TimesFM-class), language (Qwen 3 0.6B default, any catalog LM swappable via metadata), vision (ViT-class)
 - Outer-gradient packaging: per-fragment safetensors blob + SHA-256
 - Ed25519 signing of outer gradients (PyNaCl)
 - JSON-RPC client to the local node (`enrollTrainer`, `submitOuterGradient`, `finalizeRound`)
@@ -2390,16 +2390,19 @@ The `run_root` is the single hash that anchors an entire training run, and it is
 
 ### 20.6 Aggregation Rules
 
-`crates/tenzro-training/src/aggregation.rs` implements four aggregation rules over decoded fragment views; Phase 1 exposes only `Mean` via tier policy.
+`crates/tenzro-training/src/aggregation.rs` implements five aggregation rules over decoded fragment views; Phase 1 exposes `Mean` and `LoraAlternating` via tier policy.
 
 | Rule | Robustness | Phase | Use Case |
 |---|---|---|---|
 | `Mean` | None (one Byzantine submitter pollutes the aggregate) | **1** | Open tier — trust comes from stake bonding |
+| `LoraAlternating` | None (Open-tier, same admission as `Mean`) | **1** | LoRA/QLoRA adapter runs — the trainer freezes one low-rank factor per round so each round's delta is a single factor and per-coordinate mean is correct; reuses the mean aggregator |
 | `TrimmedMean { alpha_bps }` | Up to `α%` Byzantine per coordinate | 2 | Verified tier — first-line Byzantine defense |
 | `CoordinateMedian` | Up to `f < M/2` Byzantine learners | 2 | Verified tier when median is preferable |
 | `Krum { f }` | Picks the gradient with lowest sum-of-distances to nearest neighbors; tolerates `f` Byzantine | 2 | High-stakes Verified / Confidential runs |
 
-The non-`Mean` rules are implemented and unit-tested in Phase 1 to lock the wire format and the math; they are dormant behind tier policy until Phase 2 lights up Verified.
+`Mean` and `LoraAlternating` admit at every tier. The Byzantine-robust rules (`TrimmedMean`, `CoordinateMedian`, `Krum`) are implemented and unit-tested in Phase 1 to lock the wire format and the math; they are dormant behind tier policy until Phase 2 lights up Verified.
+
+For `LoraAlternating`, the naive per-coordinate mean of both LoRA factors would be wrong — the useful update is the product `B·A`, and `mean(Bᵢ·Aᵢ) ≠ (mean Bᵢ)·(mean Aᵢ)`. The trainer holds one factor fixed per round and syncs only the other, so within a round every contributor submits a delta on the same single factor and per-coordinate mean is exact.
 
 ### 20.7 Token Economics
 
@@ -2469,8 +2472,8 @@ The Python `OuterGradient.to_json()` produces the *exact* JSON shape the Rust sy
 
 **Phase 1 ships:**
 - Open tier with stake-bonded trust
-- `Mean` aggregation
-- Timeseries lead modality, with language and vision stubs sharing the same plumbing
+- `Mean` and `LoraAlternating` aggregation
+- Timeseries lead modality, with language and vision sharing the same plumbing
 - Full Rust + Python end-to-end loop for the local case (single-node syncer + multiple trainers)
 - On-chain commitments, receipt sealing, NFT-mintable receipts, RPC surface, CLI, agent kit templates
 - Reference VM precompile (`0x1008`) for receipt verification

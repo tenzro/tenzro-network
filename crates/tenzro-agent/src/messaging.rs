@@ -223,7 +223,7 @@ pub trait NetworkTransport: Send + Sync {
 
 /// Bundle of agent verifying keys used for hybrid signature verification.
 ///
-/// Wave 3d: every agent registered with the router carries BOTH a
+/// Every agent registered with the router carries BOTH a
 /// classical Ed25519 verifying key and an ML-DSA-65 verifying key
 /// (1952 bytes). The router looks both up via [`PublicKeyResolver`]
 /// and feeds them into `StandardHybridVerifier`.
@@ -246,7 +246,7 @@ impl AgentVerifyingKeys {
 }
 
 /// Resolver trait for looking up an agent's hybrid signing keys (CRITICAL #54,
-/// extended for Wave 3d hybrid post-quantum signing).
+/// extended for hybrid post-quantum signing).
 ///
 /// The message router does not embed public keys in `AgentIdentity` (which
 /// stays serialization-friendly and small), so the router needs an external
@@ -658,7 +658,7 @@ impl MessageRouter {
 
     /// Registers a hybrid verifying-key bundle for an agent in the
     /// local in-memory resolver, if it is still in use
-    /// (CRITICAL #54 + Wave 3d hybrid PQ migration).
+    /// (CRITICAL #54 + hybrid PQ migration).
     ///
     /// Returns `true` when the keys were registered, `false` when the
     /// router has been wired with a custom resolver via
@@ -874,7 +874,7 @@ impl MessageRouter {
             ));
         }
 
-        // CRITICAL #54 + Wave 3d hybrid PQ: when signing is enabled, BOTH the
+        // CRITICAL #54 + hybrid PQ: when signing is enabled, BOTH the
         // classical Ed25519 leg and the post-quantum ML-DSA-65 leg are
         // mandatory. They must either both be present (signed) or both be
         // absent (rejected — `enable_signing == true` requires signatures).
@@ -948,7 +948,7 @@ impl MessageRouter {
     }
 
     /// Signs a message in place using the supplied hybrid signer
-    /// (CRITICAL #54 + Wave 3d post-quantum migration).
+    /// (CRITICAL #54 + post-quantum migration).
     ///
     /// Computes the canonical hash via [`AgentMessage::hash`] (which
     /// excludes the existing `signature` and `pq_signature` fields, so

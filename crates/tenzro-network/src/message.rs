@@ -630,7 +630,7 @@ pub struct ProviderAnnouncementMessage {
     #[serde(default)]
     pub hardware: HardwareCapabilities,
     /// Geographic locality declared by the operator (free-form identifier
-    /// such as `us-central1-a`, `eu-west`, `ap-southeast-1`). `None` means
+    /// such as `us-east`, `eu-west`, `ap-southeast`). `None` means
     /// the provider declined to declare a region; consumers must treat
     /// `None` as "unknown geography", not as a wildcard match.
     #[serde(default)]

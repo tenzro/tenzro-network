@@ -20,7 +20,7 @@
 //!   event to the node's event bus; final completion mirrors the saga
 //!   receipt to Canton via the existing DAML mirror.
 //!
-//! NOT in scope this wave: cross-operator workflow portability (the
+//! NOT in scope: cross-operator workflow portability (the
 //! `(d)` half of Task #73). That needs an explicit failover protocol.
 
 use anyhow::Result;

@@ -60,17 +60,40 @@ class InnerStepReport:
     avg_loss: float
 
 
-def snapshot_state(model: "torch.nn.Module") -> dict[str, "torch.Tensor"]:
-    """Detached, CPU-residing copy of every parameter tensor.
+def trainable_param_names(model: "torch.nn.Module") -> set[str]:
+    """Names of parameters that carry gradient this step (``requires_grad``).
 
-    We CPU-copy so the snapshot doesn't pin GPU memory across the loop and
-    isn't mutated when the optimizer steps the live parameters.
+    For a full fine-tune every parameter is trainable, so this is the whole
+    parameter set. For a LoRA/QLoRA model the base is frozen and only the
+    low-rank adapter matrices (and, under alternating aggregation, only the
+    round's active factor) are trainable — so the returned set is exactly the
+    tensors whose delta is meaningful to transmit.
     """
     if torch is None:
         raise RuntimeError("PyTorch is required")
+    return {name for name, p in model.named_parameters() if p.requires_grad}
+
+
+def snapshot_state(model: "torch.nn.Module") -> dict[str, "torch.Tensor"]:
+    """Detached, CPU-residing copy of the trainable parameter tensors.
+
+    We CPU-copy so the snapshot doesn't pin GPU memory across the loop and
+    isn't mutated when the optimizer steps the live parameters.
+
+    Only ``requires_grad`` parameters are snapshotted. For a full fine-tune
+    that is every parameter (unchanged behavior); for LoRA/QLoRA it is just
+    the adapter matrices, so ``Δθ = θ⁽ᴴ⁾ − θ⁽⁰⁾`` and the fragment partition
+    that follows carry adapter deltas only — never zero-deltas over a frozen
+    base. Buffers (non-parameter state-dict entries such as RoPE caches) are
+    excluded because they are not trained.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch is required")
+    trainable = trainable_param_names(model)
     return {
         name: p.detach().to("cpu").clone()
-        for name, p in model.state_dict().items()
+        for name, p in model.named_parameters()
+        if name in trainable
     }
 
 

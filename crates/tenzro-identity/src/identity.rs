@@ -26,7 +26,7 @@ pub const BLS_G1_COMPRESSED_LEN: usize = 48;
 
 /// Deserialize and length-validate an ML-DSA-65 verifying key.
 ///
-/// Wave 3d hybrid migration: every identity carries a mandatory PQ verifying
+/// Under the hybrid migration, every identity carries a mandatory PQ verifying
 /// key. Reject any payload whose length doesn't match exactly so attackers
 /// can't sneak in a truncated/expanded key.
 fn validate_pq_verifying_key<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
@@ -207,7 +207,7 @@ pub struct TenzroIdentity {
     pub wallet_id: String,
     /// ML-DSA-65 verifying key (FIPS 204) bound to this identity's wallet.
     ///
-    /// Mandatory under Wave 3d hybrid migration — every identity exposes both
+    /// Mandatory under the hybrid migration — every identity exposes both
     /// its classical key (in `public_keys`) and its post-quantum verifying key.
     /// The corresponding signing key lives in the wallet keystore and is only
     /// loaded for signing operations.

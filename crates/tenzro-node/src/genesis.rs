@@ -49,7 +49,7 @@ pub const FAUCET_SIGNING_KEY_ADDRESS: &[u8] = b"faucet_signing_key_address";
 pub const FAUCET_SIGNING_KEY_PUBLIC: &[u8] = b"faucet_signing_key_public";
 /// Metadata key for the faucet's ML-DSA-65 seed (32 bytes, hex, no 0x prefix).
 ///
-/// Wave 3d hybrid PQ migration: every signed transaction must carry an
+/// Under the hybrid PQ migration, every signed transaction must carry an
 /// ML-DSA-65 verifying key alongside the classical Ed25519 leg. The seed is
 /// persisted (rather than the expanded private key) so we can rederive the
 /// `MlDsaSigningKey` deterministically across reboots.
@@ -59,7 +59,7 @@ pub const FAUCET_PQ_VERIFYING_KEY: &[u8] = b"faucet_pq_verifying_key";
 
 /// Genesis protocol version for the PQ-hybrid era.
 ///
-/// Wave 3d migration: every signed transaction now carries a mandatory
+/// Under the hybrid PQ migration, every signed transaction carries a mandatory
 /// ML-DSA-65 leg alongside the classical Ed25519 signature. Genesis blocks
 /// produced by this binary stamp `protocol_version = 2`. A binary that loads
 /// a `protocol_version = 1` genesis from storage refuses to start — the older
@@ -826,13 +826,13 @@ fn compute_genesis_state_root(genesis: &GenesisConfig, predeploys_commitment: &H
 pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>) -> Result<()> {
     // Idempotent check: if a privkey is already persisted, ensure the
     // ML-DSA-65 leg is also present and back-fill it if not. This handles
-    // upgrades from a pre-Wave-3d node that only persisted the Ed25519 key.
+    // upgrades from a classical-only node that only persisted the Ed25519 key.
     if let Ok(Some(_)) = store.get(CF_METADATA, FAUCET_SIGNING_KEY_PRIVATE) {
         if matches!(store.get(CF_METADATA, FAUCET_PQ_SIGNING_SEED), Ok(Some(_))) {
             info!("Faucet signing key already provisioned, skipping");
             return Ok(());
         }
-        info!("Back-filling faucet PQ signing key (Wave 3d migration)");
+        info!("Back-filling faucet PQ signing key (hybrid PQ migration)");
         let pq_key = tenzro_crypto::pq::MlDsaSigningKey::generate();
         let pq_seed_hex = hex::encode(pq_key.seed_bytes());
         let pq_vk_hex = hex::encode(pq_key.verifying_key_bytes());
@@ -895,7 +895,7 @@ pub async fn provision_faucet_signing_key(store: &Arc<RocksDbStore>) -> Result<(
         );
     }
 
-    // Provision the faucet's PQ signing identity (Wave 3d hybrid migration).
+    // Provision the faucet's PQ signing identity (hybrid migration).
     // The seed is the deterministic source of truth — the verifying key is
     // rederived from it on every load.
     let pq_key = tenzro_crypto::pq::MlDsaSigningKey::generate();

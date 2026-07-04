@@ -1,4 +1,4 @@
-//! SeedAgent treasury allocation primitive (Agent-Swarm Spec 10 — wave 1).
+//! SeedAgent treasury allocation primitive (Agent-Swarm Spec 10).
 //!
 //! The full spec ([seed-agent.md](../../../docs/architecture/agent-swarm/seed-agent.md))
 //! describes a treasury earmark that funds protocol-owned autonomous

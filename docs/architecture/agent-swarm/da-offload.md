@@ -220,5 +220,5 @@ When a PQ-secure DA backend ships, the abstraction trait makes adoption a featur
 - **Block body offloading.** Block data is consensus-critical; we never offload it.
 - **State offloading (Verkle, etc.).** State pruning + state-witnesses is a different research thrust. This spec is receipts only.
 - **Chain-as-DA-client (post payloads to our own chain via a different namespace).** Cute but circular. Out.
-- **PQ-secure DA backend.** None production-ready in 2026. The abstraction layer absorbs one when it ships.
+- **PQ-secure DA backend.** None available in 2026. The abstraction layer absorbs one when it ships.
 - **Agent-readable DA pointers from inside a contract.** Contracts get `commitment` and `pointer` as opaque bytes; they cannot fetch. Off-chain clients fetch. This is symmetric with the "no contract reads local fee" rule from Spec 6.

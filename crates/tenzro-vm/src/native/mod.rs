@@ -114,7 +114,7 @@ pub const SELECTOR_VALIDATOR_UPDATE_METADATA: [u8; 4] = [0x01, 0x00, 0x00, 0x32]
 // gas, persist a replay marker under `SYSTEM_ADDRESS`, and emit a typed Log.
 // The structural mutation (against the in-memory `WorkflowManager` indices,
 // privacy-domain registry, approval state machine, lifecycle clocks) is
-// performed by the node-side `WorkflowRuntime` post-execute scan in Wave 4 —
+// performed by the node-side `WorkflowRuntime` post-execute scan —
 // same pattern used by `SELECTOR_VALIDATOR_*` for the dynamic validator set.
 //
 // Selectors `0x01000040..=0x0100004B` are reserved for workflow operations.
@@ -2483,7 +2483,7 @@ impl NativeExecutor {
     // Each handler is intentionally thin: validate the JSON payload bounds,
     // charge gas, persist a replay marker under SYSTEM_ADDRESS keyed by
     // (op-prefix, op-id), and emit a typed Log carrying the JSON payload
-    // verbatim. The node-side WorkflowRuntime (Wave 4) decodes the log and
+    // verbatim. The node-side WorkflowRuntime decodes the log and
     // drives the in-memory WorkflowManager + privacy-domain registry +
     // approval state machine. This same split is what SELECTOR_VALIDATOR_*
     // uses for the dynamic validator set.

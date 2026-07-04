@@ -115,7 +115,7 @@ impl MppClient {
         message.extend_from_slice(challenge.asset.as_bytes());
 
         // Sign the message using the wallet — produces a hybrid (classical +
-        // ML-DSA-65) signature. Wave 3d: surface BOTH legs into the credential.
+        // ML-DSA-65) signature. Surface BOTH legs into the credential.
         let hybrid_sig = wallet_service.sign_data(&wallet_id, &message).await
             .map_err(|e| PaymentError::CredentialError(format!("Failed to sign credential: {}", e)))?;
         let signature_bytes = hybrid_sig.classical;

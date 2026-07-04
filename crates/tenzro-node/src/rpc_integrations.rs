@@ -4993,7 +4993,7 @@ pub(crate) async fn handle_redeem_stable_asset(
 }
 
 // =============================================================================
-// Wave 7 — Wire Wave 1-5 features as live RPC handlers
+// Wire protocol-primitive features as live RPC handlers
 //
 // The five library modules shipped in this session — ERC-7943 uRWA,
 // IVMS101 Travel Rule, attested-clock + idempotency primitives in

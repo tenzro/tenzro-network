@@ -176,7 +176,7 @@ impl X402Client {
         message.extend_from_slice(requirement.pay_to.as_bytes());
         message.extend_from_slice(self.payer_address.as_bytes());
 
-        // Wave 3d: wallet produces a hybrid signature. The x402 wire format
+        // The wallet produces a hybrid signature. The x402 wire format
         // only carries a single signature string per the Coinbase V2 spec, so
         // we emit the classical leg here. The ML-DSA-65 leg is still computed
         // and bound to the wallet's identity for internal audit; an x402

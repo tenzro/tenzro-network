@@ -1,8 +1,6 @@
-# Bridge / Fee Oracle / ERC-7683 Benchmarks — Wave 12
+# Bridge / Fee Oracle / ERC-7683 Benchmarks
 
-**Date:** 2026-06-09  
-**Image:** `tenzro-node:20260609-192215` @ `sha256:224873abda61b80070d9bce7abf93665aac43a8c29ca27c2be3217343d829277`  
-**Hardware:** Apple Silicon (aarch64, Darwin 24.1.0), local dev.  
+**Hardware:** Apple Silicon (aarch64), local dev.  
 **Mode:** `cargo bench --release` (criterion `--quick` calibration).
 
 ## Results
@@ -18,7 +16,7 @@
 | `encode_json` (signed envelope) | **2.71 µs** |
 | `decode_json` (signed envelope) | **5.64 µs** |
 
-### Fee-in-TNZO oracle (Wave 9)
+### Fee-in-TNZO oracle
 
 | Operation | Time |
 |---|---|
@@ -27,7 +25,7 @@
 
 The governance-set oracle is a `DashMap` point read + `mul_q18` arithmetic + SHA-256 over the canonical preimage. The all-8-adapter run is dominated by the SHA-256 per-quote (~1 µs each).
 
-### Fee sponsor (Wave 9/10)
+### Fee sponsor
 
 | Operation | Time |
 |---|---|
@@ -35,7 +33,7 @@ The governance-set oracle is a `DashMap` point read + `mul_q18` arithmetic + SHA
 
 Includes quote-expiry check, per-adapter pool upsert, receipt SHA-256, in-memory receipt insert.
 
-### Bridge router (Wave 9/10)
+### Bridge router
 
 | Operation | Time |
 |---|---|
@@ -43,7 +41,7 @@ Includes quote-expiry check, per-adapter pool upsert, receipt SHA-256, in-memory
 
 Cold-path read of the full per-adapter pool snapshot. Note this is 8 deterministic vault addresses with current balances — well under microsecond.
 
-### ERC-7683 envelope (Wave 11)
+### ERC-7683 envelope
 
 | Operation | Time |
 |---|---|
@@ -74,4 +72,4 @@ Even at 1000 quotes/sec sustained, the structural primitives consume **6 ms/sec*
 cargo bench -p tenzro-bridge --bench bridge_benchmarks -- --quick
 ```
 
-For full statistical confidence (default criterion mode), drop `--quick`. The numbers in this report come from quick-mode calibration on a developer machine; production-grade benchmarks should pin a baseline GCE instance and rerun across versions.
+For full statistical confidence (default criterion mode), drop `--quick`. The numbers in this report come from quick-mode calibration on a developer machine; production-grade benchmarks should pin a baseline instance and rerun across versions.

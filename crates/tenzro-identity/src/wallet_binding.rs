@@ -24,7 +24,7 @@ pub struct WalletBinding {
     /// The classical public key type ("Ed25519" or "Secp256k1").
     pub key_type: String,
     /// The wallet's ML-DSA-65 verifying key bytes (FIPS 204, exactly 1952 bytes).
-    /// Mandatory under the Wave 3d hybrid migration — every wallet carries
+    /// Mandatory under the hybrid migration — every wallet carries
     /// a PQ key, so identities bound to a wallet inherit it directly.
     pub pq_verifying_key: Vec<u8>,
     /// The wallet's BLS12-381 G1-compressed verifying key (`min_pk` scheme,

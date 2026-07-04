@@ -30,7 +30,7 @@ tenzro-storage/
 The foundation of the storage layer, providing abstract key-value storage with two implementations:
 
 #### RocksDbStore
-- **Purpose**: Production-ready persistent storage
+- **Purpose**: Persistent storage
 - **Features**:
   - Column family support for data organization
   - Configurable caching, compression, and write buffering

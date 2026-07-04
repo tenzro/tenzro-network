@@ -1,6 +1,6 @@
 //! In-process Ed25519 [`ProvenanceSigner`] implementation.
 //!
-//! This is the wave-1 testnet signer: it produces a Tenzro-native, C2PA-style
+//! This is the testnet signer: it produces a Tenzro-native, C2PA-style
 //! manifest signed with the provider's Ed25519 key. The encoding is
 //! intentionally not the on-the-wire C2PA Content Credentials format yet —
 //! that swap will happen once the EU AI Office Code of Practice's June 2026

@@ -1305,10 +1305,10 @@ async fn dispatch_request(
         // `tenzro_canton_streamEvents` is the canton-workflow doc name for
         // consuming/streaming DAML ledger events; aliased here.
         "tenzro_consumeDamlEvents" | "tenzro_canton_streamEvents" => handle_consume_daml_events(node).await,
-        // Spec 4: ERC-7683 cross-chain intent settler. Wave 1 ships protocol
+        // Spec 4: ERC-7683 cross-chain intent settler. Ships protocol
         // primitives + read RPCs against CF_SETTLEMENTS. Settler precompiles,
         // EIP-712 verification, escrow integration, gossipsub indexing, and
-        // bridge-adapter glue land in subsequent waves alongside their
+        // bridge-adapter glue land later alongside their
         // respective subsystems.
         "tenzro_get7683Order" => handle_get_7683_order(node, request.params).await,
         "tenzro_list7683Orders" => handle_list_7683_orders(node, request.params).await,
@@ -1381,15 +1381,15 @@ async fn dispatch_request(
         // and the resulting local fee multiplier over the rolling 64-block
         // window. Surcharge is computed against the live EIP-1559 base fee.
         "tenzro_getAccountContention" => handle_get_account_contention(node, request.params).await,
-        // Dual-rail gas burn quota (Agent-Swarm Spec 3 — wave 1). Read-only
+        // Dual-rail gas burn quota (Agent-Swarm Spec 3). Read-only
         // singleton: balance, cap, daily_target, last_refill, deficit, plus
-        // the derived min_reserve and can_drain hint. Wave 1 ships only the
+        // the derived min_reserve and can_drain hint. Ships only the
         // primitive — the StablecoinPaymaster, oracle, and TWAP swap loop
-        // ship in a later wave when the bridge mesh and oracles are wired.
+        // ship later when the bridge mesh and oracles are wired.
         "tenzro_getBurnQuota" => handle_get_burn_quota(node).await,
 
         // Spec 7: DA offload — receipts can either embed payload (Inline) or
-        // record a DA backend pointer (OffloadedDA). Wave 1 ships only the
+        // record a DA backend pointer (OffloadedDA). Ships only the
         // protocol primitives + the inline-fallback backend; EigenDA /
         // Celestia / Avail adapters land behind feature flags alongside the
         // bridge mesh.
@@ -1561,7 +1561,7 @@ async fn dispatch_request(
         "tenzro_permit2VerifyAndConsume" => crate::rpc_integrations::handle_permit2_verify_and_consume(node, request.params).await,
         "tenzro_permit2NonceUsed" => crate::rpc_integrations::handle_permit2_nonce_used(node, request.params).await,
 
-        // Wave 7 — Wave 1-5 primitive RPC surface
+        // Institutional-primitive RPC surface
         "tenzro_urwaIsKillSwitched" => crate::rpc_integrations::handle_urwa_is_kill_switched(node, request.params).await,
         "tenzro_urwaGetFrozenTokens" => crate::rpc_integrations::handle_urwa_get_frozen_tokens(node, request.params).await,
         "tenzro_urwaSetFrozenTokens" => crate::rpc_integrations::handle_urwa_set_frozen_tokens(node, request.params).await,
@@ -5942,7 +5942,7 @@ async fn handle_faucet(
     let chain_id = node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
     // Load the faucet's persistent ML-DSA-65 signing key. The seed is
     // provisioned once at first boot by `provision_faucet_signing_key()`
-    // (with back-fill for pre-Wave-3d state), so this lookup is mandatory —
+    // (with back-fill for classical-only state), so this lookup is mandatory —
     // there is no per-request keygen fallback.
     let pq_seed_hex = match storage.get("metadata", crate::genesis::FAUCET_PQ_SIGNING_SEED) {
         Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|_| JsonRpcError {
@@ -7614,7 +7614,7 @@ async fn handle_get_workflow_operational_metrics(
     })
 }
 
-// ---- Canton mirror RPCs (Wave 5 — receipt mirror) ---------------------------
+// ---- Canton mirror RPCs (receipt mirror) ---------------------------
 
 fn canton_adapter_or_err(
     node: &Arc<TenzroNode>,
@@ -9025,7 +9025,7 @@ async fn handle_get_account_contention(
 }
 
 /// `tenzro_getBurnQuota` — read the singleton BurnQuota state
-/// (Agent-Swarm Spec 3 — wave 1).
+/// (Agent-Swarm Spec 3).
 ///
 /// Params: none.
 ///
@@ -9040,12 +9040,12 @@ async fn handle_get_account_contention(
 ///   "last_refill":     1714824000, // ms timestamp
 ///   "total_drained":   "0x...",
 ///   "total_refilled":  "0x...",
-///   "deficit":         0,          // signed; negative is impossible in wave 1
+///   "deficit":         0,          // signed; negative is impossible here
 ///   "can_drain_one":   true        // can_drain(1) — quick "is the quota live" hint
 /// }
 /// ```
 ///
-/// In wave 1 the quota is read-only over RPC. Drains and refills happen
+/// The quota is read-only over RPC. Drains and refills happen
 /// in-process via `BurnQuotaManager::try_drain` / `refill`, which the
 /// future StablecoinPaymaster + QuotaReplenisher will invoke. There is
 /// no write RPC for refills — that channel is privileged-VM only and
@@ -9076,12 +9076,12 @@ async fn handle_get_burn_quota(
 }
 
 /// `tenzro_getDaBackends` — list configured DA backends and their status
-/// (Agent-Swarm Spec 7 — wave 1).
+/// (Agent-Swarm Spec 7).
 ///
 /// Params: none.
 ///
 /// Returns: `[{ backend, healthy, last_submission_ms, last_fetch_ms,
-/// error_rate_bps }]`. In wave 1 the only configured backend is
+/// error_rate_bps }]`. The only configured backend is
 /// `inline_fallback`, which refuses offload — receipts must use
 /// `storage_mode = Inline`. EigenDA / Celestia / Avail entries appear when
 /// their feature-gated adapters land.
@@ -9101,8 +9101,7 @@ async fn handle_get_da_backends(
 }
 
 /// `tenzro_verifyDaPointer` — probe whether a DA pointer is dereferenceable
-/// right now without paying the retrieval bandwidth (Agent-Swarm Spec 7 —
-/// wave 1).
+/// right now without paying the retrieval bandwidth (Agent-Swarm Spec 7).
 ///
 /// Params:
 /// ```json
@@ -9117,8 +9116,8 @@ async fn handle_get_da_backends(
 /// }
 /// ```
 ///
-/// Returns: `{ available: bool, backend: "...", reason: "..." }`. In wave 1
-/// the only configured backend is `inline_fallback`, which always returns
+/// Returns: `{ available: bool, backend: "...", reason: "..." }`. The
+/// only configured backend is `inline_fallback`, which always returns
 /// `available: false` because it cannot dereference external pointers — the
 /// real probes land alongside the EigenDA / Celestia / Avail adapters.
 async fn handle_verify_da_pointer(
@@ -9199,7 +9198,7 @@ async fn handle_verify_da_pointer(
         attestation_root,
     };
 
-    // Wave 1: only the inline-fallback backend is wired. Probes against any
+    // Only the inline-fallback backend is wired. Probes against any
     // external backend resolve to "not available" because the adapter is
     // not loaded — a clear signal to operators that they need to enable the
     // backend feature flag before relying on offload.
@@ -9460,7 +9459,7 @@ async fn handle_open_7683_order(
 }
 
 /// `tenzro_get7683Order` — fetch a single ERC-7683 cross-chain order envelope
-/// by `order_id` (Agent-Swarm Spec 4 — wave 1, read path).
+/// by `order_id` (Agent-Swarm Spec 4, read path).
 ///
 /// Params: `{ "order_id": "0x.." }` — 32-byte hex-encoded order id as
 /// computed by `compute_order_id`.
@@ -9539,7 +9538,7 @@ async fn handle_get_7683_order(
 }
 
 /// `tenzro_list7683Orders` — paginated scan of persisted ERC-7683 cross-chain
-/// orders (Agent-Swarm Spec 4 — wave 1, read path).
+/// orders (Agent-Swarm Spec 4, read path).
 ///
 /// Params (all optional):
 /// - `state`: filter by order state — one of `open`, `awaiting_proof`,
@@ -9996,7 +9995,7 @@ async fn handle_list_fills_7683(
 //
 // The auto-proposal generator, the EIP-1559 fee-market consumer, and the
 // real epoch observer (aggregating from UsageTracker + the burn ledger)
-// land alongside the governance executor wiring in a later wave. The four
+// land alongside the governance executor wiring later. The four
 // handlers below expose the protocol-side primitives — current dial,
 // latest snapshot, recommendation, and a placeholder proposal list — so
 // indexers and explorers can render adaptive-burn state today.
@@ -10209,7 +10208,7 @@ async fn handle_get_treasury_earmark(
         data: None,
     })?;
 
-    // Optional `name` filter — only "SeedAgent" exists in wave 1.
+    // Optional `name` filter — only "SeedAgent" exists currently.
     if let Some(p) = params.as_ref()
         && let Some(name) = p.get("name").and_then(|v| v.as_str()) {
             let earmark = manager.earmark();
@@ -10667,7 +10666,7 @@ async fn handle_get_network_activity(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    // Wave-1 stub: returns shape only. UsageTracker integration with
+    // Stub: returns shape only. UsageTracker integration with
     // exclude_seed filter (skipping txns where either side `is_seed_agent`)
     // lands alongside the off-chain daemon and per-DID flow control wiring.
     let manager = node.seed_agent_manager().ok_or_else(|| JsonRpcError {
@@ -10700,7 +10699,7 @@ async fn handle_get_network_activity(
         "settlement_count": 0_u64,
         "bridge_count": 0_u64,
         "intent_7683_count": 0_u64,
-        "note": "wave-1 stub; per-window aggregates land with the UsageTracker bridge",
+        "note": "stub; per-window aggregates land with the UsageTracker bridge",
     }))
 }
 
@@ -11036,7 +11035,7 @@ async fn handle_get_router_metrics(
 
 /// Look up a cached `ProvenanceManifest` by 32-byte content hash.
 ///
-/// Wave-1 read path for the EU AI Act Art. 50(2) machine-readable
+/// Read path for the EU AI Act Art. 50(2) machine-readable
 /// synthetic-content marker: the inference router signs every successful
 /// response and stashes the manifest in
 /// [`tenzro_model::ProvenanceStore`]. This RPC is the only public way to
@@ -11876,7 +11875,7 @@ async fn handle_get_payment_receipt(
 ///   allowed_services?, active? }`.
 ///
 /// `allowed_services` and `active` are part of the wallet-kernel public
-/// shape but are **not** persisted at the runtime layer in this wave —
+/// shape but are **not** persisted at the runtime layer —
 /// `allowed_services` is a hint for client UX only, and `active=false` is
 /// surfaced through `enabled` on the runtime `SpendingPolicy`. When
 /// `active` is omitted it defaults to `true`.
@@ -14196,7 +14195,7 @@ async fn handle_send_raw_transaction(
     );
 
     // Synchronously verify BOTH legs of the hybrid signature before accepting
-    // the tx. Wave 3d post-quantum migration: every admitted transaction must
+    // the tx. Under the post-quantum migration, every admitted transaction must
     // satisfy classical Ed25519 AND ML-DSA-65. Previously this was done
     // asynchronously in the event loop, which let invalid-signature txs return
     // a bogus tx_hash that never finalized. Now we reject at RPC time so the
@@ -18067,7 +18066,7 @@ async fn handle_serve_model(
 
     // External engine backend: front an OpenAI-compatible server (vLLM /
     // SGLang / llama-server / any OpenAI-compatible endpoint) instead of
-    // loading weights locally. This is the SOTA-throughput path — the GPU
+    // loading weights locally. This is the high-throughput path — the GPU
     // engine owns paged-attention batching; the node routes chat/completions
     // over the OpenAI wire contract. No local GGUF is downloaded or loaded.
     if let Some(engine_kind_str) = params.get("engine").and_then(|v| v.as_str()) {
@@ -21692,7 +21691,7 @@ async fn handle_openai_get_model(
 /// the handler replays any chunks with seq > `seq` and then either
 /// closes (if the stream is already finished) or — for the still-in-flight
 /// case — replays the tail. Live emission past the cursor's head is not
-/// supported in this wave because the underlying `generate_chat_stream`
+/// supported because the underlying `generate_chat_stream`
 /// has no resume hook into the in-progress generation; for that, the
 /// client should retry against a fresh prompt.
 async fn handle_openai_chat_completions(
@@ -25144,11 +25143,10 @@ async fn handle_create_api_key(
     // Optional Canton User Management Service user id binding —
     // forwards canton-scoped requests `actAs` this user's primary
     // party so Canton's AuthService enforces per-user CanActAs.
-    // See docs/operators/CANTON_MULTITENANT.md.
-    // Mutable: Stage 2.b rebinds this to `<minted_client_id>@clients`
-    // so the persisted record matches the `sub` claim on the tenant's
-    // client_credentials JWTs (the operator-supplied value is only the
-    // party-hint source in that flow).
+    // Mutable: when a per-tenant OAuth client is minted, this rebinds
+    // to `<minted_client_id>@clients` so the persisted record matches
+    // the `sub` claim on the tenant's client_credentials JWTs (the
+    // operator-supplied value is only the party-hint source there).
     let mut canton_user_id = params
         .get("canton_user_id")
         .and_then(|v| v.as_str())
@@ -29837,7 +29835,7 @@ async fn handle_workflow_step_execute(
         code: -32602, message: "Missing workflow_id".to_string(), data: None,
     })?;
 
-    // Idempotency check (Wave 12.2 / AWS Step Functions / Stripe
+    // Idempotency check (AWS Step Functions / Stripe
     // pattern). If the caller passes `idempotency_key`, this handler
     // is replay-safe: repeated calls with the same key return the
     // first execution's result hash instead of re-running the step.
@@ -29879,7 +29877,7 @@ async fn handle_workflow_step_execute(
         });
     }
 
-    // TEE-attested deadline check (Wave 12.3). When the step carries
+    // TEE-attested deadline check. When the step carries
     // an `attested_deadline`, the orchestrator refuses to advance it
     // past `wall_ms + 30s` tolerance. The monotonic counter on the
     // deadline binds it to a specific enclave instance, so a relayer
@@ -38999,7 +38997,7 @@ async fn handle_verify_zk_proof(
                 "soundness_class": if advisory { "advisory" } else { "binding" },
                 "soundness_note": if advisory {
                     "AIR binds ALL DIGEST_LEN slots of each public-input digest to \
-                     the corresponding trace cell (wave 5 hardening). Remaining gap: \
+                     the corresponding trace cell. Remaining gap: \
                      the trace's hash cells are computed off-circuit, so the AIR \
                      does not bind the witness to its declared hash itself — only \
                      the trace cells to the declared public inputs. Relying parties \
@@ -40762,7 +40760,7 @@ async fn handle_sign_transaction(
     let wid = WalletId::from_string(wallet_id.clone());
 
     // Fetch the wallet first so we can bind its ML-DSA-65 verifying key into
-    // the transaction before hashing/signing. Wave 3d: every wallet carries a
+    // the transaction before hashing/signing. Every wallet carries a
     // mandatory PQ key — there is no fallback to ephemeral keygen.
     let wallet = wallet_service
         .get_wallet(&wid)

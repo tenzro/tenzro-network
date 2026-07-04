@@ -233,7 +233,7 @@ Core `WalletService` trait defining the wallet interface.
 
 ## Security Features
 
-### Production-Ready Components
+### Components
 
 - **Key Shares**: Generated via FROST-Ed25519 trusted-dealer keygen (RFC 9591); DKG variant (`frost::dkg_part1`) available
 - **Keystore Encryption**: Argon2id KDF with 64MB memory cost, 3 iterations, parallelism 4

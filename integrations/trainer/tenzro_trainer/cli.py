@@ -194,6 +194,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     for round_index in range(max_rounds):
         log.info("--- round %d/%d ---", round_index, max_rounds - 1)
         scheduler.on_round_start(model)
+        # ADF-LoRA alternating freeze: under AggregationRule::LoraAlternating
+        # the adapter freezes one low-rank factor this round so the delta is a
+        # single factor across contributors and the syncer's per-coordinate
+        # mean is correct. No-op for full-FT adapters (no set_round method) and
+        # for LoRA adapters with alternating disabled.
+        set_round = getattr(adapter, "set_round", None)
+        if callable(set_round):
+            set_round(round_index)
         pre_state, post_state, report = run_inner_loop(
             adapter, args.shard_uri, inner_steps
         )

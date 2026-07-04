@@ -14,7 +14,7 @@
 //!   point-to-point.
 //! - **gossipsub topic prefix `/tenzro/mpc/session/<instance_id>`** — broadcast
 //!   channel for session-control envelopes only (quorum-open / quorum-close /
-//!   abort evidence) carried in a later wave. NOT used for DKLS23 rounds;
+//!   abort evidence). NOT used for DKLS23 rounds;
 //!   broadcasting them would leak the session graph and waste mesh
 //!   bandwidth.
 //!
@@ -74,7 +74,7 @@ use std::time::Duration;
 pub const MPC_RELAY_PROTOCOL: &str = "/tenzro/mpc/req-resp/1.0.0";
 
 /// gossipsub topic prefix for per-session MPC session-control broadcasts
-/// (quorum-open / quorum-close / abort-evidence in a later wave). Per-session
+/// (quorum-open / quorum-close / abort-evidence). Per-session
 /// topic is `MPC_RELAY_GOSSIP_TOPIC_PREFIX + hex(instance_id)`. DKLS23 round
 /// messages themselves go via request-response, never gossipsub.
 pub const MPC_RELAY_GOSSIP_TOPIC_PREFIX: &str = "/tenzro/mpc/session/";

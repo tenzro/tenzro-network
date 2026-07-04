@@ -100,17 +100,17 @@ pub struct AuthenticatorBinding {
     pub public_key: Vec<u8>,
     /// True if the underlying signing key is bound to TEE hardware.
     ///
-    /// Wave-1: derived from `is_seed_agent` as a coarse proxy
+    /// Currently derived from `is_seed_agent` as a coarse proxy
     /// (seed agents always run inside the operator-attested TEE pool).
-    /// Wave-2 will introduce a dedicated `tee_provider` field on
-    /// `IdentityData::Machine` and source this flag directly.
+    /// A future revision introduces a dedicated `tee_provider` field on
+    /// `IdentityData::Machine` and sources this flag directly.
     pub tee_attested: bool,
 }
 
 impl AuthenticatorBinding {
     /// Build an authenticator binding from a TDIP `PublicKeyInfo`.
     ///
-    /// `tee_attested` is the caller's responsibility — wave-1 fills it from
+    /// `tee_attested` is the caller's responsibility — it is filled from
     /// the machine's `is_seed_agent` flag.
     pub fn from_public_key(key: &PublicKeyInfo, tee_attested: bool) -> Self {
         Self {

@@ -1,7 +1,7 @@
 //! Celestia data-availability backend.
 //!
 //! Implements [`DaBackend`] against a celestia-node JSON-RPC endpoint via the
-//! `celestia-rpc` crate (pinned to `1.0.0`). This is the first production DA
+//! `celestia-rpc` crate (pinned to `1.0.0`). This is an external DA
 //! layer wired into Tenzro — EigenDA and Avail follow.
 //!
 //! # Wire model

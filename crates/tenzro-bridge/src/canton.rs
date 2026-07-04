@@ -1779,8 +1779,8 @@ impl CantonAdapter {
     }
 
     /// Resolves `config.act_as_party` (a bare party hint like
-    /// `"tenzro-validator-1"`) to its fully-qualified Canton form
-    /// (`"tenzro-validator-1::<participant-hash>"`). Cached after the
+    /// `"example-party"`) to its fully-qualified Canton form
+    /// (`"example-party::<participant-hash>"`). Cached after the
     /// first successful lookup; subsequent calls are O(1) under a read
     /// lock.
     ///
@@ -2069,13 +2069,13 @@ impl CantonAdapter {
     // confidentiality, while every state transition is anchored on Tenzro
     // first via the privileged-VM workflow selectors.
     //
-    // Template ids match the DAML codegen wave (Wave 6). The wrapper
+    // Template ids match the DAML codegen. The wrapper
     // templates are deliberately thin: they hold the Tenzro `workflow_id`
     // / `obligation_id` / `request_id` plus the canonical hash, and the
     // Tenzro receipt root. All structural data still lives on Tenzro.
 
     /// DAML template id for the workflow wrapper. Matches the Tenzro DAR
-    /// shipped with the autonomous_procurement reference template (Wave 6).
+    /// shipped with the autonomous_procurement reference template.
     const TPL_WORKFLOW: &'static str = "Tenzro.Workflow:WorkflowAnchor";
     /// DAML template id for an obligation anchor.
     const TPL_OBLIGATION: &'static str = "Tenzro.Workflow:ObligationAnchor";
@@ -3059,7 +3059,7 @@ impl CantonConfig {
             tls_enabled: true,
             jwt_token: None,
             synchronizer_ids: vec!["global-domain".to_string()],
-            act_as_party: "tenzro-validator-1".to_string(),
+            act_as_party: "example-party".to_string(),
             application_id: "tenzro-network".to_string(),
         }
     }
@@ -3622,7 +3622,7 @@ mod tests {
     fn active_contracts_request_uses_event_format_wrapper() {
         // Mirror what `query_contracts` builds for the per-party,
         // per-template case (the production path).
-        let party_fq = "tenzro-validator-1::1220ed9c20663dfc3b6180d5dd879ba3d7063a68b0016e26ba2549a9ae61ee0247b4".to_string();
+        let party_fq = "example-party::1220000000000000000000000000000000000000000000000000000000000000".to_string();
         let template_id = "#splice-amulet:Splice.Amulet:Amulet".to_string();
         let offset: i64 = 1_328_472;
 

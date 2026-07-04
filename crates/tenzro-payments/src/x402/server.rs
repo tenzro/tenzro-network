@@ -21,7 +21,7 @@ use tracing::{debug, info};
 ///
 /// Credentials are verified via a [`SchemeRegistry`] that maps the scheme id
 /// from `challenge.extra["scheme"]` (e.g. `"exact-eip3009"`, `"permit2"`,
-/// `"erc7710"`, or the wave-1 internal `"tenzro-hybrid"` default) to a
+/// `"erc7710"`, or the internal `"tenzro-hybrid"` default) to a
 /// [`crate::x402::scheme::SchemeBackend`]. Use
 /// [`X402PaymentServer::with_scheme_registry`] to inject custom backends.
 pub struct X402PaymentServer {
@@ -191,7 +191,7 @@ impl PaymentProtocol for X402PaymentServer {
 
         // 5. Dispatch credential verification to the scheme backend
         // declared by the challenge (`challenge.extra["scheme"]`). The
-        // wave-1 default is `tenzro-hybrid` (Ed25519 + ML-DSA-65). Other
+        // default is `tenzro-hybrid` (Ed25519 + ML-DSA-65). Other
         // schemes (`exact-eip3009`, `permit2`, `erc7710`) are honored via
         // the same registry — see `x402::scheme`.
         let backend = self.scheme_registry.lookup_for_challenge(challenge)?;
