@@ -1215,6 +1215,19 @@ pub struct NetworkProviderEntry {
     pub last_seen: std::time::Instant,
 }
 
+/// Derive the 32-byte provider wallet address for a plain node that has no
+/// identity-registry entry, from its announce signer's Ed25519 public key.
+/// Same derivation as the self-custodial wallet in
+/// `tenzro_identity::registry` (`sha256(public_key_bytes)`), so a validator
+/// with no provisioned identity still advertises a stable, reproducible
+/// provider address instead of the zero address.
+fn announce_signer_wallet_address(
+    signer: &(dyn tenzro_crypto::signatures::Signer + Send + Sync),
+) -> Option<Address> {
+    let hash = tenzro_crypto::sha256(signer.public_key().as_bytes());
+    Address::from_bytes(hash.as_bytes())
+}
+
 /// Main Tenzro Network node
 pub struct TenzroNode {
     config: NodeConfig,
@@ -1604,6 +1617,13 @@ pub struct TenzroNode {
     /// `TenzroMcpServer` instances per session) is installed from `main.rs`
     /// after `Arc::new(node)` exists.
     pub iroh_mcp_handler: Option<Arc<tenzro_iroh::DeferredMcpHandler>>,
+
+    /// Deferred inference-over-iroh dispatcher. Same chicken-and-egg pattern
+    /// as `iroh_a2a_dispatcher`: the `tenzro/infer` ALPN is registered on the
+    /// iroh router at bind time backed by an unbound trampoline, then the
+    /// real dispatcher (which needs `Arc<TenzroNode>` to call `handle_chat`)
+    /// is installed from `main.rs` after `Arc::new(node)` exists.
+    pub iroh_infer_dispatcher: Option<Arc<tenzro_iroh::DeferredJsonRpcDispatcher>>,
 
     // Identity & Payments (TDIP + MPP/x402)
     identity_registry: Option<Arc<IdentityRegistry>>,
@@ -2036,6 +2056,7 @@ impl TenzroNode {
             iroh_resolver: None,
             iroh_a2a_dispatcher: None,
             iroh_mcp_handler: None,
+            iroh_infer_dispatcher: None,
             identity_registry: None,
             payment_gateway: None,
             x402_server: None,
@@ -2720,6 +2741,13 @@ impl TenzroNode {
                 let mut alpns = vec!["iroh-blobs".to_string()];
                 if self.iroh_a2a_dispatcher.is_some() {
                     alpns.push("tenzro/a2a".to_string());
+                }
+                if self.iroh_mcp_handler.is_some() {
+                    alpns.push("tenzro/mcp".to_string());
+                }
+                alpns.push("tenzro/moe".to_string());
+                if self.iroh_infer_dispatcher.is_some() {
+                    alpns.push("tenzro/infer".to_string());
                 }
                 (true, Some(resolver.endpoint().id().to_string()), alpns)
             }
@@ -4620,11 +4648,20 @@ impl TenzroNode {
             crate::moe::MoeIrohDispatcher::new(Arc::clone(&self.moe_runtime)),
         );
 
+        // Inference-over-iroh: same trampoline pattern as A2A. The real
+        // dispatcher (`crate::infer::IrohInferDispatcher`) needs
+        // `Arc<TenzroNode>` to reach `handle_chat` and is installed from
+        // `main.rs` after `Arc::new(node)`.
+        let infer_deferred = Arc::new(tenzro_iroh::DeferredJsonRpcDispatcher::new("infer"));
+        self.iroh_infer_dispatcher = Some(infer_deferred.clone());
+        let infer_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = infer_deferred;
+
         match tenzro_iroh::IrohBackedResolver::bind_with_jsonrpc(
             &cfg,
             Some(a2a_dispatcher),
             Some(mcp_handler),
             Some(moe_dispatcher),
+            Some(infer_dispatcher),
         )
         .await
         {
@@ -4657,6 +4694,7 @@ impl TenzroNode {
                 // no router will ever call into them.
                 self.iroh_a2a_dispatcher = None;
                 self.iroh_mcp_handler = None;
+                self.iroh_infer_dispatcher = None;
             }
         }
 
@@ -4674,6 +4712,11 @@ impl TenzroNode {
                 .identity_registry
                 .as_ref()
                 .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+                .or_else(|| {
+                    self.announce_signer
+                        .as_ref()
+                        .and_then(|s| announce_signer_wallet_address(s.as_ref()))
+                })
                 .unwrap_or_default();
             let stake_ledger: Arc<dyn tenzro_settlement::rental::StakeLedger> = Arc::new(
                 crate::storage_provider_runtime::StakingStakeLedger::new(staking),
@@ -5429,17 +5472,10 @@ impl TenzroNode {
             }
         }
 
-        // Initialize HuggingFace downloader
-        // Default to ~/.tenzro/models/ to match where the CLI downloads models
-        let models_dir = self.config.models_dir
-            .clone()
-            .unwrap_or_else(|| {
-                std::path::PathBuf::from(
-                    std::env::var("HOME").unwrap_or_else(|_| "/home/tenzro".to_string())
-                )
-                .join(".tenzro")
-                .join("models")
-            });
+        // Initialize HuggingFace downloader. Weights are stored under the node's
+        // persistent data_dir (data_dir/models by default) so they survive a
+        // restart rather than being re-downloaded every boot.
+        let models_dir = self.config.effective_models_dir();
         std::fs::create_dir_all(&models_dir).map_err(|e| {
             NodeError::Internal(format!("Failed to create models directory: {}", e))
         })?;
@@ -7825,6 +7861,11 @@ impl TenzroNode {
                 .identity_registry
                 .as_ref()
                 .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+                .or_else(|| {
+                    self.announce_signer
+                        .as_ref()
+                        .and_then(|s| announce_signer_wallet_address(s.as_ref()))
+                })
                 .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
                 .unwrap_or_default();
 
@@ -9910,6 +9951,11 @@ impl TenzroNode {
                 .unwrap_or_default()
                 .as_secs(),
             load_info: None,
+            iroh_endpoint_id: self
+                .iroh_resolver
+                .as_ref()
+                .map(|r| r.endpoint_id().to_string())
+                .unwrap_or_default(),
         };
 
         self.model_services.insert(instance_id.clone(), instance.clone());

@@ -1567,6 +1567,11 @@ impl EventLoop {
                                 timestamp: chrono::Utc::now().timestamp_millis(),
                                 withdrawn: false,
                                 rpc_endpoint: format!("http://{}", rpc_addr),
+                                iroh_endpoint_id: self
+                                    .iroh_resolver
+                                    .as_ref()
+                                    .map(|r| r.endpoint_id().to_string())
+                                    .unwrap_or_default(),
                                 ..Default::default()
                             };
                             if let Err(e) = reg.sign(signer.as_ref()) {

@@ -12,7 +12,7 @@ use tenzro_node::error::{self, Result};
 use tenzro_node::node::TenzroNode;
 use tenzro_node::rpc::RpcServer;
 use tenzro_node::{
-    a2a, event_loop, genesis, lifecycle_state_bridge, mcp, spending_policy_bridge,
+    a2a, event_loop, genesis, infer, lifecycle_state_bridge, mcp, spending_policy_bridge,
     spt_ceiling_bridge, web,
 };
 use tenzro_storage::KvStore;
@@ -839,6 +839,19 @@ async fn main() -> Result<()> {
         info!("MCP handler installed on iroh transport (ALPN tenzro/mcp, Phase D2)");
     }
 
+    // Install the iroh-side inference dispatcher. The iroh router registered
+    // the `tenzro/infer` ALPN at bind time backed by a deferred dispatcher
+    // (see `init_ai_infrastructure`); now that we have `Arc<TenzroNode>` we
+    // swap the real one in. Consumers dial a provider's `EndpointId` on this
+    // ALPN and send a `tenzro_chat` frame — the NAT-agnostic path that
+    // replaces HTTP-POSTing to a loopback `rpc_endpoint`.
+    if let Some(deferred) = node_arc.iroh_infer_dispatcher.as_ref() {
+        let dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> =
+            Arc::new(infer::IrohInferDispatcher::new(node_arc.clone()));
+        deferred.set(dispatcher);
+        info!("Inference dispatcher installed on iroh transport (ALPN tenzro/infer)");
+    }
+
     let a2a_shutdown_rx = shutdown_tx.subscribe();
     let a2a_addr_https = a2a_addr.clone();
     let mut a2a_handle = tokio::spawn(async move {
@@ -1300,20 +1313,15 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
 
     // Merge role-specific defaults per served role when no config file was
     // provided. A multi-role node accumulates the defaults of every role it
-    // fills (e.g. validator+ai pulls both consensus and models_dir defaults).
+    // fills (e.g. validator+ai pulls both consensus and tee defaults). Weight
+    // storage is left to NodeConfig::effective_models_dir, which roots under
+    // the persistent data_dir when models_dir is unset.
     if cli.config.is_none() {
         if config.roles.is_validator() && config.consensus.is_none() {
             config.consensus = NodeConfig::default_validator().consensus;
         }
-        if config.roles.serves_ai() && config.models_dir.is_none() {
-            config.models_dir = NodeConfig::default_provider().models_dir;
-        }
         if config.roles.serves_tee() {
-            let defaults = NodeConfig::default_tee_provider();
-            if config.models_dir.is_none() {
-                config.models_dir = defaults.models_dir;
-            }
-            config.tee_enabled = defaults.tee_enabled;
+            config.tee_enabled = NodeConfig::default_tee_provider().tee_enabled;
         }
     }
 
@@ -1566,8 +1574,8 @@ fn print_node_info(config: &NodeConfig) {
     println!("  Log Level:    {}", config.log_level);
     println!("  TEE Enabled:  {}", config.tee_enabled);
 
-    if let Some(models_dir) = &config.models_dir {
-        println!("  Models Dir:   {:?}", models_dir);
+    if config.roles.serves_ai() {
+        println!("  Models Dir:   {:?}", config.effective_models_dir());
     }
 
     println!("{}\n", "=".repeat(60));

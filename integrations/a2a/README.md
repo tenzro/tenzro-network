@@ -168,14 +168,14 @@ The Tenzro A2A agent exposes skills covering blockchain, AI, identity, payments,
 
 | Skill | ID | Description |
 |-------|-----|-------------|
-| **Proof Verification** | `verification` | Verify ZK proofs, TEE attestations, transaction signatures |
+| **Proof Verification** | `verification` | Verify ZK proofs, TEE attestations, transaction signatures; look up the cached synthetic-content provenance manifest (EU AI Act Art. 50(2)) for AI-generated output by `content_hash` |
 | **Event Streaming** | `events` | Subscribe to blockchain events via WebSocket, webhooks, gRPC |
 | **Authentication (OAuth 2.1 + DPoP)** | `auth` | Onboard humans / delegated agents / autonomous agents (RFC 6749 + RFC 9449), refresh access tokens, link an existing wallet to an auth session, revoke JWTs/DIDs. Pass `dpop_jkt` (RFC 7638 thumbprint) to bind issued tokens to a holder key. |
 | **Join as MicroNode** | `join` | Zero-install network participation with auto-provisioned DID + wallet |
 | **Decentralized Storage** | `storage` | Content-addressed storage on the iroh data plane, billed per byte-epoch and held to a proof of retrievability — open/charge/look-up deals, set pricing, read provider status; one coverage budget shared with compute |
 | **Compute Rental** | `compute` | Rent compute against stake, settled per epoch on an availability proof — book/settle/look-up rentals, set pricing, read provider status; shares the storage coverage budget |
 | **Distributed MoE Serving** | `moe` | Decentralized expert-shard serving — shard map, top-k dispatch planning, replication policy, catalog topology, expert/gate weight loading into the local expert runtime, runtime status, and distributed layer forwards that fan hidden states out to expert holders and gather gate-weighted outputs |
-| **Operability Inspection** | `operability` | Read-only surface for SREs and monitoring agents — Tenzro Train inspection (list runs, run state, sealed receipts, Confidential-tier sealed-shard manifests), SLA fault-detector parameters and probes (list outstanding, issue liveness probe), and state-sync snapshot inspection (list, manifest by height, chunk fetch); validator-registry reads route through the validator-lifecycle skill |
+| **Operability Inspection** | `operability` | Read-only surface for SREs and monitoring agents — Tenzro Train inspection (list runs, run state, sealed receipts, Confidential-tier sealed-shard manifests, trainer auto-provisioning daemon status), SLA fault-detector parameters and probes (list outstanding, issue liveness probe), and state-sync snapshot inspection (list, manifest by height, chunk fetch); validator-registry reads route through the validator-lifecycle skill |
 | **Local Discovery & LAN Clustering** | `discovery` | mDNS local-segment peers, connectivity tier (`direct` / `relay_only` / `unreachable`), hardware self-profile, and deterministic layer-wise LAN cluster planning. Serving auto-triggers the cluster when a model exceeds one host: the node reads the GGUF header for shape, discovers members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline — opt out with `force_single`. |
 
 ## A2A Methods
@@ -212,7 +212,7 @@ The agent routes messages based on natural language content:
 | `swarm`, `parallel`, `orchestrat` | Swarm Orchestration |
 | `task`, `marketplace`, `post task`, `quote` | Task Marketplace |
 | `template`, `agent marketplace`, `rating` | Agent Marketplace |
-| `verify`, `proof`, `attestation`, `zk` | Verification |
+| `verify`, `proof`, `attestation`, `zk`, `provenance`, `synthetic` | Verification |
 | `join`, `micronode`, `onboard` | Join as MicroNode |
 | `nft`, `collection`, `mint`, `transfer nft` | NFT Management |
 | `bridge`, `cross-chain`, `layerzero`, `ccip`, `debridge` | Cross-Chain Bridge |

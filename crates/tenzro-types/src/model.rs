@@ -1152,6 +1152,11 @@ pub struct ModelServiceInstance {
     /// Current load information (updated dynamically, only for local models)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_info: Option<ModelLoadInfo>,
+    /// iroh EndpointId of the serving node, hex-encoded. Populated for
+    /// network-discovered endpoints so callers can see the NAT-agnostic
+    /// address a remote model is reached at. Empty for local services.
+    #[serde(default)]
+    pub iroh_endpoint_id: String,
 }
 
 /// Whether a model is served locally or by a remote network provider

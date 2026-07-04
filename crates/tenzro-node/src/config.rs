@@ -1550,10 +1550,6 @@ impl NodeConfig {
             ));
         }
 
-        // Model providers should have models directory
-        if self.roles.serves_ai() && self.models_dir.is_none() {
-            tracing::warn!("AI provider role without models directory");
-        }
 
         // Validate log level
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
@@ -1632,6 +1628,18 @@ impl NodeConfig {
             })?;
         }
         Ok(())
+    }
+
+    /// Resolve the directory where GGUF model weights are stored and served.
+    ///
+    /// Uses the explicit `models_dir` when configured, otherwise a `models`
+    /// subdirectory of `data_dir`. Rooting under `data_dir` keeps downloaded
+    /// weights on the same persistent volume as chain state, so they survive a
+    /// process/container restart instead of being re-downloaded every boot.
+    pub fn effective_models_dir(&self) -> PathBuf {
+        self.models_dir
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("models"))
     }
 }
 

@@ -82,7 +82,7 @@ pub use error::{IrohError, IrohResult};
 pub use gradient_store::IrohGradientStore;
 pub use jsonrpc::{
     call as jsonrpc_call, DeferredJsonRpcDispatcher, DeferredMcpHandler, JsonRpcDispatcher,
-    JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_MCP, ALPN_MOE,
+    JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_INFER, ALPN_MCP, ALPN_MOE,
 };
 pub use resolver::{IrohBackedResolver, IrohResolver};
 pub use sealed_shard_store::IrohSealedShardStore;

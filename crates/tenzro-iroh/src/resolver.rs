@@ -27,8 +27,8 @@ use tokio::sync::Mutex;
 use crate::config::TenzroIrohConfig;
 use crate::error::{IrohError, IrohResult};
 use crate::jsonrpc::{
-    JsonRpcDispatcher, JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_MCP,
-    ALPN_MOE,
+    JsonRpcDispatcher, JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_INFER,
+    ALPN_MCP, ALPN_MOE,
 };
 use crate::tdip::derive_iroh_secret_key_from_ed25519;
 use tenzro_types::tenzro_uri::TenzroUri;
@@ -147,7 +147,14 @@ impl IrohBackedResolver {
         let endpoint = Endpoint::bind(presets::N0)
             .await
             .map_err(|e| IrohError::Backend(format!("endpoint bind: {e}")))?;
-        Self::with_endpoint(endpoint, ResolverStore::Mem(MemStore::new()), None, None, None)
+        Self::with_endpoint(
+            endpoint,
+            ResolverStore::Mem(MemStore::new()),
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Load the persistent redb-backed blob store rooted under the
@@ -185,7 +192,7 @@ impl IrohBackedResolver {
     pub async fn bind_with_config(cfg: &TenzroIrohConfig) -> IrohResult<Arc<Self>> {
         let endpoint = Self::bind_endpoint_for_config(cfg).await?;
         let store = Self::load_fs_store(cfg).await?;
-        Self::with_endpoint(endpoint, store, None, None, None)
+        Self::with_endpoint(endpoint, store, None, None, None, None)
     }
 
     /// Endpoint bind decision shared by `bind_with_config` and
@@ -316,10 +323,11 @@ impl IrohBackedResolver {
         a2a: Option<Arc<dyn JsonRpcDispatcher>>,
         mcp: Option<Arc<dyn McpStreamHandler>>,
         moe: Option<Arc<dyn JsonRpcDispatcher>>,
+        infer: Option<Arc<dyn JsonRpcDispatcher>>,
     ) -> IrohResult<Arc<Self>> {
         let endpoint = Self::bind_endpoint_for_config(cfg).await?;
         let store = Self::load_fs_store(cfg).await?;
-        Self::with_endpoint(endpoint, store, a2a, mcp, moe)
+        Self::with_endpoint(endpoint, store, a2a, mcp, moe, infer)
     }
 
     /// Stand up the blob store + iroh-blobs ALPN router on top of an
@@ -332,6 +340,7 @@ impl IrohBackedResolver {
         a2a: Option<Arc<dyn JsonRpcDispatcher>>,
         mcp: Option<Arc<dyn McpStreamHandler>>,
         moe: Option<Arc<dyn JsonRpcDispatcher>>,
+        infer: Option<Arc<dyn JsonRpcDispatcher>>,
     ) -> IrohResult<Arc<Self>> {
         let blobs = BlobsProtocol::new(&store, None);
         let mut builder = Router::builder(endpoint.clone()).accept(ALPN, blobs);
@@ -343,6 +352,9 @@ impl IrohBackedResolver {
         }
         if let Some(dispatcher) = moe {
             builder = builder.accept(ALPN_MOE, JsonRpcProtocol::moe(dispatcher));
+        }
+        if let Some(dispatcher) = infer {
+            builder = builder.accept(ALPN_INFER, JsonRpcProtocol::infer(dispatcher));
         }
         let router = builder.spawn();
         let downloader = Downloader::new(&*store, &endpoint);

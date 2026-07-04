@@ -782,6 +782,8 @@ const PUBLIC_MCP_TOOLS: &[&str] = &[
     "list_tokens", "get_token_balance",
     // Model discovery
     "list_models", "list_model_endpoints", "get_download_progress",
+    // Provenance & training status (read-only)
+    "get_provenance", "get_trainer_daemon_status",
     // Bridge info
     "get_bridge_routes", "list_bridge_adapters",
     // deBridge read-only

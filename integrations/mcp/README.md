@@ -199,7 +199,7 @@ The same registration semantics are mirrored to two non-EVM backends from a sing
 
 - `list_models` — List available AI models
 - `chat_completion` — Send chat completion request
-- `list_model_endpoints` — List model service endpoints
+- `list_model_endpoints` — List model service endpoints. Each endpoint carries `iroh_endpoint_id`, the hex iroh `EndpointId` of the serving node (empty for local-only services); cross-node inference routes to it over the `tenzro/infer` ALPN.
 - `discover_models` — Discover models on network
 - `download_model` — Download model from registry
 - `serve_model` — Start serving a model. Auto-clusters when one host cannot hold the model: reads the GGUF header for layer count and hidden dimension, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline across them. Pass `force_single` to keep it on one host, or `cluster_members` to override discovery.
@@ -322,9 +322,14 @@ Per-tenant analytics:
 - `canton_get_my_analytics` — Subject self-read: per-tenant call counters for the API key configured on this client. Returns `{key_id, canton_user_id, calls_total, errors_total, calls_by_method, errors_by_method, first_seen_at, last_called_at}`.
 - `canton_list_api_key_analytics` — Operator admin-read: every tenant's counters (admin-token-gated). Optional `key_id` filter.
 
-### Verification (1 tool)
+### Verification (2 tools)
 
 - `verify_zk_proof` — Verify Plonky3 STARK proof over the KoalaBear field; requires `circuit_id` ∈ {inference, settlement, identity} and 4-byte LE field-chunk public inputs
+- `get_provenance` — Resolve the cached synthetic-content provenance manifest (EU AI Act Art. 50(2)) for AI-generated output by its 32-byte hex `content_hash`; errors when no manifest is cached for that hash
+
+### Tenzro Train (1 tool)
+
+- `get_trainer_daemon_status` — Report the node's trainer auto-provisioning daemon: running state, trainer DID, live trainer subprocess count, and concurrent-trainer ceiling
 
 ### Events (3 tools)
 

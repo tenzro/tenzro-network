@@ -496,7 +496,14 @@ tenzro train submit-gradient --run-id <id> --round <r> --payload ./grad.bin
 tenzro train finalize-round --run-id <id> --round <r>
 tenzro train install-sealed-manifest --manifest ./manifest.json
 tenzro train get-sealed-manifest --manifest-hash <64-hex>
+tenzro train daemon-status
 ```
+
+`daemon-status` reports the trainer auto-provisioning daemon on the target
+node (`tenzro_getTrainerDaemonStatus`): whether it is running, its trainer
+DID, the count of live trainer subprocesses, and the concurrent-trainer
+ceiling. Enable the daemon with `[training] enabled = true` in the node
+config.
 
 ### Distributed MoE
 

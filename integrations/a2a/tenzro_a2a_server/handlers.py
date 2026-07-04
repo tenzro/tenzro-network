@@ -620,11 +620,25 @@ async def handle_verification(text: str, metadata: dict = None) -> str:
         })
         return f"ZK proof verification:\n{json.dumps(result, indent=2)}"
 
+    if "provenance" in t or "synthetic" in t:
+        md = metadata or {}
+        content_hash = md.get("content_hash") or _extract_address(text)
+        if not content_hash:
+            return (
+                "Provenance lookup requires a 32-byte hex content_hash.\n"
+                "Pass via metadata: {\"content_hash\": \"0x...\"}"
+            )
+        result = await rpc_call(
+            "tenzro_getProvenance", {"content_hash": content_hash}
+        )
+        return f"Provenance manifest:\n{json.dumps(result, indent=2)}"
+
     return (
         "Verification operations:\n"
         "  - 'Verify a ZK proof'\n"
         "  - 'Check TEE attestation'\n"
-        "  - 'Verify transaction signature for 0xabc...'"
+        "  - 'Verify transaction signature for 0xabc...'\n"
+        "  - 'Look up provenance' (metadata: content_hash)"
     )
 
 
@@ -3308,6 +3322,10 @@ async def handle_operability(text: str, metadata: dict = None) -> str:
         return f"Local snapshots:\n{json.dumps(result, indent=2)}"
 
     # --- Tenzro Train inspection ---
+    if "daemon" in t or "trainer status" in t:
+        result = await rpc_call("tenzro_getTrainerDaemonStatus", {})
+        return f"Trainer daemon status:\n{json.dumps(result, indent=2)}"
+
     if "receipt" in t and task_id:
         result = await rpc_call("tenzro_training_getReceipt", {"task_id": task_id})
         return f"Training receipt for {task_id}:\n{json.dumps(result, indent=2)}"
@@ -3332,6 +3350,7 @@ async def handle_operability(text: str, metadata: dict = None) -> str:
         "  - 'Get training run task-…' (metadata: task_id)\n"
         "  - 'Get training receipt task-…' (metadata: task_id)\n"
         "  - 'Get sealed manifest task-…' (metadata: task_id)\n"
+        "  - 'Show trainer daemon status'\n"
         "  - 'Show SLA fault-detector parameters'\n"
         "  - 'List outstanding SLA probes'\n"
         "  - 'Issue SLA probe' (metadata: provider_did, epoch, round, deadline_ms?)\n"

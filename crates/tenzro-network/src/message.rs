@@ -383,6 +383,14 @@ pub struct ModelRegistrationMessage {
     /// RPC endpoint for inference requests (e.g. "http://10.128.0.3:8545")
     #[serde(default)]
     pub rpc_endpoint: String,
+    /// Provider's iroh `EndpointId` (hex) for peer-identity-addressed
+    /// inference dispatch over the `tenzro/infer` ALPN. Empty when the
+    /// provider has no iroh endpoint bound. Consumers prefer this over
+    /// `rpc_endpoint` because it works across NAT without a reachable
+    /// public HTTP address; `rpc_endpoint` stays as an opportunistic
+    /// fallback for nodes that do expose a dialable endpoint.
+    #[serde(default)]
+    pub iroh_endpoint_id: String,
     /// RFC-0007: High-level model class classification
     #[serde(default)]
     pub model_class: ModelClass,

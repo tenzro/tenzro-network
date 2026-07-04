@@ -883,8 +883,38 @@ async def chat_completion(
 
 @mcp.tool
 async def list_model_endpoints() -> dict:
-    """List active model service endpoints with their API/MCP URLs and status."""
+    """List active model service endpoints with their API/MCP URLs and status.
+
+    Each endpoint carries an `iroh_endpoint_id` — the hex EndpointId of the
+    serving node, used to route cross-node inference over the network without
+    knowing the node's IP. Empty for services running on the local node.
+    """
     result = await rpc_call("tenzro_listModelEndpoints", [])
+    return result
+
+
+@mcp.tool
+async def get_provenance(content_hash: str) -> dict:
+    """Look up the cached provenance manifest for generated content.
+
+    `content_hash` is the 32-byte hex hash (with or without `0x` prefix) of
+    the generated content. This is the machine-readable synthetic-content
+    marker per EU AI Act Art. 50(2). Returns a JSON-RPC `-32004` error when no
+    manifest is cached for the hash.
+    """
+    result = await rpc_call("tenzro_getProvenance", {"content_hash": content_hash})
+    return result
+
+
+@mcp.tool
+async def get_trainer_daemon_status() -> dict:
+    """Report the trainer auto-provisioning daemon status.
+
+    When the node has no `[training]` section (or `enabled = false`),
+    `running` is `false`. Otherwise returns `{running, trainer_did,
+    live_trainers, max_concurrent_trainers}`.
+    """
+    result = await rpc_call("tenzro_getTrainerDaemonStatus", {})
     return result
 
 
