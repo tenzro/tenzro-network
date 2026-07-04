@@ -724,13 +724,16 @@ impl ModelEndpointsCmd {
                     return Ok(());
                 }
 
-                let headers = vec!["Location", "Model", "Instance ID", "API Endpoint", "Status", "Load"];
+                let headers = vec!["Served by", "Model", "Instance ID", "API Endpoint", "Status", "Load"];
                 let mut rows = Vec::new();
 
                 for endpoint in &endpoints {
                     let location = endpoint.get("location")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
+                    let iroh_endpoint_id = endpoint.get("iroh_endpoint_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let model_name = endpoint.get("model_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
@@ -744,10 +747,22 @@ impl ModelEndpointsCmd {
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
 
-                    let location_colored = if location == "local" {
-                        format!("{}[local]{}", output::colors::CYAN, output::colors::RESET)
+                    // A non-empty iroh_endpoint_id means the model is reachable
+                    // over the network by that EndpointId (resolved via Pkarr,
+                    // not by IP). Otherwise fall back to `location`: "local" is
+                    // a same-machine endpoint, anything else is network-reached
+                    // by URL only.
+                    let location_colored = if !iroh_endpoint_id.is_empty() {
+                        let short = if iroh_endpoint_id.len() > 10 {
+                            &iroh_endpoint_id[..10]
+                        } else {
+                            iroh_endpoint_id
+                        };
+                        format!("{}network · {}…{}", output::colors::BLUE, short, output::colors::RESET)
+                    } else if location == "local" {
+                        format!("{}local{}", output::colors::CYAN, output::colors::RESET)
                     } else {
-                        format!("{}[network]{}", output::colors::BLUE, output::colors::RESET)
+                        format!("{}network{}", output::colors::BLUE, output::colors::RESET)
                     };
 
                     let status_colored = if status.to_lowercase() == "online" {
@@ -859,6 +874,9 @@ impl ModelEndpointCmd {
                 let mcp_endpoint = endpoint.get("mcp_endpoint")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let iroh_endpoint_id = endpoint.get("iroh_endpoint_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 output::print_field("Instance ID", instance_id);
 
@@ -868,7 +886,16 @@ impl ModelEndpointCmd {
                     output::print_field("Model", model_name);
                 }
 
-                output::print_field("Location", location);
+                // A non-empty iroh_endpoint_id means the model is reachable over
+                // the network by that EndpointId (resolved via Pkarr, not by IP).
+                let served_by = if !iroh_endpoint_id.is_empty() {
+                    format!("network ({})", iroh_endpoint_id)
+                } else if location == "local" {
+                    "local".to_string()
+                } else {
+                    "network".to_string()
+                };
+                output::print_field("Served by", &served_by);
                 output::print_field("Provider", provider_name);
                 output::print_field("Status", status);
 
