@@ -27,6 +27,9 @@ bytes = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
 flate2 = { workspace = true }
+# 2D Reed-Solomon erasure coding for the committee data-availability store
+# (`da::redstuff`). Core, not feature-gated.
+reed-solomon-erasure = { workspace = true }
 
 # Optional: Celestia DA backend
 celestia-rpc = { workspace = true, optional = true }

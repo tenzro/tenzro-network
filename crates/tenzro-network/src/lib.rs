@@ -67,6 +67,7 @@ pub mod block_sync_proto;
 pub mod cluster_tunnel_proto;
 pub mod config;
 pub mod consensus_direct_proto;
+pub mod da_committee_relay;
 pub mod discovery;
 pub mod error;
 pub mod gossip;
@@ -96,6 +97,14 @@ pub use cluster_tunnel_proto::{
 pub use consensus_direct_proto::{
     ConsensusDirectBehaviour, ConsensusDirectError, ConsensusDirectRequest,
     ConsensusDirectResponse, CONSENSUS_DIRECT_PROTOCOL,
+};
+pub use da_committee_relay::{
+    DaCommitteeBehaviour, DaCommitteeError, DaCommitteeRequest, DaCommitteeResponse,
+    WireMemberAttestation, DA_COMMITTEE_PROTOCOL,
+    MAX_INBOUND_STREAMS_PER_PEER as DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
+    MAX_REQUEST_SIZE as DA_COMMITTEE_MAX_REQUEST_SIZE,
+    MAX_RESPONSE_SIZE as DA_COMMITTEE_MAX_RESPONSE_SIZE,
+    REQUEST_TIMEOUT as DA_COMMITTEE_REQUEST_TIMEOUT,
 };
 pub use mpc_relay::{
     session_topic as mpc_session_topic, MpcDidResolver, MpcRelayBehaviour, MpcRelayError,

@@ -1,0 +1,49 @@
+# Cloud Build pipeline for measuring Tenzro Train inner-loop throughput.
+#
+# Installs the reference trainer (timeseries extra, CPU-only torch) and runs
+# the benchmark harness. The measured samples/sec and steps/sec appear in the
+# Cloud Build log on the `THROUGHPUT {...}` line. Nothing is pushed to a
+# registry and the testnet is not touched.
+#
+# Usage:
+#
+#   gcloud builds submit \
+#     --config=cloudbuild-train-bench.yaml \
+#     --project=tenzro-operator-project \
+#     --machine-type=n1-highcpu-8 \
+#     --timeout=1800s \
+#     .
+#
+# n1-highcpu-8 is enough — the reference model is ~3M params and the run is
+# CPU-bound; the larger machine types add cost without changing the per-core
+# throughput this benchmark reports.
+
+steps:
+  - name: 'python:3.11-slim-bookworm'
+    id: 'train-throughput-bench'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -euo pipefail
+
+        # CPU-only torch wheel keeps the install small and the number honest
+        # for the commodity-CPU class BENCHMARKS.md targets.
+        pip install --no-cache-dir --upgrade pip
+        pip install --no-cache-dir \
+          --index-url https://download.pytorch.org/whl/cpu torch
+        pip install --no-cache-dir "./integrations/trainer[timeseries]"
+
+        echo "==== tenzro-trainer inner-loop throughput ===="
+        tenzro-trainer-bench --steps 200 --warmup 20 --batch-size 8
+
+        echo "==== reference-config sweep (matches BENCHMARKS.md model) ===="
+        tenzro-trainer-bench \
+          --steps 200 --warmup 20 --batch-size 8 \
+          --d-model 256 --num-layers 4 --num-heads 4 --json
+
+options:
+  machineType: 'N1_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: '1800s'

@@ -34,7 +34,7 @@ language = [
     "bitsandbytes>=0.44",
 ]
 vision = ["timm>=1.0", "Pillow>=10.0"]
-timeseries = ["pandas>=2.2"]
+timeseries = ["pandas>=2.2", "pyarrow>=15.0"]
 # Confidential-tier shard unwrap (HPKE per RFC 9180 + AES-256-GCM).
 # Runs inside the trainer's TEE enclave; never on the syncer side.
 confidential = ["pyhpke>=0.5", "cryptography>=42.0"]
@@ -43,6 +43,7 @@ all = ["tenzro-trainer[hivemind,language,vision,timeseries,confidential]"]
 
 [project.scripts]
 tenzro-trainer = "tenzro_trainer.cli:main"
+tenzro-trainer-bench = "tenzro_trainer.benchmark:main"
 
 [tool.setuptools.packages.find]
 include = ["tenzro_trainer*"]

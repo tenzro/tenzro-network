@@ -8,6 +8,10 @@ use crate::{
         ConsensusDirectError, ConsensusDirectRequest, ConsensusDirectResponse,
         MAX_INBOUND_STREAMS_PER_PEER,
     },
+    da_committee_relay::{
+        DaCommitteeError, DaCommitteeRequest, DaCommitteeResponse,
+        MAX_INBOUND_STREAMS_PER_PEER as DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
+    },
     error::{NetworkError, Result},
     gossip::{MessageDeduplicator, MessageValidation, validate_gossip_message},
     message::{ConsensusMessage, NetworkMessage, MessagePayload},
@@ -382,6 +386,22 @@ pub struct OutboundClusterTunnelResult {
     >,
 }
 
+/// An inbound committee-DA request (`StoreSliver` or `FetchSliver`) received
+/// from a writer or reader peer.
+///
+/// The serving member's DA handler MUST eventually call
+/// [`NetworkService::send_da_committee_response`] with the matching
+/// `request_id`, supplying the signed attestation (for `StoreSliver`) or the
+/// held sliver bytes (for `FetchSliver`). Dropping the value without
+/// responding leaves the requester's request to time out, which it treats the
+/// same as a missing attestation / missing sliver.
+#[derive(Debug)]
+pub struct InboundDaCommittee {
+    pub peer: PeerId,
+    pub request_id: InboundRequestId,
+    pub request: DaCommitteeRequest,
+}
+
 /// Network service trait
 #[async_trait]
 pub trait NetworkService: Send + Sync {
@@ -558,6 +578,44 @@ pub trait NetworkService: Send + Sync {
     async fn subscribe_cluster_tunnel_results(
         &self,
     ) -> Result<mpsc::UnboundedReceiver<OutboundClusterTunnelResult>>;
+
+    /// Sends one committee-DA request (`StoreSliver` / `FetchSliver`) to a
+    /// member peer and awaits its reply.
+    ///
+    /// Unlike the fire-and-forget cluster-tunnel / MPC-relay overlays, the
+    /// committee-DA protocol is reply-carrying: a `StoreSliver` returns the
+    /// member's signed attestation and a `FetchSliver` returns the held sliver
+    /// bytes. The event loop parks the caller's reply channel keyed by the
+    /// `OutboundRequestId` and fulfils it when the peer's `Message::Response`
+    /// arrives (or an `OutboundFailure` maps to a transport error). The member
+    /// is addressed by `PeerId` directly — the node-layer adapter resolves the
+    /// committee index → validator address → `PeerId` before calling this.
+    async fn da_committee_request(
+        &self,
+        peer: PeerId,
+        request: DaCommitteeRequest,
+    ) -> Result<DaCommitteeResponse>;
+
+    /// Answers an inbound committee-DA request identified by `request_id`.
+    ///
+    /// Called by a member's DA handler after it stores its sliver (returning
+    /// [`DaCommitteeResponse::Attestation`]) or looks up a held sliver
+    /// (returning [`DaCommitteeResponse::Sliver`]). If the parked channel has
+    /// been dropped (requester disconnected, inbound stream timed out) the call
+    /// returns `Err(NetworkError::ChannelSend)`.
+    async fn send_da_committee_response(
+        &self,
+        request_id: InboundRequestId,
+        response: DaCommitteeResponse,
+    ) -> Result<()>;
+
+    /// Subscribes to inbound committee-DA requests. Only one subscriber is
+    /// supported at a time — calling twice replaces the previous channel. Used
+    /// by a validator's DA handler to receive `StoreSliver` / `FetchSliver`
+    /// requests from writers and readers.
+    async fn subscribe_da_committee_requests(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<InboundDaCommittee>>;
 }
 
 /// Commands sent to the network service
@@ -728,6 +786,26 @@ enum NetworkCommand {
     /// Subscribes to outbound cluster-tunnel results. One subscriber per node.
     SubscribeClusterTunnelResults {
         response: oneshot::Sender<Result<mpsc::UnboundedReceiver<OutboundClusterTunnelResult>>>,
+    },
+    /// Sends one committee-DA request to `peer`. The `response` oneshot is
+    /// parked in `pending_da_committee_requests` keyed by the returned
+    /// `OutboundRequestId` and fulfilled asynchronously when the peer's
+    /// `Message::Response` arrives (or an `OutboundFailure` maps to an error).
+    DaCommitteeRequest {
+        peer: PeerId,
+        request: DaCommitteeRequest,
+        response: oneshot::Sender<Result<DaCommitteeResponse>>,
+    },
+    /// Answers an inbound committee-DA request parked under `request_id`.
+    SendDaCommitteeResponse {
+        request_id: InboundRequestId,
+        response_payload: DaCommitteeResponse,
+        response: oneshot::Sender<Result<()>>,
+    },
+    /// Subscribes to inbound committee-DA requests. One subscriber per node —
+    /// calling twice replaces the previous channel.
+    SubscribeDaCommitteeRequests {
+        response: oneshot::Sender<Result<mpsc::UnboundedReceiver<InboundDaCommittee>>>,
     },
     Shutdown {
         response: oneshot::Sender<Result<()>>,
@@ -1374,6 +1452,42 @@ impl NetworkService for TenzroNetworkService {
         self.send_command(|response| NetworkCommand::SubscribeClusterTunnelResults { response })
             .await
     }
+
+    async fn da_committee_request(
+        &self,
+        peer: PeerId,
+        request: DaCommitteeRequest,
+    ) -> Result<DaCommitteeResponse> {
+        // The `response` oneshot is not fulfilled at dispatch — the event loop
+        // parks it keyed by the `OutboundRequestId` and completes it when the
+        // peer replies. `send_command` awaits exactly that completion.
+        self.send_command(move |response| NetworkCommand::DaCommitteeRequest {
+            peer,
+            request,
+            response,
+        })
+        .await
+    }
+
+    async fn send_da_committee_response(
+        &self,
+        request_id: InboundRequestId,
+        response: DaCommitteeResponse,
+    ) -> Result<()> {
+        self.send_command(move |resp| NetworkCommand::SendDaCommitteeResponse {
+            request_id,
+            response_payload: response,
+            response: resp,
+        })
+        .await
+    }
+
+    async fn subscribe_da_committee_requests(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<InboundDaCommittee>> {
+        self.send_command(|response| NetworkCommand::SubscribeDaCommitteeRequests { response })
+            .await
+    }
 }
 
 /// Event loop state
@@ -1476,6 +1590,29 @@ struct EventLoopState {
     /// is rejected with `ClusterTunnelError::ServerBusy`. Decremented on
     /// `ResponseSent` / `InboundFailure`.
     cluster_tunnel_inbound_inflight: HashMap<PeerId, usize>,
+    /// Pending outbound committee-DA reply channels keyed by
+    /// `OutboundRequestId`. Parked when a `DaCommitteeRequest` command is
+    /// dispatched; fulfilled with the peer's `DaCommitteeResponse` on
+    /// `Message::Response`, or with a transport error on `OutboundFailure`.
+    pending_da_committee_requests:
+        HashMap<OutboundRequestId, oneshot::Sender<Result<DaCommitteeResponse>>>,
+    /// Pending inbound committee-DA response channels keyed by
+    /// `InboundRequestId`. Parked until the member's DA handler answers via
+    /// `SendDaCommitteeResponse`. Same rationale as `pending_inbound_block_sync`.
+    pending_inbound_da_committee: HashMap<InboundRequestId, ResponseChannel<DaCommitteeResponse>>,
+    /// Subscriber channel for inbound committee-DA requests. `None` until a
+    /// validator's DA handler attaches via `SubscribeDaCommitteeRequests`.
+    /// Requests arriving while this is `None` are answered with
+    /// `DaCommitteeError::NoHandler` so the requester scores us down and retries.
+    da_committee_request_subscriber: Option<mpsc::UnboundedSender<InboundDaCommittee>>,
+    /// Latched once `SubscribeDaCommitteeRequests` runs — separates the
+    /// bootstrap-pre-attach debug case from the dropped-channel warn case.
+    da_committee_request_subscriber_ever_attached: bool,
+    /// Per-peer count of currently-in-flight inbound committee-DA streams.
+    /// Enforces `DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER`; overflow is
+    /// rejected with `DaCommitteeError::ServerBusy`. Decremented on
+    /// `ResponseSent` / `InboundFailure`.
+    da_committee_inbound_inflight: HashMap<PeerId, usize>,
     /// Tally of `observed_addr` reports received via Identify, keyed by the
     /// reported external multiaddr → set of distinct peer IDs that have
     /// reported it. Once a candidate accumulates reports from at least
@@ -1787,6 +1924,11 @@ async fn run_event_loop(
         cluster_tunnel_request_subscriber_ever_attached: false,
         cluster_tunnel_result_subscriber: None,
         cluster_tunnel_inbound_inflight: HashMap::new(),
+        pending_da_committee_requests: HashMap::new(),
+        pending_inbound_da_committee: HashMap::new(),
+        da_committee_request_subscriber: None,
+        da_committee_request_subscriber_ever_attached: false,
+        da_committee_inbound_inflight: HashMap::new(),
         observed_addrs: HashMap::new(),
         advertised_external_addrs: preconfigured_external,
         bootstrap_backoff: bootstrap_peers
@@ -2821,6 +2963,175 @@ fn handle_cluster_tunnel_event(
     }
 }
 
+/// Drives the committee-DA request-response overlay.
+///
+/// Inbound (`StoreSliver` / `FetchSliver`) requests are subject to a per-peer
+/// inflight cap (`DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER`, reject overflow
+/// with `ServerBusy` — do not queue), then parked and handed to the attached
+/// DA handler; the handler answers later via `SendDaCommitteeResponse`. When no
+/// handler is attached the request is answered with `NoHandler`.
+///
+/// Outbound replies are correlated per-request: a `Message::Response` fulfils
+/// the `oneshot` the caller is awaiting (parked under its `OutboundRequestId`),
+/// and an `OutboundFailure` fulfils it with a transport error.
+fn handle_da_committee_event(
+    state: &mut EventLoopState,
+    event: request_response::Event<DaCommitteeRequest, DaCommitteeResponse>,
+) {
+    use request_response::{Event as RrEvent, Message};
+    match event {
+        RrEvent::Message {
+            peer,
+            message: Message::Request {
+                request_id,
+                request,
+                channel,
+            },
+            ..
+        } => {
+            // Per-peer inbound concurrency cap. Reject overflow synchronously —
+            // queueing would let the requester's response timeout fire while
+            // the request still sits in our backlog.
+            let inflight = state
+                .da_committee_inbound_inflight
+                .entry(peer)
+                .or_insert(0);
+            if *inflight >= DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER {
+                tracing::warn!(
+                    %peer,
+                    limit = DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
+                    "committee-DA: rejecting overflow inbound stream"
+                );
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .da_committee
+                    .send_response(
+                        channel,
+                        DaCommitteeResponse::Error(DaCommitteeError::ServerBusy {
+                            limit: DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
+                        }),
+                    );
+                return;
+            }
+
+            // No handler attached — this node is not running a committee-DA
+            // member handler (bootstrap window, or handler dropped). Reply
+            // NoHandler so the requester scores us down and retries elsewhere.
+            let Some(tx) = state.da_committee_request_subscriber.as_ref() else {
+                if state.da_committee_request_subscriber_ever_attached {
+                    tracing::warn!(
+                        %peer,
+                        "committee-DA: handler was dropped — replying NoHandler"
+                    );
+                } else {
+                    tracing::debug!(
+                        %peer,
+                        "committee-DA: inbound before member handler attached \
+                         — replying NoHandler"
+                    );
+                }
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .da_committee
+                    .send_response(
+                        channel,
+                        DaCommitteeResponse::Error(DaCommitteeError::NoHandler),
+                    );
+                return;
+            };
+
+            state
+                .pending_inbound_da_committee
+                .insert(request_id, channel);
+
+            let inbound = InboundDaCommittee {
+                peer,
+                request_id,
+                request,
+            };
+            if tx.send(inbound).is_err() {
+                tracing::warn!(
+                    %peer,
+                    "committee-DA: request handler dropped — replying NoHandler"
+                );
+                state.da_committee_request_subscriber = None;
+                if let Some(channel) = state.pending_inbound_da_committee.remove(&request_id) {
+                    let _ = state
+                        .swarm
+                        .behaviour_mut()
+                        .da_committee
+                        .send_response(
+                            channel,
+                            DaCommitteeResponse::Error(DaCommitteeError::NoHandler),
+                        );
+                }
+                return;
+            }
+
+            *inflight += 1;
+        }
+        RrEvent::Message {
+            peer,
+            message: Message::Response {
+                request_id,
+                response,
+            },
+            ..
+        } => {
+            match state.pending_da_committee_requests.remove(&request_id) {
+                Some(reply) => {
+                    let _ = reply.send(Ok(response));
+                }
+                None => {
+                    tracing::warn!(
+                        %peer,
+                        %request_id,
+                        "committee-DA: response for unknown outbound request"
+                    );
+                }
+            }
+        }
+        RrEvent::OutboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::warn!(%peer, %request_id, %error, "committee-DA outbound failure");
+            if let Some(reply) = state.pending_da_committee_requests.remove(&request_id) {
+                let _ = reply.send(Err(NetworkError::PeerNotFound(format!(
+                    "committee-DA outbound failure to {}: {}",
+                    peer, error
+                ))));
+            }
+        }
+        RrEvent::InboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::debug!(%peer, %request_id, %error, "committee-DA inbound failure");
+            state.pending_inbound_da_committee.remove(&request_id);
+            if let Some(count) = state.da_committee_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+        RrEvent::ResponseSent { peer, request_id, .. } => {
+            tracing::trace!(%peer, %request_id, "committee-DA response flushed to wire");
+            if let Some(count) = state.da_committee_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+    }
+}
+
 /// Handles swarm events
 async fn handle_swarm_event(
     state: &mut EventLoopState,
@@ -3147,6 +3458,9 @@ async fn handle_swarm_event(
             }
             TenzroBehaviourEvent::ClusterTunnel(rr_event) => {
                 handle_cluster_tunnel_event(state, rr_event);
+            }
+            TenzroBehaviourEvent::DaCommittee(rr_event) => {
+                handle_da_committee_event(state, rr_event);
             }
             TenzroBehaviourEvent::AutonatClient(autonat::v2::client::Event {
                 tested_addr,
@@ -3848,6 +4162,45 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
         NetworkCommand::SubscribeClusterTunnelResults { response } => {
             let (tx, rx) = mpsc::unbounded_channel();
             state.cluster_tunnel_result_subscriber = Some(tx);
+            let _ = response.send(Ok(rx));
+        }
+        NetworkCommand::DaCommitteeRequest { peer, request, response } => {
+            // Dispatch and park the caller's reply channel keyed by the
+            // outbound request id. The event handler fulfils it when the peer
+            // replies (or the request fails). No `response.send()` here — the
+            // caller is awaiting the peer's actual `DaCommitteeResponse`.
+            let request_id = state
+                .swarm
+                .behaviour_mut()
+                .da_committee
+                .send_request(&peer, request);
+            state
+                .pending_da_committee_requests
+                .insert(request_id, response);
+        }
+        NetworkCommand::SendDaCommitteeResponse {
+            request_id,
+            response_payload,
+            response,
+        } => {
+            let result = match state.pending_inbound_da_committee.remove(&request_id) {
+                Some(channel) => state
+                    .swarm
+                    .behaviour_mut()
+                    .da_committee
+                    .send_response(channel, response_payload)
+                    .map_err(|_| NetworkError::ChannelSend),
+                None => Err(NetworkError::PeerNotFound(format!(
+                    "no parked inbound committee-DA request for id {}",
+                    request_id
+                ))),
+            };
+            let _ = response.send(result);
+        }
+        NetworkCommand::SubscribeDaCommitteeRequests { response } => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            state.da_committee_request_subscriber = Some(tx);
+            state.da_committee_request_subscriber_ever_attached = true;
             let _ = response.send(Ok(rx));
         }
         NetworkCommand::Shutdown { response } => {

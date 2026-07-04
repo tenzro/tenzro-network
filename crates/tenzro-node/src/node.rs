@@ -663,6 +663,14 @@ pub struct NodeValidatorRegistry {
     /// so that validators admitted after genesis (stake-based joins) are
     /// recognized and validators rotated out stop being admitted.
     epoch_manager: parking_lot::RwLock<Option<Arc<EpochManager>>>,
+    /// Validator-address → PeerId registry for the committee-DA surface.
+    /// Populated at the same admission point as `validator_peers`: when a
+    /// peer's signed PeerId↔validator-identity binding verifies, the matching
+    /// validator's on-chain address is bound to its PeerId so the committee-DA
+    /// backend can resolve a committee index (→ address) to the peer to dial.
+    /// `None` until the committee-DA subsystem installs it at startup.
+    da_peer_registry:
+        parking_lot::RwLock<Option<Arc<crate::da_committee_surface::AddressPeerRegistry>>>,
 }
 
 impl Default for NodeValidatorRegistry {
@@ -678,6 +686,7 @@ impl NodeValidatorRegistry {
             validator_peers: DashMap::new(),
             genesis_identities: DashMap::new(),
             epoch_manager: parking_lot::RwLock::new(None),
+            da_peer_registry: parking_lot::RwLock::new(None),
         }
     }
 
@@ -696,6 +705,39 @@ impl NodeValidatorRegistry {
     /// epoch validator set instead of the static genesis set.
     pub fn set_epoch_manager(&self, epoch_manager: Arc<EpochManager>) {
         *self.epoch_manager.write() = Some(epoch_manager);
+    }
+
+    /// Installs the committee-DA address→PeerId registry so verified validator
+    /// admissions also record the address↔PeerId binding the committee-DA
+    /// surface needs to dial members.
+    pub fn set_da_peer_registry(
+        &self,
+        registry: Arc<crate::da_committee_surface::AddressPeerRegistry>,
+    ) {
+        *self.da_peer_registry.write() = Some(registry);
+    }
+
+    /// Record the `(validator_address, peer_id)` binding for the committee-DA
+    /// surface, resolving the address from the current epoch validator set by
+    /// matching the admitted Ed25519 pubkey. Using the validator set's own
+    /// stored address avoids re-deriving it (and thus avoids any address-
+    /// convention mismatch): the committee-DA `CommitteeView` reads the same
+    /// `ValidatorInfo.address`, so registry key and lookup key are identical.
+    fn record_da_peer(&self, peer_id: &libp2p::PeerId, validator_pubkey: &[u8]) {
+        let Some(registry) = self.da_peer_registry.read().as_ref().cloned() else {
+            return;
+        };
+        let Some(epoch_manager) = self.epoch_manager.read().as_ref().cloned() else {
+            return;
+        };
+        let epoch = epoch_manager.current_epoch();
+        if let Some(v) = epoch
+            .validator_set
+            .iter()
+            .find(|v| v.is_active() && v.public_key.as_bytes() == validator_pubkey)
+        {
+            registry.insert(v.address, *peer_id);
+        }
     }
 
     /// Removes a PeerId from the validator set.
@@ -762,6 +804,7 @@ impl tenzro_network::ValidatorRegistry for NodeValidatorRegistry {
                 "Registered validator peer via verified identity binding"
             );
         }
+        self.record_da_peer(peer_id, validator_pubkey);
     }
 
     /// Remove a peer from the validator set when it has been banned by the
@@ -1259,6 +1302,20 @@ pub struct TenzroNode {
     /// the revocation to the rest of the mesh via the
     /// `RevocationBroadcaster`. `None` on non-validator roles.
     validator_hybrid_signer: Option<Arc<dyn tenzro_crypto::composite::HybridSigner>>,
+
+    /// Committee-DA validator-address → PeerId registry (Task #82). Populated
+    /// at validator admission; consumed by the committee-DA surface to dial
+    /// committee members. `None` on non-validator roles.
+    da_peer_registry: Option<Arc<crate::da_committee_surface::AddressPeerRegistry>>,
+
+    /// The committee-resident Red Stuff DA backend, held so the node retains a
+    /// `DaBackend` handle for the committee store. `None` on non-validator
+    /// roles or when committee-DA init fails.
+    da_committee_backend: Option<Arc<dyn tenzro_storage::da::DaBackend>>,
+
+    /// JoinHandle for the committee-DA inbound serving loop. Kept alive for the
+    /// node's lifetime; dropped on stop.
+    da_committee_server_handle: Option<tokio::task::JoinHandle<()>>,
 
     /// Node Ed25519 signer for outbound model + provider gossip
     /// announcements. Byte-shared with the validator identity that derives
@@ -1983,6 +2040,9 @@ impl TenzroNode {
             consensus_out_rx: None,
             local_validator_address: None,
             validator_hybrid_signer: None,
+            da_peer_registry: None,
+            da_committee_backend: None,
+            da_committee_server_handle: None,
             announce_signer: None,
             spt_ceiling_cache: None,
             vm_runtime: None,
@@ -2406,6 +2466,17 @@ impl TenzroNode {
                 }
             }
 
+            // Committee-DA PeerId registry (Task #82). Bound to the validator
+            // registry BEFORE it is moved into the network layer, so that every
+            // subsequent validator admission (`try_add_validator`) records the
+            // `(validator_address, peer_id)` binding the committee-DA surface
+            // needs to dial committee members. Retained here to build the
+            // surface below.
+            let da_peers =
+                Arc::new(crate::da_committee_surface::AddressPeerRegistry::new());
+            registry.set_da_peer_registry(da_peers.clone());
+            self.da_peer_registry = Some(da_peers);
+
             if let Err(e) = network.set_validator_registry(registry).await {
                 warn!("Failed to set validator registry in network layer: {}", e);
             } else {
@@ -2421,6 +2492,31 @@ impl TenzroNode {
                     warn!("Failed to set ban store in network layer: {}", e);
                 } else {
                     info!("Durable peer-ban store wired into network peer manager");
+                }
+            }
+        }
+
+        // 7b-bis. Wire the committee-resident Red Stuff DA backend + inbound
+        // server (Task #82). Validators erasure-code blobs, distribute slivers
+        // to the committee over `/tenzro/da/committee`, and collect `2f+1`
+        // signed attestations into an availability certificate. The store is
+        // durable (`CF_DA_COMMITTEE`) so a restarted validator still serves the
+        // slivers it previously attested to. Only runs for validators (the
+        // committee IS the validator set) with storage, network, and consensus
+        // all present.
+        if should_init_consensus {
+            if let (Some(network), Some(consensus), Some(storage), Some(da_peers)) = (
+                self.network.clone(),
+                self.consensus.clone(),
+                self.storage.clone(),
+                self.da_peer_registry.clone(),
+            ) {
+                match self
+                    .init_committee_da(network, consensus, storage, da_peers)
+                    .await
+                {
+                    Ok(()) => info!("Committee-resident DA backend + server wired"),
+                    Err(e) => warn!("Committee-DA init failed (continuing): {}", e),
                 }
             }
         }
@@ -2690,6 +2786,12 @@ impl TenzroNode {
 
         // Stop in reverse order
         // Note: In a full implementation, each subsystem would have a proper shutdown method
+
+        if let Some(handle) = self.da_committee_server_handle.take() {
+            handle.abort();
+        }
+        self.da_committee_backend = None;
+        self.da_peer_registry = None;
 
         self.bridge_router = None;
         self.payment_gateway = None;
@@ -4154,6 +4256,88 @@ impl TenzroNode {
         Ok(())
     }
 
+    /// Wire the committee-resident Red Stuff DA backend (Task #82).
+    ///
+    /// Builds a durable per-validator custody store, an `EpochManagerCommitteeView`
+    /// that shapes erasure coding against the live validator set, a
+    /// `NetworkDaCommitteeSurface` over the `/tenzro/da/committee` protocol, the
+    /// writer-side `DaCommitteeBackend`, and the inbound `DaCommitteeServer`
+    /// serving loop. The store is shared between the backend (writer side) and
+    /// the server (custody side) so a sliver received over the wire is visible
+    /// to a later local fetch. Retains the backend handle and the server task.
+    async fn init_committee_da(
+        &mut self,
+        network: Arc<TenzroNetworkService>,
+        consensus: Arc<HotStuff2Engine>,
+        storage: Arc<dyn KvStore>,
+        da_peers: Arc<crate::da_committee_surface::AddressPeerRegistry>,
+    ) -> Result<()> {
+        use crate::da_committee::{
+            committee_address, DaCommitteeBackend, DaCommitteeStore,
+        };
+        use crate::da_committee_surface::{
+            register_local, DaCommitteeServer, EpochManagerCommitteeView,
+            NetworkDaCommitteeSurface,
+        };
+
+        // The validator's Ed25519 key: signs this node's own attestations when
+        // it holds a sliver. Same key consensus loads.
+        let keypair = crate::keygen::load_validator_keypair(&self.config.data_dir)?;
+        let local_address = committee_address(&keypair)
+            .map_err(|e| NodeError::Other(format!("committee-DA local address: {e}")))?;
+
+        // Record this node's own (address, PeerId) in the surface's registry so
+        // the committee index → address → PeerId path resolves the local index
+        // (a validator storing/fetching a sliver it holds itself). Remote
+        // members are recorded by `record_da_peer` at validator admission.
+        let local_peer = network
+            .local_peer_id()
+            .await
+            .map_err(|e| NodeError::Other(format!("committee-DA local peer id: {e}")))?;
+        register_local(&da_peers, keypair.public_key(), local_peer);
+
+        // Durable custody store, hydrated from CF_DA_COMMITTEE.
+        let store = Arc::new(
+            DaCommitteeStore::with_storage(storage)
+                .map_err(|e| NodeError::Other(format!("committee-DA store: {e}")))?,
+        );
+
+        // CommitteeView over the live epoch validator set.
+        let committee: Arc<dyn crate::da_committee::CommitteeView> =
+            Arc::new(EpochManagerCommitteeView::new(consensus.epoch_manager()));
+
+        // Outbound surface over the request_response protocol.
+        let net_dyn: Arc<dyn tenzro_network::NetworkService> = network.clone();
+        let surface: Arc<dyn crate::da_committee::DaCommitteeSurface> =
+            Arc::new(NetworkDaCommitteeSurface::new(
+                net_dyn.clone(),
+                committee.clone(),
+                da_peers,
+                local_address,
+            ));
+
+        // Writer-side backend. Rebuild the keypair for the server (KeyPair is
+        // not Clone by design — secret material), so the backend and server
+        // each own their signing identity from the same bytes.
+        let server_keypair = KeyPair::from_bytes(KeyType::Ed25519, &keypair.to_bytes())
+            .map_err(|e| NodeError::Other(format!("committee-DA server keypair: {e}")))?;
+        let backend = DaCommitteeBackend::new(keypair, committee.clone(), surface, store.clone())
+            .map_err(|e| NodeError::Other(format!("committee-DA backend: {e}")))?
+            .arc();
+        self.da_committee_backend = Some(backend);
+
+        // Inbound serving loop.
+        let server = DaCommitteeServer::new(net_dyn, committee, store, server_keypair)
+            .map_err(|e| NodeError::Other(format!("committee-DA server: {e}")))?;
+        let handle = server
+            .spawn()
+            .await
+            .map_err(|e| NodeError::Other(format!("committee-DA server spawn: {e}")))?;
+        self.da_committee_server_handle = Some(handle);
+
+        Ok(())
+    }
+
     async fn init_settlement(&mut self) -> Result<()> {
         info!("Initializing settlement engine...");
 
@@ -4922,6 +5106,19 @@ impl TenzroNode {
                             ));
                         }
                     },
+                    crate::config::DaBackendSelector::Committee => {
+                        match self.da_committee_backend {
+                            Some(ref backend) => {
+                                info!("Agent memory tier wired with committee-resident DA backend (da_backend=committee)");
+                                backend.clone()
+                            }
+                            None => {
+                                return Err(NodeError::Other(
+                                    "da_backend=committee requires the committee-resident backend, but it is not bound (validator role + consensus required)".to_string(),
+                                ));
+                            }
+                        }
+                    }
                     crate::config::DaBackendSelector::Auto => {
                         if let Some(ref resolver) = self.iroh_resolver {
                             info!("Agent memory tier wired with iroh-blobs DA backend (da_backend=auto)");

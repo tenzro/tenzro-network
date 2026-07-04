@@ -22,6 +22,8 @@ use tenzro_types::principal_chain::PrincipalChainSummary;
 
 use crate::error::{Result, StorageError};
 
+pub mod redstuff;
+
 #[cfg(feature = "celestia")]
 pub mod celestia;
 
@@ -102,6 +104,12 @@ pub enum DaBackendId {
     /// Locator is the 32-byte BLAKE3 hash; backend commitment_kzg is `None`
     /// because BLAKE3 is verified end-to-end by iroh-blobs itself.
     IrohBlobs,
+    /// Committee-resident Red Stuff store. Two-dimensional Reed-Solomon slivers
+    /// distributed to the validator committee, with a `2f+1`-signed availability
+    /// certificate carried in `DaPointer::attestation_root`. Locator is the
+    /// 32-byte blob commitment; reconstruction needs `2f+1` slivers and each
+    /// sliver binds to the commitment via a Merkle proof.
+    TenzroCommittee,
 }
 
 impl DaBackendId {
@@ -112,6 +120,7 @@ impl DaBackendId {
             DaBackendId::Celestia => "celestia",
             DaBackendId::Avail => "avail",
             DaBackendId::IrohBlobs => "iroh_blobs",
+            DaBackendId::TenzroCommittee => "tenzro_committee",
         }
     }
 }
@@ -793,5 +802,6 @@ mod tests {
         assert_eq!(DaBackendId::Celestia.as_str(), "celestia");
         assert_eq!(DaBackendId::Avail.as_str(), "avail");
         assert_eq!(DaBackendId::IrohBlobs.as_str(), "iroh_blobs");
+        assert_eq!(DaBackendId::TenzroCommittee.as_str(), "tenzro_committee");
     }
 }
