@@ -1126,6 +1126,12 @@ pub enum DaBackendSelector {
     /// Require the iroh-blobs backend. Node startup fails if the iroh resolver
     /// is not bound.
     IrohBlobs,
+    /// Require the committee-resident erasure-coded store. Slivers are
+    /// distributed across the validator committee and an availability
+    /// certificate (2f+1 signed attestations) anchors each pointer. Node
+    /// startup fails if the committee backend is not bound (non-validator
+    /// roles, or consensus not initialized).
+    Committee,
 }
 
 impl Default for DaBackendSelector {

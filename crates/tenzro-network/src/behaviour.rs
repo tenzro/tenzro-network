@@ -29,6 +29,7 @@ use std::time::Duration;
 use crate::block_sync_proto::{self, BlockSyncBehaviour};
 use crate::cluster_tunnel_proto::{self, ClusterTunnelBehaviour};
 use crate::consensus_direct_proto::{self, ConsensusDirectBehaviour};
+use crate::da_committee_relay::{self, DaCommitteeBehaviour};
 use crate::gossip::{validate_gossip_message, MessageDeduplicator, MessageValidation};
 use crate::mpc_relay::{self, MpcRelayBehaviour};
 
@@ -147,6 +148,16 @@ pub struct TenzroBehaviour {
     /// request-response pair. See `cluster_tunnel_proto.rs` for the wire
     /// types and concurrency limits.
     pub cluster_tunnel: ClusterTunnelBehaviour,
+
+    /// Committee data-availability request/response protocol
+    /// (`/tenzro/da/committee/1.0.0`). Carries the two Red Stuff committee DA
+    /// RPCs — `StoreSliver` (writer → member) and `FetchSliver` (reader →
+    /// member) — between the validator set that backs the committee DA store.
+    /// Slivers and committee shapes travel as opaque bincode blobs because
+    /// this crate does not depend on `tenzro-storage`; the node-layer adapter
+    /// (`tenzro_node::da_committee`) does the typed encode/decode. See
+    /// `da_committee_relay.rs` for the wire types and concurrency limits.
+    pub da_committee: DaCommitteeBehaviour,
 
     // ─── NAT traversal stack (libp2p 2026 reference design) ────────────────
     //
@@ -420,6 +431,14 @@ impl TenzroBehaviour {
         // local rpc-server socket.
         let cluster_tunnel = cluster_tunnel_proto::new_behaviour();
 
+        // Committee DA protocol: the Red Stuff committee store's wire path.
+        // `StoreSliver` / `FetchSliver` between the validator set that holds
+        // erasure-coded slivers. Always constructed — a no-op on a node whose
+        // committee DA backend is inactive, since no peer dials it. The
+        // node-layer surface adapter is what services accepted requests
+        // against the local sliver store.
+        let da_committee = da_committee_relay::new_behaviour();
+
         // ─── NAT traversal stack ──────────────────────────────────────────
         //
         // Build only the halves the role asked for. Fields are wrapped in
@@ -515,6 +534,7 @@ impl TenzroBehaviour {
             consensus_direct,
             mpc_relay,
             cluster_tunnel,
+            da_committee,
             relay,
             relay_client,
             autonat_client,

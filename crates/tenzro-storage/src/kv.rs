@@ -98,6 +98,15 @@ pub const CF_BRIDGE_ANALYTICS: &str = "bridge_analytics";
 ///       `ValidatorModuleConfig` (installed-module index for the
 ///       AND-combined gate).
 pub const CF_VALIDATOR_MODULES: &str = "validator_modules";
+/// Committee-resident Red Stuff data-availability store. Each validator
+/// custodies the primary/secondary slivers assigned to its committee index
+/// plus the `2f+1`-signed availability certificate for every blob it holds.
+/// Keys:
+///   `da/sliver/<blob_commitment_hex>` → bincode `SliverPair` (this node's
+///       assigned slivers for the blob).
+///   `da/cert/<blob_commitment_hex>` → JSON `AvailabilityCertificate`
+///       (shape, blob_len, `2f+1` per-validator attestation signatures).
+pub const CF_DA_COMMITTEE: &str = "da_committee";
 
 /// Key-value store trait
 pub trait KvStore: Send + Sync {
@@ -213,6 +222,7 @@ const ALL_CFS: &[&str] = &[
     CF_CANTON_ANALYTICS,
     CF_BRIDGE_ANALYTICS,
     CF_VALIDATOR_MODULES,
+    CF_DA_COMMITTEE,
 ];
 
 /// Force a file through compaction at least this often even when write
@@ -580,6 +590,7 @@ impl MemoryStore {
         data.insert(CF_TRAINING_RECEIPTS.to_string(), HashMap::new());
         data.insert(CF_AUDIT.to_string(), HashMap::new());
         data.insert(CF_APPROVALS.to_string(), HashMap::new());
+        data.insert(CF_DA_COMMITTEE.to_string(), HashMap::new());
 
         Self {
             data: Arc::new(RwLock::new(data)),

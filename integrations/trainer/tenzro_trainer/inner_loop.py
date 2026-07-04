@@ -17,6 +17,7 @@ serializes per fragment.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Iterable, Protocol, runtime_checkable
 
@@ -53,11 +54,47 @@ class TrainerAdapter(Protocol):
 
 @dataclass
 class InnerStepReport:
-    """Diagnostic record returned at the end of an inner loop."""
+    """Diagnostic record returned at the end of an inner loop.
+
+    ``wall_seconds`` is the time spent in the H forward/backward/step
+    iterations only (model construction and shard load are excluded).
+    ``samples_processed`` is the sum of the leading batch dimension across
+    all steps. ``samples_per_second`` and ``steps_per_second`` are derived
+    from those two so an operator can quote a single defensible throughput
+    figure per hardware class.
+    """
 
     steps_completed: int
     final_loss: float
     avg_loss: float
+    wall_seconds: float = 0.0
+    samples_processed: int = 0
+
+    @property
+    def samples_per_second(self) -> float:
+        return self.samples_processed / self.wall_seconds if self.wall_seconds > 0 else float("nan")
+
+    @property
+    def steps_per_second(self) -> float:
+        return self.steps_completed / self.wall_seconds if self.wall_seconds > 0 else float("nan")
+
+
+def _batch_sample_count(batch: object) -> int:
+    """Best-effort count of training samples in one batch.
+
+    Adapters yield opaque batches. The convention across the reference
+    adapters is that the first tensor's leading dimension is the sample
+    (mini-batch) axis: a bare tensor ``[B, ...]``, or a tuple/list whose
+    first element is the input tensor ``[B, ...]``. Anything the driver
+    can't interpret counts as a single sample so throughput stays finite.
+    """
+    t = batch
+    if isinstance(batch, (tuple, list)) and batch:
+        t = batch[0]
+    shape = getattr(t, "shape", None)
+    if shape is not None and len(shape) >= 1:
+        return int(shape[0])
+    return 1
 
 
 def trainable_param_names(model: "torch.nn.Module") -> set[str]:
@@ -187,7 +224,9 @@ def run_inner_loop(
 
     model.train()
     losses: list[float] = []
+    samples_processed = 0
     batch_iter = iter(adapter.shard_batches(shard_uri))
+    start = time.perf_counter()
     for step in range(inner_steps):
         try:
             batch = next(batch_iter)
@@ -209,11 +248,23 @@ def run_inner_loop(
         loss.backward()
         optimizer.step()
         losses.append(float(loss.detach().item()))
+        samples_processed += _batch_sample_count(batch)
+    wall_seconds = time.perf_counter() - start
 
     post_state = snapshot_state(model)
     report = InnerStepReport(
         steps_completed=inner_steps,
         final_loss=losses[-1] if losses else float("nan"),
         avg_loss=(sum(losses) / len(losses)) if losses else float("nan"),
+        wall_seconds=wall_seconds,
+        samples_processed=samples_processed,
+    )
+    log.info(
+        "inner loop: %d steps, %d samples in %.3fs → %.1f samples/s, %.2f steps/s",
+        report.steps_completed,
+        report.samples_processed,
+        report.wall_seconds,
+        report.samples_per_second,
+        report.steps_per_second,
     )
     return pre_state, post_state, report

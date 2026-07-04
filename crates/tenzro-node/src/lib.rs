@@ -79,6 +79,8 @@ pub mod canton_jwt;
 pub mod commission_policy;
 pub mod config;
 pub mod cortex_gossip;
+pub mod da_committee;
+pub mod da_committee_surface;
 pub mod erc8004_mirror;
 pub mod erc8004_reputation_dispatcher;
 pub mod erc8004_daml_mirror;

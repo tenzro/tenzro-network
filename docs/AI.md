@@ -544,6 +544,22 @@ For 200M-1B models (covering all current frontier timeseries foundation models),
 
 On the inner-loop side, the Python reference trainer supports **Muon** (momentum orthogonalized by Newton-Schulz) as the inner optimizer: matrix parameters take the Muon update, non-matrix parameters fall back to AdamW inside the same optimizer. As an inner optimizer for low-communication training, Muon converges with fewer outer synchronizations than AdamW at equal quality.
 
+#### Measured inner-loop throughput
+
+The transfer figures above are analytical; the inner-loop rate is measured. Running the timeseries reference adapter — a 3.19M-parameter patch transformer (`d_model=256`, 4 layers, 4 heads) matching the Phase 1 lead modality — through the real forward/backward/optimizer path on a single-core commodity CPU (no GPU), with 20 warmup steps discarded and 200 steps timed:
+
+| Config | Hardware | Batch | Samples/s | Steps/s |
+|---|---|---|---|---|
+| timeseries reference (3.19M params) | 1× CPU core (n1-highcpu-8, Cascade Lake) | 8 | 177 | 22.2 |
+
+A "sample" is one `context_patches × patch_size` forecasting window (16 × 32 = 512 points of context). The measurement covers the inner training compute only; model construction and shard load are excluded. Reproduce with:
+
+```bash
+tenzro-trainer-bench --steps 200 --warmup 20 --batch-size 8
+```
+
+The harness lives in `tenzro_trainer.benchmark` and drives the same `run_inner_loop` a real training round uses, so the number tracks the adapter as it evolves. GPU and larger-model figures move up from this floor; this CPU rate is the reproducible baseline any operator can confirm on their own hardware.
+
 ---
 
 ### 7.6 Economics

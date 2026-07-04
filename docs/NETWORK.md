@@ -117,6 +117,7 @@ Some message flows are too sensitive to gossipsub's lossy fanout. Tenzro carries
 - **`/tenzro/consensus-direct/1.0.0`** — validators exchange HotStuff-2 vote messages and quorum certificates directly without going through gossipsub. Bounded latency, validator-only.
 - **`/tenzro/mpc/req-resp/1.0.0`** — DKLS23 round messages between MPC committee members. Pairs with the `/tenzro/mpc/session/<instance_id>` gossipsub topic for broadcast rounds.
 - **`/tenzro/cluster-tunnel/1.0.0`** — the authenticated transport for intra-cluster pipeline traffic. A LAN cluster head opens one tunnel session per member; framed payloads carry the ggml RPC byte stream between the head's loopback bridge and the member's loopback `rpc-server` (see AI.md §3.5). The member never binds its `rpc-server` on a network interface — the tunnel is the only way in, so the unauthenticated RPC protocol is wrapped in libp2p's authenticated transport. Sessions are demultiplexed by a session id carried on each frame; one request-response pair is full-duplex with return bytes piggybacked on the acknowledgement.
+- **`/tenzro/da/committee/1.0.0`** — the committee-resident data-availability store. A writer sends `StoreSliver` to each committee member ("hold this erasure-coded sliver for this blob commitment") and the member replies with a signed attestation of custody; a reader sends `FetchSliver` and the member returns the sliver it holds (or `None`). Slivers and encoding shapes travel as opaque bincode blobs because `tenzro-network` does not depend on `tenzro-storage` — the node-layer adapter does the typed encode/decode. 16 MiB request/response cap. The wire types live in `da_committee_relay.rs`.
 
 Each protocol uses a separate `request_response::Behaviour` instance with its own codec and concurrency cap.
 
@@ -257,7 +258,7 @@ These Prometheus metrics let operators monitor mesh size, validator reachability
 - Behaviour composition: `crates/tenzro-network/src/behaviour.rs::TenzroBehaviour`
 - Validator authentication: `crates/tenzro-network/src/peer_manager.rs::ValidatorRegistry`
 - Gossipsub topics: `crates/tenzro-network/src/gossip.rs`
-- Wire protocols: `crates/tenzro-network/src/{block_sync_proto, consensus_direct_proto, mpc_relay}.rs`
+- Wire protocols: `crates/tenzro-network/src/{block_sync_proto, consensus_direct_proto, mpc_relay, da_committee_relay}.rs`
 - Bootstrap DNS: `crates/tenzro-node/src/bootstrap_dns.rs`
 - Iroh config: `crates/tenzro-iroh/src/config.rs::TenzroIrohConfig`
 - Iroh A2A + MCP ALPNs: `crates/tenzro-iroh/src/jsonrpc.rs`, `crates/tenzro-iroh/src/lib.rs`
