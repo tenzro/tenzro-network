@@ -49,12 +49,15 @@ pub mod outer_optimizer;
 pub mod payload_store;
 pub mod quantization;
 pub mod runtime;
+pub mod slashing;
 
 pub use aggregation::{
-    aggregator_for, Aggregator, CoordinateMedianAggregator, KrumAggregator, MeanAggregator,
-    TrimmedMeanAggregator,
+    aggregator_for, clip_gradients, clip_to_l2_norm, l2_norm, Aggregator,
+    CoordinateMedianAggregator, KrumAggregator, MeanAggregator, TrimmedMeanAggregator,
 };
-pub use commitments::{compute_run_root, compute_state_root, sync_round_signing_bytes};
+pub use commitments::{
+    compute_run_root, compute_state_root, outer_gradient_signing_bytes, sync_round_signing_bytes,
+};
 pub use committee::{
     committee_seed, is_in_committee, recommended_committee_size, select_witness_committee,
     COMMITTEE_SCORE_DOMAIN_TAG, COMMITTEE_SEED_DOMAIN_TAG,
@@ -80,6 +83,7 @@ pub use runtime::{
     min_tier_for_rule, validate_aggregation_for_tier, FragmentBuffer, RoundDecision, SyncerState,
     TrainingRuntime,
 };
+pub use slashing::{eviction_decisions, EvictionReason, TrainerSlashingCallback};
 
 // Re-export the protocol-level types from `tenzro-types` for convenience —
 // downstream crates can `use tenzro_training::TrainingTaskSpec` instead of

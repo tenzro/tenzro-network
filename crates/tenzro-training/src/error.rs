@@ -159,4 +159,32 @@ pub enum TrainingError {
     Internal(String),
 }
 
+impl TrainingError {
+    /// Whether an accept-time rejection proves intent to poison the round (so
+    /// the submitter should be slashed + evicted) versus a benign timing/scope
+    /// mismatch (a straggler submitting for a stale round, or for a fragment
+    /// outside the current active shard, which honest trainers hit routinely).
+    ///
+    /// Slashable: bad signature, quantization mismatch, pipeline-stage
+    /// violation, missing attestation at a tier that requires it, and malformed
+    /// / hash-mismatched payloads — all of which require the submitter to
+    /// deviate from the task spec they enrolled under.
+    ///
+    /// Not slashable: unenrolled submitter (already rejected, nothing to
+    /// slash), wrong round, fragment out of range, fragment not in the active
+    /// shard — these are timing/scope races an honest trainer can lose.
+    pub fn is_slashable_rejection(&self) -> bool {
+        matches!(
+            self,
+            TrainingError::InvalidSignature { .. }
+                | TrainingError::QuantizationMismatch { .. }
+                | TrainingError::PipelineStageMismatch { .. }
+                | TrainingError::AttestationRequired(_)
+                | TrainingError::QuantizedPayloadMalformed(_)
+                | TrainingError::PayloadSizeMismatch { .. }
+                | TrainingError::PayloadHashMismatch
+        )
+    }
+}
+
 pub type Result<T> = std::result::Result<T, TrainingError>;

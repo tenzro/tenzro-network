@@ -30,6 +30,7 @@ from typing import Any
 from tenzro_trainer.gradient import (
     TrainerKey,
     build_round_gradients,
+    clip_outer_delta,
     compute_outer_delta,
     deserialize_fragment_delta,
     partition_state_dict,
@@ -203,6 +204,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
         delta = compute_outer_delta(pre_state, post_state)
+        delta, was_clipped = clip_outer_delta(delta, spec.clip_l2_norm)
+        if was_clipped:
+            log.info(
+                "round %d: outer delta clipped to L2 cap %.4f",
+                round_index,
+                spec.clip_l2_norm,
+            )
         delta_fragments = partition_state_dict(delta, fragment_count)
 
         # Fragment eligibility this round: the Streaming DiLoCo shard

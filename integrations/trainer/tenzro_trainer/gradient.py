@@ -223,6 +223,48 @@ def compute_outer_delta(
     return delta
 
 
+def global_l2_norm(delta_state_dict: dict[str, "torch.Tensor"]) -> float:
+    """L2 norm of a full outer delta, taken over the concatenation of every
+    fragment's flattened values (the same quantity the syncer's ``clip_l2_norm``
+    budget bounds)."""
+    if torch is None:
+        raise RuntimeError("PyTorch is required")
+    acc = 0.0
+    for k in sorted(delta_state_dict.keys()):
+        t = delta_state_dict[k].detach().to("cpu", torch.float32)
+        acc += float(torch.sum(t * t).item())
+    return acc**0.5
+
+
+def clip_outer_delta(
+    delta_state_dict: dict[str, "torch.Tensor"],
+    cap: float | None,
+) -> tuple[dict[str, "torch.Tensor"], bool]:
+    """Scale a full outer delta so its global L2 norm is at most ``cap``.
+
+    This is the trainer-side twin of the syncer's per-contributor norm budget
+    (``TrainingTaskSpec.clip_l2_norm``). Applying the identical cap here means
+    an honest trainer submits a gradient the syncer never has to clip; a
+    trainer that skips this step (or lies about it) is the one the syncer's
+    own clip catches. Returns the (possibly rescaled) delta plus a flag that is
+    ``True`` when the input exceeded ``cap``. ``None`` / non-positive ``cap``
+    disables clipping.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch is required")
+    if cap is None or cap <= 0.0:
+        return delta_state_dict, False
+    norm = global_l2_norm(delta_state_dict)
+    if norm <= cap or norm == 0.0:
+        return delta_state_dict, False
+    scale = cap / norm
+    scaled = {
+        k: (delta_state_dict[k].detach().to("cpu", torch.float32) * scale).contiguous()
+        for k in delta_state_dict
+    }
+    return scaled, True
+
+
 # ---------------------------------------------------------------------------
 # Signing
 # ---------------------------------------------------------------------------

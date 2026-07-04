@@ -53,6 +53,56 @@ fn check_uniform(gradients: &[ArrayView1<'_, f32>]) -> Result<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// Norm clipping
+// ---------------------------------------------------------------------------
+
+/// L2 norm of a flattened gradient view.
+pub fn l2_norm(grad: ArrayView1<'_, f32>) -> f32 {
+    grad.iter().map(|v| v * v).sum::<f32>().sqrt()
+}
+
+/// Clip a single gradient to an L2-norm cap.
+///
+/// Returns the (possibly rescaled) gradient plus a flag that is `true` when the
+/// input exceeded `cap` and was scaled down. A gradient whose norm is at or
+/// below `cap` is returned unchanged with `false`. A non-finite or non-positive
+/// `cap` is treated as "no clipping". A zero-norm gradient passes through
+/// unchanged (nothing to scale).
+pub fn clip_to_l2_norm(grad: ArrayView1<'_, f32>, cap: f32) -> (Array1<f32>, bool) {
+    if !cap.is_finite() || cap <= 0.0 {
+        return (grad.to_owned(), false);
+    }
+    let norm = l2_norm(grad);
+    if norm <= cap || norm == 0.0 {
+        (grad.to_owned(), false)
+    } else {
+        let scale = cap / norm;
+        (grad.mapv(|v| v * scale), true)
+    }
+}
+
+/// Clip every gradient in a batch to the same L2-norm cap.
+///
+/// Returns the owned, clipped gradients alongside a parallel `was_clipped` flag
+/// vector (same order as the input). The flags are the per-contributor signal
+/// consumed by the slashing path: an honest trainer that honored the same cap
+/// in its Python outer step never gets clipped at the syncer, so a `true` flag
+/// marks a contribution that exceeded the round's norm budget.
+pub fn clip_gradients(
+    gradients: &[ArrayView1<'_, f32>],
+    cap: f32,
+) -> (Vec<Array1<f32>>, Vec<bool>) {
+    let mut clipped = Vec::with_capacity(gradients.len());
+    let mut flags = Vec::with_capacity(gradients.len());
+    for g in gradients {
+        let (c, was) = clip_to_l2_norm(*g, cap);
+        clipped.push(c);
+        flags.push(was);
+    }
+    (clipped, flags)
+}
+
+// ---------------------------------------------------------------------------
 // Mean
 // ---------------------------------------------------------------------------
 
@@ -278,6 +328,53 @@ mod tests {
             .aggregate(&[g0.view(), g1.view(), g2.view(), g3.view(), g4.view()])
             .expect("trimmed ok");
         assert!((out[0] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn clip_passes_small_gradient_unchanged() {
+        // norm = 3.0, cap = 5.0 → unchanged, flag false.
+        let g = arr1(&[3.0_f32, 0.0, 0.0]);
+        let (out, was) = clip_to_l2_norm(g.view(), 5.0);
+        assert!(!was);
+        assert_eq!(out.as_slice().unwrap(), &[3.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn clip_scales_down_large_gradient() {
+        // norm = 10.0, cap = 2.0 → scaled to norm 2.0, flag true.
+        let g = arr1(&[6.0_f32, 8.0]); // norm 10
+        let (out, was) = clip_to_l2_norm(g.view(), 2.0);
+        assert!(was);
+        assert!((l2_norm(out.view()) - 2.0).abs() < 1e-5);
+        // Direction preserved.
+        assert!((out[0] - 1.2).abs() < 1e-5);
+        assert!((out[1] - 1.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn clip_disabled_for_nonpositive_cap() {
+        let g = arr1(&[100.0_f32, 100.0]);
+        let (out, was) = clip_to_l2_norm(g.view(), 0.0);
+        assert!(!was);
+        assert_eq!(out.as_slice().unwrap(), &[100.0, 100.0]);
+    }
+
+    #[test]
+    fn clip_zero_norm_passes_through() {
+        let g = arr1(&[0.0_f32, 0.0]);
+        let (out, was) = clip_to_l2_norm(g.view(), 1.0);
+        assert!(!was);
+        assert_eq!(out.as_slice().unwrap(), &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn clip_batch_flags_only_offenders() {
+        let g0 = arr1(&[1.0_f32, 0.0]); // norm 1
+        let g1 = arr1(&[6.0_f32, 8.0]); // norm 10 → clipped
+        let g2 = arr1(&[0.5_f32, 0.0]); // norm 0.5
+        let (out, flags) = clip_gradients(&[g0.view(), g1.view(), g2.view()], 2.0);
+        assert_eq!(flags, vec![false, true, false]);
+        assert!((l2_norm(out[1].view()) - 2.0).abs() < 1e-5);
     }
 
     #[test]
