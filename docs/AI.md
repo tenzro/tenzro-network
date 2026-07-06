@@ -12,6 +12,14 @@ None of these are silos. Compute providers serving an MoE expert shard are the s
 
 This document describes the inference surface, the MoE serving primitives, MTP wiring, multi-modal coverage, the confidential-execution path, Cortex, and Tenzro Train.
 
+### Verified on the live network
+
+The following paths have been exercised end to end against live network nodes, using the network's own registry and node machinery — no external orchestration:
+
+- **Decentralized MoE serving.** Registry-native expert extraction turns a catalog MoE entry into per-expert and gate blobs addressed by `tenzro://blob/` URI. Independent nodes each load a subset of those experts into their own memory, so the full model is assembled across distributed memory that no single node holds. A router node runs the gating step and dispatches per-token expert batches to the holders — local when the expert is resident, over the holder's iroh QUIC endpoint otherwise — and combines the returned hidden states into a single forward pass. Cross-node expert loads, the distributed forward pass, and finite outputs were all confirmed.
+- **Decentralized MoE-aware training.** The reference trainer auto-detects the MoE backbone (expert and router parameter groups, auxiliary load-balancing loss) and attaches an ADF-LoRA alternating adapter under the `LoraAlternating` aggregation rule, which freezes one adapter factor per round. Independent trainers run their inner loops, sign gradient fragments, and submit them to the syncer; the syncer reaches cross-node quorum, aggregates per coordinate, produces the aggregated state root, records it on-chain via the round-finalize path, and advances the run to the next round. A genuine multi-trainer quorum finalize was confirmed.
+- **Supporting surface.** The provider registry, `tenzro://blob/` addressing, cross-node blob fetch over iroh, gradient-fragment submission, and on-chain round finalization were all verified in the same runs.
+
 ---
 
 ## 1. Decentralized AI infrastructure — design
@@ -197,6 +205,11 @@ Execution:
 - `tenzro_moeRoute` — run the local gating network over a batch of hidden states, returning per-token top-k expert assignments
 - `tenzro_moeExecute` — run a batch of tokens through one locally-resident expert FFN
 - `tenzro_moeForward` — the full distributed layer forward: gate → plan → dispatch to holders (local / iroh / HTTP) → combine
+
+Weight preparation:
+
+- `tenzro_moePrepareExperts` — extract per-expert (and optionally gate) safetensors blobs for a catalog MoE model directly from its original checkpoint using HTTP-Range tensor fetches (only the requested tensors cross the wire, never whole shards), publish each blob into the iroh blob store, and return a background job id
+- `tenzro_moePrepareStatus` — progress snapshot for a prepare job: completed experts and the resulting `tenzro://blob/` URIs, which feed `tenzro_moeExpertLoad` / `tenzro_moeGateLoad` on any node
 
 ### 3.8 Catalog coverage
 
@@ -433,7 +446,7 @@ In short: **training compute is TEE-optional; key custody and verification are T
 
 Three modes, selected by the sponsor at task posting and aligned with the trust tiers above:
 
-- **Public** (Open or Verified tier) — dataset is referenced by content hash (IPFS, Arweave, HTTP). Trainers download cleartext.
+- **Public** (Open or Verified tier) — dataset is referenced by content hash. The native path is the network's own blob store: shards published as `tenzro://blob/<hash>` (iroh-blobs, BLAKE3-verified on transfer), fetched by the trainer through the local node's `tenzro_iroh_fetchBlob` RPC. IPFS, Arweave, and plain HTTP are supported alternatives resolved through gateways. Trainers download cleartext.
 - **Encrypted-at-rest** (Verified or Confidential tier) — dataset is AES-GCM-encrypted; the symmetric key is sealed to the trainer's TEE attestation. The TEE decrypts only inside the enclave; the host OS never sees cleartext. Requires the trainer to be in Verified or Confidential tier.
 - **TEE-resident** (Confidential tier only) — data never leaves the data owner's environment. Training runs inside a TEE colocated with the data; only outer gradients leave. This requires the trainer's hardware to be physically located with the data owner, or remote attestation over a confidential channel.
 
@@ -544,6 +557,19 @@ For 200M-1B models (covering all current frontier timeseries foundation models),
 
 On the inner-loop side, the Python reference trainer supports **Muon** (momentum orthogonalized by Newton-Schulz) as the inner optimizer: matrix parameters take the Muon update, non-matrix parameters fall back to AdamW inside the same optimizer. As an inner optimizer for low-communication training, Muon converges with fewer outer synchronizations than AdamW at equal quality.
 
+#### Multi-GPU sharding and hardware acceleration
+
+The reference trainer scales from one GPU to a multi-GPU host with no configuration. Launched under `torchrun` (`RANK` / `WORLD_SIZE` in the environment), the language adapter shards the model with **FSDP2** (`torch.distributed.fsdp.fully_shard`) — per-parameter DTensor sharding with bf16 compute and fp32 gradient reduction (`MixedPrecisionPolicy`). Each block of the decoder stack is sharded individually so parameter prefetch overlaps compute, then the root module. Single-process runs skip sharding entirely; `tenzro_trainer.distributed.DistContext.detect()` returns a disabled context whenever `RANK` is absent or `WORLD_SIZE` is 1.
+
+Under torchrun, every rank runs the full training loop (the FSDP2 collectives require all ranks to reach every gather at the same point), but only rank 0 speaks JSON-RPC to the node — the syncer sees one trainer per DID, not one per process. Each rank seeds its data sampler with its rank, so data-parallel width translates into distinct batches. Snapshot, load, and delta application in the inner loop are DTensor-aware: `snapshot_state` gathers full tensors (a collective), `load_partial_state` / `apply_state_delta` distribute full tensors back into the local shards. The Muon step gathers each sharded gradient to run Newton-Schulz on the full matrix, keeps the momentum buffer sharded, and distributes the orthogonalized update back.
+
+Two further acceleration knobs, both automatic with metadata overrides:
+
+- **Attention kernel.** The language adapter requests **FlashAttention-2** when the `flash_attn` package is importable and a CUDA device is present, PyTorch SDPA otherwise. Override with `architecture.metadata.attn_implementation`. `flash-attn` is deliberately not a pip extra — it needs a CUDA toolchain at install time, so GPU operators install it directly (`pip install flash-attn --no-build-isolation`) and the adapter picks it up.
+- **FP8 training.** Setting `architecture.metadata.fp8: true` converts eligible linear layers to FP8 via torchao `convert_to_float8_training` on Ada/Hopper-class GPUs (compute capability ≥ 8.9). Embedding and head modules are skipped, as are linear layers whose dimensions are not multiples of 16 (an FP8 kernel requirement). Absent a capable GPU or torchao (`pip install 'tenzro-trainer[fp8]'`), the request degrades to a logged no-op.
+
+One constraint: QLoRA (`lora.quantize: "nf4"`) cannot be combined with FSDP2 sharding — bitsandbytes 4-bit parameters are not DTensor-compatible. Run QLoRA single-process, or drop `quantize` for multi-process LoRA.
+
 #### Measured inner-loop throughput
 
 The transfer figures above are analytical; the inner-loop rate is measured. Running the timeseries reference adapter — a 3.19M-parameter patch transformer (`d_model=256`, 4 layers, 4 heads) matching the Phase 1 lead modality — through the real forward/backward/optimizer path on a single-core commodity CPU (no GPU), with 20 warmup steps discarded and 200 steps timed:
@@ -559,6 +585,23 @@ tenzro-trainer-bench --steps 200 --warmup 20 --batch-size 8
 ```
 
 The harness lives in `tenzro_trainer.benchmark` and drives the same `run_inner_loop` a real training round uses, so the number tracks the adapter as it evolves. GPU and larger-model figures move up from this floor; this CPU rate is the reproducible baseline any operator can confirm on their own hardware.
+
+#### Measured LoRA fine-tune
+
+The same harness runs a real PEFT LoRA fine-tune of a decoder-only LM. The base is frozen; PEFT injects low-rank adapter matrices at the attention projections; only those matrices carry gradient through the real forward/backward/optimizer path. Because only the adapters are trainable, the per-round outer gradient a trainer transmits is the serialized adapter delta alone — orders of magnitude smaller than a full-model gradient. The measurement below wraps a small Qwen3-family config built locally (no model-weight download, so it reproduces in CI), with 5 warmup steps discarded and 40 steps timed on a single commodity CPU core:
+
+| Config | Hardware | Batch × Seq | Trainable | Delta/round | Samples/s | Steps/s |
+|---|---|---|---|---|---|---|
+| Qwen3-family LoRA (r=16) | 1× CPU core (n1-highcpu-8, Cascade Lake) | 4 × 128 | 196,608 (3.99%) | 790,816 B | 39.7 | 9.92 |
+
+"Trainable" is the LoRA-adapter parameter count and its share of the base (the frozen base is excluded); "Delta/round" is the serialized safetensors bytes a trainer sends per round — exactly the adapter matrices, never the frozen base. At r=16 the trainer transmits ~0.77 MB per round regardless of base size, which is the point of the LoRA path: the per-round communication is set by the adapter rank, not the model. The measurement covers inner training compute only. Reproduce with:
+
+```bash
+tenzro-trainer-bench --modality language --steps 40 --warmup 5 \
+  --batch-size 4 --seq-len 128 --lora-rank 16
+```
+
+Pass `--hf-repo Qwen/Qwen3-0.6B` (or any catalog member) to fine-tune the real pretrained backbone instead of the local config; the code path — PEFT `get_peft_model`, frozen base, adapter-only snapshot — is identical.
 
 ---
 
@@ -628,7 +671,7 @@ The Python trainer is a thin agent that:
 
 1. Authenticates with its TDIP DID + MPC wallet (via the Tenzro JSON-RPC).
 2. Subscribes to the `tenzro/training` gossip topic.
-3. On task assignment, downloads the dataset shard, runs H inner SGD steps with the appropriate inner optimizer, and emits its outer gradient as a safetensors blob.
+3. On task assignment, resolves the dataset shard URI (`tenzro://blob/<hash>` natively through the local node's `tenzro_iroh_fetchBlob` RPC, with `ipfs://` / `ar://` / `http(s)://` as gateway-resolved alternatives and `file://` passthrough; remote fetches cache under `~/.cache/tenzro-trainer/shards`), runs H inner SGD steps with the appropriate inner optimizer, and emits its outer gradient as a safetensors blob.
 4. Submits the safetensors blob + signature to the Rust syncer over JSON-RPC (`tenzro_training_submitOuterGradient`).
 5. Listens for round-completion events on `tenzro/training/syncer` and pulls updated fragments back from the syncer.
 
