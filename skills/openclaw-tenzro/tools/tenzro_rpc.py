@@ -205,6 +205,27 @@ Usage:
     python tenzro_rpc.py treasury_approve_withdrawal <withdrawal_id> TNZO 1000000000000000000 0x<approver> <pubkey_hex> <sig_hex> [ed25519|secp256k1]
     python tenzro_rpc.py treasury_execute_withdrawal <withdrawal_id> TNZO 1000000000000000000
     python tenzro_rpc.py treasury_get_pending_withdrawal <withdrawal_id>
+
+    # x402 Bazaar — monetized-resource discovery
+    python tenzro_rpc.py x402_protocol_info
+    python tenzro_rpc.py x402_register_resource did:tenzro:machine:seller https://api.example.com/forecast 0xpayto 1000000000000000000 tenzro-hybrid tenzro TNZO
+    python tenzro_rpc.py x402_discover_resources tenzro-hybrid tenzro TNZO
+    python tenzro_rpc.py x402_deregister_resource <listing_id> did:tenzro:machine:seller
+    python tenzro_rpc.py x402_verify_offer '{"scheme":"tenzro-hybrid",...}'
+    python tenzro_rpc.py x402_payment_id did:tenzro:machine:payer '{"scheme":"tenzro-hybrid",...}'
+
+    # Managed Databases — local → LAN → network
+    python tenzro_rpc.py list_database_engines
+    python tenzro_rpc.py create_database vecmem qdrant did:tenzro:human:owner local 1 1
+    python tenzro_rpc.py list_databases
+    python tenzro_rpc.py get_database vecmem
+    python tenzro_rpc.py list_database_partitions vecmem
+    python tenzro_rpc.py get_database_partition vecmem 0
+    python tenzro_rpc.py issue_database_connection vecmem did:tenzro:human:owner
+    python tenzro_rpc.py database_query vecmem did:tenzro:human:owner '{"op":"search",...}'
+    python tenzro_rpc.py authorize_database_read vecmem did:tenzro:human:owner
+    python tenzro_rpc.py rescale_database vecmem did:tenzro:human:owner lan_cluster 3 2
+    python tenzro_rpc.py drop_database vecmem
 """
 
 import json
@@ -3183,6 +3204,101 @@ def list_x402_schemes() -> dict:
         and 'count' (int).
     """
     return _rpc("tenzro_listX402Schemes")
+
+
+# ── x402 Bazaar — resource discovery & monetization ───────────────
+
+
+def x402_protocol_info() -> dict:
+    """Return x402 Bazaar protocol metadata (schemes, networks, assets)."""
+    return _rpc("tenzro_x402ProtocolInfo", [])
+
+
+def x402_register_resource(seller_did: str, resource: str, pay_to: str,
+                           max_amount_required: str,
+                           scheme: str = "tenzro-hybrid",
+                           network: str = "tenzro", asset: str = "TNZO",
+                           description: str = None, mime_type: str = None,
+                           max_timeout_seconds: int = None,
+                           tags: list = None, extra: dict = None) -> dict:
+    """Register an HTTP-402 monetized resource on the x402 Bazaar.
+
+    scheme: tenzro-hybrid | exact-eip3009 | permit2 | erc7710
+    Returns {listingId}.
+    """
+    params = {
+        "sellerDid": seller_did,
+        "resource": resource,
+        "scheme": scheme,
+        "network": network,
+        "asset": asset,
+        "payTo": pay_to,
+        "maxAmountRequired": max_amount_required,
+    }
+    if description is not None:
+        params["description"] = description
+    if mime_type is not None:
+        params["mimeType"] = mime_type
+    if max_timeout_seconds is not None:
+        params["maxTimeoutSeconds"] = max_timeout_seconds
+    if tags is not None:
+        params["tags"] = tags
+    if extra is not None:
+        params["extra"] = extra
+    return _rpc("tenzro_x402RegisterResource", params)
+
+
+def x402_discover_resources(scheme: str = None, network: str = None,
+                            asset: str = None, seller_did: str = None,
+                            tags: list = None, limit: int = None) -> dict:
+    """Discover registered x402 resources, filtered by any of the fields.
+
+    Returns {listings, count}.
+    """
+    params = {}
+    if scheme is not None:
+        params["scheme"] = scheme
+    if network is not None:
+        params["network"] = network
+    if asset is not None:
+        params["asset"] = asset
+    if seller_did is not None:
+        params["sellerDid"] = seller_did
+    if tags is not None:
+        params["tags"] = tags
+    if limit is not None:
+        params["limit"] = limit
+    return _rpc("tenzro_x402DiscoverResources", params)
+
+
+def x402_deregister_resource(listing_id: str, seller_did: str) -> dict:
+    """Remove a resource listing owned by seller_did. Returns {removed}."""
+    return _rpc("tenzro_x402DeregisterResource", {
+        "listingId": listing_id,
+        "sellerDid": seller_did,
+    })
+
+
+def x402_verify_offer(requirement: dict) -> dict:
+    """Verify an x402 payment requirement's offer signature.
+
+    Returns {valid, offerCommitment, offerSigner}.
+    """
+    return _rpc("tenzro_x402VerifyOffer", {"requirement": requirement})
+
+
+def x402_payment_id(payer_did: str, requirement: dict = None,
+                    offer_commitment: str = None) -> dict:
+    """Derive the deterministic payment id for a payer + offer.
+
+    Provide either `requirement` or `offer_commitment`. Returns `pay_<hex>`.
+    """
+    params = {"payerDid": payer_did}
+    if requirement is not None:
+        params["requirement"] = requirement
+    if offer_commitment is not None:
+        params["offerCommitment"] = offer_commitment
+    return _rpc("tenzro_x402PaymentId", params)
 
 
 def list_payment_sessions(include_closed: bool = False) -> dict:
@@ -7205,6 +7321,147 @@ def storage_status() -> dict:
     return _rpc("tenzro_storageStatus", [])
 
 
+# ── Managed Databases ─────────────────────────────────────────────
+
+
+def list_database_engines() -> dict:
+    """List the database engines this node can serve (with data models,
+    license, sharding model, native-cluster topology)."""
+    return _rpc("tenzro_listDatabaseEngines", [])
+
+
+def create_database(database_id: str, engine_id: str, owner_did: str = None,
+                    access_policy: dict = None, placement: str = "local",
+                    partitions: int = 1, replicas: int = 1,
+                    engine_config: dict = None,
+                    confidential: bool = False) -> dict:
+    """Register a database this node serves and compute its partition
+    placement over the live cluster.
+
+    Provide either `owner_did` (owner-only access policy) or an explicit
+    `access_policy`. `placement` is local | lan_cluster | network. Set
+    `confidential` for encryption at rest.
+    """
+    params = {
+        "database_id": database_id,
+        "engine_id": engine_id,
+        "placement": placement,
+        "partitions": partitions,
+        "replicas": replicas,
+    }
+    if owner_did is not None:
+        params["owner_did"] = owner_did
+    if access_policy is not None:
+        params["access_policy"] = access_policy
+    if engine_config is not None:
+        params["engine_config"] = engine_config
+    if confidential:
+        params["confidential"] = confidential
+    return _rpc("tenzro_createDatabase", params)
+
+
+def get_database(database_id: str) -> dict:
+    """Look up a database descriptor by id."""
+    return _rpc("tenzro_getDatabase", {"database_id": database_id})
+
+
+def list_databases() -> dict:
+    """List every database this node serves."""
+    return _rpc("tenzro_listDatabases", [])
+
+
+def list_database_partitions(database_id: str) -> dict:
+    """List every partition placement of a database."""
+    return _rpc("tenzro_listDatabasePartitions",
+                {"database_id": database_id})
+
+
+def get_database_partition(database_id: str, partition_index: int) -> dict:
+    """Return the placement of one partition."""
+    return _rpc("tenzro_getDatabasePartition", {
+        "database_id": database_id,
+        "partition_index": partition_index,
+    })
+
+
+def issue_database_connection(database_id: str, caller_did: str,
+                              bearer_did: str = None, write: bool = False,
+                              ttl_secs: int = None,
+                              capability: str = None) -> dict:
+    """Mint a managed-database connection credential scoped to one database.
+
+    Returns the bearer token a developer presents on every query.
+    """
+    params = {
+        "database_id": database_id,
+        "caller_did": caller_did,
+        "write": write,
+    }
+    if bearer_did is not None:
+        params["bearer_did"] = bearer_did
+    if ttl_secs is not None:
+        params["ttl_secs"] = ttl_secs
+    if capability is not None:
+        params["capability"] = capability
+    return _rpc("tenzro_issueDatabaseConnection", params)
+
+
+def database_query(database_id: str, caller_did: str, body: dict,
+                   partition_index: int = 0, write: bool = False,
+                   capability: str = None) -> dict:
+    """Run an engine-dialect query against a database partition.
+
+    `body` is the engine dialect ({sql, params} for Postgres, {op, ...} for
+    Qdrant/Lance/Tantivy, {command: [...]} for Valkey). When this node holds
+    the target partition the result carries served_here=true and the engine
+    result; otherwise it carries the holder endpoints.
+    """
+    params = {
+        "database_id": database_id,
+        "caller_did": caller_did,
+        "body": body,
+        "partition_index": partition_index,
+        "write": write,
+    }
+    if capability is not None:
+        params["capability"] = capability
+    return _rpc("tenzro_databaseQuery", params)
+
+
+def authorize_database_read(database_id: str, caller_did: str,
+                            capability: str = None) -> dict:
+    """Check — without side effects — whether caller_did may read the
+    database. Returns {authorized, reason}."""
+    params = {"database_id": database_id, "caller_did": caller_did}
+    if capability is not None:
+        params["capability"] = capability
+    return _rpc("tenzro_authorizeDatabaseRead", params)
+
+
+def rescale_database(database_id: str, caller_did: str, placement: str,
+                     partitions: int = None, replicas: int = None,
+                     capability: str = None) -> dict:
+    """Grow or shrink a database along the local → LAN-cluster → network
+    continuum in place. Gated on the write action."""
+    params = {
+        "database_id": database_id,
+        "caller_did": caller_did,
+        "placement": placement,
+    }
+    if partitions is not None:
+        params["partitions"] = partitions
+    if replicas is not None:
+        params["replicas"] = replicas
+    if capability is not None:
+        params["capability"] = capability
+    return _rpc("tenzro_rescaleDatabase", params)
+
+
+def drop_database(database_id: str) -> dict:
+    """Remove a database and all its partition placements."""
+    return _rpc("tenzro_dropDatabase", {"database_id": database_id})
+
+
 # ── Compute Rental ────────────────────────────────────────────────
 
 
@@ -7681,6 +7938,29 @@ COMMANDS = {
     "pay_x402": lambda args: pay_x402(args[0]),
     "payment_gateway_info": lambda args: payment_gateway_info(),
     "list_x402_schemes": lambda args: list_x402_schemes(),
+    # x402 Bazaar
+    "x402_protocol_info": lambda args: x402_protocol_info(),
+    "x402_register_resource": lambda args: x402_register_resource(
+        args[0], args[1], args[2], args[3],
+        args[4] if len(args) > 4 else "tenzro-hybrid",
+        args[5] if len(args) > 5 else "tenzro",
+        args[6] if len(args) > 6 else "TNZO",
+    ),
+    "x402_discover_resources": lambda args: x402_discover_resources(
+        args[0] if args else None,
+        args[1] if len(args) > 1 else None,
+        args[2] if len(args) > 2 else None,
+        args[3] if len(args) > 3 else None,
+    ),
+    "x402_deregister_resource": lambda args: x402_deregister_resource(
+        args[0], args[1],
+    ),
+    "x402_verify_offer": lambda args: x402_verify_offer(json.loads(args[0])),
+    "x402_payment_id": lambda args: x402_payment_id(
+        args[0],
+        json.loads(args[1]) if len(args) > 1 else None,
+        args[2] if len(args) > 2 else None,
+    ),
     "list_payment_sessions": lambda args: list_payment_sessions(
         "--all" in args,
     ),
@@ -8561,6 +8841,45 @@ COMMANDS = {
         args[3] if len(args) > 3 and args[3] else None,
     ),
     "storage_status": lambda args: storage_status(),
+    # ── Managed Databases ──
+    "list_database_engines": lambda args: list_database_engines(),
+    "create_database": lambda args: create_database(
+        args[0], args[1],
+        owner_did=args[2] if len(args) > 2 and args[2] else None,
+        placement=args[3] if len(args) > 3 and args[3] else "local",
+        partitions=int(args[4]) if len(args) > 4 else 1,
+        replicas=int(args[5]) if len(args) > 5 else 1,
+        engine_config=json.loads(args[6]) if len(args) > 6 and args[6] else None,
+        confidential=(args[7].lower() in ("1", "true", "yes"))
+        if len(args) > 7 else False,
+    ),
+    "get_database": lambda args: get_database(args[0]),
+    "list_databases": lambda args: list_databases(),
+    "list_database_partitions": lambda args: list_database_partitions(args[0]),
+    "get_database_partition": lambda args: get_database_partition(
+        args[0], int(args[1])
+    ),
+    "issue_database_connection": lambda args: issue_database_connection(
+        args[0], args[1],
+        bearer_did=args[2] if len(args) > 2 and args[2] else None,
+        write=(args[3].lower() in ("1", "true", "yes")) if len(args) > 3 else False,
+        ttl_secs=int(args[4]) if len(args) > 4 and args[4] else None,
+    ),
+    "database_query": lambda args: database_query(
+        args[0], args[1], json.loads(args[2]),
+        partition_index=int(args[3]) if len(args) > 3 else 0,
+        write=(args[4].lower() in ("1", "true", "yes")) if len(args) > 4 else False,
+    ),
+    "authorize_database_read": lambda args: authorize_database_read(
+        args[0], args[1],
+        capability=args[2] if len(args) > 2 and args[2] else None,
+    ),
+    "rescale_database": lambda args: rescale_database(
+        args[0], args[1], args[2],
+        partitions=int(args[3]) if len(args) > 3 and args[3] else None,
+        replicas=int(args[4]) if len(args) > 4 and args[4] else None,
+    ),
+    "drop_database": lambda args: drop_database(args[0]),
     # ── Compute Rental ──
     "compute_book_rental": lambda args: compute_book_rental(
         args[0], int(args[1])

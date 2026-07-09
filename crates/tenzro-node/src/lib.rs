@@ -71,6 +71,7 @@
 pub mod a2a;
 pub mod agent_kit_auth;
 pub mod api_key;
+pub mod bazaar_store;
 pub mod block_sync;
 pub mod bootstrap_dns;
 pub mod bridge_analytics;
@@ -92,6 +93,7 @@ pub mod event_loop;
 pub mod genesis;
 pub mod handle;
 pub mod health;
+pub mod inference_challenge;
 pub mod ip_rate_limit;
 pub mod keygen;
 pub mod lane_resolver;
@@ -112,7 +114,11 @@ pub mod mpc_libp2p_adapter;
 pub mod mpc_threshold_signer;
 pub mod compute_rental_runtime;
 pub mod cluster_serving_runtime;
+pub mod db_engine_registry;
+pub mod db_engines;
 pub mod node;
+pub mod orchestrator;
+pub mod orchestrator_bridge;
 pub mod passkey_rpc;
 pub mod prepaid_account_ledger;
 pub mod pricing;
@@ -133,6 +139,7 @@ pub mod tap_reputation_dispatcher;
 pub mod trainer_daemon;
 pub mod web;
 pub mod workflow_runtime;
+pub mod x402_idempotency_store;
 
 // Re-export commonly used types
 pub use config::NodeConfig;

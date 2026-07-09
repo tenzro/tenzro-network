@@ -121,6 +121,29 @@ Some message flows are too sensitive to gossipsub's lossy fanout. Tenzro carries
 
 Each protocol uses a separate `request_response::Behaviour` instance with its own codec and concurrency cap.
 
+### Measured DA committee throughput
+
+Two measurements pin down what the committee-resident DA path costs, both run on an `n1-highcpu-32` worker via `cloudbuild-da-committee-bench.yaml` (nothing touches the testnet):
+
+**Sustained-write pipeline** (`cargo test -p tenzro-node --release --test da_committee_load -- --ignored --nocapture`) drives the full `DaCommitteeBackend` writer path per blob — 2D Reed-Solomon encode, per-member bincode wire framing, Merkle proof verification at each member, Ed25519 custody attestation, per-member RocksDB persistence, and 2f+1 quorum certificate assembly — over an in-process mesh that keeps every cost of the `/tenzro/da/committee/1.0.0` wire path except the socket. 96 × 1 MiB blobs per committee size:
+
+| Committee | Write | Write p50 / p95 | Fetch (reconstruct) | Fetch p50 |
+|---|---|---|---|---|
+| n=4 | 17.8 MiB/s | 54.9 / 56.8 ms | 11.7 MiB/s | 85.5 ms |
+| n=10 | 13.4 MiB/s | 72.5 / 75.9 ms | 8.1 MiB/s | 120.0 ms |
+
+These are **single-writer** figures — the upper bound the coding/signing/persistence pipeline imposes before network latency. Blobs are independent, so aggregate ingest scales with concurrent writers; in deployment, WAN round-trips to committee members dominate the per-blob latency, not this pipeline.
+
+**Coding core** (`cargo bench -p tenzro-storage --bench da_redstuff`, criterion, single-threaded) isolates the pure Reed-Solomon math, reported as bytes-of-source-blob per second:
+
+| Operation (1 MiB blob) | n=4 | n=10 |
+|---|---|---|
+| encode (2n slivers + Merkle) | 52.3 MiB/s (19.1 ms) | 38.4 MiB/s (26.1 ms) |
+| reconstruct from slivers | 30.4 MiB/s (32.9 ms) | 23.7 MiB/s (42.2 ms) |
+| verify one sliver | 4.1 ms | 1.9 ms |
+
+Encode at 8 MiB holds the same per-byte cost (n=4: 39.3 MiB/s, n=10: 30.2 MiB/s); 64 KiB blobs encode in 1.2–1.6 ms. Per-sliver verification is cheaper at larger n because each sliver shrinks as the blob is split across more members.
+
 ---
 
 ## 6. Peer discovery and bootstrap

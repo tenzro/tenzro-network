@@ -230,7 +230,7 @@ Rules enforced by the on-chain `NetworkTreasury` contract:
 | Decimals | 18 |
 | Maximum supply | 1,000,000,000 TNZO |
 | Smallest unit | 10^-18 TNZO |
-| Inflation rate | 2% per year (200 basis points) |
+| Supply model | Fixed cap; no protocol mint authority beyond the genesis distribution |
 
 ### 5.2 Token Utility
 
@@ -243,41 +243,37 @@ TNZO serves four functions within the network:
 
 ### 5.3 Initial Token Distribution
 
+There is no team allocation and no investor allocation. Tenzro Network is community-owned from day one. The genesis distribution funds the participants that produce value on the network and the long-term incentive pools that pay future participants for future contributions.
+
 | Allocation | Percentage | Amount | Purpose |
 |------------|-----------|--------|---------|
 | Community | 35% | 350,000,000 TNZO | Airdrops, incentive programs, ecosystem growth |
 | Treasury | 25% | 250,000,000 TNZO | Network treasury and grants |
+| Ecosystem and contributor incentives | 20% | 200,000,000 TNZO | Reward pool for work-gated coupons, contributor and developer grants, operator sponsorship |
 | Provider incentives | 15% | 150,000,000 TNZO | TEE, compute, and model provider rewards |
-| Team | 10% | 100,000,000 TNZO | Core team (4-year vest, 1-year cliff) |
-| Investors | 10% | 100,000,000 TNZO | Strategic rounds (vested) |
 | Liquidity | 5% | 50,000,000 TNZO | DEX and CEX liquidity provisioning |
 
-### 5.4 Vesting Schedule
+There are no privileged token-holder classes and no lock-ups for special parties, because there are no special parties. Every TNZO holder is holding because they earned it from the network or bought it from another participant who did.
 
-**Team allocation (100,000,000 TNZO):**
-- 1-year cliff from Token Generation Event (TGE)
-- Linear vesting over 4 years from TGE
-- Unvested tokens remain in the Foundation treasury
+### 5.4 No Reserved or Vesting Allocations
 
-**Investor allocation (100,000,000 TNZO):**
-- Vesting terms determined by individual agreements
-- All investor tokens subject to lock-up periods
+Because there is no team allocation and no investor allocation:
 
-**Community allocation (350,000,000 TNZO):**
-- Released through governance-approved programs
-- Includes retroactive airdrops, contributor rewards, and ecosystem grants
-- No single distribution event exceeds 5% of total community allocation without governance approval
+- There is no investor unlock cliff and no quarterly vesting events that release a wave of supply onto the market.
+- There is no team unlock schedule. Contributors who build the protocol receive grants the same way ecosystem builders do — through governance-approved disbursements from the public treasury, on terms the community can see.
+- There is no early-backer carry.
 
-### 5.5 Inflation and Supply Dynamics
+The protocol operates a vesting primitive, but it applies only to earned distributions, not to reserved allocations: reward claims vest over 12 months, foundation grants vest over 6 months, and long-term contributor grants use a 12-month cliff followed by 36-month linear release. Vesting attaches to what participants earn, not to a pre-allocated founder or investor tranche.
 
-Annual inflation of 2% creates new TNZO to fund staking rewards:
+### 5.5 Supply Dynamics
 
-- New tokens are minted at epoch boundaries (every 14,400 blocks)
-- Minted tokens flow to the reward pool for distribution to stakers
-- Fee burning (30% of all network commission fees) creates deflationary pressure
-- Net inflation depends on the ratio of minting to burning
+Supply is fixed at the genesis cap. There is no protocol-level mint authority beyond the genesis distribution:
 
-The Foundation monitors the effective inflation rate and may propose adjustments through governance if the burn rate materially changes the supply trajectory.
+- Rewards are paid from the ecosystem and contributor incentive pool seeded at genesis, not minted. Reward minting is work-gated (see §8.3): per-epoch minting rights are issued pro-rata against verified work, and unmatched or unclaimed rights are never minted.
+- Fee burning (30% of all network commission fees, plus the EIP-1559 base fee) creates deflationary pressure.
+- Because there is no emission schedule, net supply trends deflationary as usage grows: burn tracks real activity while the reward pool is a fixed genesis allocation that draws down only against verified work.
+
+The Foundation monitors the effective burn rate and the draw-down of the incentive pool and may propose parameter adjustments through governance if the supply trajectory warrants.
 
 ---
 
@@ -420,8 +416,8 @@ The veto power is explicitly revoked as part of the progressive decentralization
 | Model provider minimum stake | 500 TNZO |
 | Storage provider minimum stake | 500 TNZO |
 | Unbonding period | 7 days |
-| Base reward rate | 5% APY (500 basis points) |
-| Epoch duration | 14,400 blocks (~96 minutes at 400ms/block) |
+| Reward model | Work-gated coupons on a declining annual schedule |
+| Epoch duration | 14,400 blocks (~1 day at 6-second block target) |
 
 ### 8.2 Provider Types and Reward Multipliers
 
@@ -438,24 +434,28 @@ TEE-attested validators additionally receive a 1.5× multiplier on their reputat
 
 ### 8.3 Reward Calculation
 
-Rewards are calculated per epoch:
+Rewards are **work-gated**. Each epoch's minting rights are earned by verified work done in that epoch — not by holding stake — and are issued as minting-right coupons across three role buckets (Validator, Provider, Ecosystem):
 
 ```
-epoch_budget = total_staked × (reward_rate / 10,000) / 365
+year          = year_for(epoch)
+epoch_rights  = declining_annual_schedule(year) / 365
+(val_bps, prov_bps, eco_bps) = role_split_for(year)   // shifts infrastructure → apps over years
 
-For each staker:
-  stake_proportion = staker_amount / total_staked
-  base_reward = epoch_budget × stake_proportion
-  uptime_adjusted = base_reward × uptime_percentage
-  final_reward = uptime_adjusted × provider_type_multiplier
+For each role bucket:
+  bucket_rights = epoch_rights × bucket_bps / 10,000
+  For each address with verified work in the bucket:
+    work_share = address_work_weight / bucket_total_work_weight
+    coupon     = bucket_rights × work_share            // an unclaimed minting right
 ```
+
+Work weight is measured by the protocol, never self-reported: validators earn on finalized-block and quorum-certificate participation, providers on metered proof-of-service (uptime- and reputation-scaled), and the **Ecosystem bucket on contributions accepted through foundation/governance review** — this is the rail by which development, applications, and tooling earn TNZO on the same work-gated basis as validation and service. An accepted proposal records ecosystem work weight for the contributor's address, which then earns coupons in that epoch's ecosystem bucket.
 
 **Distribution rules:**
 
-- Epochs are processed sequentially (epoch N before epoch N+1)
-- No double distribution for the same epoch
-- Reward pool must have sufficient balance
-- Rewards accumulate as pending and must be explicitly claimed
+- Epochs are metered sequentially (epoch N closed before N+1)
+- Rights left unmatched in a bucket are permanently unminted (no leftover leaks into supply)
+- Coupons unclaimed within the claim window expire unminted
+- Claiming mints the liquid fraction immediately and opens a 12-month reward-vesting schedule for the remainder; a sponsored operator's claim converts the full amount to owned stake
 
 ### 8.4 Validator Responsibilities
 
@@ -874,7 +874,7 @@ Sections governing dissolution (§18) require Phase 3 governance with the enhanc
 |----------|-------|--------|
 | TNZO decimals | 18 | tenzro-types |
 | Maximum supply | 1,000,000,000 TNZO | tenzro-token |
-| Inflation rate | 2% / year | tenzro-token |
+| Supply model | Fixed cap; no mint authority beyond genesis | tenzro-token |
 | Network commission | 0.5% | tenzro-settlement |
 | Fee split: Treasury | 40% | tenzro-token |
 | Fee split: Burn | 30% | tenzro-token |
@@ -884,8 +884,8 @@ Sections governing dissolution (§18) require Phase 3 governance with the enhanc
 | Model provider min stake | 500 TNZO | tenzro-token |
 | Storage provider min stake | 500 TNZO | tenzro-token |
 | Unbonding period | 7 days | tenzro-token |
-| Staking reward rate | 5% APY | tenzro-token |
-| Epoch duration | 14,400 blocks (~96 min at 400ms/block) | tenzro-token |
+| Reward model | Work-gated coupons, declining schedule | tenzro-token |
+| Epoch duration | 14,400 blocks (~1 day at 6-second block target) | tenzro-token |
 | Governance min stake | 10,000 TNZO | tenzro-token |
 | Governance quorum | 20% participation | tenzro-token |
 | Governance approval | 50% of votes | tenzro-token |

@@ -315,6 +315,25 @@ async def handle_identity(text: str, metadata: dict = None) -> str:
 # AI Inference
 # ---------------------------------------------------------------------------
 
+def _build_route_intent_params(text: str, metadata: dict = None) -> dict:
+    """Assembles tenzro_routeIntent params from metadata, defaulting use_case."""
+    metadata = metadata or {}
+    params: dict = {}
+    use_case = metadata.get("use_case")
+    if not use_case:
+        t = text.lower()
+        for candidate in ("reasoning", "code", "summarize", "extract", "embed", "chat"):
+            if candidate in t:
+                use_case = candidate
+                break
+    params["use_case"] = use_case or "chat"
+    for key in ("budget", "optimize", "quality_floor",
+                "est_input_tokens", "est_output_tokens", "payer_did"):
+        if metadata.get(key) is not None:
+            params[key] = metadata[key]
+    return params
+
+
 async def handle_inference(text: str, metadata: dict = None) -> str:
     t = text.lower()
 
@@ -326,6 +345,31 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
         for m in result:
             lines.append(f"  - {m.get('name', 'unknown')} ({m.get('id', '')})")
         return "\n".join(lines)
+
+    # Intent routing: discover the best model for a use case + budget without
+    # naming one. "route"/"intent"/"best model", or a use_case in metadata,
+    # triggers tenzro_routeIntent (discovery only — nothing is dispatched).
+    if ("route" in t or "intent" in t or "best model" in t
+            or (metadata and metadata.get("use_case"))) and "chat" not in t:
+        params = _build_route_intent_params(text, metadata)
+        result = await rpc_call("tenzro_routeIntent", params)
+        return json.dumps(result, indent=2)
+
+    # Chat by intent: "chat by intent" or metadata use_case with a chat verb
+    # discovers a model then dispatches in one call via tenzro_chatByIntent.
+    if ("chat" in t and ("intent" in t or "use case" in t
+                         or (metadata and metadata.get("use_case")))):
+        prompt = text
+        for kw in ["chat", "ask", "complete", "say"]:
+            idx = t.find(kw)
+            if idx >= 0:
+                prompt = text[idx + len(kw):].strip().lstrip(":").strip()
+                break
+        params = _build_route_intent_params(text, metadata)
+        params["message"] = prompt
+        params["max_tokens"] = (metadata or {}).get("max_tokens", 256)
+        result = await rpc_call("tenzro_chatByIntent", params)
+        return json.dumps(result, indent=2)
 
     if "chat" in t or "ask" in t or "complete" in t:
         # Extract the prompt after keywords
@@ -484,10 +528,15 @@ async def handle_provider(text: str, metadata: dict = None) -> str:
         result = await rpc_call("tenzro_providerStats", [addr])
         return f"Provider stats for {addr}:\n{json.dumps(result, indent=2)}"
 
+    if "capacity" in t:
+        result = await rpc_call("tenzro_listProviderCapacity", [])
+        return f"Provider capacity (advertised + measured):\n{json.dumps(result, indent=2)}"
+
     return (
         "Provider operations:\n"
         "  - 'Register as provider with address 0xabc...'\n"
-        "  - 'Get provider status for 0xabc...'"
+        "  - 'Get provider status for 0xabc...'\n"
+        "  - 'List provider capacity'"
     )
 
 
@@ -497,6 +546,7 @@ async def handle_provider(text: str, metadata: dict = None) -> str:
 
 async def handle_payment(text: str, metadata: dict = None) -> str:
     t = text.lower()
+    md = metadata or {}
 
     if "session" in t:
         result = await rpc_call("tenzro_listPaymentSessions", [])
@@ -505,6 +555,55 @@ async def handle_payment(text: str, metadata: dict = None) -> str:
     if "info" in t or "gateway" in t:
         result = await rpc_call("tenzro_paymentGatewayInfo", [])
         return f"Payment gateway info:\n{json.dumps(result, indent=2)}"
+
+    # x402 Bazaar — resource discovery and monetization
+    if "x402" in t and ("bazaar" in t or "protocol info" in t):
+        result = await rpc_call("tenzro_x402ProtocolInfo", [])
+        return f"x402 protocol info:\n{json.dumps(result, indent=2)}"
+
+    if "x402" in t and "register" in t and md.get("sellerDid") and md.get("resource"):
+        params = {
+            "sellerDid": md["sellerDid"],
+            "resource": md["resource"],
+            "scheme": md.get("scheme", "tenzro-hybrid"),
+            "network": md.get("network", "tenzro"),
+            "asset": md.get("asset", "TNZO"),
+            "payTo": md["payTo"],
+            "maxAmountRequired": md["maxAmountRequired"],
+        }
+        for opt in ("description", "mimeType", "maxTimeoutSeconds", "tags", "extra"):
+            if md.get(opt) is not None:
+                params[opt] = md[opt]
+        result = await rpc_call("tenzro_x402RegisterResource", params)
+        return f"x402 resource registered:\n{json.dumps(result, indent=2)}"
+
+    if "x402" in t and ("discover" in t or "find" in t or "bazaar" in t):
+        params = {}
+        for opt in ("scheme", "network", "asset", "sellerDid", "tags", "limit"):
+            if md.get(opt) is not None:
+                params[opt] = md[opt]
+        result = await rpc_call("tenzro_x402DiscoverResources", params)
+        return f"x402 resources:\n{json.dumps(result, indent=2)}"
+
+    if "x402" in t and ("deregister" in t or "remove" in t) and md.get("listingId"):
+        result = await rpc_call("tenzro_x402DeregisterResource", {
+            "listingId": md["listingId"],
+            "sellerDid": md.get("sellerDid"),
+        })
+        return f"x402 resource deregistered:\n{json.dumps(result, indent=2)}"
+
+    if "x402" in t and "verify" in t and md.get("requirement"):
+        result = await rpc_call("tenzro_x402VerifyOffer", {"requirement": md["requirement"]})
+        return f"x402 offer verification:\n{json.dumps(result, indent=2)}"
+
+    if "x402" in t and ("payment id" in t or "paymentid" in t) and md.get("payerDid"):
+        params = {"payerDid": md["payerDid"]}
+        if md.get("requirement") is not None:
+            params["requirement"] = md["requirement"]
+        if md.get("offerCommitment") is not None:
+            params["offerCommitment"] = md["offerCommitment"]
+        result = await rpc_call("tenzro_x402PaymentId", params)
+        return f"x402 payment id:\n{json.dumps(result, indent=2)}"
 
     if "scheme" in t and "x402" in t:
         result = await rpc_call("tenzro_listX402Schemes", [])
@@ -565,7 +664,15 @@ async def handle_payment(text: str, metadata: dict = None) -> str:
         "  - 'List x402 schemes'\n"
         "  - 'List payment sessions'\n"
         "  - 'AP2 create payment for 100 TNZO'\n"
-        "  - 'Payment gateway info'"
+        "  - 'Payment gateway info'\n"
+        "  - 'x402 protocol info'\n"
+        "  - 'x402 register resource' (metadata: sellerDid, resource, payTo, "
+        "maxAmountRequired, scheme?, network?, asset?, description?, tags?)\n"
+        "  - 'x402 discover resources' (metadata: scheme?, network?, asset?, "
+        "sellerDid?, tags?, limit?)\n"
+        "  - 'x402 deregister resource' (metadata: listingId, sellerDid)\n"
+        "  - 'x402 verify offer' (metadata: requirement)\n"
+        "  - 'x402 payment id' (metadata: payerDid, requirement?|offerCommitment?)"
     )
 
 
@@ -3412,6 +3519,135 @@ async def handle_discovery(text: str, metadata: dict = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Managed databases
+# ---------------------------------------------------------------------------
+
+async def handle_database(text: str, metadata: dict = None) -> str:
+    """Managed-database catalog, partition placement, access control, and
+    engine-dialect query. Database descriptors, engine config, and query
+    bodies carry structured fields, so they read from `metadata`.
+    """
+    t = text.lower()
+    md = metadata or {}
+    database_id = md.get("database_id")
+
+    if "engine" in t and ("list" in t or "catalog" in t):
+        result = await rpc_call("tenzro_listDatabaseEngines", [])
+        return f"Database engine catalog:\n{json.dumps(result, indent=2)}"
+
+    if "create" in t and md.get("engine_id"):
+        params = {
+            "database_id": md.get("database_id"),
+            "engine_id": md["engine_id"],
+            "placement": md.get("placement", "local"),
+            "partitions": md.get("partitions", 1),
+            "replicas": md.get("replicas", 1),
+        }
+        if md.get("owner_did"):
+            params["owner_did"] = md["owner_did"]
+        if md.get("access_policy"):
+            params["access_policy"] = md["access_policy"]
+        if md.get("engine_config"):
+            params["engine_config"] = md["engine_config"]
+        if md.get("confidential"):
+            params["confidential"] = md["confidential"]
+        result = await rpc_call("tenzro_createDatabase", params)
+        return f"Database created:\n{json.dumps(result, indent=2)}"
+
+    if "connection" in t and database_id and md.get("caller_did"):
+        params = {
+            "database_id": database_id,
+            "caller_did": md["caller_did"],
+            "write": md.get("write", False),
+        }
+        if md.get("bearer_did"):
+            params["bearer_did"] = md["bearer_did"]
+        if md.get("ttl_secs"):
+            params["ttl_secs"] = md["ttl_secs"]
+        if md.get("capability"):
+            params["capability"] = md["capability"]
+        result = await rpc_call("tenzro_issueDatabaseConnection", params)
+        return f"Database connection issued:\n{json.dumps(result, indent=2)}"
+
+    if "query" in t and database_id and md.get("caller_did") and md.get("body") is not None:
+        params = {
+            "database_id": database_id,
+            "caller_did": md["caller_did"],
+            "body": md["body"],
+            "partition_index": md.get("partition_index", 0),
+            "write": md.get("write", False),
+        }
+        if md.get("capability"):
+            params["capability"] = md["capability"]
+        result = await rpc_call("tenzro_databaseQuery", params)
+        return f"Database query:\n{json.dumps(result, indent=2)}"
+
+    if ("authorize" in t or "access" in t) and database_id and md.get("caller_did"):
+        params = {"database_id": database_id, "caller_did": md["caller_did"]}
+        if md.get("capability"):
+            params["capability"] = md["capability"]
+        result = await rpc_call("tenzro_authorizeDatabaseRead", params)
+        return f"Database access decision:\n{json.dumps(result, indent=2)}"
+
+    if "rescale" in t and database_id and md.get("caller_did") and md.get("placement"):
+        params = {
+            "database_id": database_id,
+            "caller_did": md["caller_did"],
+            "placement": md["placement"],
+        }
+        if md.get("partitions") is not None:
+            params["partitions"] = md["partitions"]
+        if md.get("replicas") is not None:
+            params["replicas"] = md["replicas"]
+        if md.get("capability"):
+            params["capability"] = md["capability"]
+        result = await rpc_call("tenzro_rescaleDatabase", params)
+        return f"Database rescaled:\n{json.dumps(result, indent=2)}"
+
+    if "drop" in t and database_id:
+        result = await rpc_call("tenzro_dropDatabase", {"database_id": database_id})
+        return f"Database dropped:\n{json.dumps(result, indent=2)}"
+
+    if "partition" in t and database_id and md.get("partition_index") is not None:
+        result = await rpc_call("tenzro_getDatabasePartition", {
+            "database_id": database_id,
+            "partition_index": md["partition_index"],
+        })
+        return f"Database partition:\n{json.dumps(result, indent=2)}"
+
+    if "partition" in t and database_id:
+        result = await rpc_call("tenzro_listDatabasePartitions", {"database_id": database_id})
+        return f"Database partitions:\n{json.dumps(result, indent=2)}"
+
+    if database_id:
+        result = await rpc_call("tenzro_getDatabase", {"database_id": database_id})
+        return f"Database:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t:
+        result = await rpc_call("tenzro_listDatabases", [])
+        return f"Databases:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Managed-database operations:\n"
+        "  - 'List database engines'\n"
+        "  - 'List databases'\n"
+        "  - 'Create database' (metadata: database_id, engine_id, owner_did|access_policy, "
+        "placement?, partitions?, replicas?, engine_config?, confidential?)\n"
+        "  - 'Get database' (metadata: database_id)\n"
+        "  - 'List database partitions' (metadata: database_id)\n"
+        "  - 'Get database partition' (metadata: database_id, partition_index)\n"
+        "  - 'Issue database connection' (metadata: database_id, caller_did, bearer_did?, "
+        "write?, ttl_secs?, capability?)\n"
+        "  - 'Database query' (metadata: database_id, caller_did, body, partition_index?, "
+        "write?, capability?)\n"
+        "  - 'Authorize database read' (metadata: database_id, caller_did, capability?)\n"
+        "  - 'Rescale database' (metadata: database_id, caller_did, placement, "
+        "partitions?, replicas?, capability?)\n"
+        "  - 'Drop database' (metadata: database_id)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Handler dispatch table
 # ---------------------------------------------------------------------------
 
@@ -3470,6 +3706,7 @@ HANDLERS: dict[str, callable] = {
     "babylon": handle_babylon,
     "caip": handle_caip,
     "storage": handle_storage,
+    "database": handle_database,
     "compute": handle_compute,
     "moe": handle_moe,
     "operability": handle_operability,

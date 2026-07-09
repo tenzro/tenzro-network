@@ -285,6 +285,25 @@ impl ProviderWithMetrics {
     }
 }
 
+/// Copy the advertised fields from a gossip announcement onto a provider's
+/// full capacity: the numeric throughput envelope plus the MoE expert-shard
+/// declarations ([`MoeShardView`](crate::moe_shard::MoeShardView) is built
+/// from these). Heavier locally-derived fields (LAN cluster, drafter
+/// footprint, hardware) stay untouched.
+fn apply_advertised_capacity(
+    capacity: &mut tenzro_types::ProviderCapacity,
+    advertised: &tenzro_types::AdvertisedCapacity,
+) {
+    capacity.max_concurrent_requests = advertised.max_concurrent_requests;
+    capacity.active_requests = advertised.active_requests;
+    capacity.requests_per_second = advertised.requests_per_second;
+    capacity.max_batch_size = advertised.max_batch_size;
+    capacity.mtp_enabled = advertised.mtp_enabled;
+    capacity.verifiable_inference = advertised.verifiable_inference;
+    capacity.moe_holdings = advertised.moe_holdings.clone();
+    capacity.moe_roles = advertised.moe_roles.clone();
+}
+
 /// Manager for inference providers
 #[derive(Clone)]
 pub struct ProviderManager {
@@ -565,9 +584,11 @@ impl ProviderManager {
         endpoint_url: Option<String>,
         models: Vec<String>,
         hardware: tenzro_types::HardwareCapabilities,
+        advertised: tenzro_types::AdvertisedCapacity,
         status: ProviderStatus,
         has_tee: bool,
         signing_pubkey: Option<Vec<u8>>,
+        iroh_endpoint_id: Option<String>,
     ) {
         if let Some(mut entry) = self.providers.get_mut(&address) {
             // Refresh advertised fields; preserve observed metrics.
@@ -575,6 +596,8 @@ impl ProviderManager {
             entry.provider.endpoint_url = endpoint_url;
             entry.provider.models = models;
             entry.provider.capacity.hardware = hardware;
+            apply_advertised_capacity(&mut entry.provider.capacity, &advertised);
+            entry.provider.capacity.iroh_endpoint_id = iroh_endpoint_id;
             entry.provider.status = status;
             entry.provider.signing_pubkey = signing_pubkey;
             entry.has_tee = has_tee;
@@ -589,6 +612,8 @@ impl ProviderManager {
         provider.endpoint_url = endpoint_url;
         provider.models = models;
         provider.capacity.hardware = hardware;
+        apply_advertised_capacity(&mut provider.capacity, &advertised);
+        provider.capacity.iroh_endpoint_id = iroh_endpoint_id;
         provider.status = status;
         provider.signing_pubkey = signing_pubkey;
 
@@ -597,6 +622,65 @@ impl ProviderManager {
         self.providers.insert(address, pwm);
         self.persist_index();
         info!("Installed gossip-discovered provider: {}", address);
+    }
+
+    /// Install this node's own MoE expert-shard declaration.
+    ///
+    /// Called by the MoE load/unload handlers after every mutation of the
+    /// local [`MoeExpertRuntime`](crate::moe_exec::MoeExpertRuntime): the
+    /// runtime status is the source of truth, so `holdings` replaces the
+    /// stored set wholesale (idempotent under replay). The heartbeat reads
+    /// the self entry back each tick, so the declaration rides the next
+    /// `tenzro/providers` announcement and remote routers admit this node
+    /// into their [`MoeShardView`](crate::moe_shard::MoeShardView).
+    pub fn set_moe_declaration(
+        &self,
+        address: Address,
+        endpoint_url: Option<String>,
+        holdings: Vec<tenzro_types::MoeExpertHolding>,
+        is_router: bool,
+        iroh_endpoint_id: Option<String>,
+    ) {
+        use tenzro_types::MoeProviderRole;
+
+        let apply = |capacity: &mut tenzro_types::ProviderCapacity| {
+            capacity.moe_holdings = holdings.clone();
+            capacity
+                .moe_roles
+                .retain(|r| !matches!(r, MoeProviderRole::Router | MoeProviderRole::ExpertHolder));
+            if is_router {
+                capacity.moe_roles.push(MoeProviderRole::Router);
+            }
+            if !holdings.is_empty() {
+                capacity.moe_roles.push(MoeProviderRole::ExpertHolder);
+            }
+            if iroh_endpoint_id.is_some() {
+                capacity.iroh_endpoint_id = iroh_endpoint_id.clone();
+            }
+        };
+
+        if let Some(mut entry) = self.providers.get_mut(&address) {
+            if endpoint_url.is_some() {
+                entry.provider.endpoint_url = endpoint_url;
+            }
+            apply(&mut entry.provider.capacity);
+            let pwm = entry.clone();
+            drop(entry);
+            self.persist_provider(&address, &pwm);
+            debug!("Refreshed self MoE declaration for provider {}", address);
+            return;
+        }
+
+        let mut provider = InferenceProvider::new(address, address.to_string());
+        provider.endpoint_url = endpoint_url;
+        provider.status = ProviderStatus::Active;
+        apply(&mut provider.capacity);
+
+        let pwm = ProviderWithMetrics::new(provider, false);
+        self.persist_provider(&address, &pwm);
+        self.providers.insert(address, pwm);
+        self.persist_index();
+        info!("Installed self MoE declaration for provider {}", address);
     }
 
     /// Removes a provider from the routing set.

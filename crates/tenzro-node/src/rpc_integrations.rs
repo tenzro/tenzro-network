@@ -296,10 +296,11 @@ pub(crate) async fn handle_x402_protocol_info(
         },
         "schemes": [
             tenzro_payments::x402::DEFAULT_SCHEME,
-            "exact",
             "exact-eip3009",
             "permit2",
             "erc7710",
+            tenzro_payments::x402::UPTO_SCHEME,
+            tenzro_payments::x402::BATCH_SETTLEMENT_SCHEME,
         ],
         "default_scheme": tenzro_payments::x402::DEFAULT_SCHEME,
         "tenzro_extensions": {
@@ -330,8 +331,276 @@ pub(crate) async fn handle_x402_protocol_info(
                 "values": ["tenzro-evm", "tenzro-svm", "tenzro-daml"],
                 "absent_when": "settlement_landed_on_external_chain",
             },
+            "bazaar_discovery": {
+                "rpc": [
+                    "tenzro_x402RegisterResource",
+                    "tenzro_x402DiscoverResources",
+                    "tenzro_x402DeregisterResource",
+                ],
+                "http": "GET /discovery/resources",
+                "listing_domain_tag": tenzro_payments::x402::BAZAAR_LISTING_DOMAIN,
+                "binding": ["seller_did", "resource"],
+            },
+            "signed_offer": {
+                "rpc": [
+                    "tenzro_x402VerifyOffer",
+                    "tenzro_x402PaymentId",
+                ],
+                "extra_keys": [
+                    tenzro_payments::x402::OFFER_COMMITMENT_KEY,
+                    tenzro_payments::x402::OFFER_SIG_KEY,
+                    tenzro_payments::x402::OFFER_SIGNER_KEY,
+                ],
+                "offer_domain_tag": tenzro_payments::x402::X402_OFFER_DOMAIN,
+                "payment_id_domain_tag": tenzro_payments::x402::X402_PAYMENT_ID_DOMAIN,
+                "binding": ["scheme", "network", "max_amount_required", "asset", "pay_to", "resource", "expires_at"],
+                "idempotency": "settlement_keyed_by_offer_commitment_and_payer_did_replay_returns_prior_receipt",
+            },
         },
         "stock_compatibility": "tenzroCommitment_and_tenzroVm_omitted_from_external_chain_receipts_so_stock_clients_unaffected",
+    }))
+}
+
+/// `tenzro_x402RegisterResource` — a seller publishes a discoverable paid
+/// resource into the Bazaar catalog. The listing id is derived server-side
+/// from `(seller_did, resource)` so a client cannot spoof another seller's id;
+/// re-registering the same resource is idempotent (updates in place).
+///
+/// Params (object): `sellerDid`, `resource`, `scheme`, `network`, `asset`,
+/// `payTo`, `maxAmountRequired`, optional `description`, `mimeType`,
+/// `maxTimeoutSeconds`, `tags` (array), and `extra` (scheme-specific object).
+pub(crate) async fn handle_x402_register_resource(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let catalog = node
+        .bazaar_catalog()
+        .ok_or_else(|| invalid_params("payment gateway not initialized"))?;
+    let p = unwrap_arr(params.unwrap_or(Value::Null));
+
+    let seller_did = p
+        .get("sellerDid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("sellerDid required"))?
+        .to_string();
+    let resource = p
+        .get("resource")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("resource required"))?;
+    let scheme = p
+        .get("scheme")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("scheme required"))?;
+    let network = p
+        .get("network")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("network required"))?;
+    let asset = p
+        .get("asset")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("asset required"))?;
+    let pay_to = p
+        .get("payTo")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("payTo required"))?;
+    let max_amount = p
+        .get("maxAmountRequired")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("maxAmountRequired required"))?;
+    let description = p
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mime_type = p
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or("application/json");
+    let max_timeout_seconds = p
+        .get("maxTimeoutSeconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(300);
+    let tags: Vec<String> = p
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let mut requirement = tenzro_payments::x402::X402PaymentRequirement::new(
+        scheme,
+        network,
+        max_amount,
+        pay_to,
+        asset,
+        resource,
+        description,
+        mime_type,
+        max_timeout_seconds,
+    );
+    if let Some(extra) = p.get("extra").filter(|v| !v.is_null()) {
+        requirement = requirement.with_extra(extra.clone());
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let listing = tenzro_payments::x402::X402ResourceListing::new(
+        seller_did,
+        requirement,
+        tags,
+        now_ms,
+    );
+    let listing_id = catalog.register(listing).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("bazaar register: {e}"),
+        data: None,
+    })?;
+
+    Ok(json!({ "listingId": listing_id }))
+}
+
+/// `tenzro_x402DiscoverResources` — a buyer queries the Bazaar catalog for
+/// listings matching a filter. All set fields are ANDed; unset fields match
+/// everything. Results are freshest-first and capped by `limit` when non-zero.
+///
+/// Params (object): optional `scheme`, `network`, `asset`, `sellerDid`,
+/// `tags` (array), `limit` (number).
+pub(crate) async fn handle_x402_discover_resources(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let catalog = node
+        .bazaar_catalog()
+        .ok_or_else(|| invalid_params("payment gateway not initialized"))?;
+    let p = unwrap_arr(params.unwrap_or(Value::Null));
+
+    let query = tenzro_payments::x402::ResourceQuery {
+        scheme: p.get("scheme").and_then(Value::as_str).map(String::from),
+        network: p.get("network").and_then(Value::as_str).map(String::from),
+        asset: p.get("asset").and_then(Value::as_str).map(String::from),
+        seller_did: p.get("sellerDid").and_then(Value::as_str).map(String::from),
+        tags: p
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        limit: p.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize,
+    };
+
+    let listings = catalog.discover(&query);
+    Ok(json!({ "listings": listings, "count": listings.len() }))
+}
+
+/// `tenzro_x402DeregisterResource` — a seller removes its own listing. The
+/// removal is refused if `sellerDid` does not own the listing.
+///
+/// Params (object): `listingId`, `sellerDid`.
+pub(crate) async fn handle_x402_deregister_resource(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let catalog = node
+        .bazaar_catalog()
+        .ok_or_else(|| invalid_params("payment gateway not initialized"))?;
+    let p = unwrap_arr(params.unwrap_or(Value::Null));
+
+    let listing_id = p
+        .get("listingId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("listingId required"))?;
+    let seller_did = p
+        .get("sellerDid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("sellerDid required"))?;
+
+    let removed = catalog
+        .deregister(listing_id, seller_did)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("bazaar deregister: {e}"),
+            data: None,
+        })?;
+    Ok(json!({ "removed": removed }))
+}
+
+/// `tenzro_x402VerifyOffer` — verify a server-signed offer carried in a 402
+/// payment requirement. A buyer that received an `X402PaymentRequirement`
+/// (with `offerCommitment` / `offerSig` / `offerSigner` in `extra`) passes the
+/// requirement back verbatim; the node recomputes the commitment, checks it
+/// against the carried value, and verifies the Ed25519 signature under the
+/// carried signer key. No node state is consulted — this is a pure
+/// verification the buyer can run before paying.
+///
+/// Params (object): `requirement` — the full [`X402PaymentRequirement`] JSON
+/// exactly as it appeared in the 402 body.
+pub(crate) async fn handle_x402_verify_offer(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_arr(params.unwrap_or(Value::Null));
+    let req_value = p
+        .get("requirement")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| invalid_params("requirement required"))?;
+    let requirement: tenzro_payments::x402::X402PaymentRequirement =
+        serde_json::from_value(req_value.clone())
+            .map_err(|e| invalid_params(&format!("requirement decode: {e}")))?;
+
+    let offer = tenzro_payments::x402::SignedOffer::extract_from(&requirement)
+        .ok_or_else(|| invalid_params("requirement carries no signed offer"))?;
+
+    match offer.verify(&requirement) {
+        Ok(()) => Ok(json!({
+            "valid": true,
+            "offerCommitment": offer.offer_commitment,
+            "offerSigner": offer.offer_signer,
+        })),
+        Err(e) => Ok(json!({
+            "valid": false,
+            "reason": e.to_string(),
+            "offerCommitment": offer.offer_commitment,
+            "offerSigner": offer.offer_signer,
+        })),
+    }
+}
+
+/// `tenzro_x402PaymentId` — derive the deterministic `pay_<hex>` idempotency
+/// identifier for a `(offer, payer)` pair. A buyer that wants to know its
+/// payment id ahead of settling — to detect and skip a retry client-side —
+/// passes either the full `requirement` (the node recomputes the commitment)
+/// or a pre-computed `offerCommitment` hex, plus the `payerDid`.
+///
+/// Params (object): one of `requirement` (full requirement JSON) or
+/// `offerCommitment` (64-hex), and `payerDid`.
+pub(crate) async fn handle_x402_payment_id(
+    _node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = unwrap_arr(params.unwrap_or(Value::Null));
+    let payer_did = p
+        .get("payerDid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("payerDid required"))?;
+
+    let commitment: [u8; tenzro_payments::x402::X402_OFFER_COMMITMENT_LEN] =
+        if let Some(req_value) = p.get("requirement").filter(|v| !v.is_null()) {
+            let requirement: tenzro_payments::x402::X402PaymentRequirement =
+                serde_json::from_value(req_value.clone())
+                    .map_err(|e| invalid_params(&format!("requirement decode: {e}")))?;
+            tenzro_payments::x402::compute_offer_commitment(&requirement)
+        } else if let Some(hex_str) = p.get("offerCommitment").and_then(Value::as_str) {
+            let bytes = hex::decode(hex_str)
+                .map_err(|e| invalid_params(&format!("offerCommitment hex: {e}")))?;
+            bytes
+                .try_into()
+                .map_err(|_| invalid_params("offerCommitment must be 32 bytes"))?
+        } else {
+            return Err(invalid_params(
+                "one of requirement or offerCommitment required",
+            ));
+        };
+
+    let payment_id = tenzro_payments::x402::derive_payment_id(&commitment, payer_did);
+    Ok(json!({
+        "paymentId": payment_id,
+        "offerCommitment": hex::encode(commitment),
     }))
 }
 

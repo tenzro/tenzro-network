@@ -897,6 +897,7 @@ mod tests {
     fn caps(vram_gb: u32) -> tenzro_types::hardware::HardwareCapabilities {
         tenzro_types::hardware::HardwareCapabilities {
             vram_gb,
+            detected: true,
             ..Default::default()
         }
     }
@@ -925,8 +926,8 @@ mod tests {
             CAPABILITY_MAX_BPS - CAPABILITY_TEE_SPAN_BPS
         );
         // Monotonic in hardware class: consumer < datacenter < multi.
-        let consumer = capability_multiplier_bps(&HardwareCapabilities { vram_gb: 16, ..Default::default() }, false);
-        let datacenter = capability_multiplier_bps(&HardwareCapabilities { vram_gb: 80, ..Default::default() }, false);
+        let consumer = capability_multiplier_bps(&HardwareCapabilities { vram_gb: 16, detected: true, ..Default::default() }, false);
+        let datacenter = capability_multiplier_bps(&HardwareCapabilities { vram_gb: 80, detected: true, ..Default::default() }, false);
         let multi = capability_multiplier_bps(&caps(200), false);
         assert!(consumer < datacenter);
         assert!(datacenter < multi);

@@ -242,6 +242,7 @@ impl ExternalEngine {
             output_tokens,
             generation_time_ms: elapsed_ms,
             tokens_per_second: tps,
+            commitment: None,
         })
     }
 
@@ -375,5 +376,6 @@ fn finalize(
         output_tokens,
         generation_time_ms: elapsed_ms,
         tokens_per_second: tps,
+        commitment: None,
     }
 }

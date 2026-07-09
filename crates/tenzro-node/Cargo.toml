@@ -30,7 +30,8 @@ llama-cpp-2 = { workspace = true }
 tenzro-cortex = { workspace = true }
 tenzro-training = { workspace = true }
 tenzro-settlement = { workspace = true }
-tenzro-storage-market = { workspace = true }
+tenzro-storage-provider = { workspace = true }
+tenzro-database = { workspace = true }
 tenzro-bridge = { workspace = true }
 tenzro-events = { workspace = true }
 tenzro-agent-kit = { workspace = true }
@@ -94,6 +95,15 @@ k256 = { workspace = true }
 # UnwrapErr to satisfy the `CryptoRng` bound that k256/p256 0.14-rc's
 # `SecretKey::random` requires (signature 3.0.0 → rand_core ^0.10).
 getrandom_0_4 = { package = "getrandom", version = "0.4", features = ["std"] }
+# Managed-database engine backends (see src/db_engines/). Connect-to-existing:
+# tokio-postgres + redis are thin clients to operator-run engines; lancedb +
+# tantivy + arrow serve the embedded engines in-process under the data dir.
+tokio-postgres = { workspace = true }
+redis = { workspace = true }
+lancedb = { workspace = true }
+tantivy = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
 
 [features]
 default = ["cluster-serving"]

@@ -1058,6 +1058,18 @@ pub(crate) fn cortex_model_info(
         ModelModality::Text,
         worker.worker_address(),
     );
+    // Cortex workers run behind a sidecar and have no downloadable weights
+    // artifact, but the registry rejects zero hashes. Bind a deterministic
+    // identity hash over the model id + worker DID instead — nothing fetches
+    // Cortex weights through the download manager, so this hash never
+    // reaches per-artifact integrity verification.
+    info.model_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tenzro/model/cortex-identity");
+        hasher.update(model_id.as_bytes());
+        hasher.update(worker.worker_did().as_bytes());
+        tenzro_types::Hash::new(hasher.finalize().into())
+    };
     info.description = format!(
         "Recurrent-depth reasoning worker (arch={}, max_loops={}).",
         arch_label, family.max_loops
@@ -1097,13 +1109,6 @@ pub(crate) fn cortex_model_info(
     info
 }
 
-/// GPU information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GpuInfo {
-    pub name: String,
-    pub vram_gb: f64,
-}
-
 /// Hardware profile detected from the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HardwareProfile {
@@ -1111,7 +1116,7 @@ pub struct HardwareProfile {
     pub cpu_cores: usize,
     pub cpu_threads: usize,
     pub total_ram_gb: f64,
-    pub gpus: Vec<GpuInfo>,
+    pub gpus: Vec<tenzro_types::hardware::GpuDevice>,
     pub storage_available_gb: f64,
     pub tee_available: bool,
     pub tee_vendor: Option<String>,
@@ -1350,6 +1355,15 @@ pub struct TenzroNode {
     /// `tenzro_withdrawComputeBond`). Persists to CF_PROVIDERS via
     /// `ComputeBondManager::with_storage`.
     compute_bond_manager: Option<Arc<tenzro_token::compute_bond::ComputeBondManager>>,
+    /// Verifiable-inference commitment store + challenge lifecycle
+    /// (TOPLOC scheme). Stores per-response top-k logit commitments
+    /// under `commitment/<hash_hex>` and filed disputes under
+    /// `challenge/<uuid>` in CF_CHALLENGES. Consulted by the
+    /// `tenzro_*InferenceCommitment` / `tenzro_*InferenceChallenge`
+    /// RPC handlers; commitments are written by the chat/inference
+    /// handlers when the caller passes `verifiable: true`. `Some`
+    /// only when RocksDB storage is available.
+    challenge_manager: Option<Arc<crate::inference_challenge::ChallengeManager>>,
     /// SLA fault detector (Phase B Thread 5). Owns the validator's VRF
     /// signing key (byte-shared with the validator's Ed25519 identity per
     /// RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI), issues VRF-stamped probes
@@ -1479,6 +1493,26 @@ pub struct TenzroNode {
     /// paths persist to CF_TOKENS via
     /// `SeedAgentEarmarkManager::with_storage`.
     seed_agent_manager: Option<Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>>,
+    /// Work-gated reward engine. Meters verified work (consensus
+    /// participation, settled inference/TEE/RPC traffic, training rounds,
+    /// app usage) into per-epoch reward coupons against the declining
+    /// minting schedule. Coupons expire unclaimed after
+    /// `CLAIM_WINDOW_EPOCHS`; unmatched minting rights are permanently
+    /// unminted. Persists to CF_TOKENS via `RewardEngine::with_storage`.
+    reward_engine: Option<Arc<tenzro_token::RewardEngine>>,
+    /// Vesting schedules (reward / grant / contributor). The claim path
+    /// routes the non-liquid portion of reward claims here; grant and
+    /// contributor schedules are created through admin-gated RPCs.
+    /// Slashing consumes vesting after the junior bond and before owned
+    /// stake. Persists to CF_TOKENS via `VestingManager::with_storage`.
+    vesting_manager: Option<Arc<tenzro_token::VestingManager>>,
+    /// Foundation sponsorship slots (revocable delegated stake for
+    /// qualifying operators). Enforces junior bond, adaptive concentration
+    /// caps, and the 33% aggregate sponsored-stake ceiling. While a slot is
+    /// Active, 100% of the operator's reward claims convert to self-owned
+    /// stake until graduation. Persists to CF_TOKENS via
+    /// `SponsorshipManager::with_storage`.
+    sponsorship_manager: Option<Arc<tenzro_token::SponsorshipManager>>,
     /// Gossip sender created at `init_token_economics` time and consumed by
     /// the SeedAgent provisioning daemon spawned in `start()` after
     /// consensus is initialised. The receiver half is owned by the
@@ -1597,6 +1631,14 @@ pub struct TenzroNode {
     model_registry: Option<Arc<ModelRegistry>>,
     provider_manager: Option<Arc<ProviderManager>>,
     inference_router: Option<Arc<InferenceRouter>>,
+    /// Intent → model discovery-and-dispatch layer. Sits above the inference
+    /// router: resolves a `RouteIntent` (use case + budget + quality floor) to
+    /// a concrete `model_id`, then hands that to `inference_router` for
+    /// provider selection. Reuses `model_registry` + `usage_tracker` +
+    /// `inference_router`; the per-DID budget gate adapts the same spending
+    /// policy the payment binder enforces. Read by `tenzro_routeIntent` and
+    /// `tenzro_chatByIntent`.
+    meta_router: Option<Arc<tenzro_model::meta_router::MetaRouter>>,
     /// Usage tracker — recipient of every successful inference's
     /// `UsageRecord`. Persists per-model / per-provider / global stats
     /// to RocksDB CF_MODELS via `UsageTracker::with_storage`. Read by
@@ -1686,6 +1728,21 @@ pub struct TenzroNode {
     identity_registry: Option<Arc<IdentityRegistry>>,
     payment_gateway: Option<Arc<TenzroPaymentGateway>>,
     x402_server: Option<Arc<X402PaymentServer>>,
+
+    /// x402 Bazaar resource catalog — sellers register discoverable paid
+    /// resources; buyers query matching listings. RocksDB-backed via
+    /// `CF_SETTLEMENTS / bazaar:*`.
+    bazaar_catalog: Option<Arc<tenzro_payments::x402::ResourceCatalog>>,
+
+    /// Distributed database registry — the databases this node serves, placed
+    /// local / LAN-cluster / network with the same tiering the model and
+    /// storage layers use. RocksDB-backed via `CF_DATABASES`.
+    database_registry: Option<Arc<tenzro_database::DatabaseRegistry>>,
+
+    /// Live database-engine backends this node serves, keyed by engine id. The
+    /// registry above tracks placement; this holds the concrete drivers the
+    /// query path dispatches to. Empty until a driver backend is registered.
+    db_engine_registry: Arc<crate::db_engine_registry::EngineRegistry>,
 
     /// Spec-2 per-DID admission controller. Wired into the consensus
     /// mempool at startup (`set_admission`); also held here so RPC
@@ -1899,6 +1956,9 @@ pub struct TenzroNode {
     pub provider_schedule: Arc<RwLock<ProviderSchedule>>,
     pub provider_pricing: Arc<RwLock<ProviderPricing>>,
     pub model_downloads: Arc<DashMap<String, ModelDownloadStatus>>,
+    /// Background MoE expert-extraction jobs keyed by job id
+    /// (`tenzro_moePrepareExperts` / `tenzro_moePrepareStatus`).
+    pub moe_prepare_jobs: Arc<DashMap<String, crate::moe::MoePrepareJob>>,
     pub served_models: Arc<DashMap<String, bool>>,
     pub model_services: Arc<DashMap<String, ModelServiceInstance>>,
     pub load_tracker: Arc<tenzro_model::LoadTracker>,
@@ -2051,6 +2111,7 @@ impl TenzroNode {
             staking: None,
             bond_manager: None,
             compute_bond_manager: None,
+            challenge_manager: None,
             sla_manager: None,
             sla_outstanding_probes: Arc::new(DashMap::new()),
             workflow_runtime: None,
@@ -2068,6 +2129,9 @@ impl TenzroNode {
             burn_quota_manager: None,
             burn_rate_manager: None,
             seed_agent_manager: None,
+            reward_engine: None,
+            vesting_manager: None,
+            sponsorship_manager: None,
             seed_agent_gossip_tx: None,
             seed_agent_daemon: None,
             trainer_daemon: None,
@@ -2095,6 +2159,7 @@ impl TenzroNode {
             model_registry: None,
             provider_manager: None,
             inference_router: None,
+            meta_router: None,
             usage_tracker: None,
             provenance_store: None,
             provenance_signer: None,
@@ -2120,6 +2185,9 @@ impl TenzroNode {
             identity_registry: None,
             payment_gateway: None,
             x402_server: None,
+            database_registry: None,
+            db_engine_registry: Arc::new(crate::db_engine_registry::EngineRegistry::new()),
+            bazaar_catalog: None,
             admission: None,
             agent_kit: None,
             token_registry: None,
@@ -2162,6 +2230,7 @@ impl TenzroNode {
             provider_schedule: Arc::new(RwLock::new(ProviderSchedule::default())),
             provider_pricing: Arc::new(RwLock::new(ProviderPricing::default())),
             model_downloads: Arc::new(DashMap::new()),
+            moe_prepare_jobs: Arc::new(DashMap::new()),
             served_models: Arc::new(DashMap::new()),
             model_services: Arc::new(DashMap::new()),
             load_tracker: Arc::new(tenzro_model::LoadTracker::new()),
@@ -2796,6 +2865,9 @@ impl TenzroNode {
         self.bridge_router = None;
         self.payment_gateway = None;
         self.x402_server = None;
+        self.bazaar_catalog = None;
+        self.database_registry = None;
+        self.db_engine_registry = Arc::new(crate::db_engine_registry::EngineRegistry::new());
         self.admission = None;
         self.identity_registry = None;
         self.agent_runtime = None;
@@ -2856,6 +2928,11 @@ impl TenzroNode {
             None => (false, None, Vec::new()),
         };
 
+        let self_peer_id = match &self.network {
+            Some(net) => net.local_peer_id().await.ok().map(|p| p.to_string()),
+            None => None,
+        };
+
         NodeStatus {
             state: format!("{:?}", state),
             roles: self.config.roles.clone(),
@@ -2870,6 +2947,7 @@ impl TenzroNode {
             iroh_endpoint_id,
             iroh_alpns,
             reachability: self.reachability_tier().map(|t| t.as_str().to_string()),
+            self_peer_id,
         }
     }
 
@@ -3444,6 +3522,23 @@ impl TenzroNode {
         };
         self.compute_bond_manager = Some(compute_bond_manager);
 
+        // Initialize the verifiable-inference commitment store +
+        // challenge lifecycle (TOPLOC scheme). Persists to
+        // CF_CHALLENGES; hydrates filed challenges on boot. Requires
+        // durable storage — commitments must survive restarts for
+        // challenges to be resolvable, so no in-memory fallback.
+        if let Some(storage) = &self.storage {
+            match crate::inference_challenge::ChallengeManager::new(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(m) => self.challenge_manager = Some(m),
+                Err(e) => warn!(
+                    "ChallengeManager hydration failed ({}), verifiable-inference challenges disabled",
+                    e
+                ),
+            }
+        }
+
         // Initialize permissionless ValidatorRegistry. Persists to
         // CF_TOKENS so candidate / active / pending-exit / jailed state
         // survives restarts. The post-block scan in EventLoop drives the
@@ -3539,6 +3634,76 @@ impl TenzroNode {
             Arc::new(tenzro_token::seed_agent::SeedAgentEarmarkManager::new())
         };
         self.seed_agent_manager = Some(seed_agent_manager);
+
+        // Initialize the work-gated reward engine. Verified work is
+        // metered per epoch (consensus participation from finalized
+        // blocks, settled inference/TEE/RPC traffic from the usage
+        // tracker) and converted to reward coupons when the epoch
+        // closes at the consensus epoch boundary. Persists issued
+        // coupons + per-epoch summaries + cumulative meters to
+        // CF_TOKENS.
+        let reward_engine = if let Some(storage) = &self.storage {
+            match tenzro_token::RewardEngine::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(e) => Arc::new(e),
+                Err(e) => {
+                    warn!(
+                        "RewardEngine hydration failed ({}), falling back to in-memory",
+                        e
+                    );
+                    Arc::new(tenzro_token::RewardEngine::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_token::RewardEngine::new())
+        };
+        self.reward_engine = Some(reward_engine);
+
+        // Initialize the vesting manager. Holds reward vesting created by
+        // the claim path (75% of every non-sponsored claim), plus
+        // admin-created grant and contributor schedules. Persists to
+        // CF_TOKENS.
+        let vesting_manager = if let Some(storage) = &self.storage {
+            match tenzro_token::VestingManager::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(m) => Arc::new(m),
+                Err(e) => {
+                    warn!(
+                        "VestingManager hydration failed ({}), falling back to in-memory",
+                        e
+                    );
+                    Arc::new(tenzro_token::VestingManager::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_token::VestingManager::new())
+        };
+        self.vesting_manager = Some(vesting_manager);
+
+        // Initialize the foundation sponsorship manager. Slots are
+        // created through the admin-gated delegate RPC after off-chain
+        // application review; graduation, revocation, bond slashing, and
+        // the expiry sweep run against this manager. Persists the pool
+        // singleton + per-DID slots to CF_TOKENS.
+        let sponsorship_manager = if let Some(storage) = &self.storage {
+            match tenzro_token::SponsorshipManager::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(m) => Arc::new(m),
+                Err(e) => {
+                    warn!(
+                        "SponsorshipManager hydration failed ({}), falling back to in-memory",
+                        e
+                    );
+                    Arc::new(tenzro_token::SponsorshipManager::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_token::SponsorshipManager::new())
+        };
+        self.sponsorship_manager = Some(sponsorship_manager);
 
         // Initialize governance with persistent storage and staking integration
         let governance = if let Some(ref storage) = self.storage {
@@ -5164,6 +5329,35 @@ impl TenzroNode {
         self.swarm_manager = Some(swarm_mgr);
         info!("Swarm manager initialized");
 
+        // Intent router (model selection tier). Reuses the registry, usage
+        // tracker, and inference router already built above, and adapts the
+        // agent runtime's per-machine spending policy into the meta-router's
+        // per-DID budget gate so intent-routed dispatch enforces the same
+        // rolling-window ceiling as direct payments.
+        if let (Some(registry), Some(usage), Some(router)) = (
+            self.model_registry.clone(),
+            self.usage_tracker.clone(),
+            self.inference_router.clone(),
+        ) {
+            let mut meta = tenzro_model::meta_router::MetaRouter::new(registry, usage, router);
+            if let Some(ref runtime) = self.agent_runtime {
+                let gate = Arc::new(crate::spending_policy_bridge::SpendingPolicyBudgetGate::new(
+                    runtime.clone(),
+                ));
+                meta = meta.with_budget_gate(gate);
+            }
+            // Wallet-balance ceiling: read the payer's on-chain TNZO balance so
+            // no intent is ever routed to a model the payer cannot pay for.
+            if let Some(ref token) = self.token {
+                let balance = Arc::new(crate::spending_policy_bridge::TnzoBalanceProvider::new(
+                    token.clone(),
+                ));
+                meta = meta.with_balance_provider(balance);
+            }
+            self.meta_router = Some(Arc::new(meta));
+            info!("Meta-router (intent → model) initialized");
+        }
+
         // Background liveness sweeper. Marks silent skills/tools/templates/
         // tasks/sessions/services as Inactive and purges terminal rows past
         // the configured TTL. Also auto-Terminates agents stuck in Suspended
@@ -6206,7 +6400,14 @@ impl TenzroNode {
             // logged but does not block startup.
             if let Some(ref registry) = self.model_registry {
                 let info = cortex_model_info(&model_id, &worker, &wc.arch);
-                if let Err(e) = registry.register_model(info) {
+                let result = match registry.register_model(info.clone()) {
+                    Err(tenzro_model::ModelError::ModelAlreadyExists(_)) => {
+                        // Hydrated from a previous process lifetime — refresh.
+                        registry.update_model(info)
+                    }
+                    other => other,
+                };
+                if let Err(e) = result {
                     warn!(
                         model_id = %model_id,
                         "Failed to publish Cortex model in ModelRegistry: {e}"
@@ -7378,17 +7579,131 @@ impl TenzroNode {
             .with_challenge_store(challenge_store.clone());
         gateway.register_protocol(Arc::new(mpp_server));
 
-        // Register x402 protocol server (stateless one-shot payments)
-        let x402_server = Arc::new(
-            X402PaymentServer::new(
-                "0x0000000000000000000000000000000000000001",
-                vec!["tenzro".to_string(), "base".to_string(), "ethereum".to_string()],
-            )
-            .with_default_asset("USDC")
-            .with_challenge_store(challenge_store.clone()),
-        );
+        // Register x402 protocol server (stateless one-shot payments).
+        //
+        // Two optional capabilities are wired when their prerequisites exist:
+        //
+        //   * offer signing — the node signs each 402 payment requirement with
+        //     its long-term Ed25519 key (the same key that signs gossip
+        //     announcements), letting the buyer verify the offer commitment
+        //     against the node's advertised identity before paying.
+        //   * idempotency — a RocksDB-backed ledger keyed by
+        //     `pay_<offer-commitment×payer-did>` collapses duplicate
+        //     settlements to the first receipt, hydrating prior receipts on
+        //     boot so replay protection survives restart.
+        let mut x402_builder = X402PaymentServer::new(
+            "0x0000000000000000000000000000000000000001",
+            vec!["tenzro".to_string(), "base".to_string(), "ethereum".to_string()],
+        )
+        .with_default_asset("USDC")
+        .with_challenge_store(challenge_store.clone());
+
+        match crate::keygen::load_validator_keypair(&self.config.data_dir) {
+            Ok(offer_keypair) => {
+                match tenzro_crypto::signatures::Ed25519SignerImpl::new(offer_keypair) {
+                    Ok(signer) => {
+                        x402_builder = x402_builder.with_offer_signer(Arc::new(signer));
+                        info!("x402 offer signing enabled (node Ed25519 key)");
+                    }
+                    Err(e) => warn!(
+                        "x402 offer signer construction failed ({e}); 402 offers will be unsigned"
+                    ),
+                }
+            }
+            Err(NodeError::KeyMissing { .. }) => {
+                warn!("No node Ed25519 key on disk — x402 402 offers will be unsigned");
+            }
+            Err(e) => return Err(e),
+        }
+
+        let idempotency_ledger = if let Some(storage) = &self.storage {
+            let store = Arc::new(crate::x402_idempotency_store::NodeIdempotencyStore::new(
+                storage.clone() as Arc<dyn KvStore>,
+            ));
+            match tenzro_payments::x402::IdempotencyLedger::with_store(store) {
+                Ok(ledger) => {
+                    info!(
+                        "x402 idempotency ledger hydrated: {} payment ids",
+                        ledger.len()
+                    );
+                    ledger
+                }
+                Err(e) => {
+                    warn!("x402 idempotency ledger hydration failed ({e}); starting empty");
+                    tenzro_payments::x402::IdempotencyLedger::new()
+                }
+            }
+        } else {
+            warn!(
+                "x402 idempotency ledger without persistent storage — replay protection \
+                 resets on restart"
+            );
+            tenzro_payments::x402::IdempotencyLedger::new()
+        };
+        x402_builder = x402_builder.with_idempotency_ledger(Arc::new(idempotency_ledger));
+
+        let x402_server = Arc::new(x402_builder);
         gateway.register_protocol(x402_server.clone());
         self.x402_server = Some(x402_server);
+
+        // x402 Bazaar resource catalog — RocksDB-backed when storage is up,
+        // hydrating any previously-registered listings on boot; in-memory
+        // otherwise (storage-less test/dev node).
+        let catalog = if let Some(storage) = &self.storage {
+            let store = Arc::new(crate::bazaar_store::NodeResourceCatalogStore::new(
+                storage.clone() as Arc<dyn KvStore>,
+            ));
+            match tenzro_payments::x402::ResourceCatalog::with_store(store) {
+                Ok(c) => {
+                    info!("x402 Bazaar catalog hydrated: {} listings", c.len());
+                    Arc::new(c)
+                }
+                Err(e) => {
+                    warn!("x402 Bazaar catalog hydration failed ({e}); starting empty");
+                    Arc::new(tenzro_payments::x402::ResourceCatalog::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_payments::x402::ResourceCatalog::new())
+        };
+        self.bazaar_catalog = Some(catalog);
+
+        // Distributed database registry — RocksDB-backed when storage is up,
+        // hydrating every database this node serves on boot; in-memory
+        // otherwise (storage-less test/dev node).
+        let database_registry = if let Some(storage) = &self.storage {
+            match tenzro_database::DatabaseRegistry::with_storage(storage.clone() as Arc<dyn KvStore>)
+            {
+                Ok(reg) => {
+                    info!("Database registry hydrated: {} databases", reg.list_databases().len());
+                    Arc::new(reg)
+                }
+                Err(e) => {
+                    warn!("Database registry hydration failed ({e}); starting empty");
+                    Arc::new(tenzro_database::DatabaseRegistry::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_database::DatabaseRegistry::new())
+        };
+        self.database_registry = Some(database_registry);
+
+        // Engine backends: link the concrete drivers the operator wired up in
+        // `[databases]` config (external Postgres/Qdrant/Valkey by URL, embedded
+        // Lance/Tantivy under {data_dir}/databases/). A node with no database
+        // config serves no engines and the query path answers with a routing
+        // error — never a panic.
+        let engine_registry = crate::db_engines::build_registry_from_config(
+            &self.config.databases,
+            &self.config.data_dir,
+        );
+        let engine_ids = engine_registry.serving_engine_ids();
+        if engine_ids.is_empty() {
+            info!("Database engine registry: no engines configured");
+        } else {
+            info!("Database engine registry serving: {}", engine_ids.join(", "));
+        }
+        self.db_engine_registry = Arc::new(engine_registry);
 
         // Register Visa TAP server (RFC 9421 HTTP Message Signatures).
         //
@@ -8086,7 +8401,12 @@ impl TenzroNode {
         // served-models snapshot is re-read from the live `Arc<DashMap>` at
         // each tick.
         if self.config.roles.is_provider() || self.config.roles.is_validator() {
-            let mut hardware = tenzro_types::HardwareCapabilities::detect();
+            // The probe shells out to vendor tools (nvidia-smi / rocm-smi /
+            // sysctl) synchronously — keep it off the async executor.
+            let mut hardware =
+                tokio::task::spawn_blocking(tenzro_types::HardwareCapabilities::detect)
+                    .await
+                    .unwrap_or_default();
             // `config.tee_enabled` is the operator's intent; presence of an
             // initialized `tee_provider` means the runtime probe at startup
             // succeeded. Both must hold before we advertise TEE availability
@@ -8154,6 +8474,26 @@ impl TenzroNode {
                 None
             };
 
+            // Advertised serving capacity: read the node's own registered
+            // provider entry if it has one, else fall back to the default
+            // envelope. Only the numeric throughput/concurrency subset is
+            // carried on gossip.
+            let mut capacity = self
+                .provider_manager
+                .as_ref()
+                .and_then(|pm| {
+                    Address::from_hex(provider_address.strip_prefix("0x").unwrap_or(&provider_address))
+                        .ok()
+                        .and_then(|addr| pm.get_provider(&addr).ok())
+                })
+                .map(|p| p.capacity.advertised())
+                .unwrap_or_else(|| tenzro_types::ProviderCapacity::default().advertised());
+            // The built-in llama.cpp runtime reads raw logits in-process, so
+            // any AI-serving node can produce TOPLOC commitments without
+            // configuration. Models served through external engines return
+            // no commitment per-request regardless of this flag.
+            capacity.verifiable_inference = self.config.roles.serves_ai();
+
             let ctx = crate::event_loop::ProviderAnnouncementContext {
                 hardware,
                 geography: self.config.geography.clone(),
@@ -8163,15 +8503,23 @@ impl TenzroNode {
                 rpc_endpoint,
                 ttl_secs: 120,
                 cluster_profile,
+                capacity,
             };
             event_loop = event_loop.with_provider_announcement(ctx);
         }
 
         // A storage-serving node opts into HRW shard self-selection: inbound
         // shard-replication requests are ranked against its local membership
-        // view and the top-`R` shards for this node are pinned locally.
+        // view and the top-`R` shards for this node are pinned locally. The
+        // mDNS-discovered local-peer set lets self-selection fill replicas
+        // from the caller's own LAN segment before spilling onto the wider
+        // network — the local-machine → LAN-cluster → network progression the
+        // model-serving tier uses, applied to shard placement.
         if self.config.roles.serves_storage() {
             event_loop = event_loop.with_storage_replicas(DEFAULT_STORAGE_REPLICAS);
+            if let Some(lp) = self.local_peers() {
+                event_loop = event_loop.with_local_peers(lp);
+            }
         }
 
         // Wire the snapshot ABCI store so the finality hook produces a
@@ -8286,6 +8634,45 @@ impl TenzroNode {
         // but do NOT replay the refill (that would double-spend).
         let event_loop = if let Some(seed_agents) = self.seed_agent_manager.clone() {
             event_loop.with_seed_agent_manager(seed_agents)
+        } else {
+            event_loop
+        };
+
+        // Wire the distributed-database registry so the event loop can upsert
+        // descriptors received over the tenzro/databases gossipsub topic into
+        // the same registry the RPC handlers serve from. Upserts are idempotent
+        // and metadata-only — the receiver is not a partition holder, so it
+        // records the origin's authoritative descriptor without recomputing
+        // placement.
+        let event_loop = if let Some(db_registry) = self.database_registry.clone() {
+            event_loop.with_database_registry(db_registry)
+        } else {
+            event_loop
+        };
+
+        // Wire the work-gated reward engine so the event loop can record
+        // per-block consensus participation (proposer + QC signers) and, at
+        // epoch boundaries, ingest cumulative provider usage as InferenceServed
+        // work before closing the epoch and minting reward coupons.
+        let event_loop = if let Some(rewards) = self.reward_engine.clone() {
+            event_loop.with_reward_engine(rewards)
+        } else {
+            event_loop
+        };
+
+        // Wire the sponsorship manager so the event loop can run the slot
+        // expiry sweep at epoch boundaries, returning lapsed foundation
+        // delegations to the revolving pool.
+        let event_loop = if let Some(sponsorship) = self.sponsorship_manager.clone() {
+            event_loop.with_sponsorship_manager(sponsorship)
+        } else {
+            event_loop
+        };
+
+        // Wire the usage tracker so epoch-boundary reward metering can read
+        // cumulative per-provider revenue for InferenceServed work credit.
+        let event_loop = if let Some(usage) = self.usage_tracker.clone() {
+            event_loop.with_usage_tracker(usage)
         } else {
             event_loop
         };
@@ -9198,6 +9585,60 @@ impl TenzroNode {
                     "SeedAgent discovery wired to gossipsub"
                 );
             }
+
+            // Wire the distributed-database gossipsub bridge: subscribe to
+            // `tenzro/databases` and forward opaque payloads to the event loop
+            // for decode + idempotent upsert into the local `DatabaseRegistry`.
+            // Only network-tier create/rescale events ride this topic; local-
+            // and LAN-tier databases have no network holders to announce.
+            {
+                let event_tx_db = event_loop.event_sender();
+                let net_db = network.clone();
+                let topic_owned = tenzro_database::DATABASES_TOPIC.to_string();
+                tokio::spawn(async move {
+                    match net_db.subscribe(&topic_owned).await {
+                        Ok(mut rx) => {
+                            tracing::info!(
+                                topic = %topic_owned,
+                                "Database: subscribed to gossipsub topic"
+                            );
+                            while let Some(msg) = rx.recv().await {
+                                if let tenzro_network::MessagePayload::Custom { topic, data } =
+                                    msg.payload
+                                {
+                                    if topic != topic_owned {
+                                        continue;
+                                    }
+                                    if let Err(e) = event_tx_db
+                                        .send(NodeEvent::DatabaseGossipReceived {
+                                            topic: topic.clone(),
+                                            bytes: data,
+                                        })
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            "Failed to forward database gossip to event loop: {}",
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                topic = %topic_owned,
+                                error = %e,
+                                "Failed to subscribe to database gossipsub topic"
+                            );
+                        }
+                    }
+                });
+                info!(
+                    topic = tenzro_database::DATABASES_TOPIC,
+                    "Database discovery wired to gossipsub"
+                );
+            }
         }
 
         // Spawn the event loop in the background
@@ -9308,6 +9749,22 @@ impl TenzroNode {
         self.x402_server.as_ref()
     }
 
+    /// Returns the x402 Bazaar resource catalog if the payment gateway is up.
+    pub fn bazaar_catalog(&self) -> Option<&Arc<tenzro_payments::x402::ResourceCatalog>> {
+        self.bazaar_catalog.as_ref()
+    }
+
+    /// Returns the distributed database registry if initialized.
+    pub fn database_registry(&self) -> Option<&Arc<tenzro_database::DatabaseRegistry>> {
+        self.database_registry.as_ref()
+    }
+
+    /// Returns the live database-engine backend registry (always present, may be
+    /// empty if this node links no engine driver).
+    pub fn db_engine_registry(&self) -> &Arc<crate::db_engine_registry::EngineRegistry> {
+        &self.db_engine_registry
+    }
+
     /// Returns the model registry if initialized
     pub fn model_registry(&self) -> Option<&Arc<ModelRegistry>> {
         self.model_registry.as_ref()
@@ -9318,6 +9775,23 @@ impl TenzroNode {
     /// per-provider health, reputation, and circuit-breaker state.
     pub fn provider_manager(&self) -> Option<&Arc<ProviderManager>> {
         self.provider_manager.as_ref()
+    }
+
+    /// This node's own provider wallet address: the first identity-registry
+    /// entry's wallet when one is provisioned, else the address derived from
+    /// the announce signer's Ed25519 public key. Same derivation the
+    /// provider-announcement context uses, so self-installed provider
+    /// entries (e.g. MoE expert-shard declarations) key to the identical
+    /// address remote peers see on gossip.
+    pub(crate) fn self_provider_address(&self) -> Option<Address> {
+        self.identity_registry
+            .as_ref()
+            .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+            .or_else(|| {
+                self.announce_signer
+                    .as_ref()
+                    .and_then(|s| announce_signer_wallet_address(s.as_ref()))
+            })
     }
 
     /// Returns the inference router if initialized. Wired into the web
@@ -9334,6 +9808,12 @@ impl TenzroNode {
     /// router with the node's RPC dispatcher).
     pub fn inference_router_arc(&self) -> Option<Arc<InferenceRouter>> {
         self.inference_router.clone()
+    }
+
+    /// Returns the meta-router (intent → model) if initialized. Read by the
+    /// `tenzro_routeIntent` and `tenzro_chatByIntent` RPC handlers.
+    pub fn meta_router(&self) -> Option<&Arc<tenzro_model::meta_router::MetaRouter>> {
+        self.meta_router.as_ref()
     }
 
     /// Owned clone of the shared `ModelRuntime` Arc. The runtime is
@@ -9799,6 +10279,17 @@ impl TenzroNode {
         self.compute_bond_manager.as_ref()
     }
 
+    /// Returns the verifiable-inference commitment store + challenge
+    /// manager if initialized. `Some` only when RocksDB storage is
+    /// available. Read by the chat/inference handlers (commitment
+    /// write path) and the `tenzro_*Inference{Commitment,Challenge}`
+    /// RPC handlers.
+    pub fn challenge_manager(
+        &self,
+    ) -> Option<&Arc<crate::inference_challenge::ChallengeManager>> {
+        self.challenge_manager.as_ref()
+    }
+
     /// Returns the SLA fault detector if initialized. `Some` only on
     /// validator-role nodes — the slashing authority requires consensus
     /// participation. Read by the `tenzro_sla*` RPC handlers.
@@ -9938,6 +10429,21 @@ impl TenzroNode {
         &self,
     ) -> Option<&Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>> {
         self.seed_agent_manager.as_ref()
+    }
+
+    /// Returns the work-gated reward engine.
+    pub fn reward_engine(&self) -> Option<&Arc<tenzro_token::RewardEngine>> {
+        self.reward_engine.as_ref()
+    }
+
+    /// Returns the vesting manager (reward / grant / contributor schedules).
+    pub fn vesting_manager(&self) -> Option<&Arc<tenzro_token::VestingManager>> {
+        self.vesting_manager.as_ref()
+    }
+
+    /// Returns the foundation sponsorship manager.
+    pub fn sponsorship_manager(&self) -> Option<&Arc<tenzro_token::SponsorshipManager>> {
+        self.sponsorship_manager.as_ref()
     }
 
     /// Returns the SeedAgent provisioning daemon (Spec 10 Task #42). `None`
@@ -10084,7 +10590,7 @@ impl TenzroNode {
     }
 
     /// Node iroh resolver (single content-addressed endpoint). `None` until
-    /// startup binds it. Used by storage-market producers to read the local
+    /// startup binds it. Used by storage-provider producers to read the local
     /// `EndpointId` when broadcasting shard-replication requests.
     pub fn iroh_resolver(&self) -> Option<&Arc<tenzro_iroh::IrohBackedResolver>> {
         self.iroh_resolver.as_ref()
@@ -10596,8 +11102,12 @@ impl TenzroNode {
             .and_then(|v| v.as_str())
             .unwrap_or(model_id)
             .to_string();
+        let api_key = record
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-        let engine = match ExternalEngine::new(kind, base_url, upstream_model, None) {
+        let engine = match ExternalEngine::new(kind, base_url, upstream_model, api_key) {
             Ok(e) => e,
             Err(e) => {
                 warn!(
@@ -10742,7 +11252,7 @@ impl TenzroNode {
                                             let gpu_vram = profile
                                                 .gpus
                                                 .first()
-                                                .map(|g| g.vram_gb)
+                                                .map(|g| g.vram_gb as f64)
                                                 .unwrap_or(0.0);
                                             let has_gpu = !profile.gpus.is_empty()
                                                 && gpu_vram > 0.0;
@@ -10809,6 +11319,12 @@ impl TenzroNode {
                 self.load_tracker.unregister_model(model_id);
                 if let Some(ref storage) = self.storage {
                     let _ = storage.delete(CF_MODELS, model_id.as_bytes());
+                }
+                // A hydrated ModelRegistry row from the previous process
+                // lifetime would still say Active — flip it so routing stops
+                // considering a model this node can no longer serve.
+                if let Some(ref registry) = self.model_registry {
+                    let _ = registry.deactivate_model(model_id);
                 }
                 cleared_models += 1;
 
@@ -11240,8 +11756,13 @@ pub async fn detect_hardware(data_dir: &std::path::Path) -> Result<HardwareProfi
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
 
-    // GPU detection
-    let gpus = detect_gpus(&os).await;
+    // GPU detection — shared probe (nvidia-smi / rocm-smi / Apple unified
+    // memory) with vendor, compute capability, and FP8/FP4 derivation. The
+    // probe shells out synchronously, so run it off the async executor.
+    let gpus = tokio::task::spawn_blocking(tenzro_types::HardwareCapabilities::detect)
+        .await
+        .map(|caps| caps.gpus)
+        .unwrap_or_default();
 
     // TEE detection
     let (tee_available, tee_vendor) = match detect_tee().await {
@@ -11276,102 +11797,6 @@ pub async fn detect_hardware(data_dir: &std::path::Path) -> Result<HardwareProfi
         arch,
         device_fingerprint,
     })
-}
-
-/// Detect GPUs on the system
-async fn detect_gpus(os: &str) -> Vec<GpuInfo> {
-    let mut gpus = Vec::new();
-
-    match os {
-        "macos" => {
-            // Use system_profiler to get GPU info
-            if let Ok(output) = tokio::process::Command::new("system_profiler")
-                .args(["SPDisplaysDataType", "-json"])
-                .output()
-                .await
-                && output.status.success()
-                    && let Ok(json_str) = String::from_utf8(output.stdout)
-                        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str)
-                            && let Some(displays) = json.get("SPDisplaysDataType").and_then(|v| v.as_array()) {
-                                for display in displays {
-                                    if let Some(chipset) = display.get("sppci_model").and_then(|v| v.as_str()) {
-                                        // Try to extract VRAM
-                                        let vram_str = display.get("sppci_vram").and_then(|v| v.as_str()).unwrap_or("0 MB");
-                                        let vram_gb = parse_vram(vram_str);
-
-                                        gpus.push(GpuInfo {
-                                            name: chipset.to_string(),
-                                            vram_gb,
-                                        });
-                                    }
-                                }
-                            }
-        }
-        "linux" => {
-            // Try nvidia-smi first
-            if let Ok(output) = tokio::process::Command::new("nvidia-smi")
-                .args(["--query-gpu=name,memory.total", "--format=csv,noheader"])
-                .output()
-                .await
-                && output.status.success()
-                    && let Ok(stdout) = String::from_utf8(output.stdout) {
-                        for line in stdout.lines() {
-                            let parts: Vec<&str> = line.split(',').collect();
-                            if parts.len() >= 2 {
-                                let name = parts[0].trim().to_string();
-                                let vram_str = parts[1].trim();
-                                let vram_gb = parse_vram(vram_str);
-
-                                gpus.push(GpuInfo { name, vram_gb });
-                            }
-                        }
-                    }
-
-            // If no NVIDIA GPUs found, check /proc for other info
-            if gpus.is_empty()
-                && let Ok(entries) = std::fs::read_dir("/proc/driver") {
-                    for entry in entries.flatten() {
-                        if entry.file_name() == "nvidia" {
-                            // NVIDIA driver exists but nvidia-smi failed
-                            gpus.push(GpuInfo {
-                                name: "NVIDIA GPU (details unavailable)".to_string(),
-                                vram_gb: 0.0,
-                            });
-                        }
-                    }
-                }
-        }
-        _ => {
-            // Windows or other platforms - not implemented
-        }
-    }
-
-    gpus
-}
-
-/// Parse VRAM string to GB (handles formats like "8 GB", "8192 MB", etc.)
-fn parse_vram(vram_str: &str) -> f64 {
-    let cleaned = vram_str.trim().to_lowercase();
-
-    if let Some(gb_pos) = cleaned.find("gb") {
-        let num_str = &cleaned[..gb_pos].trim();
-        num_str.parse::<f64>().unwrap_or(0.0)
-    } else if let Some(mb_pos) = cleaned.find("mb") {
-        let num_str = &cleaned[..mb_pos].trim();
-        let mb = num_str.parse::<f64>().unwrap_or(0.0);
-        mb / 1024.0
-    } else if let Some(mib_pos) = cleaned.find("mib") {
-        let num_str = &cleaned[..mib_pos].trim();
-        let mib = num_str.parse::<f64>().unwrap_or(0.0);
-        mib / 1024.0
-    } else {
-        // Try to parse as plain number (assume MB)
-        cleaned.split_whitespace()
-            .next()
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|mb| mb / 1024.0)
-            .unwrap_or(0.0)
-    }
 }
 
 /// Node status information
@@ -11412,4 +11837,8 @@ pub struct NodeStatus {
     /// only admitted once this reaches a tier that `can_serve`; the request
     /// router prefers `direct` providers over `relay_only` ones.
     pub reachability: Option<String>,
+    /// libp2p peer id of this node in base-58 form, or `None` when the network
+    /// service is not running. Dialers use this to construct a
+    /// `/p2p/<peer_id>` boot-node multiaddr targeting this node.
+    pub self_peer_id: Option<String>,
 }

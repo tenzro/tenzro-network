@@ -39,9 +39,10 @@ use tenzro_iroh::{
 };
 use tenzro_model::{
     combine_expert_outputs, to_token_routing, ExpertBatch, ExpertExecuteRequest,
-    ExpertExecuteResponse, MoeExpertRuntime, RoutedToken,
+    ExpertExecuteResponse, MoeExpertRuntime, MoeExtractor, MoeTensorNaming, RoutedToken,
 };
 use tenzro_types::tenzro_uri::TenzroUri;
+use tenzro_types::{MoeExpertHolding, MoeExpertResidency};
 
 use crate::node::TenzroNode;
 use crate::rpc::JsonRpcError;
@@ -253,6 +254,43 @@ fn routed_to_json(routed: &[RoutedToken]) -> Vec<Value> {
 // Expert-holder RPC handlers (load / unload / status / route / execute)
 // ---------------------------------------------------------------------------
 
+/// Rebuild this node's MoE declaration on the ProviderManager from the
+/// live expert runtime, so the next provider heartbeat gossips the current
+/// holdings and roles to the rest of the network.
+fn sync_moe_declaration(node: &Arc<TenzroNode>) {
+    let Some(pm) = node.provider_manager() else {
+        debug!("MoE declaration sync skipped: no provider manager");
+        return;
+    };
+    let Some(address) = node.self_provider_address() else {
+        warn!("MoE declaration sync skipped: no self provider address");
+        return;
+    };
+    let status = node.moe_runtime.status();
+    let holdings: Vec<MoeExpertHolding> = status
+        .experts
+        .iter()
+        .map(|e| MoeExpertHolding {
+            model_id: e.model_id.clone(),
+            layer: e.layer,
+            expert: e.expert,
+            residency: MoeExpertResidency::Warm,
+            committed_tps: 0,
+        })
+        .collect();
+    let is_router = !status.gates.is_empty();
+    let iroh_endpoint_id = node
+        .iroh_resolver
+        .as_ref()
+        .map(|r| r.endpoint_id().to_string());
+    let config = node.config();
+    let endpoint_url = config
+        .external_rpc_addr
+        .clone()
+        .unwrap_or_else(|| format!("http://{}", config.rpc_addr));
+    pm.set_moe_declaration(address, Some(endpoint_url), holdings, is_router, iroh_endpoint_id);
+}
+
 /// `tenzro_moeExpertLoad` — decode a per-expert safetensors blob
 /// (gate/up/down projections) and admit it into the local expert runtime.
 /// Blob source: inline `blob_base64` or content-addressed `uri`.
@@ -279,6 +317,7 @@ pub(crate) async fn handle_moe_expert_load(
             message: format!("expert load: {e}"),
             data: None,
         })?;
+    sync_moe_declaration(node);
     serde_json::to_value(&row).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("serialize: {e}"),
@@ -310,6 +349,7 @@ pub(crate) async fn handle_moe_gate_load(
             message: format!("gate load: {e}"),
             data: None,
         })?;
+    sync_moe_declaration(node);
     serde_json::to_value(&row).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("serialize: {e}"),
@@ -327,6 +367,9 @@ pub(crate) async fn handle_moe_expert_unload(
     let layer = req_u32(&p, "layer")?;
     let expert = req_u32(&p, "expert")?;
     let removed = node.moe_runtime.unload_expert(model_id, layer, expert);
+    if removed {
+        sync_moe_declaration(node);
+    }
     Ok(json!({
         "model_id": model_id,
         "layer": layer,
@@ -344,6 +387,9 @@ pub(crate) async fn handle_moe_gate_unload(
     let model_id = req_str(&p, "model_id")?;
     let layer = req_u32(&p, "layer")?;
     let removed = node.moe_runtime.unload_gate(model_id, layer);
+    if removed {
+        sync_moe_declaration(node);
+    }
     Ok(json!({
         "model_id": model_id,
         "layer": layer,
@@ -424,6 +470,220 @@ pub(crate) async fn handle_moe_execute(
             data: None,
         })?;
     serde_json::to_value(&resp).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize: {e}"),
+        data: None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Registry-native expert extraction (tenzro_moePrepareExperts)
+// ---------------------------------------------------------------------------
+
+/// One published expert blob produced by a prepare job.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MoePreparedExpert {
+    pub expert: u32,
+    pub uri: String,
+    pub bytes: u64,
+}
+
+/// The published gating-network blob produced by a prepare job.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MoePreparedGate {
+    pub uri: String,
+    pub bytes: u64,
+}
+
+/// Background expert-extraction job snapshot, keyed by job id in
+/// `TenzroNode::moe_prepare_jobs` and read by `tenzro_moePrepareStatus`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MoePrepareJob {
+    pub model_id: String,
+    pub layer: u32,
+    /// "running" | "completed" | "failed"
+    pub state: String,
+    pub error: Option<String>,
+    pub total_experts: u32,
+    pub completed_experts: u32,
+    pub experts: Vec<MoePreparedExpert>,
+    pub gate: Option<MoePreparedGate>,
+}
+
+/// `tenzro_moePrepareExperts` — extract per-expert (and optionally gate)
+/// safetensors blobs for a catalog MoE model directly from its original
+/// checkpoint via HTTP-Range tensor fetches, publish each blob into the
+/// iroh blob store, and return a job id. Progress and the resulting
+/// `tenzro://blob/` URIs are read back with `tenzro_moePrepareStatus`;
+/// the URIs feed `tenzro_moeExpertLoad` / `tenzro_moeGateLoad` on any
+/// node in the network.
+pub(crate) async fn handle_moe_prepare_experts(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let p = params.unwrap_or(json!({}));
+    let model_id = req_str(&p, "model_id")?.to_string();
+    let layer = req_u32(&p, "layer")?;
+    let include_gate = p.get("include_gate").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let entry = tenzro_model::catalog::get_model_by_id(&model_id).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("unknown catalog model_id: {model_id}"),
+        data: None,
+    })?;
+    let shape = entry.moe.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("{model_id} is not a MoE catalog entry"),
+        data: None,
+    })?;
+    let repo =
+        tenzro_model::catalog::moe_safetensors_repo(&model_id).ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("no safetensors checkpoint source mapped for {model_id}"),
+            data: None,
+        })?;
+    let naming =
+        MoeTensorNaming::for_architecture(entry.architecture).ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!(
+                "no MoE tensor-naming scheme for architecture {:?}",
+                entry.architecture
+            ),
+            data: None,
+        })?;
+    let resolver = node
+        .iroh_resolver
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "iroh resolver not bound — cannot publish expert blobs".into(),
+            data: None,
+        })?;
+
+    let expert_ids: Vec<u32> = match p.get("experts").and_then(|v| v.as_array()) {
+        Some(arr) => {
+            let mut ids = Vec::with_capacity(arr.len());
+            for v in arr {
+                let id = v.as_u64().ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "experts must be an array of integers".into(),
+                    data: None,
+                })? as u32;
+                if id >= shape.num_experts {
+                    return Err(JsonRpcError {
+                        code: -32602,
+                        message: format!(
+                            "expert {id} out of range: {model_id} has {} experts",
+                            shape.num_experts
+                        ),
+                        data: None,
+                    });
+                }
+                ids.push(id);
+            }
+            ids
+        }
+        None => (0..shape.num_experts).collect(),
+    };
+
+    let total_experts = expert_ids.len();
+    let job_id = uuid::Uuid::new_v4().to_string();
+    node.moe_prepare_jobs.insert(
+        job_id.clone(),
+        MoePrepareJob {
+            model_id: model_id.clone(),
+            layer,
+            state: "running".into(),
+            error: None,
+            total_experts: total_experts as u32,
+            completed_experts: 0,
+            experts: Vec::new(),
+            gate: None,
+        },
+    );
+
+    let jobs = Arc::clone(&node.moe_prepare_jobs);
+    let spawn_job_id = job_id.clone();
+    tokio::spawn(async move {
+        let outcome: Result<(), String> = async {
+            let mut extractor = MoeExtractor::open(repo, naming)
+                .await
+                .map_err(|e| format!("open {repo}: {e}"))?;
+            for expert in &expert_ids {
+                let blob = extractor
+                    .expert_blob(layer, *expert)
+                    .await
+                    .map_err(|e| format!("expert {expert}: {e}"))?;
+                let len = blob.len() as u64;
+                let uri = resolver
+                    .publish_bytes(Bytes::from(blob))
+                    .await
+                    .map_err(|e| format!("publish expert {expert}: {e}"))?;
+                if let Some(mut job) = jobs.get_mut(&spawn_job_id) {
+                    job.completed_experts += 1;
+                    job.experts.push(MoePreparedExpert {
+                        expert: *expert,
+                        uri: uri.to_string(),
+                        bytes: len,
+                    });
+                }
+            }
+            if include_gate {
+                let blob = extractor
+                    .gate_blob(layer)
+                    .await
+                    .map_err(|e| format!("gate: {e}"))?;
+                let len = blob.len() as u64;
+                let uri = resolver
+                    .publish_bytes(Bytes::from(blob))
+                    .await
+                    .map_err(|e| format!("publish gate: {e}"))?;
+                if let Some(mut job) = jobs.get_mut(&spawn_job_id) {
+                    job.gate = Some(MoePreparedGate {
+                        uri: uri.to_string(),
+                        bytes: len,
+                    });
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Some(mut job) = jobs.get_mut(&spawn_job_id) {
+            match outcome {
+                Ok(()) => job.state = "completed".into(),
+                Err(e) => {
+                    warn!("MoE prepare job {spawn_job_id} failed: {e}");
+                    job.state = "failed".into();
+                    job.error = Some(e);
+                }
+            }
+        }
+    });
+
+    Ok(json!({
+        "job_id": job_id,
+        "model_id": model_id,
+        "layer": layer,
+        "total_experts": total_experts,
+        "include_gate": include_gate,
+        "state": "running",
+    }))
+}
+
+/// `tenzro_moePrepareStatus` — snapshot of one prepare job by id.
+pub(crate) async fn handle_moe_prepare_status(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let p = params.unwrap_or(json!({}));
+    let job_id = req_str(&p, "job_id")?;
+    let job = node.moe_prepare_jobs.get(job_id).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("unknown prepare job: {job_id}"),
+        data: None,
+    })?;
+    serde_json::to_value(&*job).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("serialize: {e}"),
         data: None,

@@ -20,11 +20,11 @@ ephemeral Ed25519 trainer key per run unless ``--seed-file`` is provided.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
 import sys
+import time
 from typing import Any
 
 from tenzro_trainer.gradient import (
@@ -41,6 +41,7 @@ from tenzro_trainer.inner_loop import (
     load_partial_state,
     run_inner_loop,
 )
+from tenzro_trainer.distributed import DistContext
 from tenzro_trainer.rpc_bridge import RpcClient, RpcError, pretty
 from tenzro_trainer.types import OuterGradient, PipelineAssignment, TrainingTaskSpec
 
@@ -62,16 +63,26 @@ def _load_key(seed_path: str | None) -> TrainerKey:
     return TrainerKey.generate()
 
 
-def _trainer_address_from_did(trainer_did: str) -> bytes:
-    """Derive a 32-byte ``Address`` from a DID string.
+def _wait_for_round(
+    rpc: RpcClient, task_id: str, round_index: int, timeout_secs: float
+) -> bool:
+    """Block until the syncer's ``current_round`` reaches ``round_index``.
 
-    Phase 1 trick: hash the DID. The Rust syncer doesn't enforce a binding
-    between DID and address yet (Open tier) — the address is just a recipient
-    pointer for any pro-rata reward distribution at receipt time. Verified /
-    Confidential tiers will replace this with the wallet address bound to the
-    trainer's TDIP identity.
+    The syncer accepts gradients only for its current round
+    (``accept_outer_gradient`` rejects future rounds with ``InvalidRound``),
+    so a trainer must pace its loop on round finalization rather than
+    free-running. Transient RPC failures are retried until the deadline.
     """
-    return hashlib.sha256(trainer_did.encode("utf-8")).digest()
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        try:
+            run = rpc.get_run(task_id)
+            if run["current_round"] >= round_index:
+                return True
+        except RpcError as e:
+            log.warning("get_run poll failed (retrying): %s", e)
+        time.sleep(2.0)
+    return False
 
 
 def _build_adapter_for_modality(
@@ -120,8 +131,21 @@ def cmd_enroll(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     rpc = RpcClient(url=args.rpc_url, timeout_secs=args.timeout)
+    # The shard resolver reads TENZRO_RPC_URL so tenzro:// shard fetches
+    # go through the same node this run enrolls with.
+    os.environ["TENZRO_RPC_URL"] = args.rpc_url
     key = _load_key(args.seed_file)
-    address = _trainer_address_from_did(args.trainer_did)
+    # The syncer's signature binding requires trainer_address to BE the
+    # trainer's Ed25519 public key: accept_outer_gradient rejects any
+    # submission where signature.public_key != trainer_address.
+    address = key.public_key_bytes
+
+    # Under torchrun every rank runs the full loop (the FSDP2 collectives
+    # require it) but only rank 0 speaks JSON-RPC — the node sees one
+    # trainer per DID, not one per process.
+    ctx = DistContext.detect()
+    if ctx.enabled:
+        log.info("distributed run: rank %d of %d", ctx.rank, ctx.world_size)
 
     # 1. Pull + parse the task spec.
     try:
@@ -141,14 +165,29 @@ def cmd_run(args: argparse.Namespace) -> int:
     inner_steps = spec.inner_steps
     max_rounds = spec.max_rounds
 
-    # 2. Enroll (idempotent on the Rust side).
-    try:
-        rpc.enroll_trainer(args.task_id, args.trainer_did)
-    except RpcError as e:
-        if "already enrolled" not in e.message.lower():
-            log.error("enrollment failed: %s", e)
-            return 1
-        log.info("already enrolled, continuing")
+    # 2. Enroll. Rank 0 only; the barrier guarantees the pipeline
+    # assignment is bound before other ranks re-fetch the run. A rank-0
+    # failure exits non-zero and torchrun tears the remaining ranks down.
+    # Rejoining is tolerated: the syncer's EnrollmentClosed check runs
+    # before its AlreadyEnrolled check, so a trainer that restarts after
+    # quorum promoted the run to Training sees "enrollment closed" — check
+    # the run's trainer set to distinguish a rejoin from a genuine refusal.
+    if ctx.is_primary:
+        try:
+            rpc.enroll_trainer(args.task_id, args.trainer_did)
+        except RpcError as e:
+            msg = e.message.lower()
+            if "already enrolled" in msg:
+                log.info("already enrolled, continuing")
+            elif args.trainer_did in (run_state.get("trainers") or []):
+                log.info("rejoining enrolled run (%s), continuing", e.message)
+            else:
+                log.error("enrollment failed: %s", e)
+                return 1
+    if ctx.enabled:
+        import torch.distributed as dist
+
+        dist.barrier()
 
     # 3. Pipeline assignment. Bound by the Rust runtime at enrollment and
     # surfaced on the run's `pipeline_assignments` map — re-fetch to read it.
@@ -193,6 +232,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 5. Per-round inner loop + outer-gradient submission.
     for round_index in range(max_rounds):
         log.info("--- round %d/%d ---", round_index, max_rounds - 1)
+        if round_index > 0 and ctx.is_primary:
+            # Pace on finalization: the previous round must be finalized
+            # (by the syncer's witness committee or a coordinating peer)
+            # before this round's submissions are acceptable.
+            wait_secs = spec.grace_window_ms / 1000.0 + 60.0
+            if not _wait_for_round(rpc, args.task_id, round_index, wait_secs):
+                log.error(
+                    "round %d was not finalized within %.0fs — aborting",
+                    round_index - 1,
+                    wait_secs,
+                )
+                return 1
         scheduler.on_round_start(model)
         # ADF-LoRA alternating freeze: under AggregationRule::LoraAlternating
         # the adapter freezes one low-rank factor this round so the delta is a
@@ -251,18 +302,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             inner_step_count=(round_index + 1) * inner_steps,
             key=key,
         )
-        for g in gradients:
-            try:
-                rpc.submit_outer_gradient(g)
-                log.info(
-                    "fragment %d submitted: sha256=%s, %d bytes",
-                    g.fragment,
-                    g.safetensors_hash.hex()[:16],
-                    g.payload_bytes,
-                )
-            except RpcError as e:
-                log.error("fragment %d submit failed: %s", g.fragment, e)
-                return 1
+        if ctx.is_primary:
+            for g in gradients:
+                try:
+                    rpc.submit_outer_gradient(g)
+                    log.info(
+                        "fragment %d submitted: sha256=%s, %d bytes",
+                        g.fragment,
+                        g.safetensors_hash.hex()[:16],
+                        g.payload_bytes,
+                    )
+                except RpcError as e:
+                    log.error("fragment %d submit failed: %s", g.fragment, e)
+                    return 1
 
         # Reset each synced fragment to θ⁽⁰⁾, then route the *wire-visible*
         # delta through the scheduler. Immediate mode nets to θ⁽ᴴ⁾ exactly
@@ -359,7 +411,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--shard-uri",
         required=True,
-        help="Shard URI (file:// or scheme-specific). Phase 1 demo adapters accept file:// only.",
+        help="Shard URI. tenzro://blob/<hash> fetches from the node's iroh blob "
+        "store (native); ipfs:// / ar:// / http(s):// resolve through gateways; "
+        "file:// and bare paths pass through.",
     )
     p_run.add_argument(
         "--seed-file",

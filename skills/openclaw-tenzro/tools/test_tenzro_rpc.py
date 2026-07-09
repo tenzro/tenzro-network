@@ -1599,5 +1599,247 @@ class TestCct(unittest.TestCase):
         self.assertEqual(result["type"], "burn_mint")
 
 
+class TestX402Bazaar(unittest.TestCase):
+    @patch("tenzro_rpc.requests.post")
+    def test_protocol_info(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "schemes": ["tenzro-hybrid", "exact-eip3009", "permit2", "erc7710"],
+            "networks": ["tenzro"],
+            "assets": ["TNZO"],
+        })
+        result = tenzro_rpc.x402_protocol_info()
+        self.assertIn("tenzro-hybrid", result["schemes"])
+        args, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_x402ProtocolInfo")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_register_resource(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"listingId": "lst_abc"})
+        result = tenzro_rpc.x402_register_resource(
+            "did:tenzro:machine:seller",
+            "https://api.example.com/forecast",
+            "0xpayto",
+            "1000000000000000000",
+        )
+        self.assertEqual(result["listingId"], "lst_abc")
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(kwargs["json"]["method"], "tenzro_x402RegisterResource")
+        self.assertEqual(params["sellerDid"], "did:tenzro:machine:seller")
+        self.assertEqual(params["payTo"], "0xpayto")
+        self.assertEqual(params["maxAmountRequired"], "1000000000000000000")
+        # Defaults are forwarded.
+        self.assertEqual(params["scheme"], "tenzro-hybrid")
+        self.assertEqual(params["network"], "tenzro")
+        self.assertEqual(params["asset"], "TNZO")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_discover_resources(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "listings": [{"listingId": "lst_abc"}],
+            "count": 1,
+        })
+        result = tenzro_rpc.x402_discover_resources(scheme="tenzro-hybrid")
+        self.assertEqual(result["count"], 1)
+        args, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_x402DiscoverResources")
+        self.assertEqual(kwargs["json"]["params"]["scheme"], "tenzro-hybrid")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_deregister_resource(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"removed": True})
+        result = tenzro_rpc.x402_deregister_resource(
+            "lst_abc", "did:tenzro:machine:seller"
+        )
+        self.assertTrue(result["removed"])
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(kwargs["json"]["method"], "tenzro_x402DeregisterResource")
+        self.assertEqual(params["listingId"], "lst_abc")
+        self.assertEqual(params["sellerDid"], "did:tenzro:machine:seller")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_verify_offer(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "valid": True,
+            "offerCommitment": "0xcommit",
+            "offerSigner": "did:tenzro:machine:seller",
+        })
+        requirement = {"scheme": "tenzro-hybrid", "payTo": "0xpayto"}
+        result = tenzro_rpc.x402_verify_offer(requirement)
+        self.assertTrue(result["valid"])
+        args, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_x402VerifyOffer")
+        self.assertEqual(kwargs["json"]["params"]["requirement"], requirement)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_payment_id(self, mock_post):
+        mock_post.return_value = _mock_rpc_response("pay_deadbeef")
+        result = tenzro_rpc.x402_payment_id(
+            "did:tenzro:machine:payer", offer_commitment="0xcommit"
+        )
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(kwargs["json"]["method"], "tenzro_x402PaymentId")
+        self.assertEqual(params["payerDid"], "did:tenzro:machine:payer")
+        self.assertEqual(params["offerCommitment"], "0xcommit")
+
+
+class TestManagedDatabases(unittest.TestCase):
+    @patch("tenzro_rpc.requests.post")
+    def test_list_engines(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "engines": [
+                {"engine_id": "postgres"},
+                {"engine_id": "qdrant"},
+                {"engine_id": "valkey"},
+                {"engine_id": "lance"},
+                {"engine_id": "tantivy"},
+            ],
+        })
+        result = tenzro_rpc.list_database_engines()
+        self.assertEqual(len(result["engines"]), 5)
+        args, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_listDatabaseEngines")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_create_database(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "database_id": "vecmem",
+            "engine_id": "qdrant",
+            "partitions": 1,
+        })
+        result = tenzro_rpc.create_database(
+            "vecmem", "qdrant", owner_did="did:tenzro:human:owner",
+        )
+        self.assertEqual(result["database_id"], "vecmem")
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(kwargs["json"]["method"], "tenzro_createDatabase")
+        self.assertEqual(params["engine_id"], "qdrant")
+        self.assertEqual(params["owner_did"], "did:tenzro:human:owner")
+        self.assertEqual(params["placement"], "local")
+        # confidential defaults off → key omitted.
+        self.assertNotIn("confidential", params)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_create_confidential_database(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"database_id": "secrets"})
+        tenzro_rpc.create_database(
+            "secrets", "postgres", owner_did="did:tenzro:human:owner",
+            confidential=True,
+        )
+        args, kwargs = mock_post.call_args
+        self.assertTrue(kwargs["json"]["params"]["confidential"])
+
+    @patch("tenzro_rpc.requests.post")
+    def test_get_database(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"database_id": "vecmem"})
+        result = tenzro_rpc.get_database("vecmem")
+        self.assertEqual(result["database_id"], "vecmem")
+        args, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_getDatabase")
+        self.assertEqual(kwargs["json"]["params"]["database_id"], "vecmem")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_databases(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"databases": []})
+        tenzro_rpc.list_databases()
+        args, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_listDatabases")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_partitions(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"partitions": [{"index": 0}]})
+        result = tenzro_rpc.list_database_partitions("vecmem")
+        self.assertEqual(len(result["partitions"]), 1)
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_listDatabasePartitions"
+        )
+        self.assertEqual(kwargs["json"]["params"]["database_id"], "vecmem")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_get_partition(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"index": 0, "holders": []})
+        tenzro_rpc.get_database_partition("vecmem", 0)
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(kwargs["json"]["method"], "tenzro_getDatabasePartition")
+        self.assertEqual(params["partition_index"], 0)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_issue_connection(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"token": "conn_abc"})
+        result = tenzro_rpc.issue_database_connection(
+            "vecmem", "did:tenzro:human:owner",
+        )
+        self.assertEqual(result["token"], "conn_abc")
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_issueDatabaseConnection"
+        )
+        self.assertEqual(params["caller_did"], "did:tenzro:human:owner")
+        self.assertFalse(params["write"])
+
+    @patch("tenzro_rpc.requests.post")
+    def test_database_query(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "served_here": True,
+            "result": {"rows": []},
+        })
+        body = {"op": "search", "vector": [0.1, 0.2]}
+        result = tenzro_rpc.database_query(
+            "vecmem", "did:tenzro:human:owner", body,
+        )
+        self.assertTrue(result["served_here"])
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(kwargs["json"]["method"], "tenzro_databaseQuery")
+        self.assertEqual(params["body"], body)
+        self.assertEqual(params["partition_index"], 0)
+        self.assertFalse(params["write"])
+
+    @patch("tenzro_rpc.requests.post")
+    def test_authorize_read(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "authorized": True, "reason": "owner",
+        })
+        result = tenzro_rpc.authorize_database_read(
+            "vecmem", "did:tenzro:human:owner",
+        )
+        self.assertTrue(result["authorized"])
+        args, kwargs = mock_post.call_args
+        self.assertEqual(
+            kwargs["json"]["method"], "tenzro_authorizeDatabaseRead"
+        )
+
+    @patch("tenzro_rpc.requests.post")
+    def test_rescale_database(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "database_id": "vecmem", "placement": "lan_cluster",
+        })
+        tenzro_rpc.rescale_database(
+            "vecmem", "did:tenzro:human:owner", "lan_cluster",
+            partitions=3, replicas=2,
+        )
+        args, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(kwargs["json"]["method"], "tenzro_rescaleDatabase")
+        self.assertEqual(params["placement"], "lan_cluster")
+        self.assertEqual(params["partitions"], 3)
+        self.assertEqual(params["replicas"], 2)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_drop_database(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"removed": True})
+        result = tenzro_rpc.drop_database("vecmem")
+        self.assertTrue(result["removed"])
+        args, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_dropDatabase")
+        self.assertEqual(kwargs["json"]["params"]["database_id"], "vecmem")
+
+
 if __name__ == "__main__":
     unittest.main()

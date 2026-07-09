@@ -48,9 +48,9 @@ use tenzro_types::primitives::Address;
 ///
 /// The version segment is required by libp2p's `StreamProtocol` rules
 /// (third-party / external surface). Internal Tenzro identifiers (gossipsub
-/// topics, JSON-RPC methods, the `DA_COMMITTEE_PROTOCOL` tag in the node layer)
-/// intentionally omit version segments per the project's identifier
-/// conventions; this constant is the libp2p exception.
+/// topics, JSON-RPC methods, signing domain tags) intentionally omit version
+/// segments per the project's identifier conventions; this constant is the
+/// libp2p exception.
 pub const DA_COMMITTEE_PROTOCOL: &str = "/tenzro/da/committee/1.0.0";
 
 /// Per-peer inbound concurrent stream cap. Overflow MUST be rejected with

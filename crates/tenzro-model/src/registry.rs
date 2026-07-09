@@ -652,6 +652,7 @@ mod tests {
             pricing: PricingConfig::default(),
             status: ModelStatus::Active,
             metadata: Default::default(),
+            size_bytes: 0,
             moe: None,
             timeseries: None,
             vision: None,

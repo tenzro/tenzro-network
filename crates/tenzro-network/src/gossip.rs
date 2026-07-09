@@ -55,6 +55,9 @@ impl GossipTopics {
         // SeedAgent (Spec 10) — provisioning lifecycle, refill, sunset
         topics.insert("seed_agents".to_string(), IdentTopic::new("tenzro/seed-agents"));
 
+        // Distributed database registration and rescale events
+        topics.insert("databases".to_string(), IdentTopic::new("tenzro/databases"));
+
         Self { topics }
     }
 
@@ -136,6 +139,11 @@ impl GossipTopics {
     /// SeedAgent lifecycle topic (Spec 10)
     pub fn seed_agents(&self) -> &IdentTopic {
         self.topics.get("seed_agents").expect("seed_agents topic must exist")
+    }
+
+    /// Distributed-database registration/rescale topic
+    pub fn databases(&self) -> &IdentTopic {
+        self.topics.get("databases").expect("databases topic must exist")
     }
 }
 

@@ -1038,6 +1038,13 @@ pub struct OnnxTextEmbeddingEntry {
     pub hf_repo: String,
     /// ONNX filename within the repo.
     pub hf_filename: String,
+    /// Optional external-data sidecar (ONNX `model.onnx_data`) that large
+    /// exports ship alongside `model.onnx`. When set, the model is fetched
+    /// as a bundle so the sidecar lands next to the graph file and ORT
+    /// resolves it via the relative path in the `external_data` proto
+    /// field. Empty when the export is self-contained (single-file).
+    #[serde(default)]
+    pub external_data_filename: String,
     /// Tokenizer filename (typically "tokenizer.json"). Loaded by the runtime.
     pub tokenizer_filename: String,
     /// Maximum sequence length the tokenizer/model accepts.
@@ -1079,12 +1086,13 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             family: "qwen3-embedding".into(),
             hf_repo: "onnx-community/Qwen3-Embedding-0.6B-ONNX".into(),
             hf_filename: "onnx/model.onnx".into(),
+            external_data_filename: "onnx/model.onnx_data".into(),
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 32768,
             embedding_dim: 1024,
             matryoshka_dims: vec![],
             supports_fp16: true,
-            size_bytes: 1_300_000_000,
+            size_bytes: 2_400_000_000,
             min_ram_gb: 3,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
@@ -1095,14 +1103,15 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             name: "Qwen3-Embedding 4B".into(),
             family: "qwen3-embedding".into(),
             hf_repo: "onnx-community/Qwen3-Embedding-4B-ONNX".into(),
-            hf_filename: "onnx/model.onnx".into(),
+            hf_filename: "model.onnx".into(),
+            external_data_filename: "model.onnx_data".into(),
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 32768,
             embedding_dim: 2560,
             matryoshka_dims: vec![],
             supports_fp16: true,
-            size_bytes: 7_500_000_000,
-            min_ram_gb: 12,
+            size_bytes: 16_100_000_000,
+            min_ram_gb: 20,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
             description: "Qwen3-Embedding 4B — mid-tier multilingual text embeddings".into(),
@@ -1112,14 +1121,15 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             name: "Qwen3-Embedding 8B".into(),
             family: "qwen3-embedding".into(),
             hf_repo: "onnx-community/Qwen3-Embedding-8B-ONNX".into(),
-            hf_filename: "onnx/model.onnx".into(),
+            hf_filename: "model.onnx".into(),
+            external_data_filename: "model.onnx_data".into(),
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 32768,
             embedding_dim: 4096,
             matryoshka_dims: vec![],
             supports_fp16: true,
-            size_bytes: 15_500_000_000,
-            min_ram_gb: 20,
+            size_bytes: 30_300_000_000,
+            min_ram_gb: 36,
             license: "Apache 2.0".into(),
             license_tier: LicenseTier::Permissive,
             description: "Qwen3-Embedding 8B — flagship multilingual text embeddings".into(),
@@ -1132,13 +1142,14 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             family: "embeddinggemma".into(),
             hf_repo: "onnx-community/embeddinggemma-300m-ONNX".into(),
             hf_filename: "onnx/model.onnx".into(),
+            external_data_filename: "onnx/model.onnx_data".into(),
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 2048,
             embedding_dim: 768,
             matryoshka_dims: vec![512, 256, 128],
             supports_fp16: false,
-            size_bytes: 1_200_000_000,
-            min_ram_gb: 2,
+            size_bytes: 1_235_000_000,
+            min_ram_gb: 3,
             license: "Gemma Terms of Use".into(),
             license_tier: LicenseTier::CommercialCustom,
             description: "Google EmbeddingGemma 300M — Matryoshka edge embeddings, fp32-only".into(),
@@ -1151,16 +1162,57 @@ pub fn get_text_embedding_catalog() -> Vec<OnnxTextEmbeddingEntry> {
             family: "bge".into(),
             hf_repo: "BAAI/bge-m3".into(),
             hf_filename: "onnx/model.onnx".into(),
+            external_data_filename: "onnx/model.onnx_data".into(),
             tokenizer_filename: "tokenizer.json".into(),
             max_sequence_length: 8192,
             embedding_dim: 1024,
             matryoshka_dims: vec![],
             supports_fp16: true,
-            size_bytes: 2_300_000_000,
+            size_bytes: 2_270_000_000,
             min_ram_gb: 4,
             license: "MIT".into(),
             license_tier: LicenseTier::Permissive,
             description: "BAAI BGE-M3 — multilingual multi-granularity retrieval encoder".into(),
+        },
+        // ── ModernBERT embedding variants (Apache 2.0) ─────────────
+        // Bidirectional RoPE encoder, 8192 context, mean pooling.
+        // The base masked-LM checkpoint is not retrieval-tuned; these
+        // are the embedding-finetuned variants (mean-pool at inference).
+        OnnxTextEmbeddingEntry {
+            id: "modernbert-embed-base".into(),
+            name: "ModernBERT-embed base".into(),
+            family: "modernbert".into(),
+            hf_repo: "nomic-ai/modernbert-embed-base".into(),
+            hf_filename: "onnx/model.onnx".into(),
+            external_data_filename: String::new(),
+            tokenizer_filename: "tokenizer.json".into(),
+            max_sequence_length: 8192,
+            embedding_dim: 768,
+            matryoshka_dims: vec![256],
+            supports_fp16: true,
+            size_bytes: 596_000_000,
+            min_ram_gb: 2,
+            license: "Apache 2.0".into(),
+            license_tier: LicenseTier::Permissive,
+            description: "ModernBERT-embed base — 8192-context mean-pooled retrieval encoder, Matryoshka 256".into(),
+        },
+        OnnxTextEmbeddingEntry {
+            id: "modernbert-embed-large".into(),
+            name: "ModernBERT-embed large".into(),
+            family: "modernbert".into(),
+            hf_repo: "lightonai/modernbert-embed-large".into(),
+            hf_filename: "onnx/model.onnx".into(),
+            external_data_filename: String::new(),
+            tokenizer_filename: "tokenizer.json".into(),
+            max_sequence_length: 8192,
+            embedding_dim: 1024,
+            matryoshka_dims: vec![],
+            supports_fp16: true,
+            size_bytes: 1_580_000_000,
+            min_ram_gb: 3,
+            license: "Apache 2.0".into(),
+            license_tier: LicenseTier::Permissive,
+            description: "ModernBERT-embed large — 8192-context mean-pooled retrieval encoder".into(),
         },
     ]
 }
@@ -4260,6 +4312,8 @@ impl HfModelEntry {
         );
         info.architecture = self.architecture.to_string();
         info.description = self.description.clone();
+        info.size_bytes = self.size_bytes;
+        info.parameters.context_window = self.context_length;
         if let Some(shape) = self.moe {
             info = info.with_moe(shape.to_metadata());
         }
@@ -4270,6 +4324,20 @@ impl HfModelEntry {
 /// Look up a model by its internal ID.
 pub fn get_model_by_id(id: &str) -> Option<HfModelEntry> {
     get_model_catalog().into_iter().find(|m| m.id == id)
+}
+
+/// HuggingFace repository holding the original (unquantized)
+/// safetensors checkpoint for a MoE catalog entry. The serving
+/// artifact (`hf_repo`/`hf_filename`) is a quantized GGUF for
+/// whole-model llama.cpp serving; distributed expert extraction
+/// (`crate::moe_extract`) instead slices per-expert weights out of the
+/// safetensors layout, so MoE entries carry this second source.
+/// `None` means expert extraction is not yet available for the entry.
+pub fn moe_safetensors_repo(model_id: &str) -> Option<&'static str> {
+    match model_id {
+        "qwen3-30b-a3b" => Some("Qwen/Qwen3-30B-A3B"),
+        _ => None,
+    }
 }
 
 /// Get all model families.
@@ -4667,6 +4735,22 @@ mod tests {
         assert_eq!(e.matryoshka_dims, vec![512, 256, 128]);
         assert!(!e.supports_fp16, "EmbeddingGemma is fp32-only");
         assert_eq!(e.license_tier, LicenseTier::CommercialCustom);
+    }
+
+    #[test]
+    fn test_modernbert_embed_variants() {
+        let base = get_text_embedding_model_by_id("modernbert-embed-base").unwrap();
+        assert_eq!(base.family, "modernbert");
+        assert_eq!(base.embedding_dim, 768);
+        assert_eq!(base.max_sequence_length, 8192);
+        assert_eq!(base.matryoshka_dims, vec![256]);
+        assert_eq!(base.license_tier, LicenseTier::Permissive);
+
+        let large = get_text_embedding_model_by_id("modernbert-embed-large").unwrap();
+        assert_eq!(large.family, "modernbert");
+        assert_eq!(large.embedding_dim, 1024);
+        assert_eq!(large.max_sequence_length, 8192);
+        assert_eq!(large.license_tier, LicenseTier::Permissive);
     }
 
     #[test]

@@ -26,6 +26,7 @@ except ImportError:  # pragma: no cover
 
 
 from tenzro_trainer.muon import build_inner_optimizer
+from tenzro_trainer.shards import resolve_shard
 
 log = logging.getLogger(__name__)
 
@@ -83,8 +84,10 @@ class _TimeSeriesPatchTransformer(nn.Module if nn is not None else object):  # t
 def _load_parquet_series(uri: str) -> "torch.Tensor":
     """Load a univariate series from a parquet shard URI.
 
-    Phase 1 supports ``file://`` and bare local paths. ``ipfs://`` and
-    ``ar://`` are routed through external resolvers (TODO: gateway URL env).
+    ``tenzro://`` shards fetch from the local node's iroh blob store;
+    ``ipfs://`` / ``ar://`` / ``http(s)://`` resolve through gateways.
+    ``file://`` and bare paths pass through. See
+    :func:`tenzro_trainer.shards.resolve_shard`.
     """
     if torch is None:
         raise RuntimeError("PyTorch is required")
@@ -95,13 +98,7 @@ def _load_parquet_series(uri: str) -> "torch.Tensor":
             "pandas is required for timeseries shards (pip install 'tenzro-trainer[timeseries]')"
         ) from e
 
-    path = uri
-    if uri.startswith("file://"):
-        path = uri[len("file://") :]
-    elif uri.startswith(("ipfs://", "ar://", "https://", "http://")):
-        raise NotImplementedError(
-            f"remote shard scheme not supported in Phase 1 demo adapter: {uri}"
-        )
+    path = resolve_shard(uri)
     df = pd.read_parquet(path)
     if "value" not in df.columns:
         raise ValueError(f"parquet shard {path!r} must have a 'value' column")

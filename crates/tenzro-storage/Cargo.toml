@@ -61,3 +61,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "storage_benchmarks"
 harness = false
+
+[[bench]]
+name = "da_redstuff"
+harness = false

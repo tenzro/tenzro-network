@@ -451,6 +451,36 @@ impl SyncerState {
         round: u32,
         post_step_hashes: HashMap<u32, Hash>,
     ) -> Result<SyncRound> {
+        // A round that is already finalized has had its per-fragment buffers
+        // dropped (see `finalize_round`). Recomputing the state root from the
+        // now-empty buffers would yield a different digest than the one
+        // committed at finalize time, so a redundant witness finalize would
+        // spuriously conflict. Return the recorded root instead — this is what
+        // makes the k-of-N finalize idempotent across the RPC boundary.
+        {
+            let run = self.run.read();
+            if round < run.current_round {
+                let committed = run
+                    .round_state_roots
+                    .get(round as usize)
+                    .copied()
+                    .ok_or_else(|| {
+                        TrainingError::Internal(format!(
+                            "round {} is below current_round {} but missing from state-root log",
+                            round, run.current_round
+                        ))
+                    })?;
+                return Ok(SyncRound {
+                    task_id: self.task_spec.task_id.clone(),
+                    round,
+                    fragment_quorums: HashMap::new(),
+                    state_root: committed,
+                    syncer_signature: tenzro_types::primitives::Signature::default(),
+                    published_at: Timestamp::now(),
+                    no_quorum_witnesses: None,
+                });
+            }
+        }
         let fragment_statuses = self.fragment_statuses(round, &post_step_hashes);
         let state_root = compute_state_root(&self.task_spec.task_id, round, &fragment_statuses);
         let mut fragment_quorums = HashMap::new();
@@ -1139,6 +1169,57 @@ mod tests {
         let run = state.run.read();
         assert_eq!(run.current_round, 1);
         assert_eq!(run.round_state_roots, vec![root_a]);
+    }
+
+    #[test]
+    fn build_sync_round_returns_committed_root_after_finalize() {
+        // A redundant witness finalize recomputes the state root via
+        // `build_sync_round`. Because `finalize_round` drops the round's
+        // per-fragment buffers, recomputing from the now-empty buffers would
+        // yield a different digest and spuriously conflict. `build_sync_round`
+        // must instead return the already-committed root for a finalized round.
+        let spec = dummy_task();
+        let state = SyncerState::new(
+            spec.clone(),
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        );
+        state.enroll_trainer("did:tenzro:machine:t1".into()).unwrap();
+        state.enroll_trainer("did:tenzro:machine:t2".into()).unwrap();
+
+        // Populate round-0 buffers with real accepted gradients on every
+        // fragment so the computed root reflects non-empty buffers.
+        for fragment in 0..spec.architecture.fragment_count {
+            for did in ["did:tenzro:machine:t1", "did:tenzro:machine:t2"] {
+                state
+                    .accept_outer_gradient(make_gradient(&spec, did, 0, fragment))
+                    .unwrap();
+            }
+        }
+
+        let post_step_hashes: HashMap<u32, Hash> = (0..spec.architecture.fragment_count)
+            .map(|f| (f, Hash::from_bytes(&[f as u8 + 1; 32]).unwrap()))
+            .collect();
+
+        // First finalize: compute the root over non-empty buffers, record it,
+        // and drop the round-0 buffers.
+        let first = state.build_sync_round(0, post_step_hashes.clone()).unwrap();
+        state.finalize_round(0, first.state_root).unwrap();
+        assert_eq!(state.run.read().current_round, 1);
+
+        // Second finalize for the same round: `build_sync_round` must return
+        // the committed root (buffers are gone), and `finalize_round` must
+        // treat it as an idempotent no-op rather than a conflict.
+        let second = state.build_sync_round(0, post_step_hashes).unwrap();
+        assert_eq!(
+            second.state_root, first.state_root,
+            "redundant finalize must return the committed root, not an empty-buffer recompute"
+        );
+        state.finalize_round(0, second.state_root).unwrap();
+
+        let run = state.run.read();
+        assert_eq!(run.current_round, 1);
+        assert_eq!(run.round_state_roots, vec![first.state_root]);
     }
 
     #[test]

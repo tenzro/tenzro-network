@@ -10,6 +10,8 @@ pub mod client;
 pub mod coinbase;
 pub mod receipt;
 pub mod scheme;
+pub mod bazaar;
+pub mod offer;
 
 pub use payment_required::{X402PaymentRequired, X402PaymentRequirement, X402_WIRE_VERSION};
 pub use payment_payload::{ExactAuthorization, ExactSchemePayload, X402PaymentPayload};
@@ -22,7 +24,17 @@ pub use receipt::{
     TenzroNetwork, X402SettlementReceiptBody, X402_RECEIPT_COMMITMENT_LEN, X402_RECEIPT_DOMAIN,
 };
 pub use scheme::{
-    CdpFacilitatorVerifier, DelegationVerifier, Eip3009Backend, Erc7710Backend,
-    FacilitatorVerifier, NullDelegationVerifier, Permit2Backend, SchemeBackend,
-    SchemeRegistry, TenzroHybridBackend, DEFAULT_SCHEME,
+    BatchSettlementBackend, CdpFacilitatorVerifier, DelegationVerifier, Eip3009Backend,
+    Erc7710Backend, FacilitatorVerifier, NullDelegationVerifier, Permit2Backend, SchemeBackend,
+    SchemeRegistry, TenzroHybridBackend, UptoBackend, BATCH_SETTLEMENT_SCHEME, DEFAULT_SCHEME,
+    UPTO_SCHEME,
+};
+pub use bazaar::{
+    ResourceCatalog, ResourceCatalogStore, ResourceQuery, X402ResourceListing,
+    BAZAAR_LISTING_DOMAIN,
+};
+pub use offer::{
+    compute_offer_commitment, derive_payment_id, is_payment_id, IdempotencyLedger,
+    IdempotencyStore, SignedOffer, OFFER_COMMITMENT_KEY, OFFER_SIGNER_KEY, OFFER_SIG_KEY,
+    X402_OFFER_COMMITMENT_LEN, X402_OFFER_DOMAIN, X402_PAYMENT_ID_DOMAIN,
 };

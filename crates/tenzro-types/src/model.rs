@@ -35,6 +35,11 @@ pub struct ModelInfo {
     pub status: ModelStatus,
     /// Model metadata
     pub metadata: HashMap<String, String>,
+    /// Approximate resident artifact size in bytes (GGUF / ONNX bundle on
+    /// disk). `0` means unknown — the router skips memory-fit admission for
+    /// models with no declared size.
+    #[serde(default)]
+    pub size_bytes: u64,
     /// Mixture-of-Experts routing metadata (optional).
     ///
     /// Populated for MoE architectures (Mixtral, DeepSeek-V2/V3, Qwen2-MoE,
@@ -83,6 +88,7 @@ impl ModelInfo {
             pricing: PricingConfig::default(),
             status: ModelStatus::Pending,
             metadata: HashMap::new(),
+            size_bytes: 0,
             moe: None,
             timeseries: None,
             vision: None,
@@ -841,6 +847,15 @@ pub struct ProviderCapacity {
     /// drafter footprint, which is fine when `mtp_enabled = false`.
     #[serde(default)]
     pub drafter_vram_gb: Option<f32>,
+    /// Whether this provider can produce TOPLOC inference commitments —
+    /// per-token top-k logit records that a verifier holding the same
+    /// weights can recheck with a single prefill. True for the built-in
+    /// llama.cpp runtime (raw logits are readable in-process); false
+    /// for external OpenAI-compatible engines (vLLM / SGLang serve over
+    /// an API that does not expose raw logits). Set automatically at
+    /// registration — providers never configure it by hand.
+    #[serde(default)]
+    pub verifiable_inference: bool,
     /// MoE expert-shard declaration. When a provider can't fit an entire
     /// MoE model (e.g. Qwen 3.5 397B-A17B) on its hardware, it can host
     /// a subset of expert weights and serve as one peer in a
@@ -893,6 +908,57 @@ pub struct ProviderCapacity {
     /// observed metrics alone (neutral bias).
     #[serde(default)]
     pub hardware: HardwareCapabilities,
+}
+
+/// Compact advertised capacity envelope broadcast over the
+/// provider-announcement gossip topic. This is the subset of
+/// [`ProviderCapacity`] a discovery consumer needs to rank providers by
+/// declared serving capacity and to build the MoE expert shard view,
+/// without carrying the heavier LAN-cluster / hardware payload (the full
+/// announcement already carries `hardware` separately). Every field here
+/// is *advertised* by the provider; the network gates each claim on
+/// observed serving metrics before trusting it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AdvertisedCapacity {
+    /// Maximum concurrent requests the provider will admit.
+    pub max_concurrent_requests: u32,
+    /// Active requests at announcement-build time.
+    pub active_requests: u32,
+    /// Declared sustained requests-per-second ceiling.
+    pub requests_per_second: u32,
+    /// Maximum batch size the serving runtime will coalesce.
+    pub max_batch_size: u32,
+    /// Whether the provider has a speculative drafter co-loaded (MTP).
+    pub mtp_enabled: bool,
+    /// Whether the provider can produce TOPLOC inference commitments.
+    pub verifiable_inference: bool,
+    /// MoE expert-shard holdings this provider serves. Router peers build
+    /// their [`MoeExpertHolding`]-keyed shard view from these declarations,
+    /// so a holding that never rides the announcement is unreachable for
+    /// distributed dispatch.
+    #[serde(default)]
+    pub moe_holdings: Vec<MoeExpertHolding>,
+    /// MoE-pipeline roles this provider declares (Router / ExpertHolder /
+    /// Replica / prefill-decode variants).
+    #[serde(default)]
+    pub moe_roles: Vec<MoeProviderRole>,
+}
+
+impl ProviderCapacity {
+    /// Project the full capacity down to the compact advertised envelope
+    /// carried on the announcement gossip.
+    pub fn advertised(&self) -> AdvertisedCapacity {
+        AdvertisedCapacity {
+            max_concurrent_requests: self.max_concurrent_requests,
+            active_requests: self.active_requests,
+            requests_per_second: self.requests_per_second,
+            max_batch_size: self.max_batch_size,
+            mtp_enabled: self.mtp_enabled,
+            verifiable_inference: self.verifiable_inference,
+            moe_holdings: self.moe_holdings.clone(),
+            moe_roles: self.moe_roles.clone(),
+        }
+    }
 }
 
 /// Provider's holding declaration for one MoE expert in one model.
@@ -1037,6 +1103,7 @@ impl Default for ProviderCapacity {
             requests_per_second: 100,
             max_batch_size: 1,
             mtp_enabled: false,
+            verifiable_inference: false,
             drafter_vram_gb: None,
             moe_holdings: Vec::new(),
             moe_roles: Vec::new(),

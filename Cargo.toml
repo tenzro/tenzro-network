@@ -26,7 +26,9 @@ members = [
     "crates/tenzro-cortex",
     "crates/tenzro-training",
     "crates/tenzro-iroh",
-    "crates/tenzro-storage-market",
+    "crates/tenzro-cluster",
+    "crates/tenzro-storage-provider",
+    "crates/tenzro-database",
     "crates/tenzro-wasm",
     "crates/tenzro-node",
     "crates/tenzro-cli",
@@ -87,7 +89,9 @@ tenzro-events = { path = "crates/tenzro-events", version = "0.1.0" }
 tenzro-cortex = { path = "crates/tenzro-cortex", version = "0.1.0" }
 tenzro-training = { path = "crates/tenzro-training", version = "0.1.0" }
 tenzro-iroh = { path = "crates/tenzro-iroh", version = "0.1.0" }
-tenzro-storage-market = { path = "crates/tenzro-storage-market", version = "0.1.0" }
+tenzro-cluster = { path = "crates/tenzro-cluster", version = "0.1.0" }
+tenzro-storage-provider = { path = "crates/tenzro-storage-provider", version = "0.1.0" }
+tenzro-database = { path = "crates/tenzro-database", version = "0.1.0" }
 tenzro-wasm = { path = "crates/tenzro-wasm", version = "0.1.0" }
 tenzro-identity = { path = "crates/tenzro-identity", version = "0.1.0" }
 tenzro-payments = { path = "crates/tenzro-payments", version = "0.1.0" }
@@ -221,7 +225,7 @@ libc = "0.2"
 # Compression
 zstd = "0.13"
 
-# Reed-Solomon erasure coding for the storage market (tenzro-storage-market).
+# Reed-Solomon erasure coding for the storage provider (tenzro-storage-provider).
 # Systematic RS over GF(2^8): k data shards + m parity shards, any k of n
 # reconstruct the object. Pure-Rust, no SIMD intrinsics required.
 reed-solomon-erasure = "6"
@@ -380,6 +384,12 @@ tantivy = "0.26"
 arrow = "58"
 arrow-array = "58"
 arrow-schema = "58"
+# Managed-database engine drivers (tenzro-node connect-to-existing model):
+# tokio-postgres for the Postgres/Citus backend, redis for the Valkey backend.
+# Qdrant is reached over its REST API via the shared reqwest client; Lance and
+# Tantivy are embedded via the lancedb/tantivy deps above.
+tokio-postgres = "0.7"
+redis = { version = "1", features = ["tokio-comp", "cluster-async"] }
 futures-util = "0.3"
 bitflags = "2"
 

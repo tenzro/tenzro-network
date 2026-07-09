@@ -274,10 +274,11 @@ def clip_outer_delta(
 class TrainerKey:
     """Ed25519 signing key for outer-gradient submissions.
 
-    The public key bytes also serve as the trainer's TDIP machine identity.
-    The Rust syncer in Phase 1 (Open tier) does *not* enforce gradient
-    signatures, but the wire format already carries them so Phase 2 can
-    light up signature verification without a protocol change.
+    The public key bytes are the trainer's on-wire identity: the syncer
+    requires ``trainer_address`` to equal ``signature.public_key`` and
+    verifies the Ed25519 signature over the canonical preimage on every
+    submission, so gradients must be built with
+    ``trainer_address=key.public_key_bytes``.
     """
 
     signing: nacl.signing.SigningKey

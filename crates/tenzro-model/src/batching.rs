@@ -222,6 +222,7 @@ impl Sequence {
                 output_tokens: self.output_tokens,
                 generation_time_ms,
                 tokens_per_second,
+                commitment: None,
             }));
         }
     }

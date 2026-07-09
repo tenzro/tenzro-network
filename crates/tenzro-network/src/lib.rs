@@ -117,9 +117,10 @@ pub use gossip::{GossipTopics, MessageDeduplicator, MessageValidation, TopicSubs
 pub use metrics::NetworkMetrics;
 pub use message::{
     AgentAnnouncementMessage, AttestationMessage, BlobAnnouncementMessage, ConsensusMessage,
-    InferenceRequestMessage, InferenceResponseMessage, MessagePayload, ModelRegistrationMessage,
-    ModelSchedule, NetworkMessage, PaymentDetails, PricingInfo, ProviderAnnouncementMessage,
-    ShardReplicationEntry, ShardReplicationMessage, StatusMessage, VoteType,
+    DatabaseAnnouncementMessage, InferenceRequestMessage, InferenceResponseMessage, MessagePayload,
+    ModelRegistrationMessage, ModelSchedule, NetworkMessage, PaymentDetails, PricingInfo,
+    ProviderAnnouncementMessage, ShardReplicationEntry, ShardReplicationMessage, StatusMessage,
+    VoteType,
 };
 pub use peer_binding::{
     binding_payload, encode_agent_binding, parse_agent_binding, verify_peer_binding,

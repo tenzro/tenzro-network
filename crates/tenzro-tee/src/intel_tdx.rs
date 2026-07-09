@@ -347,65 +347,112 @@ impl IntelTdxProvider {
 
     /// Extracts QE certificate chain from a TDX Quote v4 signature section.
     ///
-    /// Quote v4 signature structure (after header+body at offset 632):
-    /// - Signature (64 bytes ECDSA P-256)
-    /// - Attestation Key (64 bytes)
-    /// - QE Report (384 bytes)
-    /// - QE Report Signature (64 bytes)
-    /// - QE Auth Data Length (2 bytes)
-    /// - QE Auth Data (variable)
-    /// - QE Certification Data Type (2 bytes) — type 5 = QE cert chain (PEM)
+    /// TD Quote v4 signature structure (after header+body at offset 632):
+    /// - Signature Data Size (4 bytes, u32 LE)
+    /// - ECDSA Signature (64 bytes, P-256 r||s over header+body)
+    /// - ECDSA Attestation Key (64 bytes, raw X||Y)
+    /// - QE Certification Data Type (2 bytes) — type 6 = QE Report Certification Data
     /// - QE Certification Data Size (4 bytes)
-    /// - QE Certification Data (variable, PEM certs)
+    /// - QE Certification Data (type 6 body):
+    ///   - QE Report (384 bytes)
+    ///   - QE Report Signature (64 bytes)
+    ///   - QE Auth Data Size (2 bytes) + QE Auth Data (variable)
+    ///   - Inner Certification Data Type (2 bytes) — type 5 = PCK cert chain (PEM)
+    ///   - Inner Certification Data Size (4 bytes)
+    ///   - Inner Certification Data (PEM certs)
     fn extract_qe_cert_chain_from_quote(quote_data: &[u8]) -> Result<Vec<Vec<u8>>> {
-        if quote_data.len() < quote_offsets::SIGNATURE_DATA {
+        const SIG_DATA_HEADER: usize = 4; // u32 sig_data_size
+        const ECDSA_SIG_LEN: usize = 64;
+        const ECDSA_PUBKEY_LEN: usize = 64;
+        const QE_REPORT_LEN: usize = 384;
+        const QE_REPORT_SIG_LEN: usize = 64;
+
+        if quote_data.len() < quote_offsets::SIGNATURE_DATA + SIG_DATA_HEADER {
             return Err(TeeError::InvalidAttestationReport(
                 "Quote too short to contain signature section".to_string()
             ));
         }
 
-        let sig_section = &quote_data[quote_offsets::SIGNATURE_DATA..];
-
-        // Minimum signature section: 64+64+384+64+2 = 578 bytes before QE Auth Data
-        if sig_section.len() < 578 {
-            tracing::debug!("Quote signature section too short for cert extraction");
+        let sig_data_size = u32::from_le_bytes(
+            quote_data[quote_offsets::SIGNATURE_DATA..quote_offsets::SIGNATURE_DATA + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let auth_start = quote_offsets::SIGNATURE_DATA + SIG_DATA_HEADER;
+        let auth_end = auth_start.saturating_add(sig_data_size);
+        if auth_end > quote_data.len() {
+            tracing::debug!(
+                "Quote sig_data_size {} exceeds buffer {} bytes",
+                sig_data_size, quote_data.len()
+            );
             return Ok(vec![]);
         }
+        let auth = &quote_data[auth_start..auth_end];
 
-        // QE Auth Data Length at offset 576 (64+64+384+64)
-        let qe_auth_data_len = u16::from_le_bytes([sig_section[576], sig_section[577]]) as usize;
-
-        let cert_data_type_offset = 578 + qe_auth_data_len;
-        if sig_section.len() < cert_data_type_offset + 6 {
-            tracing::debug!("Quote too short for certification data");
+        // Skip signature + attestation key to the outer certification data.
+        let outer_type_offset = ECDSA_SIG_LEN + ECDSA_PUBKEY_LEN;
+        if auth.len() < outer_type_offset + 6 {
+            tracing::debug!("Quote auth data too short for certification data");
             return Ok(vec![]);
         }
-
-        let cert_data_type = u16::from_le_bytes([
-            sig_section[cert_data_type_offset],
-            sig_section[cert_data_type_offset + 1]
-        ]);
-
-        if cert_data_type != 5 {
-            tracing::debug!("QE Certification Data Type is not 5 (PEM chain), got {}", cert_data_type);
-            return Ok(vec![]);
-        }
-
-        let cert_data_size = u32::from_le_bytes([
-            sig_section[cert_data_type_offset + 2],
-            sig_section[cert_data_type_offset + 3],
-            sig_section[cert_data_type_offset + 4],
-            sig_section[cert_data_type_offset + 5],
-        ]) as usize;
-
-        let cert_data_offset = cert_data_type_offset + 6;
-        if sig_section.len() < cert_data_offset + cert_data_size {
+        let outer_type = u16::from_le_bytes([auth[outer_type_offset], auth[outer_type_offset + 1]]);
+        let outer_size = u32::from_le_bytes(
+            auth[outer_type_offset + 2..outer_type_offset + 6].try_into().unwrap(),
+        ) as usize;
+        let outer_body_offset = outer_type_offset + 6;
+        if auth.len() < outer_body_offset + outer_size {
             return Err(TeeError::InvalidAttestationReport(
-                format!("Certification data size {} exceeds available data", cert_data_size)
+                format!("Certification data size {} exceeds available data", outer_size)
             ));
         }
+        let outer_body = &auth[outer_body_offset..outer_body_offset + outer_size];
 
-        let pem_data = &sig_section[cert_data_offset..cert_data_offset + cert_data_size];
+        // Type 5 directly carries the PEM chain; type 6 (the TD Quote v4
+        // case) wraps the QE Report and nests the type-5 chain inside.
+        let pem_data: &[u8] = match outer_type {
+            5 => outer_body,
+            6 => {
+                let auth_len_offset = QE_REPORT_LEN + QE_REPORT_SIG_LEN;
+                if outer_body.len() < auth_len_offset + 2 {
+                    tracing::debug!("QE Report Certification Data too short");
+                    return Ok(vec![]);
+                }
+                let qe_auth_data_len = u16::from_le_bytes([
+                    outer_body[auth_len_offset],
+                    outer_body[auth_len_offset + 1],
+                ]) as usize;
+                let inner_type_offset = auth_len_offset + 2 + qe_auth_data_len;
+                if outer_body.len() < inner_type_offset + 6 {
+                    tracing::debug!("QE Report Certification Data too short for inner cert data");
+                    return Ok(vec![]);
+                }
+                let inner_type = u16::from_le_bytes([
+                    outer_body[inner_type_offset],
+                    outer_body[inner_type_offset + 1],
+                ]);
+                if inner_type != 5 {
+                    tracing::debug!(
+                        "Inner QE Certification Data Type is not 5 (PEM chain), got {}",
+                        inner_type
+                    );
+                    return Ok(vec![]);
+                }
+                let inner_size = u32::from_le_bytes(
+                    outer_body[inner_type_offset + 2..inner_type_offset + 6].try_into().unwrap(),
+                ) as usize;
+                let inner_body_offset = inner_type_offset + 6;
+                if outer_body.len() < inner_body_offset + inner_size {
+                    return Err(TeeError::InvalidAttestationReport(
+                        format!("Inner certification data size {} exceeds available data", inner_size)
+                    ));
+                }
+                &outer_body[inner_body_offset..inner_body_offset + inner_size]
+            }
+            other => {
+                tracing::debug!("QE Certification Data Type {} carries no PEM chain", other);
+                return Ok(vec![]);
+            }
+        };
 
         // Parse PEM certificates
         let pem_str = std::str::from_utf8(pem_data)
@@ -1005,6 +1052,17 @@ impl TeeProvider for IntelTdxProvider {
             metadata.insert("simulated".to_string(), "true".to_string());
         }
 
+        // Project the TD measurement (MRTD) into the returned report so
+        // structural verifiers see the launch measurement without re-parsing
+        // the raw Quote.
+        let measurement = match self.parse_quote(&attestation_data) {
+            Ok(quote) => quote.mr_td,
+            Err(e) => {
+                tracing::warn!("Failed to parse generated TD Quote: {}", e);
+                Vec::new()
+            }
+        };
+
         // In real mode, extract embedded certificates from Quote if available
         let certificates = if !self.simulate && attestation_data.len() > quote_offsets::SIGNATURE_DATA {
             match Self::extract_qe_cert_chain_from_quote(&attestation_data) {
@@ -1033,6 +1091,7 @@ impl TeeProvider for IntelTdxProvider {
             certificates,
             timestamp: tenzro_types::Timestamp::now(),
             metadata,
+            measurement,
             ..Default::default()
         })
     }

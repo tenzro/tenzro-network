@@ -481,12 +481,39 @@ pub struct ModelServeCmd {
     /// announce the model so any peer can route inference to it.
     #[arg(long)]
     private: bool,
+
+    /// Front an external OpenAI-compatible serving engine instead of loading
+    /// weights in-process: vllm, sglang, llama-server, or external (any
+    /// OpenAI-compatible endpoint). Requires --base-url. The node routes
+    /// chat for this model to the engine; the engine owns batching and GPU
+    /// memory.
+    #[arg(long, requires = "base_url")]
+    engine: Option<String>,
+
+    /// Base URL of the external engine (e.g. http://127.0.0.1:8000).
+    #[arg(long, requires = "engine")]
+    base_url: Option<String>,
+
+    /// Model name the external engine was launched with, when it differs
+    /// from the catalog id (e.g. the HF repo path passed to vLLM's --model).
+    #[arg(long, requires = "engine")]
+    upstream_model: Option<String>,
+
+    /// Bearer token when the external engine was launched with an API key.
+    #[arg(long, requires = "engine")]
+    api_key: Option<String>,
 }
 
 impl ModelServeCmd {
     pub async fn execute(&self) -> Result<()> {
         if let Some(ref rpc_url) = self.rpc {
             return self.execute_remote(rpc_url).await;
+        }
+        if self.engine.is_some() {
+            // External engines are registered on a running node — the node
+            // routes inference and announces the model. Default to the local
+            // node's RPC when --rpc is omitted.
+            return self.execute_remote("http://127.0.0.1:8545").await;
         }
         self.execute_local().await
     }
@@ -501,14 +528,30 @@ impl ModelServeCmd {
         println!();
 
         let rpc = RpcClient::new(rpc_url);
-        let spinner = output::create_spinner("Loading model on node...");
+        let spinner = output::create_spinner(if self.engine.is_some() {
+            "Registering external engine on node..."
+        } else {
+            "Loading model on node..."
+        });
 
-        let result: serde_json::Value = rpc.call("tenzro_serveModel", serde_json::json!({
+        let mut req = serde_json::json!({
             "model_id": self.model_id,
             "user_forced": self.cluster,
             "force_single": self.force_single,
             "visibility": if self.private { "private" } else { "network" },
-        })).await.map_err(|e| anyhow::anyhow!("Serve request failed: {}", e))?;
+        });
+        if let Some(ref engine) = self.engine {
+            req["engine"] = serde_json::json!(engine);
+            req["base_url"] = serde_json::json!(self.base_url);
+            if let Some(ref up) = self.upstream_model {
+                req["upstream_model"] = serde_json::json!(up);
+            }
+            if let Some(ref key) = self.api_key {
+                req["api_key"] = serde_json::json!(key);
+            }
+        }
+        let result: serde_json::Value = rpc.call("tenzro_serveModel", req)
+            .await.map_err(|e| anyhow::anyhow!("Serve request failed: {}", e))?;
 
         spinner.finish_and_clear();
 
@@ -520,6 +563,12 @@ impl ModelServeCmd {
         }
         if let Some(ep) = result.get("api_endpoint").and_then(|v| v.as_str()) {
             output::print_field("API Endpoint", ep);
+        }
+        if let Some(engine) = result.get("engine").and_then(|v| v.as_str()) {
+            output::print_field("Engine", engine);
+        }
+        if let Some(base) = result.get("base_url").and_then(|v| v.as_str()) {
+            output::print_field("Engine URL", base);
         }
         println!();
         output::print_info(&format!("Use 'tenzro chat {} --rpc {}' to interact.", self.model_id, rpc_url));

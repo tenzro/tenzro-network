@@ -94,14 +94,16 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
 | **tenzro-vm** | Multi-VM: EVM (revm) + SVM (solana_rbpf) + DAML, Block-STM parallel execution, EIP-1559, ERC-4337 AA, ERC-7579 modular validators, **EIP-7702 Type-4 delegation registry**, **Permit2 SignatureTransfer + witness** (ERC-7683-ready gasless flows), **Secure-Mint precompile** (1:1 reserve-attestation invariant for tokenized assets), standard EVM + EIP-2537 BLS12-381 + Tenzro precompiles (TEE_VERIFY, ZK_VERIFY, VRF_VERIFY at 0x1007) |
 | **tenzro-token** | TNZO token economics: treasury, staking, governance, epoch rewards, liquid staking (stTNZO) |
 | **tenzro-identity** | TDIP: unified human/machine identity, W3C DID documents, verifiable credentials, delegation scopes, GDPR Article 17 right-to-erasure (`tenzro_forgetIdentity`) |
-| **tenzro-payments** | Agentic payment protocols. **Crypto rails (settle on-chain):** AP2 v0.2 (Google/FIDO) mandate sign + verify + validate-pair, MPP (Stripe + Tempo) sessions, x402 v1 (Coinbase) HTTP 402, Stripe SPT (SharedPaymentToken) issuance + verify with TDIP cap-resolver + ERC-8004 ReputationRegistry cross-write, Tempo (EIP-155 signing), ERC-8004 v0.6+ Trustless Agents Registry (Identity / Reputation / Validation, 22 surfaces). **Card rails (Tenzro provides identity + delegation + audit; card networks settle fiat):** Visa TAP (Trusted Agent Protocol), Mastercard Agent Pay. HTTP 402 middleware, RFC 9421 HTTP message signatures. |
+| **tenzro-payments** | Agentic payment protocols. **Crypto rails (settle on-chain):** AP2 v0.2 (Google/FIDO) mandate sign + verify + validate-pair, MPP (Stripe + Tempo) sessions, x402 v1 (Coinbase) HTTP 402 with a resource bazaar (register / discover / deregister paid resources, offer verification, idempotent payment ids) across the tenzro-hybrid, exact-eip3009, permit2, and erc7710 schemes, Stripe SPT (SharedPaymentToken) issuance + verify with TDIP cap-resolver + ERC-8004 ReputationRegistry cross-write, Tempo (EIP-155 signing), ERC-8004 v0.6+ Trustless Agents Registry (Identity / Reputation / Validation, 22 surfaces). **Card rails (Tenzro provides identity + delegation + audit; card networks settle fiat):** Visa TAP (Trusted Agent Protocol), Mastercard Agent Pay. HTTP 402 middleware, RFC 9421 HTTP message signatures. |
 | **tenzro-agent** | AI agent infrastructure: A2A protocol, MCP bridge, capability attestation, durable persistence |
 | **tenzro-agent-kit** | High-level agent SDK: compose agents from skills, tools, and payment protocols |
 | **tenzro-model** | Model registry, modality-aware inference routing (price/latency/reputation), HuggingFace downloads (`HfArtifactDownloader` single-file + bundle), durable catalog. Multi-modal ONNX runtimes: forecast (TimesFM 2.5), vision (CLIP, SigLIP2, DINOv3, DINOv2), text-embedding (Qwen3-Embedding, EmbeddingGemma, BGE-M3, Snowflake Arctic), segmentation (SAM 3 / 3.1, SAM 2, EdgeSAM, MobileSAM), detection (RF-DETR, D-FINE), audio ASR (Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT, Canary-1B-Flash), video (encoder scaffold). License-tier gating: Permissive / Attribution / CommercialCustom / NonCommercial. |
 | **tenzro-cortex** | Recurrent-depth reasoning workers (RDT/MoE): HTTP sidecar architecture, signed receipts, attestation suite, gossip-based worker discovery, depth-priced billing |
 | **tenzro-training** | Tenzro Train protocol layer (Decoupled DiLoCo): aggregation rules (Mean, LoraAlternating, TrimmedMean, CoordinateMedian, Krum), Nesterov outer optimizer with adaptive learning rate, blockwise Int8/Int4 gradient quantization, streaming shard synchronization, pipeline trainer groups, syncer state machine, on-chain run-root commitments. Pairs with the Python reference trainer at `integrations/trainer/`. |
 | **tenzro-settlement** | Escrow, micropayment channels, batch settlement, dispute resolution, and streaming rental escrow: time-based capacity rental with renter deposit + per-epoch streaming release gated on signed availability proof; provider stake collateralizes one-epoch exposure across active rentals, make-whole-from-stake on miss |
-| **tenzro-storage-market** | Decentralized storage over the iroh content-addressed transport: provider daemon (accept / serve objects), nonce-bound proof-of-retrievability challenges, systematic Reed-Solomon erasure coding (replication as the k=1 case), per-byte streaming metering gated on a passing retrievability proof (`ServiceType::Storage`) |
+| **tenzro-storage-provider** | Decentralized storage over the iroh content-addressed transport: provider daemon (accept / serve objects), nonce-bound proof-of-retrievability challenges, systematic Reed-Solomon erasure coding (replication as the k=1 case), per-byte streaming metering gated on a passing retrievability proof (`ServiceType::Storage`), capability-gated retrieval (`AccessPolicy` + optional confidential seal) |
+| **tenzro-cluster** | Engine-agnostic local-network cluster substrate shared by model, storage, and database serving: reachability tiers, probed link-cost graph, deterministic nearest-neighbour ordering, and HRW rendezvous placement — every function is a deterministic function of measured inputs, so members converge on the same plan without a coordinator round |
+| **tenzro-database** | Managed-database protocol layer (engine-agnostic, no driver): `DatabaseDescriptor`, placement across local / LAN-cluster / network tiers, engine catalog (PostgreSQL, Qdrant, Milvus, Valkey, Dgraph, Lance, Tantivy). Five engines have a driver (PostgreSQL / Qdrant / Valkey as thin stateless clients to an operator-run engine; Lance / Tantivy embedded in-process); Milvus and Dgraph are catalog-only until a driver is linked. Per-engine config validation, `AccessPolicy` + confidential seal, managed connection credentials, `tenzro/databases` gossip |
 | **tenzro-bridge** | Cross-chain: Wormhole NTT (Guardian quorum verifier), LayerZero V2, Chainlink CCIP + CCT, deBridge DLN, Li.Fi, Canton DAML, Hyperlane V3 (sovereign Tenzro-ISM), Axelar GMP (Cosmos / Move / Stellar reach), Babylon Bitcoin staking |
 | **tenzro-events** | Event sourcing and subscription system with replay, webhooks, websockets |
 | **tenzro-workflow** | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
@@ -163,6 +165,21 @@ tenzro interactive
 # One node serving inference and holding storage under one stake
 ./target/release/tenzro-node --roles ai,storage --data-dir ./data
 ```
+
+### Become a Provider
+
+Bring your GPU, cluster, or data center and earn from network demand. With
+a node running (`tenzro-node --roles ai`), one command handles everything:
+
+```bash
+tenzro join --provider
+```
+
+Hardware detection, wallet provisioning, faucet funding, the 100 TNZO
+compute bond, provider registration, default pricing, and pulling + serving
+the largest catalog model that fits your machine are all automatic. Your
+capacity is advertised on the provider gossip topic and inference demand
+routes to you, settling in TNZO per call.
 
 ### AI Inference
 

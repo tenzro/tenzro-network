@@ -28,6 +28,7 @@ pub mod token;
 pub mod contract;
 pub mod bridge;
 pub mod debridge;
+pub mod database;
 pub mod lifi;
 pub mod nft;
 pub mod compliance;

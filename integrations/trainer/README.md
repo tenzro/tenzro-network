@@ -63,6 +63,16 @@ training loop for Decoupled DiLoCo, paired with the Rust protocol layer in
   `SyncStrategy::Streaming`), and delayed outer-update application
   (`OuterUpdateScheduler` applies round r's update during round r+1 so
   communication overlaps computation).
+- **Hardware acceleration:** under `torchrun` the language adapter shards the
+  model with FSDP2 (per-parameter DTensor sharding, bf16 compute / fp32
+  gradient reduction) — every rank runs the loop, only rank 0 speaks JSON-RPC,
+  each rank samples distinct batches. Attention uses FlashAttention-2 when
+  `flash_attn` + CUDA are present (SDPA otherwise; override via
+  `architecture.metadata.attn_implementation`), and
+  `architecture.metadata.fp8: true` opts eligible linear layers into torchao
+  FP8 training on compute-capability ≥ 8.9 GPUs (`pip install
+  'tenzro-trainer[fp8]'`). QLoRA (`lora.quantize: "nf4"`) is single-process
+  only — bitsandbytes 4-bit parameters are not DTensor-compatible.
 
 ## Quickstart
 
@@ -71,13 +81,29 @@ training loop for Decoupled DiLoCo, paired with the Rust protocol layer in
 cd integrations/trainer
 pip install -e '.[timeseries]'
 
-# Train one round of a posted task
+# Publish a dataset shard into the network's content-addressed blob store
+# (iroh-blobs, BLAKE3-verified on transfer) and train against it. The
+# trainer fetches tenzro:// shards through the local node's
+# tenzro_iroh_fetchBlob RPC and caches them under ~/.cache/tenzro-trainer.
+tenzro iroh publish --file shard-3.parquet
+# → tenzro://blob/<blake3-hash>
+
 tenzro-trainer run \
     --rpc-url http://localhost:8545 \
     --task-id task-timesfm-202604 \
     --trainer-did did:tenzro:machine:trainer-7 \
-    --shard-uri ipfs://Qm…/shard-3.parquet \
-    --modality timeseries
+    --shard-uri tenzro://blob/<blake3-hash>
+
+# Also supported: ipfs:// and ar:// (via HTTP gateways, override with
+# TENZRO_IPFS_GATEWAY / TENZRO_ARWEAVE_GATEWAY), plain http(s)://, and
+# file:// / bare local paths.
+
+# Multi-GPU host: same command under torchrun. The language adapter shards
+# the model with FSDP2; only rank 0 speaks JSON-RPC to the node.
+torchrun --nproc-per-node 8 -m tenzro_trainer.cli run \
+    --task-id task-qwen-202607 \
+    --trainer-did did:tenzro:machine:trainer-7 \
+    --shard-uri file:///data/shard.jsonl
 ```
 
 The invocation above is the direct developer path. In production the trainer is
@@ -97,8 +123,11 @@ identity derivation, crash policy, and the `tenzro_getTrainerDaemonStatus` RPC.
 | `tenzro_trainer.rpc_bridge` | Thin JSON-RPC 2.0 client over `requests`. Handles `enrollTrainer`, `submitOuterGradient`, `finalizeRound`. |
 | `tenzro_trainer.gradient` | Outer-gradient packaging: per-fragment safetensors blobs + SHA-256 + signing helpers (Ed25519 via PyNaCl). |
 | `tenzro_trainer.inner_loop` | Generic H-step inner driver plus `OuterUpdateScheduler` (delayed outer-update application), partial-state load/apply for streaming shards, and state snapshots. |
-| `tenzro_trainer.muon` | Muon inner optimizer — Newton-Schulz orthogonalization of 2D weight updates, AdamW fallback for 1D / embedding / head parameters. |
+| `tenzro_trainer.muon` | Muon inner optimizer — Newton-Schulz orthogonalization of 2D weight updates, AdamW fallback for 1D / embedding / head parameters. DTensor-aware: sharded gradients gather for Newton-Schulz, momentum stays sharded, the update distributes back. |
+| `tenzro_trainer.distributed` | torchrun detection (`DistContext`), FSDP2 sharding (`shard_model_fsdp2`), and DTensor helpers (`full_tensor`, `copy_into`, `add_into`) used by the inner loop and Muon. |
+| `tenzro_trainer.accel` | Attention-kernel selection (FlashAttention-2 / SDPA) and torchao FP8 conversion for the language adapter. |
 | `tenzro_trainer.quantization` | Blockwise symmetric Int8/Int4 gradient codec, byte-identical to the Rust `tenzro_training::quantization` implementation. |
+| `tenzro_trainer.shards` | Shard URI resolution: `tenzro://` via the local node's iroh blob store (native), `ipfs://` / `ar://` via HTTP gateways, `http(s)://` direct, `file://` / bare paths passthrough. Remote fetches cached under `~/.cache/tenzro-trainer/shards`; vision ImageFolder tarballs unpacked on arrival. |
 | `tenzro_trainer.confidential` | Confidential-tier sealed-shard unwrap: HPKE RFC 9180 base-mode key unwrap + AES-256-GCM shard decryption, run inside the trainer's TEE enclave. |
 | `tenzro_trainer.adapters.*` | Modality-specific model + dataset wiring. |
 | `tenzro_trainer.cli` | `tenzro-trainer enroll | run | submit-gradient | finalize-round` |

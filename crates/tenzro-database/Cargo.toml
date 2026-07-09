@@ -1,0 +1,21 @@
+[package]
+name = "tenzro-database"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Queryable distributed database layer for Tenzro Network — engine catalog, local/LAN-cluster/network placement, and partition maps over the shared cluster substrate"
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-cluster = { workspace = true }
+tenzro-storage = { workspace = true }
+
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dashmap = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

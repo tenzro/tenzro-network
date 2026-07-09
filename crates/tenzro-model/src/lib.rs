@@ -122,7 +122,9 @@ pub mod hf_download;
 pub mod latency;
 pub mod library;
 pub mod load;
+pub mod meta_router;
 pub mod moe_exec;
+pub mod moe_extract;
 pub mod moe_router;
 pub mod moe_shard;
 pub mod onnx_session;
@@ -137,6 +139,7 @@ pub mod segmentation_runtime;
 pub mod sla;
 pub mod text_embedding_runtime;
 pub mod text_segmentation_runtime;
+pub mod toploc;
 pub mod ts_runtime;
 pub mod usage;
 pub mod video_runtime;
@@ -164,6 +167,7 @@ pub use moe_exec::{
     ExpertFfn, GatingNetwork, MoeExecError, MoeExpertRuntime, MoeExpertRuntimeStatus,
     MoeLoadedExpert, MoeLoadedGate, RoutedSlot, RoutedToken,
 };
+pub use moe_extract::{MoeExtractor, MoeTensorNaming};
 pub use library::{
     CategoryType, CompatibilityRequirements, LibraryModelInfo, ModelCategory, ModelHighlight,
     ModelLibrary,
@@ -188,6 +192,11 @@ pub use runtime::{
     ModelRuntime, ToolCall, ToolDefinition,
 };
 pub use batching::{BatchEngine, BatchRequest};
+pub use toploc::{
+    compare_step, top_k_from_logits, verify_commitment, InferenceCommitment, StepComparison,
+    StepRecord, TopKEntry, VerificationOutcome, DEFAULT_COMMITMENT_K, MAX_COMMITMENT_K,
+    MIN_INDEX_OVERLAP, MAX_MEAN_LOGIT_DELTA, MIN_PASSING_STEP_FRACTION,
+};
 pub use external_engine::{ExternalEngine, ExternalEngineKind};
 pub use usage::{
     UsageTracker, UsageRecord, ModelUsageStats, ProviderUsageStats, GlobalUsageStats,

@@ -153,7 +153,7 @@ Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind
 - `create_payment_challenge` — Create MPP, x402, or native payment challenge
 - `verify_payment` — Verify payment credential and settle on-chain
 - `list_payment_protocols` — List supported payment protocols
-- `list_x402_schemes` — Discover registered x402 scheme adapters (`exact`, `permit2`, plus any pluggable extensions)
+- `list_x402_schemes` — Discover registered x402 scheme adapters (`tenzro-hybrid` default, `exact-eip3009`, `permit2`, `erc7710`)
 - `settle_payment` — Execute immediate settlement
 - `create_escrow` — Build & sign a `CreateEscrow` transaction (consensus-mediated, gas: 75,000). VM derives `escrow_id` and locks funds at a derived vault address.
 - `release_escrow` — Build & sign a `ReleaseEscrow` transaction (payer-only, gas: 60,000)
@@ -161,6 +161,17 @@ Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind
 - `get_escrow` — Read an escrow record by id (calls `tenzro_getEscrow`)
 - `open_payment_channel` — Open micropayment channel
 - `close_payment_channel` — Close payment channel with final balance
+
+### x402 Bazaar (6 tools)
+
+A discovery catalog over the x402 payment surface: sellers register paid resources, buyers browse and verify offers before paying.
+
+- `x402_protocol_info` — x402 protocol metadata and registered scheme adapters (`tenzro-hybrid`, `exact-eip3009`, `permit2`, `erc7710`)
+- `x402_register_resource` — Register a paid resource listing (resource, scheme, network, asset, pay-to, max amount required, tags). Listing id is derived from `(seller_did, resource)`, so re-registration is idempotent.
+- `x402_discover_resources` — Browse listings, filtered by scheme / network / asset / tags
+- `x402_deregister_resource` — Remove a listing by id (seller-scoped)
+- `x402_verify_offer` — Validate a payment requirement against the registered scheme adapters before a buyer commits
+- `x402_payment_id` — Derive the deterministic payment id for a settlement
 
 ### AP2 v0.2 (Agent Payments Protocol)
 
@@ -516,6 +527,22 @@ Treasury config mutations (add/remove withdrawer, threshold) are admin-token-gat
 - `node_reachability` — Sustained connectivity tier (`direct` / `relay_only` / `unreachable`)
 - `node_profile` — Hardware self-profile: build commit, CPU arch, OS, devices, derived serving capacity / backend / capability key
 - `cluster_plan` — Deterministic layer-wise LAN cluster placement for a model across candidate members
+
+### Managed Databases (11 tools)
+
+An engine-agnostic protocol layer over persistent state. A node either holds a thin stateless client to an operator-run engine (PostgreSQL / Qdrant / Valkey via URL config) or serves an embedded engine in-process (Lance / Tantivy). Milvus and Dgraph are catalog-only until a driver is linked. Placement is `local`, `lan_cluster`, or `network`; query bodies are per-engine dialects (SQL, vector search, full-text, command array).
+
+- `list_database_engines` — The engine catalog with placement modes and driver status
+- `create_database` — Create a database from a descriptor (engine, placement, access policy, optional confidential seal)
+- `get_database` — Read a database descriptor by id
+- `list_databases` — List databases on this node
+- `list_database_partitions` — List partitions for a database
+- `get_database_partition` — Read a single partition by index
+- `issue_database_connection` — Mint a scoped connection to the backing engine
+- `database_query` — Run an engine-native query (SQL / vector / full-text / command array)
+- `authorize_database_read` — Grant a reader access under the database's access policy
+- `rescale_database` — Change partition/replica count
+- `drop_database` — Delete a database and its partitions
 
 ## Ecosystem MCP Servers
 

@@ -45,6 +45,7 @@ use llama_cpp_2::model::params::{LlamaModelParams, LlamaSplitMode};
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::speculative::{MtpSpeculative, MtpSpeculativeParams};
+use llama_cpp_2::token::LlamaToken;
 
 /// Hardware backend information detected at runtime
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +138,14 @@ pub struct GenerationConfig {
     /// otherwise the runtime returns `ModelError::MtpUnavailable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_n: Option<u8>,
+    /// Optional TOPLOC commitment width (1..=64). When `Some(k)`, the
+    /// autoregressive path records the top-k raw logits for every
+    /// generated token and returns the commitment blob on
+    /// [`InferenceResult::commitment`]. Only the single-token sampling
+    /// path produces commitments — speculative decoding, external
+    /// engines, and the batch engine leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commitment_k: Option<u8>,
 }
 
 impl Default for GenerationConfig {
@@ -149,6 +158,7 @@ impl Default for GenerationConfig {
             repeat_last_n: 64,
             seed: 42,
             draft_n: None,
+            commitment_k: None,
         }
     }
 }
@@ -161,6 +171,11 @@ pub struct InferenceResult {
     pub output_tokens: u32,
     pub generation_time_ms: u64,
     pub tokens_per_second: f64,
+    /// TOPLOC commitment blob, present when the request set
+    /// [`GenerationConfig::commitment_k`] and the single-token
+    /// autoregressive path served it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commitment: Option<crate::toploc::InferenceCommitment>,
 }
 
 /// A chat message with role and content (for chat template formatting)
@@ -210,6 +225,11 @@ pub struct ChatWithToolsResult {
     /// Why generation stopped: `"end_turn"`, `"tool_use"`, `"max_tokens"`,
     /// `"stop_sequence"`. Mirrors the spec's `stop_reason` enum.
     pub stop_reason: String,
+    /// TOPLOC top-k logit commitment, when the caller requested one via
+    /// [`GenerationConfig::commitment_k`] and the single-token serial
+    /// path served the request. `None` for external engines, the batch
+    /// engine, and speculative decoding.
+    pub commitment: Option<crate::toploc::InferenceCommitment>,
 }
 
 /// Maximum context length we allow to prevent OOM on consumer hardware.
@@ -427,6 +447,68 @@ impl ModelRuntime {
         Ok(())
     }
 
+    /// Detected local hardware, probed once per process. Detection shells
+    /// out to vendor tools (`nvidia-smi` / `rocm-smi`), so callers must be
+    /// on a blocking thread — both load paths run inside `spawn_blocking`.
+    fn local_hardware() -> &'static tenzro_types::HardwareCapabilities {
+        static HW: OnceLock<tenzro_types::HardwareCapabilities> = OnceLock::new();
+        HW.get_or_init(tenzro_types::HardwareCapabilities::detect)
+    }
+
+    /// Number of transformer layers to offload to the GPU for a model of
+    /// the given on-disk size.
+    ///
+    /// `1000` means "offload everything" (llama.cpp clamps to the model's
+    /// layer count). The budget only deviates from full offload when
+    /// detection has positively established that discrete VRAM cannot hold
+    /// the whole model:
+    ///
+    /// - undetected hardware or a unified-memory pool (Apple Silicon) →
+    ///   full offload; [`check_memory_admission`](Self::check_memory_admission)
+    ///   is the RAM gate there;
+    /// - detected CPU-only host → 0, skipping pointless offload attempts;
+    /// - model plus KV/activation headroom fits in total VRAM → full offload;
+    /// - otherwise → proportional layer count from the GGUF header, so the
+    ///   layers that fit ride the GPU and the remainder stays in system RAM
+    ///   instead of the load failing on device allocation.
+    fn gpu_layer_budget(gguf_path: &Path, file_len: u64) -> u32 {
+        let hw = Self::local_hardware();
+        if !hw.detected || hw.interconnect == tenzro_types::Interconnect::UnifiedMemory {
+            return 1000;
+        }
+        if hw.vram_gb == 0 {
+            return 0;
+        }
+        let need_gb = (file_len as f32 / 1_073_741_824.0)
+            * (MODEL_LOAD_HEADROOM_NUM as f32 / MODEL_LOAD_HEADROOM_DEN as f32);
+        let vram_gb = hw.vram_gb as f32;
+        if need_gb <= vram_gb {
+            return 1000;
+        }
+        match crate::gguf_shape::read_model_shape(gguf_path) {
+            Ok(shape) if shape.layers > 0 => {
+                let layers =
+                    ((shape.layers as f32 * vram_gb / need_gb) as u32).min(shape.layers);
+                warn!(
+                    "Partial GPU offload for {}: {:.1} GiB needed vs {} GiB VRAM — {}/{} layers on GPU",
+                    gguf_path.display(),
+                    need_gb,
+                    hw.vram_gb,
+                    layers,
+                    shape.layers,
+                );
+                layers
+            }
+            _ => {
+                warn!(
+                    "Could not read GGUF layer count from {}; requesting full GPU offload",
+                    gguf_path.display()
+                );
+                1000
+            }
+        }
+    }
+
     /// Load a GGUF model into memory.
     ///
     /// llama.cpp auto-detects the model architecture from GGUF metadata.
@@ -479,9 +561,11 @@ impl ModelRuntime {
         let backend = self.backend.clone();
 
         let loaded = tokio::task::spawn_blocking(move || {
-            // Offload all layers to GPU (Metal on macOS, CUDA if feature enabled).
-            // n_gpu_layers(1000) means "offload everything available".
-            let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
+            // GPU offload sized against detected VRAM — full offload when the
+            // model fits (or the pool is unified / undetected), a proportional
+            // layer count when it doesn't.
+            let n_gpu_layers = Self::gpu_layer_budget(&gguf_path_owned, file_len);
+            let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
 
             let model =
                 LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params).map_err(
@@ -819,7 +903,8 @@ impl ModelRuntime {
         let backend = self.backend.clone();
 
         let loaded = tokio::task::spawn_blocking(move || {
-            let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
+            let n_gpu_layers = Self::gpu_layer_budget(&gguf_path_owned, file_len);
+            let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
             let model =
                 LlamaModel::load_from_file(&backend, &gguf_path_owned, &model_params).map_err(
                     |e| {
@@ -873,6 +958,126 @@ impl ModelRuntime {
     /// loop and the inference router's mtp_enabled filter.
     pub fn has_drafter(&self, target_model_id: &str) -> bool {
         self.loaded_drafters.contains_key(target_model_id)
+    }
+
+    /// Re-execute a committed inference as a single prefill and compare
+    /// the recomputed logits against the commitment (TOPLOC check).
+    ///
+    /// The verifier must hold the same model weights the provider used.
+    /// The prompt is tokenized exactly as the generation path tokenizes
+    /// it (`AddBos::Always`); the committed output tokens are appended
+    /// and the whole sequence is decoded in one batch, which is roughly
+    /// two orders of magnitude cheaper than the original token-by-token
+    /// decode.
+    pub async fn verify_inference_commitment(
+        &self,
+        model_id: &str,
+        prompt: &str,
+        commitment: crate::toploc::InferenceCommitment,
+    ) -> Result<crate::toploc::VerificationOutcome> {
+        if self.external_engines.contains_key(model_id) {
+            return Err(ModelError::InferenceError(
+                "model is served through an external engine, which does not expose logits; \
+                 commitment verification requires locally loaded weights"
+                    .to_string(),
+            ));
+        }
+        let entry = self
+            .loaded_models
+            .get(model_id)
+            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
+            .value()
+            .clone();
+        let _guard = self.acquire_inflight(model_id)?;
+        match entry.as_ref() {
+            LoadedEntry::Batched(_) => Err(ModelError::InferenceError(
+                "commitment verification requires the model loaded in serial mode".to_string(),
+            )),
+            LoadedEntry::Serial(model_mutex) => {
+                let model_mutex = model_mutex.clone();
+                let prompt = prompt.to_string();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let loaded = model_mutex.blocking_lock();
+                    Self::verify_commitment_sync(&loaded, &prompt, &commitment)
+                });
+                handle
+                    .await
+                    .map_err(|e| ModelError::Other(format!("Verification task error: {}", e)))?
+            }
+        }
+    }
+
+    fn verify_commitment_sync(
+        loaded: &LoadedModel,
+        prompt: &str,
+        commitment: &crate::toploc::InferenceCommitment,
+    ) -> Result<crate::toploc::VerificationOutcome> {
+        if commitment.steps.is_empty() {
+            return Ok(crate::toploc::verify_commitment(commitment, &[]));
+        }
+
+        let prompt_tokens = loaded
+            .model
+            .str_to_token(prompt, AddBos::Always)
+            .map_err(|e| ModelError::Other(format!("Tokenization failed: {}", e)))?;
+        if prompt_tokens.len() != commitment.prompt_tokens as usize {
+            return Err(ModelError::InferenceError(format!(
+                "prompt tokenizes to {} tokens but the commitment declares {} — \
+                 different tokenizer or altered prompt",
+                prompt_tokens.len(),
+                commitment.prompt_tokens,
+            )));
+        }
+
+        let prompt_len = prompt_tokens.len();
+        let steps = commitment.steps.len();
+        // Step j's logits come from sequence position prompt_len - 1 + j,
+        // so the batch feeds the prompt plus all output tokens except the
+        // last one.
+        let total = prompt_len + steps - 1;
+
+        let n_ctx = NonZeroU32::new(loaded.context_length)
+            .unwrap_or(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH).unwrap());
+        if total as u32 > n_ctx.get() {
+            return Err(ModelError::InferenceError(format!(
+                "committed sequence needs {} positions but the context holds {}",
+                total,
+                n_ctx.get(),
+            )));
+        }
+
+        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
+        let mut ctx = loaded
+            .model
+            .new_context(&loaded.backend, ctx_params)
+            .map_err(|e| ModelError::Other(format!("Failed to create context: {}", e)))?;
+
+        let mut batch = LlamaBatch::new(std::cmp::max(total, 512), 1);
+        for (i, token) in prompt_tokens.iter().enumerate() {
+            let wants_logits = i >= prompt_len - 1;
+            batch
+                .add(*token, i as i32, &[0], wants_logits)
+                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
+        }
+        for (j, step) in commitment.steps[..steps - 1].iter().enumerate() {
+            let pos = (prompt_len + j) as i32;
+            batch
+                .add(LlamaToken(step.token_id as i32), pos, &[0], true)
+                .map_err(|e| ModelError::Other(format!("Batch add failed: {}", e)))?;
+        }
+
+        ctx.decode(&mut batch)
+            .map_err(|e| ModelError::Other(format!("Verification prefill failed: {}", e)))?;
+
+        let k = commitment.k as usize;
+        let recomputed: Vec<Vec<crate::toploc::TopKEntry>> = (0..steps)
+            .map(|j| {
+                let pos = (prompt_len - 1 + j) as i32;
+                crate::toploc::top_k_from_logits(ctx.get_logits_ith(pos), k)
+            })
+            .collect();
+
+        Ok(crate::toploc::verify_commitment(commitment, &recomputed))
     }
 
     /// Submit a prompt to a model's continuous-batching engine and await its
@@ -1109,6 +1314,7 @@ impl ModelRuntime {
             generation_time_ms: inner.generation_time_ms,
             tokens_per_second: inner.tokens_per_second,
             stop_reason,
+            commitment: inner.commitment,
         })
     }
 
@@ -1370,9 +1576,22 @@ impl ModelRuntime {
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut output_text = String::new();
 
+        // TOPLOC commitment collection: one top-k logit record per
+        // generated token, read from the raw logits the sampler chain
+        // sees (the chain works on a copied token-data array, so the
+        // row is unmodified).
+        let commitment_k = config
+            .commitment_k
+            .map(|k| k.clamp(1, crate::toploc::MAX_COMMITMENT_K) as usize);
+        let mut commitment_steps: Vec<crate::toploc::StepRecord> = Vec::new();
+
         let max_pos = n_ctx_val.min(input_tokens as i32 + config.max_tokens as i32);
 
         while n_cur < max_pos {
+            let step_top_k = commitment_k.map(|k| {
+                crate::toploc::top_k_from_logits(ctx.get_logits_ith(batch.n_tokens() - 1), k)
+            });
+
             // Sample next token
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             sampler.accept(token);
@@ -1380,6 +1599,13 @@ impl ModelRuntime {
             // Check for end of generation
             if loaded.model.is_eog_token(token) {
                 break;
+            }
+
+            if let Some(top_k) = step_top_k {
+                commitment_steps.push(crate::toploc::StepRecord {
+                    token_id: token.0 as u32,
+                    top_k,
+                });
             }
 
             // Decode token to text
@@ -1425,12 +1651,21 @@ impl ModelRuntime {
             0.0
         };
 
+        let commitment = commitment_k.filter(|_| !commitment_steps.is_empty()).map(|k| {
+            crate::toploc::InferenceCommitment {
+                k: k as u8,
+                prompt_tokens: input_tokens,
+                steps: commitment_steps,
+            }
+        });
+
         Ok(InferenceResult {
             text: output_text,
             input_tokens,
             output_tokens,
             generation_time_ms,
             tokens_per_second,
+            commitment,
         })
     }
 
@@ -1582,6 +1817,7 @@ impl ModelRuntime {
                 output_tokens,
                 generation_time_ms: start.elapsed().as_millis() as u64,
                 tokens_per_second: 0.0,
+                commitment: None,
             });
         }
         match loaded
@@ -1599,6 +1835,7 @@ impl ModelRuntime {
                         output_tokens,
                         generation_time_ms: start.elapsed().as_millis() as u64,
                         tokens_per_second: 0.0,
+                        commitment: None,
                     });
                 }
                 output_text.push_str(&piece);
@@ -1708,6 +1945,7 @@ impl ModelRuntime {
                                 output_tokens,
                                 generation_time_ms: start.elapsed().as_millis() as u64,
                                 tokens_per_second: 0.0,
+                                commitment: None,
                             });
                         }
                         output_text.push_str(&piece);
@@ -1737,6 +1975,7 @@ impl ModelRuntime {
                                 output_tokens,
                                 generation_time_ms: start.elapsed().as_millis() as u64,
                                 tokens_per_second: 0.0,
+                                commitment: None,
                             });
                         }
                         output_text.push_str(&piece);
@@ -1774,6 +2013,7 @@ impl ModelRuntime {
             output_tokens,
             generation_time_ms,
             tokens_per_second,
+            commitment: None,
         })
     }
 }

@@ -20,9 +20,14 @@ load-balancing loss is added to the cross-entropy objective when the
 model reports one (``output_router_logits`` is enabled at load time for
 MoE configs).
 
-Wraps cleanly under :class:`torch.distributed.fsdp.FullyShardedDataParallel`
-(FSDP2) when the caller has initialized a process group — see
-``docs/AI.md §7.7.1``. Plain DDP and single-GPU paths work out of the box.
+Under torchrun (``RANK``/``WORLD_SIZE`` set), the model is sharded with
+FSDP2 (``torch.distributed.fsdp.fully_shard``) — per-parameter DTensor
+sharding, bf16 compute with fp32 gradient reduction — before the optimizer
+is constructed; see ``docs/AI.md §7.7.1``. Single-process runs skip
+sharding entirely. Attention dispatches to FlashAttention-2 when the
+``flash_attn`` package and a CUDA device are present (SDPA otherwise), and
+``architecture.metadata.fp8`` opts eligible linear layers into torchao FP8
+training on Ada/Hopper-class GPUs.
 """
 
 from __future__ import annotations
@@ -39,7 +44,10 @@ except ImportError:  # pragma: no cover
     nn = None  # type: ignore[assignment]
 
 
+from tenzro_trainer.accel import maybe_convert_fp8, resolve_attn_implementation
+from tenzro_trainer.distributed import DistContext, shard_model_fsdp2
 from tenzro_trainer.muon import build_inner_optimizer
+from tenzro_trainer.shards import resolve_shard
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +142,7 @@ class LanguageAdapter:
     seq_len: int = 1024
     batch_size: int = 1
     device: str = "cpu"
+    data_seed: int = 0
     lora_alternating: bool = False
     _lora_a_names: list[str] = field(default_factory=list)
     _lora_b_names: list[str] = field(default_factory=list)
@@ -167,19 +176,12 @@ class LanguageAdapter:
     def shard_batches(self, shard_uri: str) -> Iterable[object]:
         if torch is None:
             raise RuntimeError("PyTorch is required")
-        # Resolve the shard URI. Confidential-tier shards arrive
-        # pre-decrypted as `file://` pointers into an enclave-private
-        # tmpfs; see `tenzro_trainer.confidential.unwrap_shard`.
-        if shard_uri.startswith("file://"):
-            path = shard_uri[len("file://") :]
-        elif shard_uri.startswith(("ipfs://", "ar://", "https://", "http://")):
-            raise NotImplementedError(
-                f"remote shard scheme not supported in reference trainer "
-                f"(fetch upstream, expose as file:// or via the confidential "
-                f"unwrap helper): {shard_uri}"
-            )
-        else:
-            path = shard_uri
+        # Resolve the shard URI. tenzro:// fetches from the local node's
+        # iroh blob store; ipfs:// / ar:// / http(s):// go through gateways.
+        # Confidential-tier shards arrive pre-decrypted as `file://`
+        # pointers into an enclave-private tmpfs; see
+        # `tenzro_trainer.confidential.unwrap_shard`.
+        path = resolve_shard(shard_uri)
 
         with open(path, "rb") as f:
             text = f.read().decode("utf-8", errors="replace")
@@ -201,8 +203,11 @@ class LanguageAdapter:
                 f"{ids.shape[0]} tokens, need at least seq_len+1={self.seq_len + 1}"
             )
 
+        # Per-rank seed: under torchrun every rank must sample different
+        # offsets from the shard, otherwise the world trains on identical
+        # batches and the data-parallel width is wasted.
         rng = torch.Generator()
-        rng.manual_seed(0)
+        rng.manual_seed(self.data_seed)
         n = ids.shape[0] - self.seq_len - 1
         while True:
             offsets = torch.randint(0, n, (self.batch_size,), generator=rng)
@@ -285,12 +290,20 @@ def build_adapter(
         "fp16": torch.float16,
         "fp32": torch.float32,
     }.get(dtype_str, torch.bfloat16)
-    device = str(hp.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"))
+    ctx = DistContext.detect()
+    if ctx.enabled and torch.cuda.is_available():
+        device = f"cuda:{ctx.local_rank}"
+    else:
+        device = str(
+            hp.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
     lora_cfg = md.get("lora")
 
+    attn_impl = resolve_attn_implementation(md)
     load_kwargs: dict[str, Any] = {
         "torch_dtype": dtype,
         "trust_remote_code": True,
+        "attn_implementation": attn_impl,
     }
     quantize = str((lora_cfg or {}).get("quantize", "")).lower()
     if lora_cfg is not None and quantize == "nf4":
@@ -309,7 +322,13 @@ def build_adapter(
             bnb_4bit_compute_dtype=dtype,
         )
 
-    log.info("loading causal LM %r (dtype=%s, device=%s) ...", repo, dtype_str, device)
+    log.info(
+        "loading causal LM %r (dtype=%s, device=%s, attn=%s) ...",
+        repo,
+        dtype_str,
+        device,
+        attn_impl,
+    )
     tokenizer = AutoTokenizer.from_pretrained(repo, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(repo, **load_kwargs)
     # A 4-bit base is placed by the quantizer; only move a full-precision base.
@@ -380,6 +399,21 @@ def build_adapter(
             trainable,
         )
 
+    model = maybe_convert_fp8(model, md)
+
+    if ctx.enabled:
+        if quantize == "nf4":
+            raise ValueError(
+                "QLoRA (lora.quantize='nf4') cannot be combined with FSDP2 "
+                "sharding: bitsandbytes 4-bit parameters are not DTensor-"
+                "compatible. Run QLoRA single-process, or drop `quantize` "
+                "for multi-process LoRA."
+            )
+        model = shard_model_fsdp2(model, ctx)
+        log.info(
+            "FSDP2 sharding applied (rank %d/%d)", ctx.rank, ctx.world_size
+        )
+
     opt = build_inner_optimizer(model, md, hp, default_lr=1e-5)
     log.info(
         "built language adapter %r: %d params",
@@ -393,6 +427,7 @@ def build_adapter(
         seq_len=int(hp.get("seq_len", 1024)),
         batch_size=int(hp.get("batch_size", 1)),
         device=device,
+        data_seed=ctx.rank,
         lora_alternating=lora_alternating,
         _lora_a_names=lora_a_names,
         _lora_b_names=lora_b_names,

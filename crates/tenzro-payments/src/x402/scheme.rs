@@ -5,9 +5,21 @@
 //! | scheme id          | how the payer authorizes                                   |
 //! |--------------------|------------------------------------------------------------|
 //! | `tenzro-hybrid`    | Ed25519 + ML-DSA-65 hybrid signature over the credential   |
+//! | `upto`             | Ed25519 + ML-DSA-65 hybrid over a MAXIMUM; settle actual  |
 //! | `exact-eip3009`    | EIP-3009 `transferWithAuthorization` (USDC-style meta-tx)  |
 //! | `permit2`          | Uniswap Permit2 `PermitTransferFrom` signature             |
 //! | `erc7710`          | ERC-7710 redeem of a pre-issued delegation                 |
+//!
+//! ## The `upto` (usage-metered) scheme
+//!
+//! `exact` schemes bind a fixed amount at authorization time. For per-token
+//! LLM billing, metered compute, or bandwidth, the buyer can't know the
+//! amount in advance. The `upto` scheme lets the buyer sign a *maximum*: the
+//! challenge's `amount` is the ceiling, the credential's `amount` is the
+//! actual usage (which must be `<= ceiling`), and settlement charges the
+//! actual. The buyer's hybrid signature is over the ceiling (bound by a
+//! distinct domain tag so an `upto` authorization can never be replayed as
+//! an `exact` one), so the seller is free to settle any amount up to it.
 //!
 //! The [`SchemeRegistry`] looks up a [`SchemeBackend`] by id and delegates
 //! credential verification to it. The credential-form path reads the scheme
@@ -18,6 +30,7 @@
 //! contains:
 //!
 //! - [`TenzroHybridBackend`] under `"tenzro-hybrid"` ([`DEFAULT_SCHEME`]).
+//! - [`UptoBackend`] under `"upto"`.
 //! - [`Eip3009Backend`] under `"exact-eip3009"` and `"eip3009"`.
 //! - [`Permit2Backend`] under `"permit2"`.
 //! - [`Erc7710Backend`] under `"erc7710"`.
@@ -50,6 +63,23 @@ use crate::x402::payment_required::X402PaymentRequirement;
 
 /// Scheme identifier used when a challenge does not pin one explicitly.
 pub const DEFAULT_SCHEME: &str = "tenzro-hybrid";
+
+/// Usage-metered scheme: buyer signs a maximum, seller settles the actual.
+pub const UPTO_SCHEME: &str = "upto";
+
+/// Domain-separation tag for the `upto` authorization preimage. Distinct from
+/// the plain credential preimage so a maximum-authorizing signature can never
+/// be replayed as an exact-amount authorization.
+pub const UPTO_PREIMAGE_DOMAIN: &str = "tenzro/x402/upto";
+
+/// Channel scheme: buyer deposits once, then signs cumulative off-chain
+/// vouchers; the seller settles many vouchers with a single on-chain claim.
+pub const BATCH_SETTLEMENT_SCHEME: &str = "batch-settlement";
+
+/// Domain-separation tag for a batch-settlement cumulative-voucher preimage.
+/// Distinct from every other x402 preimage so a voucher can never be replayed
+/// as an exact/upto authorization and vice versa.
+pub const BATCH_VOUCHER_PREIMAGE_DOMAIN: &str = "tenzro/x402/batch-voucher";
 
 /// One pluggable verification path for an x402 credential.
 ///
@@ -138,6 +168,12 @@ impl SchemeRegistry {
         let mut r = Self::empty();
         let hybrid: Arc<dyn SchemeBackend> = Arc::new(TenzroHybridBackend);
         r.register(DEFAULT_SCHEME, hybrid);
+
+        let upto: Arc<dyn SchemeBackend> = Arc::new(UptoBackend);
+        r.register(UPTO_SCHEME, upto);
+
+        let batch: Arc<dyn SchemeBackend> = Arc::new(BatchSettlementBackend);
+        r.register(BATCH_SETTLEMENT_SCHEME, batch);
 
         let eip3009: Arc<dyn SchemeBackend> =
             Arc::new(Eip3009Backend::new(Arc::new(CdpFacilitatorVerifier::new())));
@@ -379,6 +415,346 @@ fn extract_classical_public_key(credential: &PaymentCredential) -> Result<Public
     Err(PaymentError::CredentialError(
         "No public key found in credential".to_string(),
     ))
+}
+
+// ─── Upto (usage-metered) backend ─────────────────────────────────────────
+
+/// Usage-metered x402 backend. The buyer signs a **maximum** authorized
+/// amount; the seller settles the **actual** usage, which must be ≤ the
+/// maximum. Used for per-token LLM billing, metered compute, and bandwidth
+/// where the exact charge isn't known at authorization time.
+///
+/// # Credential layout
+///
+/// - `credential.amount` — the *actual* usage the server is settling.
+/// - `credential.extra["upto_max"]` — the *maximum* the buyer authorized,
+///   as a decimal string. This is the value the buyer's hybrid signature
+///   commits to (via [`build_upto_preimage`]). Must be `>= credential.amount`.
+/// - `credential.pq_public_key` / `pq_signature` / `signature` — the same
+///   Ed25519 + ML-DSA-65 hybrid legs as [`TenzroHybridBackend`], but over
+///   the [`UPTO_PREIMAGE_DOMAIN`]-tagged maximum preimage.
+///
+/// The server's amount admission (`X402PaymentServer::verify_credential`)
+/// enforces `credential.amount <= challenge.amount` for this scheme instead
+/// of exact equality; this backend enforces `credential.amount <= upto_max`
+/// and that the signature commits to `upto_max`.
+#[derive(Debug)]
+pub struct UptoBackend;
+
+/// Builds the canonical `upto` authorization preimage. The buyer signs the
+/// **maximum** (`upto_max`), not the actual usage, so the seller can settle
+/// any amount up to it. Domain-separated from [`build_credential_preimage`]
+/// so the two signature families never overlap.
+pub fn build_upto_preimage(
+    challenge_id: &str,
+    payer_did: &str,
+    upto_max: u128,
+    asset: &str,
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        UPTO_PREIMAGE_DOMAIN.len() + challenge_id.len() + payer_did.len() + 16 + asset.len(),
+    );
+    message.extend_from_slice(UPTO_PREIMAGE_DOMAIN.as_bytes());
+    message.extend_from_slice(challenge_id.as_bytes());
+    message.extend_from_slice(payer_did.as_bytes());
+    message.extend_from_slice(&upto_max.to_le_bytes());
+    message.extend_from_slice(asset.as_bytes());
+    message
+}
+
+/// Read the buyer-authorized maximum from `credential.extra["upto_max"]`.
+fn extract_upto_max(credential: &PaymentCredential) -> Result<u128> {
+    let raw = credential
+        .extra
+        .get("upto_max")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            PaymentError::CredentialError(
+                "upto credential is missing extra.upto_max (decimal string)".to_string(),
+            )
+        })?;
+    raw.parse::<u128>().map_err(|_| {
+        PaymentError::CredentialError(format!(
+            "upto credential extra.upto_max is not a valid u128: '{}'",
+            raw
+        ))
+    })
+}
+
+#[async_trait]
+impl SchemeBackend for UptoBackend {
+    fn name(&self) -> &'static str {
+        UPTO_SCHEME
+    }
+
+    async fn verify(
+        &self,
+        challenge: &PaymentChallenge,
+        credential: &PaymentCredential,
+    ) -> Result<()> {
+        if credential.pq_public_key.is_empty() {
+            return Err(PaymentError::VerificationFailed(
+                "upto credential is missing pq_public_key (ML-DSA-65)".to_string(),
+            ));
+        }
+        if credential.pq_signature.is_empty() {
+            return Err(PaymentError::VerificationFailed(
+                "upto credential is missing pq_signature (ML-DSA-65)".to_string(),
+            ));
+        }
+
+        let upto_max = extract_upto_max(credential)?;
+
+        // The actual usage must fit under the authorized maximum...
+        if credential.amount > upto_max {
+            return Err(PaymentError::VerificationFailed(format!(
+                "upto actual amount {} exceeds authorized maximum {}",
+                credential.amount, upto_max
+            )));
+        }
+        // ...and the maximum must fit under the challenge ceiling.
+        if upto_max > challenge.amount {
+            return Err(PaymentError::VerificationFailed(format!(
+                "upto authorized maximum {} exceeds challenge ceiling {}",
+                upto_max, challenge.amount
+            )));
+        }
+
+        // The buyer's hybrid signature commits to the maximum, not the actual.
+        let message =
+            build_upto_preimage(&credential.challenge_id, &credential.payer_did, upto_max, &credential.asset);
+        let classical_pk = extract_classical_public_key(credential)?;
+
+        let composite_pk =
+            CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
+        let composite_sig = CompositeSignature::new(
+            credential.signature.clone(),
+            credential.pq_signature.clone(),
+        );
+
+        let verifier = StandardHybridVerifier::new(composite_pk);
+        verifier.verify(&message, &composite_sig).map_err(|e| {
+            PaymentError::VerificationFailed(format!(
+                "upto hybrid signature verification failed: {}",
+                e
+            ))
+        })?;
+
+        debug!(
+            "upto verified credential {} (actual {} of max {}) for challenge {}",
+            credential.credential_id, credential.amount, upto_max, challenge.challenge_id
+        );
+        Ok(())
+    }
+
+    // settle: usage-metered payments are closed by the local SettlementEngine
+    // using credential.amount as the actual charge, so `Ok(None)` is correct.
+}
+
+// ─── Batch-settlement (channel voucher) backend ───────────────────────────
+
+/// Channel-voucher x402 backend. The buyer deposits once into a micropayment
+/// channel, then signs a running **cumulative** total after each request; the
+/// seller settles many vouchers with a single on-chain claim. Used for
+/// high-frequency per-request billing where per-request on-chain settlement
+/// would dominate the cost.
+///
+/// This backend is stateless: it verifies that a voucher is a valid hybrid
+/// signature over `(channel_id, cumulative_amount, voucher_nonce)` and that
+/// the voucher is monotone (cumulative ≥ the challenge's declared floor and
+/// within the channel deposit ceiling). The stateful accounting — deposit
+/// locking, cumulative debit, claim, refund — lives in
+/// [`tenzro_settlement::ChannelManager`], driven at the server/node layer once
+/// verification passes.
+///
+/// # Credential layout
+///
+/// - `credential.amount` — the *incremental* charge this voucher authorizes
+///   (`cumulative - previous_cumulative`), settled into the channel.
+/// - `credential.extra["channel_id"]` — hex of the channel this voucher draws
+///   against. Must equal the challenge's `extra["channel_id"]`.
+/// - `credential.extra["cumulative_amount"]` — the running total the buyer is
+///   signing, as a decimal string.
+/// - `credential.extra["voucher_nonce"]` — monotonically increasing per-channel
+///   voucher counter, as a decimal string.
+/// - `credential.extra["channel_deposit"]` — the channel deposit ceiling, as a
+///   decimal string. The cumulative total may not exceed it.
+/// - `credential.{signature, pq_signature, pq_public_key}` — the Ed25519 +
+///   ML-DSA-65 hybrid legs over [`build_batch_voucher_preimage`].
+#[derive(Debug)]
+pub struct BatchSettlementBackend;
+
+/// Builds the canonical batch-settlement voucher preimage. The buyer signs the
+/// **cumulative** total against a specific channel and voucher nonce, so the
+/// seller can settle the highest voucher and discard the rest.
+pub fn build_batch_voucher_preimage(
+    channel_id: &str,
+    payer_did: &str,
+    cumulative_amount: u128,
+    voucher_nonce: u64,
+    asset: &str,
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        BATCH_VOUCHER_PREIMAGE_DOMAIN.len()
+            + channel_id.len()
+            + payer_did.len()
+            + 16
+            + 8
+            + asset.len(),
+    );
+    message.extend_from_slice(BATCH_VOUCHER_PREIMAGE_DOMAIN.as_bytes());
+    message.extend_from_slice(channel_id.as_bytes());
+    message.extend_from_slice(payer_did.as_bytes());
+    message.extend_from_slice(&cumulative_amount.to_le_bytes());
+    message.extend_from_slice(&voucher_nonce.to_le_bytes());
+    message.extend_from_slice(asset.as_bytes());
+    message
+}
+
+/// Read a required decimal `u128` field from `credential.extra`.
+fn extract_u128_field(credential: &PaymentCredential, key: &str) -> Result<u128> {
+    let raw = credential
+        .extra
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            PaymentError::CredentialError(format!(
+                "batch-settlement voucher is missing extra.{} (decimal string)",
+                key
+            ))
+        })?;
+    raw.parse::<u128>().map_err(|_| {
+        PaymentError::CredentialError(format!(
+            "batch-settlement voucher extra.{} is not a valid u128: '{}'",
+            key, raw
+        ))
+    })
+}
+
+/// Read a required decimal `u64` field from `credential.extra`.
+fn extract_u64_field(credential: &PaymentCredential, key: &str) -> Result<u64> {
+    let raw = credential
+        .extra
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            PaymentError::CredentialError(format!(
+                "batch-settlement voucher is missing extra.{} (decimal string)",
+                key
+            ))
+        })?;
+    raw.parse::<u64>().map_err(|_| {
+        PaymentError::CredentialError(format!(
+            "batch-settlement voucher extra.{} is not a valid u64: '{}'",
+            key, raw
+        ))
+    })
+}
+
+#[async_trait]
+impl SchemeBackend for BatchSettlementBackend {
+    fn name(&self) -> &'static str {
+        BATCH_SETTLEMENT_SCHEME
+    }
+
+    async fn verify(
+        &self,
+        challenge: &PaymentChallenge,
+        credential: &PaymentCredential,
+    ) -> Result<()> {
+        if credential.pq_public_key.is_empty() {
+            return Err(PaymentError::VerificationFailed(
+                "batch-settlement voucher is missing pq_public_key (ML-DSA-65)".to_string(),
+            ));
+        }
+        if credential.pq_signature.is_empty() {
+            return Err(PaymentError::VerificationFailed(
+                "batch-settlement voucher is missing pq_signature (ML-DSA-65)".to_string(),
+            ));
+        }
+
+        let channel_id = credential
+            .extra
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                PaymentError::CredentialError(
+                    "batch-settlement voucher is missing extra.channel_id".to_string(),
+                )
+            })?;
+
+        // The voucher must draw against the channel the challenge pins.
+        if let Some(expected) = challenge.extra.get("channel_id").and_then(|v| v.as_str())
+            && expected != channel_id
+        {
+            return Err(PaymentError::VerificationFailed(format!(
+                "batch-settlement voucher channel_id '{}' does not match challenge channel '{}'",
+                channel_id, expected
+            )));
+        }
+
+        let cumulative = extract_u128_field(credential, "cumulative_amount")?;
+        let voucher_nonce = extract_u64_field(credential, "voucher_nonce")?;
+        let deposit = extract_u128_field(credential, "channel_deposit")?;
+
+        // The incremental charge must be non-zero and must not exceed the
+        // cumulative total it advances.
+        if credential.amount == 0 {
+            return Err(PaymentError::VerificationFailed(
+                "batch-settlement voucher increment must be non-zero".to_string(),
+            ));
+        }
+        if credential.amount > cumulative {
+            return Err(PaymentError::VerificationFailed(format!(
+                "batch-settlement increment {} exceeds cumulative total {}",
+                credential.amount, cumulative
+            )));
+        }
+
+        // The cumulative total may never exceed the channel deposit ceiling.
+        if cumulative > deposit {
+            return Err(PaymentError::VerificationFailed(format!(
+                "batch-settlement cumulative {} exceeds channel deposit {}",
+                cumulative, deposit
+            )));
+        }
+
+        // The buyer's hybrid signature commits to the cumulative total against
+        // this channel and voucher nonce.
+        let message = build_batch_voucher_preimage(
+            channel_id,
+            &credential.payer_did,
+            cumulative,
+            voucher_nonce,
+            &credential.asset,
+        );
+        let classical_pk = extract_classical_public_key(credential)?;
+
+        let composite_pk =
+            CompositePublicKey::new(classical_pk, credential.pq_public_key.clone());
+        let composite_sig = CompositeSignature::new(
+            credential.signature.clone(),
+            credential.pq_signature.clone(),
+        );
+
+        let verifier = StandardHybridVerifier::new(composite_pk);
+        verifier.verify(&message, &composite_sig).map_err(|e| {
+            PaymentError::VerificationFailed(format!(
+                "batch-settlement voucher signature verification failed: {}",
+                e
+            ))
+        })?;
+
+        debug!(
+            "batch-settlement verified voucher {} (increment {}, cumulative {}, nonce {}) on channel {}",
+            credential.credential_id, credential.amount, cumulative, voucher_nonce, channel_id
+        );
+        Ok(())
+    }
+
+    // settle: the channel debit and eventual on-chain claim are performed by
+    // tenzro_settlement::ChannelManager at the server/node layer, so `Ok(None)`
+    // is correct here.
 }
 
 // ─── Facilitator-backed schemes (EIP-3009 / Permit2) ──────────────────────
@@ -1100,6 +1476,330 @@ mod tests {
         let backend = Erc7710Backend::new(Arc::new(NullDelegationVerifier));
         let ch = make_challenge("erc7710");
         let cred = make_erc7710_credential();
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    // ── upto (usage-metered) backend ────────────────────────────────────
+
+    fn upto_hybrid_signer() -> tenzro_crypto::composite::InMemoryHybridSigner {
+        use tenzro_crypto::composite::InMemoryHybridSigner;
+        use tenzro_crypto::keys::KeyPair;
+        use tenzro_crypto::pq::MlDsaSigningKey;
+        use tenzro_crypto::signatures::Ed25519SignerImpl;
+        let kp = KeyPair::generate(KeyType::Ed25519).unwrap();
+        let classical = Ed25519SignerImpl::new(kp).unwrap();
+        InMemoryHybridSigner::new(Box::new(classical), MlDsaSigningKey::generate())
+    }
+
+    /// Build an upto credential whose hybrid signature commits to `upto_max`,
+    /// charging `actual`. `challenge_id`/`payer_did`/`asset` must match the
+    /// challenge the backend verifies against.
+    fn make_upto_credential(upto_max: u128, actual: u128) -> PaymentCredential {
+        use tenzro_crypto::composite::HybridSigner;
+        let signer = upto_hybrid_signer();
+        let payer_did = "did:tenzro:human:alice";
+        let asset = "USDC";
+        let message = build_upto_preimage("ch-1", payer_did, upto_max, asset);
+        let sig = signer.sign(&message).unwrap();
+        let composite_pk = signer.public_key();
+        let classical_pk_hex = hex::encode(composite_pk.classical.as_bytes());
+
+        let mut extra = StdHashMap::new();
+        extra.insert("public_key".to_string(), serde_json::json!(classical_pk_hex));
+        extra.insert("upto_max".to_string(), serde_json::json!(upto_max.to_string()));
+        PaymentCredential {
+            credential_id: "cred-upto".to_string(),
+            challenge_id: "ch-1".to_string(),
+            protocol: "x402".to_string(),
+            payer_did: payer_did.to_string(),
+            payer_address: String::new(),
+            amount: actual,
+            asset: asset.to_string(),
+            signature: sig.classical.clone(),
+            pq_signature: sig.pq.clone(),
+            pq_public_key: composite_pk.pq.clone(),
+            extra,
+        }
+    }
+
+    #[test]
+    fn registry_defaults_contain_upto() {
+        let r = SchemeRegistry::with_defaults();
+        assert!(r.get(UPTO_SCHEME).is_some());
+        assert_eq!(r.get("UPTO").unwrap().name(), UPTO_SCHEME);
+    }
+
+    #[test]
+    fn upto_preimage_is_domain_separated_from_credential_preimage() {
+        // A maximum-authorizing signature must never verify as a plain
+        // exact-amount credential: the two preimages must differ even for
+        // identical (challenge, payer, amount, asset) tuples.
+        let upto = build_upto_preimage("ch-1", "did:x", 1_000, "USDC");
+        let cred = PaymentCredential {
+            credential_id: "c".into(),
+            challenge_id: "ch-1".into(),
+            protocol: "x402".into(),
+            payer_did: "did:x".into(),
+            payer_address: String::new(),
+            amount: 1_000,
+            asset: "USDC".into(),
+            signature: vec![],
+            pq_signature: vec![],
+            pq_public_key: vec![],
+            extra: StdHashMap::new(),
+        };
+        assert_ne!(upto, build_credential_preimage(&cred));
+    }
+
+    #[tokio::test]
+    async fn upto_accepts_actual_at_or_below_max() {
+        let backend = UptoBackend;
+        let ch = make_challenge(UPTO_SCHEME); // ceiling 1_000
+        let cred = make_upto_credential(800, 300);
+        backend.verify(&ch, &cred).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn upto_accepts_actual_equal_to_max() {
+        let backend = UptoBackend;
+        let ch = make_challenge(UPTO_SCHEME);
+        let cred = make_upto_credential(800, 800);
+        backend.verify(&ch, &cred).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn upto_rejects_actual_above_max() {
+        let backend = UptoBackend;
+        let ch = make_challenge(UPTO_SCHEME);
+        let cred = make_upto_credential(800, 801);
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn upto_rejects_max_above_ceiling() {
+        let backend = UptoBackend;
+        let ch = make_challenge(UPTO_SCHEME); // ceiling 1_000
+        let cred = make_upto_credential(2_000, 500);
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn upto_rejects_missing_upto_max() {
+        let backend = UptoBackend;
+        let ch = make_challenge(UPTO_SCHEME);
+        let mut cred = make_upto_credential(800, 300);
+        cred.extra.remove("upto_max");
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::CredentialError(_)));
+    }
+
+    #[tokio::test]
+    async fn upto_rejects_empty_pq_legs() {
+        let backend = UptoBackend;
+        let ch = make_challenge(UPTO_SCHEME);
+        let mut cred = make_upto_credential(800, 300);
+        cred.pq_public_key.clear();
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn upto_rejects_signature_over_different_max() {
+        // Credential signs over max=800 but claims upto_max=900 — the
+        // hybrid check must fail because the preimage no longer matches.
+        let backend = UptoBackend;
+        let ch = make_challenge(UPTO_SCHEME);
+        let mut cred = make_upto_credential(800, 300);
+        cred.extra
+            .insert("upto_max".to_string(), serde_json::json!("900"));
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    // ─── batch-settlement backend ──────────────────────────────────────────
+
+    /// Build a batch-settlement challenge pinned to `channel_id`.
+    fn make_batch_challenge(channel_id: &str) -> PaymentChallenge {
+        let mut ch = make_challenge(BATCH_SETTLEMENT_SCHEME); // ceiling 1_000
+        ch.extra
+            .insert("channel_id".to_string(), serde_json::json!(channel_id));
+        ch
+    }
+
+    /// Build a batch-settlement voucher whose hybrid signature commits to
+    /// `cumulative` against `channel_id` and `voucher_nonce`, settling an
+    /// increment of `increment` under a `deposit` ceiling.
+    fn make_batch_voucher(
+        channel_id: &str,
+        increment: u128,
+        cumulative: u128,
+        voucher_nonce: u64,
+        deposit: u128,
+    ) -> PaymentCredential {
+        use tenzro_crypto::composite::HybridSigner;
+        let signer = upto_hybrid_signer();
+        let payer_did = "did:tenzro:human:alice";
+        let asset = "USDC";
+        let message = build_batch_voucher_preimage(
+            channel_id,
+            payer_did,
+            cumulative,
+            voucher_nonce,
+            asset,
+        );
+        let sig = signer.sign(&message).unwrap();
+        let composite_pk = signer.public_key();
+        let classical_pk_hex = hex::encode(composite_pk.classical.as_bytes());
+
+        let mut extra = StdHashMap::new();
+        extra.insert("public_key".to_string(), serde_json::json!(classical_pk_hex));
+        extra.insert("channel_id".to_string(), serde_json::json!(channel_id));
+        extra.insert(
+            "cumulative_amount".to_string(),
+            serde_json::json!(cumulative.to_string()),
+        );
+        extra.insert(
+            "voucher_nonce".to_string(),
+            serde_json::json!(voucher_nonce.to_string()),
+        );
+        extra.insert(
+            "channel_deposit".to_string(),
+            serde_json::json!(deposit.to_string()),
+        );
+        PaymentCredential {
+            credential_id: "cred-batch".to_string(),
+            challenge_id: "ch-1".to_string(),
+            protocol: "x402".to_string(),
+            payer_did: payer_did.to_string(),
+            payer_address: String::new(),
+            amount: increment,
+            asset: asset.to_string(),
+            signature: sig.classical.clone(),
+            pq_signature: sig.pq.clone(),
+            pq_public_key: composite_pk.pq.clone(),
+            extra,
+        }
+    }
+
+    #[test]
+    fn registry_defaults_contain_batch_settlement() {
+        let r = SchemeRegistry::with_defaults();
+        assert!(r.get(BATCH_SETTLEMENT_SCHEME).is_some());
+        assert_eq!(
+            r.get("BATCH-SETTLEMENT").unwrap().name(),
+            BATCH_SETTLEMENT_SCHEME
+        );
+    }
+
+    #[test]
+    fn batch_voucher_preimage_is_domain_separated_from_upto() {
+        // A cumulative voucher must never verify as an upto authorization even
+        // for identical (id, payer, amount, asset) tuples.
+        let voucher = build_batch_voucher_preimage("chan-1", "did:x", 1_000, 0, "USDC");
+        let upto = build_upto_preimage("chan-1", "did:x", 1_000, "USDC");
+        assert_ne!(voucher, upto);
+    }
+
+    #[tokio::test]
+    async fn batch_accepts_increment_within_cumulative_and_deposit() {
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        // increment 200, cumulative 500, deposit 800.
+        let cred = make_batch_voucher("chan-1", 200, 500, 3, 800);
+        backend.verify(&ch, &cred).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_accepts_cumulative_equal_to_deposit() {
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        let cred = make_batch_voucher("chan-1", 300, 800, 5, 800);
+        backend.verify(&ch, &cred).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_cumulative_above_deposit() {
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        // cumulative 900 > deposit 800.
+        let cred = make_batch_voucher("chan-1", 100, 900, 6, 800);
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_increment_above_cumulative() {
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        // increment 600 > cumulative 500.
+        let cred = make_batch_voucher("chan-1", 600, 500, 2, 800);
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_zero_increment() {
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        let cred = make_batch_voucher("chan-1", 0, 500, 2, 800);
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_channel_mismatch() {
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        // Voucher draws against a different channel than the challenge pins.
+        let cred = make_batch_voucher("chan-2", 200, 500, 3, 800);
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_missing_cumulative() {
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        let mut cred = make_batch_voucher("chan-1", 200, 500, 3, 800);
+        cred.extra.remove("cumulative_amount");
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::CredentialError(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_empty_pq_legs() {
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        let mut cred = make_batch_voucher("chan-1", 200, 500, 3, 800);
+        cred.pq_public_key.clear();
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_signature_over_different_cumulative() {
+        // Voucher signs cumulative=500 but claims cumulative=600 — the hybrid
+        // check must fail because the preimage no longer matches.
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        let mut cred = make_batch_voucher("chan-1", 200, 500, 3, 800);
+        cred.extra
+            .insert("cumulative_amount".to_string(), serde_json::json!("600"));
+        let err = backend.verify(&ch, &cred).await.unwrap_err();
+        assert!(matches!(err, PaymentError::VerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_signature_over_different_nonce() {
+        // Voucher signs nonce=3 but claims nonce=4 — preimage mismatch.
+        let backend = BatchSettlementBackend;
+        let ch = make_batch_challenge("chan-1");
+        let mut cred = make_batch_voucher("chan-1", 200, 500, 3, 800);
+        cred.extra
+            .insert("voucher_nonce".to_string(), serde_json::json!("4"));
         let err = backend.verify(&ch, &cred).await.unwrap_err();
         assert!(matches!(err, PaymentError::VerificationFailed(_)));
     }

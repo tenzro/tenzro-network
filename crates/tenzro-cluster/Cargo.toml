@@ -1,0 +1,11 @@
+[package]
+name = "tenzro-cluster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Engine-agnostic local-network cluster substrate for Tenzro Network — reachability tiers, probed link-cost graph, deterministic nearest-neighbour stage ordering, and HRW rendezvous placement shared by model, storage, and database serving"
+
+[dependencies]
+serde = { workspace = true }
+sha2 = { workspace = true }

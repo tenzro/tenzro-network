@@ -53,8 +53,9 @@ All payment protocols follow the HTTP 402 Payment Required pattern with challeng
 - **X402PaymentRequired** — 402 response with payment details
 - **X402PaymentPayload** — Payment transaction data
 - **X402Facilitator** — Settlement facilitator interface (dispatches to a `SchemeRegistry` of pluggable scheme adapters)
-- **SchemeRegistry** — Pluggable adapter table for x402 schemes; ships with `exact` (direct on-chain transfer of the exact challenge amount) and `permit2` (EIP-2612 permit-based authorization, facilitator pulls funds at settlement). Discoverable at runtime via `tenzro_listX402Schemes`; payers select via `--scheme <name>` on `tenzro x402 pay`.
+- **SchemeRegistry** — Pluggable adapter table for x402 schemes; ships with `tenzro-hybrid` (the default), `exact-eip3009` (direct on-chain transfer of the exact challenge amount via EIP-3009 authorization), `permit2` (Permit2 authorization, facilitator pulls funds at settlement), and `erc7710` (ERC-7710 delegation-based authorization). Discoverable at runtime via `tenzro_listX402Schemes`; payers select via `--scheme <name>` on `tenzro x402 pay`.
 - **CdpFacilitatorClient** — Coinbase CDP facilitator with EIP-3009 calldata encoding and EIP-712 typed data
+- **ResourceCatalog (Bazaar)** — Discovery catalog for paid resources. A seller registers an `X402ResourceListing` (resource URL, scheme, network, asset, pay-to, max amount, tags); buyers browse via a `ResourceQuery` before ever hitting a `402`. The listing id is derived from `(seller_did, resource)`, so re-registering the same pair is idempotent. Optional `ResourceCatalogStore` gives write-through persistence. Surfaced over RPC as `tenzro_x402RegisterResource` / `tenzro_x402DiscoverResources` / `tenzro_x402DeregisterResource`, with `tenzro_x402VerifyOffer` for server-signed offers and `tenzro_x402PaymentId` for deterministic `pay_<hex>` idempotency ids.
 
 ### Tempo Network
 - **TempoBridgeAdapter** — Direct Tempo network integration

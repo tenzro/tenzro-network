@@ -169,6 +169,10 @@ impl WebServer {
             .route("/verify/ready", get(handlers::ready))
             .route("/ready", get(handlers::ready))
             .route("/status", get(handlers::status))
+            // x402 Bazaar resource discovery — public, ungated. Buyers
+            // browse a seller's paid resource listings, narrowed by
+            // scheme/network/asset/sellerDid/tags query params.
+            .route("/discovery/resources", get(handlers::discover_resources))
             .route("/faucet", post(handlers::faucet))
             // OAuth 2.1 / RFC 8693 / RFC 7662 / RFC 7009 / RFC 9728
             // — agent-to-agent token surface, distinct from the
