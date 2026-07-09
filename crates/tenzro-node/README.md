@@ -12,7 +12,7 @@ The `tenzro-node` crate provides the complete node binary that integrates all Te
 - **Modular Architecture**: Clean separation of concerns across subsystems
 - **Health Monitoring**: Real-time health tracking for all subsystems
 - **Metrics Collection**: Performance metrics and statistics
-- **JSON-RPC API**: Standard API for querying and interacting with the node (470+ methods across 26+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, settlement, escrow, agents, identity, network, governance, payments, ap2, staking, canton, task marketplace, agent marketplace, token registry, bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
+- **JSON-RPC API**: Standard API for querying and interacting with the node (490+ methods across 28+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, settlement, escrow, agents, identity, network, governance, payments, x402 bazaar, ap2, staking, canton, task marketplace, agent marketplace, token registry, databases, bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
 - **MCP Server**: Model Context Protocol server with 414 tools (base + 29 multi-modal AI + 3 AgentBond/insurance + 3 agent-memory) on `rmcp` Streamable HTTP transport at `/mcp`, port 3001
 - **A2A Server**: Agent-to-Agent protocol server with 41 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
 - **Web Verification API**: REST endpoints for ZK proof, TEE attestation, and transaction verification (port 8080)
@@ -148,7 +148,7 @@ Shutdown occurs in reverse order to ensure clean resource cleanup.
 
 The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0:8545`).
 
-### RPC Namespaces (470+ methods, 26+ namespaces)
+### RPC Namespaces (490+ methods, 28+ namespaces)
 
 - **Blockchain**: blockNumber, getBlock, getBlockRange (batch fetch for catch-up sync), getTransaction (returns `status: "pending" | "finalized"` so callers can distinguish in-mempool from block-included transactions), submitBlock
 - **Accounts**: createAccount, createWallet (chain-agnostic — see "Wallet model" below), getBalance, getNonce, listAccounts
@@ -167,7 +167,8 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0
 - **Identity**: registerIdentity, importIdentity, resolveDidDocument, resolveIdentity, participate, forgetIdentity (GDPR Article 17 right-to-erasure — DID must already be `Revoked`)
 - **Network**: nodeInfo, peerCount, syncing, hardwareProfile, role
 - **Governance**: listProposals, vote, getVotingPower
-- **Payments**: createPaymentChallenge, payMpp, payX402, listPaymentSessions, paymentGatewayInfo, listX402Schemes (pluggable scheme registry: `exact`, `permit2`)
+- **Payments**: createPaymentChallenge, payMpp, payX402, listPaymentSessions, paymentGatewayInfo, listX402Schemes (pluggable scheme registry: `tenzro-hybrid`, `exact-eip3009`, `permit2`, `erc7710`)
+- **x402 Bazaar**: x402ProtocolInfo, x402RegisterResource, x402DiscoverResources, x402DeregisterResource, x402VerifyOffer, x402PaymentId — a discovery catalog for paid resources: sellers register listings (resource, scheme, network, asset, pay-to, max amount, tags), buyers browse before hitting a `402`, listing ids derive from `(seller_did, resource)` (re-register is idempotent), plus server-signed offer verification and deterministic `pay_<hex>` idempotency ids
 - **AP2 v0.2 (Agent Payments Protocol)**: createAp2Session, ap2SignMandate (Ed25519 sign-side for `checkout` and `payment` mandates), ap2VerifyMandate, ap2ValidateMandatePair (three-axis validation: mandate constraints + DelegationScope + SpendingPolicy)
 - **Stripe SPT**: sptIssue (TDIP cap-resolver enforces principal `DelegationScope` + runtime `SpendingPolicy`), sptVerify, with `granted_token.deactivated` webhook cascading into TDIP `apply_remote_revocation` and ERC-8004 ReputationRegistry cross-write on every settled outcome
 - **AAP (Agent Access Protocol)**: oauthDiscovery, exchangeToken, introspectToken — OAuth 2.1 + DPoP-bound JWTs (RFC 9449) + RAR (RFC 9396) over `tenzro-auth`
@@ -192,6 +193,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0
 - **Compute**: computeStatus, computeBookRental, computeSettleEpoch, computeGetRental, computeSetPricing — rentable compute against stake, settled per epoch on an availability proof; shares the storage coverage budget
 - **MoE**: moeShardMap, moePlanDispatch, moeReplicationPolicy, moeCatalogShape — decentralized expert-shard serving: shard map, top-k dispatch planning, governance-tuned replication policy, catalog topology
 - **Discovery & Clustering**: localPeers (mDNS local segment), nodeReachability (`direct` / `relay_only` / `unreachable`), nodeProfile (hardware self-profile: build commit, CPU arch, OS, devices, derived serving capacity / backend / capability key), clusterPlan (deterministic layer-wise LAN cluster placement)
+- **Databases**: listDatabaseEngines, createDatabase, getDatabase, listDatabases, getDatabasePartition, listDatabasePartitions, dropDatabase, authorizeDatabaseRead, databaseQuery, rescaleDatabase, issueDatabaseConnection — managed-database protocol layer over an operator-run engine (PostgreSQL / Qdrant / Valkey as thin clients, Lance / Tantivy embedded in-process; Milvus / Dgraph catalog-only). Placement moves a database along local → lan_cluster → network; queries carry the engine's own dialect body; connections are minted as AAP capabilities scoped to a single database; access is gated by `AccessPolicy` + optional confidential seal
 
 ### Paid Agent Marketplace
 

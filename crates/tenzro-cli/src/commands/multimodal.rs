@@ -1,7 +1,7 @@
 //! Multi-modal inference commands for the Tenzro CLI.
 //!
-//! Wraps the JSON-RPC surface added in Layer A:
-//!   - `embed-text`  → `tenzro_textEmbed`
+//! Wraps the JSON-RPC multi-modal surface:
+//!   - `embed-text`  → `tenzro_textEmbed` (+ `load`/`unload` to serve a catalog encoder locally)
 //!   - `segment`     → `tenzro_segment`
 //!   - `detect`      → `tenzro_detect`
 //!   - `transcribe`  → `tenzro_transcribe`
@@ -9,7 +9,7 @@
 //!
 //! Each subcommand reads the input from a local path (image / audio / video),
 //! base64-encodes it, and dispatches to the node. List/catalog subcommands
-//! cover the discovery side.
+//! cover the discovery side; `load` downloads a catalog model onto the node.
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
@@ -36,6 +36,10 @@ pub enum EmbedTextCommand {
     Catalog(EmbedTextCatalogCmd),
     /// List currently-loaded text encoders on this node.
     List(EmbedTextListCmd),
+    /// Download a catalog encoder onto this node and register it for serving.
+    Load(EmbedTextLoadCmd),
+    /// Unregister a previously-loaded text encoder.
+    Unload(EmbedTextUnloadCmd),
     /// Embed one or more strings.
     Run(EmbedTextRunCmd),
 }
@@ -45,8 +49,57 @@ impl EmbedTextCommand {
         match self {
             Self::Catalog(c) => c.execute().await,
             Self::List(c) => c.execute().await,
+            Self::Load(c) => c.execute().await,
+            Self::Unload(c) => c.execute().await,
             Self::Run(c) => c.execute().await,
         }
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbedTextLoadCmd {
+    /// Catalog model id (e.g. `qwen3-embedding-0.6b`, `embeddinggemma-300m`, `bge-m3`).
+    /// The node fetches the ONNX graph, its external-data sidecar (if any), and
+    /// the tokenizer from HuggingFace onto its persistent models dir, then serves it.
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedTextLoadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_loadTextEmbeddingModel",
+                json!({ "model_id": self.model }),
+            )
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&res)?);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbedTextUnloadCmd {
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedTextUnloadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_unloadTextEmbeddingModel",
+                json!({ "model_id": self.model }),
+            )
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&res)?);
+        Ok(())
     }
 }
 

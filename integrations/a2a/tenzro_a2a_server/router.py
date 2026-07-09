@@ -191,6 +191,12 @@ def route_message(text: str) -> str:
     ]):
         return "discovery"
     if any(k in t for k in [
+        "database", "managed database", "database engine", "database partition",
+        "database query", "database connection", "create database",
+        "drop database", "rescale database", "list databases",
+    ]):
+        return "database"
+    if any(k in t for k in [
         "storage", "store object", "storage deal", "store ",
         "por challenge", "charge epoch",
     ]):

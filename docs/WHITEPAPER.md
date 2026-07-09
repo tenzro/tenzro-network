@@ -318,7 +318,7 @@ Tenzro is built for open-source intelligence at every modality and every size. T
 
 - **Language** — Qwen 2 / 3 / 3.5 / 3.6 (dense and MoE), Gemma 3 / 4 (incl. Gemma 4 26B-A4B MoE), Mistral (incl. Mistral Small 3.2), Phi 3 / 4, DeepSeek V3 (native MTP) and V4 Pro / Flash, GLM 5 / 5.1 / 5.2 (5.2 with native MTP), Kimi K2 / K2.5 / K2.6 / K2.7-Code, MiniMax M1 / M3, Granite, Granite-H, gpt-oss, Nemotron Nano. All run through the language runtime with full chat templates, streaming, and Anthropic-style SSE.
 - **Vision embedding** — CLIP ViT-B/32 and L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16. Used for image search, similarity, and embedding pipelines.
-- **Text embedding** — Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M (Matryoshka), BGE-M3, Snowflake Arctic Embed L v2.0.
+- **Text embedding** — Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M (Matryoshka), BGE-M3, Snowflake Arctic Embed L v2.0, ModernBERT-embed base/large (8192-context RoPE encoder).
 - **Segmentation** — point/box (SAM 2 base/large, EdgeSAM, MobileSAM) and text-promptable open-vocabulary (SAM 3 / 3.1).
 - **Detection** — RF-DETR (nano through 2xl, 90-class COCO) and D-FINE (n/s/m/l/x, 80-class).
 - **Audio (ASR)** — Moonshine v2, Distil-Whisper, Whisper-large-v3-turbo, NVIDIA Parakeet-TDT-0.6B-v3, Canary-1B-Flash.

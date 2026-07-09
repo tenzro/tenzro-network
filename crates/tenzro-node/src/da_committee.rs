@@ -63,11 +63,6 @@ use tenzro_storage::redstuff::{
 };
 use tenzro_types::primitives::{Address, Hash, Timestamp};
 
-/// Libp2p protocol string for the committee DA sliver/attestation exchange.
-/// Kept version-free per Tenzro identifier convention; a breaking wire change
-/// is a flag-day cutover, not a `/v2`.
-pub const DA_COMMITTEE_PROTOCOL: &str = "/tenzro/da/committee";
-
 /// Domain-separation tag for the message a validator signs when attesting that
 /// it has durably stored its assigned sliver for a blob.
 const ATTEST_TAG: &[u8] = b"tenzro/da/committee/attest";

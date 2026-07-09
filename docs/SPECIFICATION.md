@@ -839,26 +839,30 @@ The elevated multiplier for TEE providers incentivizes investment in hardware-ro
 
 ### 8.4 Reward Distribution
 
-Rewards are calculated and distributed per epoch:
+Rewards are **work-gated**, issued per epoch as minting-right coupons rather than paid on stake:
 
 | Parameter | Value |
 |-----------|-------|
 | Epoch duration | 14,400 blocks (~1 day at 6s/block) |
-| Base reward rate | 5% APY (500 basis points) |
+| Reward model | Work-gated coupons on a declining annual schedule |
+| Role buckets | Validator, Provider, Ecosystem |
+| Claim liquid fraction | `liquid_bps` (remainder opens 12-month reward vesting) |
 
-**Reward calculation for each staker:**
+**Reward calculation for each closed epoch:**
 
 ```
-epoch_budget = total_staked * (reward_rate / 10000) / 365
+year          = year_for(epoch)
+epoch_rights  = declining_annual_schedule(year) / 365
+(val_bps, prov_bps, eco_bps) = role_split_for(year)   // shifts infra → apps over years
 
-For each staker:
-  stake_proportion = staker_amount / total_staked
-  base_reward = epoch_budget * stake_proportion
-  uptime_adjusted = base_reward * uptime_percentage
-  final_reward = uptime_adjusted * provider_type_multiplier
+For each role bucket:
+  bucket_rights = epoch_rights * bucket_bps / 10000
+  For each address with verified work in the bucket:
+    work_share = address_work_weight / bucket_total_work_weight
+    coupon     = bucket_rights * work_share            // an unclaimed minting right
 ```
 
-Rewards accumulate as pending balances and must be explicitly claimed. Double-distribution is prevented by tracking which epochs have been distributed. Epoch reward calculations are enforced to be sequential — epoch N must be processed before epoch N+1.
+Work weight is measured by the protocol — never self-reported. Validators earn on finalized-block and quorum-certificate participation; providers on metered proof-of-service (uptime- and reputation-scaled); the ecosystem bucket on contributions accepted through governance/foundation review (development, apps, tools). Rights left unmatched in a bucket, and coupons unclaimed within the claim window, are **permanently unminted** — supply only moves for work that was both done and claimed. Claiming a coupon mints the `liquid_bps` fraction immediately and opens a 12-month linear reward-vesting schedule for the remainder; a claim by a foundation-sponsored operator instead converts the full amount into operator-owned stake. Epoch reward metering is enforced sequential — epoch N is closed before N+1.
 
 ### 8.5 Treasury
 
@@ -1081,13 +1085,67 @@ The LLM runtime adapts to whatever compute is available on the provider's machin
 
 This means an ordinary laptop, a workstation with a single consumer GPU, and a multi-A100 server all participate in the same provider marketplace using the same binary; they just earn different volumes of inference traffic based on their measured throughput. The detected backend is published in the provider's hardware profile and visible to the routing layer.
 
+Each provider publishes an advertised capacity in its gossip announcement — maximum concurrent requests, requests per second, batch size, and whether multi-token-prediction is enabled. `tenzro_listProviderCapacity` returns that advertised claim next to the throughput this node has actually observed for the provider: tokens per second, p95 latency, reputation (0–1000), and a reputation-discounted throughput figure that scales measured tokens/sec by the provider's trust score. Both the advertised and measured numbers are surfaced so consumers rank on observed behaviour rather than the claim alone. The same view is available through the `tenzro provider capacity` CLI command and the `list_provider_capacity` MCP tool.
+
+#### Automatic hardware detection
+
+Every node profiles its own hardware once at startup, with no operator configuration:
+
+- **System memory** from `/proc/meminfo` on Linux and `sysctl hw.memsize` on macOS.
+- **NVIDIA GPUs** via `nvidia-smi` (name, VRAM, compute capability per device) plus an NVLink probe (`nvidia-smi nvlink --status`) that distinguishes NVLink-connected multi-GPU machines from PCIe-only ones.
+- **AMD GPUs** via `rocm-smi` (name, VRAM) paired with `rocminfo` gfx target discovery.
+- **Apple Silicon** is treated as a unified-memory device: the GPU-usable budget is approximately three quarters of system RAM, matching the Metal working-set limit.
+
+Probe failures degrade to coarser answers — a machine where `nvidia-smi` is absent simply reports no NVIDIA devices; it never errors. A `detected` flag records whether the profile came from a real probe: hardware claims are only ever produced by the node's own detection, never typed in by an operator.
+
+Low-precision support is derived from the silicon, not declared: FP8 is inferred from NVIDIA compute capability ≥ 8.9 (Ada, Hopper) or AMD gfx94x/gfx95x/gfx12 targets, and FP4 from compute capability ≥ 10 (Blackwell) or gfx950 (CDNA4).
+
+#### Hardware classes and routing
+
+The detected profile collapses into a coarse `HardwareClass` — `Cpu`, `ConsumerGpu` (up to 24 GB VRAM), `DatacenterGpu` (25–96 GB), `MultiAccelerator` (above 96 GB), or `Unknown` when no probe ran. The class contributes a static weight to routing (0.2 / 0.5 / 0.8 / 1.0 respectively) alongside the dynamic observed metrics; `Unknown` providers get a neutral 0.5 and compete purely on measured throughput and reputation. Requests may carry a `min_hardware` hint in `InferenceParameters.custom` (`"consumer-gpu"`, `"datacenter-gpu"`, `"multi-accelerator"`) to set a hardware floor — a provider with no detected profile never satisfies an explicit floor, so the hint filters on verified capability only.
+
+Routing also applies a memory-fit filter: when a model's registry entry carries a real weights size, providers whose detected memory budget cannot hold the model are excluded before scoring. The budget is system RAM plus discrete VRAM (llama.cpp splits a model across both pools), or unified memory alone on Apple Silicon. Providers with no detected profile pass the filter — absence of a claim is not treated as a negative claim.
+
+#### VRAM-aware GPU offload
+
+When a model loads, the runtime sizes the GPU offload from the detected profile and the model's own GGUF header:
+
+- If the weights (with a 1.35× headroom factor for KV cache and compute buffers) fit in the GPU budget, all layers offload.
+- If detection positively establishes that discrete VRAM cannot hold the full model, the runtime reads the layer count from the GGUF header and offloads the proportional number of layers, leaving the remainder on CPU.
+- Unified-memory machines always take full offload — there is no separate VRAM pool to overflow.
+- Cluster-scheduled loads skip the check entirely: the LAN placement planner has already guaranteed fit.
+
+The result is that the same `tenzro model serve` command works on an 8 GB laptop and a 640 GB HGX node; the runtime picks the largest offload the hardware supports rather than failing or silently thrashing.
+
+#### Served-model publication
+
+Serving a GGUF model publishes it into the shared model registry with the real artifact hash: the node streams a SHA-256 over the weights file in the background and registers the model with that digest, catalog-derived size, context window, and architecture. Peers that later fetch the weights verify the downloaded bytes against this registry hash, so the digest is never synthetic — if hashing fails, the model is announced to the network but stays out of the registry rather than entering with a fabricated hash. Stopping a model (or failing to reload it at boot) flips the registry row to Inactive so routing stops considering it; re-serving reactivates it in place.
+
+#### External serving engines
+
+A provider can front an already-running OpenAI-compatible inference server — vLLM, SGLang, llama-server, or any compatible endpoint — instead of loading weights in the node process. `tenzro_serveModel` accepts `engine` (`vllm` | `sglang` | `llama-server` | `external`), `base_url`, an optional `upstream_model` (the name the engine was launched with, when it differs from the catalog id), and an optional `api_key` bearer token. Registration health-probes the engine so a misconfigured endpoint fails at serve time rather than at the first inference; chat and streaming requests are then mapped onto the engine's `/v1/chat/completions` API, including generation parameters and usage accounting from the engine's own token counts.
+
+Externally-fronted models participate in routing, announcement, and settlement the same as in-process models, with two differences. The registry row carries a deterministic identity hash derived from the model id and engine URL rather than a weights digest — there is no local artifact for peers to fetch or verify. And the row's size is recorded as zero so the provider memory-fit filter does not apply: the weights live in the engine, whose health probe is the capacity signal. The binding persists across node restarts (including the bearer token, stored only in the operator's local database) and is re-probed at boot — a reachable engine re-registers automatically, an unreachable one is detached.
+
+### 10.8 Verifiable Inference (TOPLOC Commitments)
+
+Provenance signing (§10.6) attests to who served a response; a TOPLOC commitment attests to what the model computed. A request carrying `verifiable: true` (JSON-RPC `tenzro_chat`, the OpenAI-compatible surface, or `tenzro_inferenceRequest`) instructs the serving node to record the top-`k` raw logits (`k = 16`) at every generated decode step and persist the resulting commitment durably under its canonical SHA-256 hash. The response carries `{hash, k, steps}`; the full commitment is retrievable by hash.
+
+**Verification is asymmetric.** A verifier holding the same model weights replays prompt + committed output token ids as a single prefill pass and compares per-step top-k logits — roughly two orders of magnitude cheaper than the original autoregressive decode. Providers that serve a quantization below their advertised precision, substitute a smaller model, or fabricate output produce logits that diverge from the commitment.
+
+**Privacy.** The prompt is never stored with the commitment — the verifier supplies it at verification time. The commitment does contain the output token ids (the object of attestation), so requesting `verifiable` is an explicit opt-out of the gateway's completion-retention default for that response.
+
+**Scope.** Commitments come from the local single-token (llama.cpp serial) decode path, non-streaming only: the SSE token channel carries no commitment and externally-fronted engines do not expose per-step logits. On the network path the flag is forwarded to the remote provider; its commitment object passes through the proxy verbatim, so a challenge is always anchored to the provider that served.
+
+**Challenge lifecycle.** Any party may file a challenge against a stored commitment (`tenzro_fileInferenceChallenge`); the challenged model and provider are read from the stored envelope rather than caller input, so filings cannot misattribute. Resolution (`tenzro_resolveInferenceChallenge`) is operator-gated by the node admin token and is either evidence-based — the operator supplies the prompt, the node re-executes, and a failing verification upholds the challenge — or an explicit verdict. An upheld challenge fires the provider's existing penalty paths: routing reputation decrements through the failed-call path, and a failure is recorded against the provider's compute bond. No dedicated slashing primitive exists for inference challenges; the penalty economics reuse the reputation and bond machinery that also governs availability failures. Reputation increases only through settled payments, which prevents recovery via self-challenge. Commitments and challenges persist in `CF_CHALLENGES` and survive restarts; a node without durable storage disables the surface entirely.
+
 ---
 
 ## 11. Autonomous Agent Framework
 
 ### 11.1 Overview
 
-Tenzro provides a first-class runtime for autonomous AI agents that can discover peers, negotiate services, execute tasks, and settle payments without human intervention.
+Tenzro provides a dedicated runtime for autonomous AI agents that can discover peers, negotiate services, execute tasks, and settle payments without human intervention.
 
 ### 11.2 Agent Identity
 
@@ -1461,6 +1519,24 @@ x402 provides stateless HTTP 402 payments:
 - **X402Facilitator** — Coordinates between payer, payee, and settlement
 - **X402PaymentServer** — HTTP handler for x402 flow
 - **X402Client** — Client-side payment creation
+
+**Payment schemes.** A resource declares one of three settlement schemes in its 402 challenge:
+
+- **`exact`** — the base scheme: a single one-shot payment of a fixed amount per request.
+- **`upto`** — usage-metered: the challenge names a per-request ceiling; the client authorizes up to that amount and the resource captures the actual metered cost (never above the ceiling) after serving. Fits token-metered inference and byte-metered reads where the final price is known only after the work runs.
+- **`batch-settlement`** — off-chain accumulation: many small requests draw down a pre-funded channel and settle on-chain once at close, so per-call gas does not dominate a stream of micro-charges.
+
+**Discovery (Bazaar).** A resource server advertises its priced endpoints so agents can find them without out-of-band configuration:
+
+- `tenzro_x402RegisterResource { resource, scheme, price, asset, ... }` publishes a priced resource into the local Bazaar index.
+- `tenzro_x402DiscoverResources { filter }` returns matching resources with their scheme and price.
+- `tenzro_x402DeregisterResource { resource }` withdraws it.
+
+**Idempotency and signed offers.** Each challenge carries a payment identifier and an offer signed by the resource server:
+
+- `tenzro_x402PaymentId {}` mints a unique payment identifier; a client replaying the same identifier gets the first result, not a second charge.
+- `tenzro_x402VerifyOffer { offer, signature }` verifies that a quoted price/scheme was actually issued by the resource server before the client authorizes payment.
+- `tenzro_x402ProtocolInfo {}` reports the supported schemes and extensions.
 
 ### 13.7 Stripe SPT (SharedPaymentToken)
 
@@ -2185,7 +2261,7 @@ The storage layer uses RocksDB with column families for data isolation:
 | `CF_SNAPSHOTS` | State snapshot metadata |
 | `CF_SETTLEMENTS` | Settlement receipts and escrow state |
 | `CF_CHANNELS` | Micropayment channel state |
-| `CF_CHALLENGES` | Payment challenge storage for MPP/x402 |
+| `CF_CHALLENGES` | Payment challenges (MPP/x402) + TOPLOC inference commitments and challenge records |
 
 ### 17.2 Merkle Patricia Trie
 

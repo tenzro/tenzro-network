@@ -70,6 +70,10 @@ pub struct ProviderAnnouncementContext {
     /// serving only — peers will not auto-cluster this node. Captured once at
     /// startup from the local ggml device profile + linked llama.cpp commit.
     pub cluster_profile: Option<tenzro_types::ClusterProfile>,
+    /// Advertised serving throughput/concurrency envelope broadcast on each
+    /// provider heartbeat. Captured from the node's `ProviderCapacity` at the
+    /// point the announcement context is built.
+    pub capacity: tenzro_types::AdvertisedCapacity,
 }
 
 /// Maximum tolerated forward clock skew for announcement timestamps (ms).
@@ -98,6 +102,27 @@ fn check_announcement_freshness(timestamp_ms: i64, ttl_secs: u64) -> std::result
         ));
     }
     Ok(())
+}
+
+/// Map an announced reachability tier string onto the storage placement tier.
+/// A peer also seen on the local mDNS segment is promoted to `LocalDirect`
+/// regardless of its announced WAN tier — the LAN path is the one shard
+/// transfers actually use. Announced `"direct"` maps to `Direct`, `"relay_only"`
+/// to `RelayOnly`; anything else (unreachable / unreported) maps to
+/// `SymmetricNat`, which tiered self-selection excludes.
+fn member_reachability_from_announcement(
+    tier: &str,
+    on_local_segment: bool,
+) -> tenzro_storage_provider::MemberReachability {
+    use tenzro_storage_provider::MemberReachability;
+    if on_local_segment {
+        return MemberReachability::LocalDirect;
+    }
+    match tier {
+        "direct" => MemberReachability::Direct,
+        "relay_only" => MemberReachability::RelayOnly,
+        _ => MemberReachability::SymmetricNat,
+    }
 }
 
 /// Event types flowing through the node
@@ -159,6 +184,14 @@ pub enum NodeEvent {
     /// `MonthlyRefillCompleted` is informational only — receivers do NOT
     /// replay the refill, only update their earmark snapshot.
     SeedAgentGossipReceived { topic: String, bytes: Vec<u8> },
+    /// Distributed-database gossip message received on `tenzro/databases`.
+    ///
+    /// Carries a bincode-encoded [`tenzro_database::DatabaseGossipMessage`]
+    /// (`Registered` or `Rescaled`). The event loop decodes via
+    /// `tenzro_database::decode_for_topic` and upserts the descriptor into the
+    /// local `DatabaseRegistry` idempotently — re-receiving a descriptor a node
+    /// already holds is a no-op.
+    DatabaseGossipReceived { topic: String, bytes: Vec<u8> },
     /// Shutdown signal
     Shutdown,
 }
@@ -370,6 +403,11 @@ pub struct EventLoop {
     network_agents: Option<Arc<DashMap<String, crate::node::NetworkAgentEntry>>>,
     /// Shared reference to the node's network_providers map for gossipsub provider discovery
     network_providers: Option<Arc<DashMap<String, crate::node::NetworkProviderEntry>>>,
+    /// Same-segment peer set (mDNS / private range). Storage-shard
+    /// self-selection prefers holders on this segment before spilling onto the
+    /// wider network, so a deal served within one LAN keeps its replicas local.
+    /// `None` when networking is not running (light clients never replicate).
+    local_peers: Option<Arc<tenzro_network::LocalPeerSet>>,
     /// Shared reference to the node's `ProviderManager`. Verified provider
     /// announcements are bridged into it (`upsert_from_announcement`) so the
     /// `InferenceRouter` scoring path — which routes real chat traffic —
@@ -420,6 +458,12 @@ pub struct EventLoop {
     /// inbound seed-agent gossip messages are decoded and logged but not
     /// applied.
     seed_agent_manager: Option<Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>>,
+    /// Distributed-database registry. Wired from the node so the event loop can
+    /// upsert descriptors received on the `tenzro/databases` gossipsub topic
+    /// into the same registry the RPC handlers serve from. Absent on nodes that
+    /// don't initialize the database subsystem; in that case inbound database
+    /// gossip is decoded and logged but not applied.
+    database_registry: Option<Arc<tenzro_database::DatabaseRegistry>>,
     /// Persistent kill-switch receipt store. Wired from the node so that the
     /// post-execute scan in `handle_block_finalized` can record the
     /// canonical `KillSwitchReceipt` (with the real `frozen_at_block`)
@@ -484,6 +528,24 @@ pub struct EventLoop {
     /// for the snapshot, and (with `staking`) compute the staker /
     /// treasury emission split.
     token: Option<Arc<tenzro_token::TnzoToken>>,
+
+    /// Work-gated reward engine. Every finalized block records consensus
+    /// participation (proposer + QC signers) as verified work; at each
+    /// epoch boundary the cumulative provider usage meters are ingested
+    /// and the closing epoch's minting rights are converted into reward
+    /// coupons. Without this wired, no work is metered and `close_epoch`
+    /// never runs — claims return nothing.
+    reward_engine: Option<Arc<tenzro_token::RewardEngine>>,
+    /// Foundation sponsorship manager — the epoch boundary hook runs the
+    /// slot expiry sweep (`expire_due`) so 24-month slots wind down and
+    /// their delegations return to the revolving pool without operator
+    /// action.
+    sponsorship_manager: Option<Arc<tenzro_token::SponsorshipManager>>,
+    /// Usage tracker — read at each epoch boundary to feed the reward
+    /// engine's cumulative provider meters (`ingest_cumulative`). Settled
+    /// usage only; the tracker records real routed inference, never
+    /// self-reported capacity.
+    usage_tracker: Option<Arc<tenzro_model::UsageTracker>>,
 
     /// Circulating supply at the most recent epoch boundary, captured
     /// after a successful `record_metrics` call. Used to compute the
@@ -604,6 +666,7 @@ impl EventLoop {
             swarm_manager: None,
             network_agents: None,
             network_providers: None,
+            local_peers: None,
             provider_manager: None,
             provider_announcement_ctx: None,
             announce_signer: None,
@@ -613,6 +676,7 @@ impl EventLoop {
             iroh_resolver: None,
             training_runtime: None,
             seed_agent_manager: None,
+            database_registry: None,
             kill_switch_store: None,
             staking: None,
             identity_registry: None,
@@ -623,6 +687,9 @@ impl EventLoop {
             block_import_rx: None,
             burn_rate_manager: None,
             token: None,
+            reward_engine: None,
+            sponsorship_manager: None,
+            usage_tracker: None,
             last_observed_epoch_supply: 0,
             last_observed_base_fee_burn: 0,
             last_observed_slash_burn: 0,
@@ -874,6 +941,16 @@ impl EventLoop {
         self
     }
 
+    /// Wires the same-segment peer set so storage-shard self-selection can
+    /// prefer local-segment holders before spilling onto the wider network.
+    pub fn with_local_peers(
+        mut self,
+        local_peers: Arc<tenzro_network::LocalPeerSet>,
+    ) -> Self {
+        self.local_peers = Some(local_peers);
+        self
+    }
+
     /// Wires the `ProviderManager` so verified provider announcements are
     /// bridged into the `InferenceRouter` scoring path. Without this, a
     /// gossip-discovered provider lives only in `network_providers` and is
@@ -956,6 +1033,49 @@ impl EventLoop {
         manager: Arc<tenzro_token::seed_agent::SeedAgentEarmarkManager>,
     ) -> Self {
         self.seed_agent_manager = Some(manager);
+        self
+    }
+
+    /// Wires the shared `DatabaseRegistry` so the event loop can upsert
+    /// descriptors received on the `tenzro/databases` gossipsub topic. Without
+    /// this wired, database gossip payloads decoded off the wire are dropped
+    /// with a debug-level log.
+    pub fn with_database_registry(
+        mut self,
+        registry: Arc<tenzro_database::DatabaseRegistry>,
+    ) -> Self {
+        self.database_registry = Some(registry);
+        self
+    }
+
+    /// Wires the work-gated reward engine. Every finalized block records
+    /// consensus participation; every epoch boundary ingests provider
+    /// usage meters and closes the epoch into reward coupons.
+    pub fn with_reward_engine(
+        mut self,
+        engine: Arc<tenzro_token::RewardEngine>,
+    ) -> Self {
+        self.reward_engine = Some(engine);
+        self
+    }
+
+    /// Wires the foundation sponsorship manager so the epoch boundary
+    /// hook can run the slot expiry sweep.
+    pub fn with_sponsorship_manager(
+        mut self,
+        manager: Arc<tenzro_token::SponsorshipManager>,
+    ) -> Self {
+        self.sponsorship_manager = Some(manager);
+        self
+    }
+
+    /// Wires the usage tracker consumed by the reward engine's epoch
+    /// boundary ingestion of cumulative provider meters.
+    pub fn with_usage_tracker(
+        mut self,
+        tracker: Arc<tenzro_model::UsageTracker>,
+    ) -> Self {
+        self.usage_tracker = Some(tracker);
         self
     }
 
@@ -1737,6 +1857,31 @@ impl EventLoop {
                             .map(|r| r.endpoint_id().to_string())
                             .unwrap_or_default();
 
+                        // Advertised capacity is read live from the self entry
+                        // in the ProviderManager each tick — MoE expert-shard
+                        // declarations installed after startup (expert/gate
+                        // loads) must ride the next heartbeat, so the static
+                        // context snapshot is only the no-entry fallback.
+                        let capacity = self
+                            .provider_manager
+                            .as_ref()
+                            .and_then(|pm| {
+                                let hexstr = ctx
+                                    .provider_address
+                                    .strip_prefix("0x")
+                                    .unwrap_or(&ctx.provider_address);
+                                tenzro_types::primitives::Address::from_hex(hexstr)
+                                    .ok()
+                                    .and_then(|addr| pm.get_provider(&addr).ok())
+                            })
+                            .map(|p| {
+                                let mut c = p.capacity.advertised();
+                                c.verifiable_inference =
+                                    c.verifiable_inference || ctx.capacity.verifiable_inference;
+                                c
+                            })
+                            .unwrap_or_else(|| ctx.capacity.clone());
+
                         let mut ann = tenzro_network::ProviderAnnouncementMessage {
                             peer_id: local_peer_id,
                             provider_address: ctx.provider_address.clone(),
@@ -1755,6 +1900,7 @@ impl EventLoop {
                             trust_profile: tenzro_types::TrustProfile::default(),
                             worker_roles: Vec::new(),
                             hardware: ctx.hardware.clone(),
+                            capacity,
                             geography: ctx.geography.clone(),
                             iroh_endpoint_id,
                             cluster_profile: ctx.cluster_profile.clone(),
@@ -2310,11 +2456,18 @@ impl EventLoop {
                                 // ProviderManager so the InferenceRouter can
                                 // score and dispatch to this provider by its
                                 // advertised HardwareCapabilities. Skip
-                                // providers with no reachable endpoint or no
-                                // served models — they cannot be routed to.
+                                // providers with no reachable endpoint, and
+                                // providers that neither serve models nor
+                                // declare MoE expert shards — those cannot be
+                                // routed to. A pure expert holder (empty
+                                // served_models, non-empty moe_holdings) must
+                                // be admitted or the MoE shard view never sees
+                                // it.
                                 if let Some(ref pm) = self.provider_manager
                                     && !ann.rpc_endpoint.is_empty()
-                                    && !ann.served_models.is_empty()
+                                    && (!ann.served_models.is_empty()
+                                        || !ann.capacity.moe_holdings.is_empty()
+                                        || !ann.capacity.moe_roles.is_empty())
                                     && let Ok(address) =
                                         tenzro_types::primitives::Address::from_hex(&ann.provider_address)
                                 {
@@ -2337,15 +2490,22 @@ impl EventLoop {
                                     } else {
                                         Some(ann.pubkey.clone())
                                     };
+                                    let iroh_endpoint_id = if ann.iroh_endpoint_id.is_empty() {
+                                        None
+                                    } else {
+                                        Some(ann.iroh_endpoint_id.clone())
+                                    };
                                     pm.upsert_from_announcement(
                                         address,
                                         ann.peer_id.clone(),
                                         Some(ann.rpc_endpoint.clone()),
                                         ann.served_models.clone(),
                                         ann.hardware.clone(),
+                                        ann.capacity.clone(),
                                         status,
                                         has_tee,
                                         signing_pubkey,
+                                        iroh_endpoint_id,
                                     );
                                 }
                             }
@@ -2407,12 +2567,22 @@ impl EventLoop {
                                 if own_endpoint != req.origin_endpoint_id {
                                     // Candidate membership view: storage-capable
                                     // providers discovered via gossip, plus the
-                                    // origin, plus self. HRW self-selection is
-                                    // computed against this local snapshot; view
-                                    // skew self-heals as heartbeats converge.
-                                    let mut candidates: Vec<String> = vec![
-                                        own_endpoint.clone(),
-                                        req.origin_endpoint_id.clone(),
+                                    // origin, plus self — each tagged with its
+                                    // data-plane reachability. Self and any peer
+                                    // on the local mDNS segment are LocalDirect;
+                                    // remote providers map their announced WAN
+                                    // tier. Self-selection prefers local-segment
+                                    // holders and only spills onto the wider
+                                    // network when the segment is too small. The
+                                    // view is a local snapshot; skew self-heals
+                                    // as heartbeats converge.
+                                    use tenzro_storage_provider::TieredCandidate;
+                                    let mut candidates: Vec<TieredCandidate> = vec![
+                                        // Self is always on its own segment.
+                                        TieredCandidate::local(own_endpoint.clone()),
+                                        // The origin is directly reachable — it
+                                        // just published the shards.
+                                        TieredCandidate::direct(req.origin_endpoint_id.clone()),
                                     ];
                                     if let Some(ref np) = self.network_providers {
                                         for entry in np.iter() {
@@ -2423,8 +2593,20 @@ impl EventLoop {
                                                 .any(|c| c == "storage")
                                                 && !ann.iroh_endpoint_id.is_empty()
                                             {
-                                                candidates
-                                                    .push(ann.iroh_endpoint_id.clone());
+                                                let on_local_segment = self
+                                                    .local_peers
+                                                    .as_ref()
+                                                    .map(|set| set.contains(&ann.peer_id))
+                                                    .unwrap_or(false);
+                                                let reachability =
+                                                    member_reachability_from_announcement(
+                                                        &ann.network_profile.reachability,
+                                                        on_local_segment,
+                                                    );
+                                                candidates.push(TieredCandidate {
+                                                    endpoint_id: ann.iroh_endpoint_id.clone(),
+                                                    reachability,
+                                                });
                                             }
                                         }
                                     }
@@ -2432,9 +2614,10 @@ impl EventLoop {
                                     let origin = req.origin_endpoint_id.clone();
                                     let mut pinned = 0usize;
                                     for shard in &req.shards {
-                                        if tenzro_storage_market::should_replicate(
+                                        if tenzro_storage_provider::should_replicate_tiered(
                                             &shard.commitment,
                                             &own_endpoint,
+                                            true,
                                             &candidates,
                                             replicas,
                                         ) {
@@ -2836,6 +3019,48 @@ impl EventLoop {
                                     %topic,
                                     error = %e,
                                     "Failed to decode SeedAgentGossip payload"
+                                ),
+                            }
+                        }
+                        NodeEvent::DatabaseGossipReceived { topic, bytes } => {
+                            match tenzro_database::decode_for_topic(&topic, &bytes) {
+                                Ok(msg) => {
+                                    let desc = msg.descriptor().clone();
+                                    let database_id = desc.database_id.clone();
+                                    let kind = match msg {
+                                        tenzro_database::DatabaseGossipMessage::Registered(_) => {
+                                            "Registered"
+                                        }
+                                        tenzro_database::DatabaseGossipMessage::Rescaled(_) => {
+                                            "Rescaled"
+                                        }
+                                    };
+                                    if let Some(ref registry) = self.database_registry {
+                                        match registry.upsert_descriptor(desc) {
+                                            Ok(()) => info!(
+                                                %database_id,
+                                                kind,
+                                                "Applied gossiped database descriptor"
+                                            ),
+                                            Err(e) => warn!(
+                                                %database_id,
+                                                kind,
+                                                error = %e,
+                                                "Failed to apply gossiped database descriptor"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %database_id,
+                                            kind,
+                                            "Dropping gossiped database descriptor (registry not wired)"
+                                        );
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    %topic,
+                                    error = %e,
+                                    "Failed to decode DatabaseGossip payload"
                                 ),
                             }
                         }
@@ -4030,6 +4255,105 @@ impl EventLoop {
                     self.last_observed_epoch_supply = circulating;
                     self.last_observed_base_fee_burn = cumulative_base_fee_burn;
                     self.last_observed_slash_burn = cumulative_slash_burn;
+                }
+            }
+        }
+
+        // Work-gated reward metering. Two layers:
+        //
+        // (1) Every finalized block: the proposer earns a BlockProposal
+        //     work unit and each commit-QC signer earns a ConsensusVote
+        //     unit for the epoch covering this height. Runs after the
+        //     follower epoch catch-up above so the current epoch is the
+        //     one that actually covers `block_height`.
+        // (2) At the epoch boundary (same `should_transition(next_height)`
+        //     gate as the adaptive-burn observer, i.e. on the last block
+        //     of the closing epoch): ingest the usage tracker's cumulative
+        //     per-provider revenue meters as InferenceServed work, close
+        //     the epoch (minting rights -> pro-rata coupons, expired-coupon
+        //     sweep), and run the sponsorship slot expiry sweep.
+        //
+        // Skip during sync replay: work is metered by the network as it
+        // happens; a node replaying history must not issue coupons for
+        // epochs the live network already closed.
+        if !from_sync
+            && let (Some(consensus), Some(rewards)) =
+                (self.consensus.as_ref(), self.reward_engine.as_ref())
+        {
+            let em = consensus.epoch_manager();
+            let epoch = em.current_epoch().number;
+
+            let voters: Vec<Address> = block
+                .header
+                .consensus_proof
+                .signatures
+                .iter()
+                .map(|s| s.validator)
+                .collect();
+            if let Err(e) =
+                rewards.record_block_participation(epoch, &block.header.proposer, &voters)
+            {
+                warn!(
+                    height = block_height.0,
+                    epoch,
+                    error = %e,
+                    "Reward engine rejected block participation record"
+                );
+            }
+
+            let next_height =
+                tenzro_types::primitives::BlockHeight::from(block_height.0 + 1);
+            if em.should_transition(next_height) {
+                // Settled provider usage only — the tracker records real
+                // routed inference, never self-reported capacity.
+                if let Some(tracker) = self.usage_tracker.as_ref() {
+                    for stats in tracker.list_provider_stats() {
+                        if let Err(e) = rewards.ingest_cumulative(
+                            epoch,
+                            stats.provider_id,
+                            tenzro_token::WorkClass::InferenceServed,
+                            stats.total_revenue as u128,
+                        ) {
+                            warn!(
+                                provider = %hex::encode(stats.provider_id.as_bytes()),
+                                epoch,
+                                error = %e,
+                                "Reward engine rejected provider usage ingestion"
+                            );
+                        }
+                    }
+                }
+
+                match rewards.close_epoch(epoch) {
+                    Ok(summary) => info!(
+                        epoch,
+                        rights_issued = %summary.rights_issued,
+                        matched = %summary.matched,
+                        expired_unmatched = %summary.expired_unmatched,
+                        coupon_count = summary.coupon_count,
+                        "Closed reward epoch"
+                    ),
+                    Err(e) => warn!(
+                        epoch,
+                        error = %e,
+                        "Reward epoch close failed"
+                    ),
+                }
+
+                if let Some(sponsorship) = self.sponsorship_manager.as_ref() {
+                    match sponsorship
+                        .expire_due(tenzro_types::primitives::Timestamp::now())
+                    {
+                        Ok(expired) if !expired.is_empty() => info!(
+                            expired = expired.len(),
+                            "Sponsorship expiry sweep returned delegations to pool"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => warn!(
+                            error = %e,
+                            "Sponsorship expiry sweep failed"
+                        ),
+                    }
                 }
             }
         }

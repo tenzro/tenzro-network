@@ -735,6 +735,31 @@ impl InferenceRouter {
             }
         }
 
+        // Memory-fit admission — when the registry knows the model's
+        // resident artifact size, drop providers whose *detected* memory
+        // envelope (RAM + VRAM, or the unified pool on Apple Silicon)
+        // cannot hold the weights at all. `can_hold_model` returns `None`
+        // for providers that never ran hardware detection and for models
+        // with no declared size, so absent claims are never filtered on —
+        // undeclared providers keep competing per the trust-advertised
+        // model, and the serving runtime's local free-memory admission
+        // remains the final gate at load time.
+        if let Some(registry) = &self.registry
+            && let Ok(model) = registry.get_model(&request.model_id)
+            && model.size_bytes > 0
+        {
+            let model_gb = model.size_bytes as f32 / 1_073_741_824.0;
+            providers.retain(|p| {
+                p.provider.capacity.hardware.can_hold_model(model_gb) != Some(false)
+            });
+            if providers.is_empty() {
+                return Err(ModelError::NoProvidersAvailable(format!(
+                    "{} (memory fit: {:.1} GiB model exceeds every detected provider envelope)",
+                    request.model_id, model_gb
+                )));
+            }
+        }
+
         // MTP filter — when the caller asked for speculative decoding
         // (Multi-Token Prediction), prefer providers that advertise an
         // MTP-capable runtime (`ProviderCapacity.mtp_enabled = true`).
@@ -763,6 +788,31 @@ impl InferenceRouter {
                 .collect();
             if !mtp_providers.is_empty() {
                 providers = mtp_providers;
+            }
+        }
+
+        // Verifiable-inference filter — when the caller asked for a TOPLOC
+        // commitment (`verifiable: true` on `InferenceParameters.custom`),
+        // prefer providers whose advertised capacity carries
+        // `verifiable_inference = true` (the flag is set automatically for
+        // AI-serving nodes at announcement time). Same semantics as the MTP
+        // filter above: hard-filter when at least one capable provider
+        // exists, otherwise keep the full pool — a non-capable provider
+        // returns `commitment: None` and the caller can degrade.
+        let wants_verifiable = request
+            .parameters
+            .custom
+            .get("verifiable")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if wants_verifiable {
+            let verifiable_providers: Vec<_> = providers
+                .iter()
+                .filter(|p| p.provider.capacity.verifiable_inference)
+                .cloned()
+                .collect();
+            if !verifiable_providers.is_empty() {
+                providers = verifiable_providers;
             }
         }
 

@@ -1,4 +1,4 @@
-"""Tenzro Network MCP Server — 149 blockchain tools for AI agents.
+"""Tenzro Network MCP Server — coordination tools for AI agents.
 
 Exposes the full Tenzro Network JSON-RPC interface as MCP tools,
 enabling AI agents to interact with the Tenzro L1 settlement layer,
@@ -535,6 +535,289 @@ async def list_x402_schemes() -> dict:
     """
     result = await rpc_call("tenzro_listX402Schemes", [])
     return result
+
+
+# ---------------------------------------------------------------------------
+# x402 Bazaar — resource discovery + signed-offer idempotency (6 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def x402_protocol_info() -> dict:
+    """Describe the x402 protocol surface this node exposes: registered
+    schemes, supported networks/assets, and the Bazaar discovery endpoints."""
+    return await rpc_call("tenzro_x402ProtocolInfo", [])
+
+
+@mcp.tool
+async def x402_register_resource(
+    seller_did: str,
+    resource: str,
+    scheme: str,
+    network: str,
+    asset: str,
+    pay_to: str,
+    max_amount_required: str,
+    description: str = "",
+    mime_type: str = "application/json",
+    max_timeout_seconds: int = 300,
+    tags: list[str] | None = None,
+    extra: dict | None = None,
+) -> dict:
+    """List a paid HTTP resource in the x402 Bazaar so buyers can discover it.
+
+    scheme is an x402 scheme id ('tenzro-hybrid', 'exact-eip3009', 'permit2',
+    'erc7710'). network/asset/pay_to identify the settlement rail. Returns the
+    assigned listingId.
+    """
+    params: dict = {
+        "sellerDid": seller_did,
+        "resource": resource,
+        "scheme": scheme,
+        "network": network,
+        "asset": asset,
+        "payTo": pay_to,
+        "maxAmountRequired": max_amount_required,
+        "description": description,
+        "mimeType": mime_type,
+        "maxTimeoutSeconds": max_timeout_seconds,
+        "tags": tags or [],
+    }
+    if extra is not None:
+        params["extra"] = extra
+    return await rpc_call("tenzro_x402RegisterResource", params)
+
+
+@mcp.tool
+async def x402_discover_resources(
+    scheme: str = "",
+    network: str = "",
+    asset: str = "",
+    seller_did: str = "",
+    tags: list[str] | None = None,
+    limit: int = 0,
+) -> dict:
+    """Query the x402 Bazaar for paid resources. All set filters are ANDed;
+    unset filters match everything. Results are freshest-first, capped by
+    limit when non-zero. Returns {listings, count}."""
+    params: dict = {"tags": tags or [], "limit": limit}
+    if scheme:
+        params["scheme"] = scheme
+    if network:
+        params["network"] = network
+    if asset:
+        params["asset"] = asset
+    if seller_did:
+        params["sellerDid"] = seller_did
+    return await rpc_call("tenzro_x402DiscoverResources", params)
+
+
+@mcp.tool
+async def x402_deregister_resource(listing_id: str, seller_did: str) -> dict:
+    """Remove a Bazaar listing. Refused unless seller_did owns the listing.
+    Returns {removed}."""
+    return await rpc_call(
+        "tenzro_x402DeregisterResource",
+        {"listingId": listing_id, "sellerDid": seller_did},
+    )
+
+
+@mcp.tool
+async def x402_verify_offer(requirement: dict) -> dict:
+    """Verify a server-signed x402 offer before paying. Pass the full
+    X402PaymentRequirement JSON exactly as it appeared in the 402 body. The
+    node recomputes the commitment and verifies the Ed25519 signature under
+    the carried signer key. Returns {valid, offerCommitment, offerSigner}."""
+    return await rpc_call("tenzro_x402VerifyOffer", {"requirement": requirement})
+
+
+@mcp.tool
+async def x402_payment_id(
+    payer_did: str,
+    requirement: dict | None = None,
+    offer_commitment: str = "",
+) -> dict:
+    """Derive the deterministic pay_<hex> idempotency id for an (offer, payer)
+    pair so a buyer can detect and skip a retry client-side. Pass either the
+    full requirement (node recomputes the commitment) or a 64-hex
+    offer_commitment, plus payer_did."""
+    params: dict = {"payerDid": payer_did}
+    if requirement is not None:
+        params["requirement"] = requirement
+    elif offer_commitment:
+        params["offerCommitment"] = offer_commitment
+    return await rpc_call("tenzro_x402PaymentId", params)
+
+
+# ---------------------------------------------------------------------------
+# Managed databases — engine catalog, placement, query, connections (11 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_database_engines() -> dict:
+    """List the database engines this node can serve — each with its data
+    models, license, sharding model, and native-cluster topology. Engines are
+    operator-run externals (PostgreSQL, Qdrant, Valkey) and in-process embedded
+    engines (Lance, Tantivy)."""
+    return await rpc_call("tenzro_listDatabaseEngines", [])
+
+
+@mcp.tool
+async def create_database(
+    database_id: str,
+    engine_id: str,
+    owner_did: str,
+    placement: str = "local",
+    partitions: int = 1,
+    replicas: int = 1,
+    engine_config: dict | None = None,
+) -> dict:
+    """Register a database this node serves, computing and persisting its
+    partition placement over the live cluster. owner_did becomes the admin
+    authority (owner-only access policy). placement is 'local', 'lan_cluster',
+    or 'network'. Returns {database, partitions}."""
+    params: dict = {
+        "database_id": database_id,
+        "engine_id": engine_id,
+        "owner_did": owner_did,
+        "placement": placement,
+        "partitions": partitions,
+        "replicas": replicas,
+    }
+    if engine_config is not None:
+        params["engine_config"] = engine_config
+    return await rpc_call("tenzro_createDatabase", params)
+
+
+@mcp.tool
+async def get_database(database_id: str) -> dict:
+    """Look up a database descriptor by id."""
+    return await rpc_call("tenzro_getDatabase", {"database_id": database_id})
+
+
+@mcp.tool
+async def list_databases() -> dict:
+    """List every database this node serves."""
+    return await rpc_call("tenzro_listDatabases", [])
+
+
+@mcp.tool
+async def list_database_partitions(database_id: str) -> dict:
+    """List every partition placement of a database."""
+    return await rpc_call(
+        "tenzro_listDatabasePartitions", {"database_id": database_id}
+    )
+
+
+@mcp.tool
+async def get_database_partition(database_id: str, partition_index: int) -> dict:
+    """Return the placement of one partition."""
+    return await rpc_call(
+        "tenzro_getDatabasePartition",
+        {"database_id": database_id, "partition_index": partition_index},
+    )
+
+
+@mcp.tool
+async def issue_database_connection(
+    database_id: str,
+    caller_did: str,
+    bearer_did: str = "",
+    write: bool = False,
+    ttl_secs: int = 0,
+    capability: str = "",
+) -> dict:
+    """Mint a managed-database connection credential bound to bearer_did,
+    scoped to this one database. The owner (caller_did) — or a caller holding
+    the write-action capability — issues it. When write is true the token also
+    carries the admin action. Returns the credential a developer presents on
+    every query."""
+    params: dict = {
+        "database_id": database_id,
+        "caller_did": caller_did,
+        "write": write,
+    }
+    if bearer_did:
+        params["bearer_did"] = bearer_did
+    if ttl_secs:
+        params["ttl_secs"] = ttl_secs
+    if capability:
+        params["capability"] = capability
+    return await rpc_call("tenzro_issueDatabaseConnection", params)
+
+
+@mcp.tool
+async def database_query(
+    database_id: str,
+    caller_did: str,
+    body: dict,
+    partition_index: int = 0,
+    write: bool = False,
+    capability: str = "",
+) -> dict:
+    """Run an engine-dialect query against a database partition. caller_did is
+    authorized against the access policy (writes require the admin action,
+    reads the read action) before any engine is touched. body is the engine
+    dialect: SQL {sql, params} for Postgres, a {op, ...} document for Qdrant /
+    Lance / Tantivy, a {command: [...]} for Valkey. When this node holds the
+    target partition the result carries served_here=true and the engine result;
+    otherwise it carries holder endpoints."""
+    params: dict = {
+        "database_id": database_id,
+        "caller_did": caller_did,
+        "body": body,
+        "partition_index": partition_index,
+        "write": write,
+    }
+    if capability:
+        params["capability"] = capability
+    return await rpc_call("tenzro_databaseQuery", params)
+
+
+@mcp.tool
+async def authorize_database_read(
+    database_id: str, caller_did: str, capability: str = ""
+) -> dict:
+    """Check — without side effects — whether caller_did may read the database.
+    Returns {authorized, reason}."""
+    params: dict = {"database_id": database_id, "caller_did": caller_did}
+    if capability:
+        params["capability"] = capability
+    return await rpc_call("tenzro_authorizeDatabaseRead", params)
+
+
+@mcp.tool
+async def rescale_database(
+    database_id: str,
+    caller_did: str,
+    placement: str,
+    partitions: int = 0,
+    replicas: int = 0,
+    capability: str = "",
+) -> dict:
+    """Grow or shrink a database along the local → lan_cluster → network
+    continuum in place. Administrative — gated on the write action.
+    partitions/replicas default to the database's current counts when 0."""
+    params: dict = {
+        "database_id": database_id,
+        "caller_did": caller_did,
+        "placement": placement,
+    }
+    if partitions:
+        params["partitions"] = partitions
+    if replicas:
+        params["replicas"] = replicas
+    if capability:
+        params["capability"] = capability
+    return await rpc_call("tenzro_rescaleDatabase", params)
+
+
+@mcp.tool
+async def drop_database(database_id: str) -> dict:
+    """Remove a database and all its partition placements, tearing down the
+    engine backing for every partition this node holds."""
+    return await rpc_call("tenzro_dropDatabase", {"database_id": database_id})
 
 
 @mcp.tool
@@ -3673,11 +3956,13 @@ async def storage_store_object(
     owner: str = "",
     data_shards: int = 4,
     parity_shards: int = 2,
+    owner_did: str = "",
 ) -> dict:
     """Store an object on this node's storage provider with erasure coding.
 
     `data` is the base64-encoded payload. `data_shards`/`parity_shards`
-    set the Reed-Solomon redundancy scheme.
+    set the Reed-Solomon redundancy scheme. `owner_did` gates who may
+    retrieve the object; it defaults to the owner address when unset.
     """
     params = {
         "object_id": object_id,
@@ -3687,6 +3972,8 @@ async def storage_store_object(
     }
     if owner:
         params["owner"] = owner
+    if owner_did:
+        params["owner_did"] = owner_did
     return await rpc_call("tenzro_storageStoreObject", params)
 
 

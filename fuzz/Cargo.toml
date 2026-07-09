@@ -1,0 +1,88 @@
+[package]
+name = "tenzro-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+tenzro-types = { path = "../crates/tenzro-types" }
+tenzro-crypto = { path = "../crates/tenzro-crypto" }
+tenzro-consensus = { path = "../crates/tenzro-consensus" }
+tenzro-bridge = { path = "../crates/tenzro-bridge" }
+tenzro-settlement = { path = "../crates/tenzro-settlement" }
+tenzro-token = { path = "../crates/tenzro-token" }
+
+# Detach from the parent workspace: fuzz targets build with
+# `-C passes=sancov-module` instrumentation and must not leak
+# those flags into the main dependency graph.
+[workspace]
+
+# Replicate the root workspace's vendored-crate patches that this
+# package's dependency graph reaches (tenzro-bridge → dkls23).
+# Patch sections do not cross workspace boundaries, so without these
+# the detached fuzz workspace would resolve the unpinned crates.io
+# versions instead of the vendored RustCrypto-pinned ones.
+[patch.crates-io]
+dkls23-core = { path = "../vendor/dkls23-core" }
+dkls23-secp256k1 = { path = "../vendor/dkls23-secp256k1" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "bridge_inner_message"
+path = "fuzz_targets/bridge_inner_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wormhole_vaa"
+path = "fuzz_targets/wormhole_vaa.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "consensus_vote"
+path = "fuzz_targets/consensus_vote.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "settlement_channel_state"
+path = "fuzz_targets/settlement_channel_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "staking_arithmetic"
+path = "fuzz_targets/staking_arithmetic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transaction_decode"
+path = "fuzz_targets/transaction_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "intent_7683"
+path = "fuzz_targets/intent_7683.rs"
+test = false
+doc = false
+bench = false

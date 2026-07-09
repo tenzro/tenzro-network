@@ -64,6 +64,7 @@ pub mod kill_switch;
 pub mod intent_7683;
 pub mod hardware;
 pub mod tenzro_uri;
+pub mod access_policy;
 
 // Re-export commonly used types
 pub use primitives::{Hash, Address, Signature, BlockHeight, Nonce, Timestamp, ChainId};
@@ -74,7 +75,7 @@ pub use asset::{AssetId, AssetType, StablecoinType, AssetInfo};
 pub use network::{NetworkRole, NodeInfo, PeerInfo, RoleSet};
 pub use tee::{TeeVendor, AttestationReport, AttestationResult, TeeCapacity, TeeProviderInfo};
 pub use agent::{AgentIdentity, AgentConfig, AgentMessage, AgentMessageType, Capability};
-pub use model::{ModelInfo, ModelLoadInfo, ModelModality, MoeMetadata, MoeRoutingStrategy, MoeExpertHolding, MoeExpertResidency, MoeProviderRole, InferenceRequest, InferenceResponse, InferenceParameters, InferenceProvider, ProvenanceManifest, ProviderCapacity, PricingConfig};
+pub use model::{ModelInfo, ModelLoadInfo, ModelModality, MoeMetadata, MoeRoutingStrategy, MoeExpertHolding, MoeExpertResidency, MoeProviderRole, InferenceRequest, InferenceResponse, InferenceParameters, InferenceProvider, ProvenanceManifest, ProviderCapacity, AdvertisedCapacity, PricingConfig};
 pub use settlement::{SettlementRequest, SettlementReceipt, SettlementStatus, ReleaseConditions, ServiceType, PaymentIntent, ServiceProof, ProofType};
 pub use token::{TokenConfig, Treasury, StakingPool, ProviderStake, ProviderType, GovernanceProposal, ProposalStatus, ProposalType};
 pub use governance::{GovernanceVote, VoteType};
@@ -112,6 +113,10 @@ pub use workflow_template::{
     WorkflowTemplateStatus,
 };
 pub use resource::{ResourceClass, ResourceDescriptor, ResourceFilter};
+pub use access_policy::{
+    AccessPolicy, ConfidentialSeal, WrappedDataKey, DEFAULT_READ_ACTION, DEFAULT_WRITE_ACTION,
+    WRAP_ALG,
+};
 pub use tenzro_uri::{TenzroUri, TenzroUriError, TENZRO_URI_SCHEME};
 pub use error::TenzroError;
 pub use config::{NetworkConfig, NodeConfig};
@@ -136,7 +141,7 @@ pub use principal_chain::{
     PrincipalRole, MAX_DELEGATION_DEPTH,
 };
 pub use kill_switch::{KillSwitchAction, KillSwitchReceipt};
-pub use hardware::{HardwareCapabilities, HardwareClass};
+pub use hardware::{GpuDevice, GpuVendor, HardwareCapabilities, HardwareClass, Interconnect};
 pub use intent_7683::{
     compute_order_id, fill_storage_key, order_storage_key, u128_to_uint256_be,
     uint256_be_to_u128, BridgeFeeHint, CrossChainOrder, FillInstruction, FillRecord,

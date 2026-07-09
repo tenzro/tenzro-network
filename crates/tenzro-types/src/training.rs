@@ -364,7 +364,9 @@ pub struct TrainingTaskSpec {
     /// Total reward pool escrowed by sponsor (TNZO, in attoTNZO).
     pub reward_pool: u128,
     /// Reference to the dataset. Format depends on tier:
-    /// - Open / Verified (public): `ipfs://...`, `ar://...`, `https://...`
+    /// - Open / Verified (public): `tenzro://blob/<hash>` (native
+    ///   content-addressed store); `ipfs://...`, `ar://...`,
+    ///   `https://...` as supported alternatives
     /// - Verified (encrypted-at-rest): `enc:...` (key sealed to TEE)
     /// - Confidential (TEE-resident): `tee://...` (data never leaves owner)
     pub dataset_ref: String,

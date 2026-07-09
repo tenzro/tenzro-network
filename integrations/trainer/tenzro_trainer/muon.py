@@ -139,6 +139,8 @@ class Muon(torch.optim.Optimizer if torch is not None else object):  # type: ign
         return loss
 
     def _step_muon(self, group: dict[str, Any]) -> None:
+        from tenzro_trainer.distributed import full_tensor, is_dtensor
+
         lr = group["lr"]
         momentum = group["momentum"]
         wd = group["weight_decay"]
@@ -152,13 +154,25 @@ class Muon(torch.optim.Optimizer if torch is not None else object):  # type: ign
             buf: torch.Tensor = state["momentum_buffer"]
             buf.lerp_(g, 1.0 - momentum)
             d = g.lerp(buf, momentum) if group["nesterov"] else buf
+            # Newton-Schulz needs the full matrix. Under FSDP2 the gradient
+            # is a sharded DTensor, so gather it first (collective — every
+            # rank walks the same param order). Momentum stays sharded.
+            d_full = full_tensor(d)
             # Flatten conv filters etc. to 2D for the orthogonalization.
-            d2 = d if d.ndim == 2 else d.view(d.size(0), -1)
+            d2 = d_full if d_full.ndim == 2 else d_full.view(d_full.size(0), -1)
             u = zeropower_via_newtonschulz5(d2, steps=group["ns_steps"])
             if wd != 0.0:
                 p.mul_(1.0 - lr * wd)
             scale = max(1.0, d2.size(0) / d2.size(1)) ** 0.5
-            p.add_(u.view_as(p), alpha=-lr * scale)
+            if is_dtensor(p):
+                from torch.distributed.tensor import distribute_tensor
+
+                update = distribute_tensor(
+                    u.view(p.shape).to(p.dtype), p.device_mesh, p.placements
+                )
+                p.add_(update, alpha=-lr * scale)
+            else:
+                p.add_(u.view_as(p), alpha=-lr * scale)
 
     def _step_adamw(self, group: dict[str, Any]) -> None:
         lr = group["lr"]

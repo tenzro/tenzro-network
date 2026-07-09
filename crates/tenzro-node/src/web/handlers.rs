@@ -2070,6 +2070,52 @@ pub async fn get_execution_receipt(
     })
 }
 
+/// `GET /discovery/resources` — x402 Bazaar resource discovery.
+///
+/// Public, ungated endpoint that lets any buyer (agent or human) browse the
+/// paid resources a seller has listed on this node. Query parameters narrow
+/// the result set (all ANDed): `scheme`, `network`, `asset`, `sellerDid`,
+/// `tags` (comma-separated, all must be present), `limit` (default 100).
+/// Listings are returned freshest-first.
+pub async fn discover_resources(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let catalog = state
+        .node
+        .as_ref()
+        .and_then(|n| n.bazaar_catalog().cloned());
+
+    let Some(catalog) = catalog else {
+        return Json(serde_json::json!({ "listings": [], "count": 0 }));
+    };
+
+    let mut query = tenzro_payments::x402::ResourceQuery {
+        limit: 100,
+        ..Default::default()
+    };
+    query.scheme = params.get("scheme").filter(|s| !s.is_empty()).cloned();
+    query.network = params.get("network").filter(|s| !s.is_empty()).cloned();
+    query.asset = params.get("asset").filter(|s| !s.is_empty()).cloned();
+    query.seller_did = params.get("sellerDid").filter(|s| !s.is_empty()).cloned();
+    if let Some(tags) = params.get("tags").filter(|s| !s.is_empty()) {
+        query.tags = tags
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+    }
+    if let Some(limit) = params.get("limit").and_then(|s| s.parse::<usize>().ok()) {
+        query.limit = limit;
+    }
+
+    let listings = catalog.discover(&query);
+    Json(serde_json::json!({
+        "count": listings.len(),
+        "listings": listings,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

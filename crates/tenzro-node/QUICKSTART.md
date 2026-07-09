@@ -70,6 +70,17 @@ Serve AI models:
   --log-level info
 ```
 
+With the node running, register as a provider in one command:
+
+```bash
+tenzro join --provider
+```
+
+This detects your hardware, provisions identity + wallet, posts the 100 TNZO
+compute bond (faucet-funded on testnet), registers you with default pricing,
+and downloads + serves the largest catalog model that fits your machine.
+Capacity is advertised automatically and inference demand routes to you.
+
 ## Using Configuration Files
 
 Create `my-config.json`:

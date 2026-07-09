@@ -35,11 +35,17 @@ language = [
 ]
 vision = ["timm>=1.0", "Pillow>=10.0"]
 timeseries = ["pandas>=2.2", "pyarrow>=15.0"]
+# FP8 training on Ada/Hopper-class GPUs (compute capability >= 8.9) via
+# torchao convert_to_float8_training. flash-attn is intentionally not an
+# extra: it needs a CUDA toolchain at install time, so operators install
+# it directly on GPU hosts (`pip install flash-attn --no-build-isolation`)
+# and the adapter picks it up automatically.
+fp8 = ["torchao>=0.7"]
 # Confidential-tier shard unwrap (HPKE per RFC 9180 + AES-256-GCM).
 # Runs inside the trainer's TEE enclave; never on the syncer side.
 confidential = ["pyhpke>=0.5", "cryptography>=42.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
-all = ["tenzro-trainer[hivemind,language,vision,timeseries,confidential]"]
+all = ["tenzro-trainer[hivemind,language,vision,timeseries,confidential,fp8]"]
 
 [project.scripts]
 tenzro-trainer = "tenzro_trainer.cli:main"

@@ -617,6 +617,8 @@ mod tests {
                 tee_available: false,
                 cpu_arch: "aarch64".to_string(),
                 cpu_cores: 8,
+                detected: true,
+                ..Default::default()
             });
 
         let recommendations = provisioner.recommend_models();

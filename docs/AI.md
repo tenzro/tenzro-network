@@ -247,7 +247,7 @@ The catalog covers seven ONNX runtimes plus the llama.cpp language path. All ent
 |---|---|---|---|
 | Forecast | TimesFM 2.5 200M | `tenzro_forecast` | |
 | Vision embedding | CLIP ViT-B/32 + L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16, DINOv2 | `tenzro_imageEmbed` | `tenzro_visionEmbed` |
-| Text embedding | Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M Matryoshka, BGE-M3, Snowflake Arctic Embed L v2.0 | `tenzro_textEmbed` | `tenzro_embed` |
+| Text embedding | Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M Matryoshka, BGE-M3, Snowflake Arctic Embed L v2.0, ModernBERT-embed base/large (8192-context RoPE encoder) | `tenzro_textEmbed` | `tenzro_embed` |
 | Segmentation (point/box) | SAM 2 base/large, EdgeSAM, MobileSAM | `tenzro_segment` | |
 | Segmentation (text-promptable) | SAM 3 / 3.1 | `tenzro_textSegment` | |
 | Detection | RF-DETR n/s/m/b/l/2xl (90-class COCO), D-FINE n/s/m/l/x (80-class) | `tenzro_detect` | |
@@ -255,6 +255,10 @@ The catalog covers seven ONNX runtimes plus the llama.cpp language path. All ent
 | Video | Vision-fallback encoder over uniformly-sampled frames | `tenzro_videoEmbed` | |
 
 Each modality has a dedicated runtime in `tenzro-model` with model-specific preprocessing (mel-spectrogram for ASR, ImageNet / CLIP / SigLIP normalization for vision, BPE tokenization for text-embed). The runtime dispatch hides the per-family ABI differences (SAM 1 vs SAM 2 decoder, RF-DETR vs D-FINE post-processing, Parakeet RNN-T vs Canary NeMo Conformer-AED).
+
+**Serving embeddings — local or network.** `tenzro_loadTextEmbeddingModel` with just `{ model_id }` (a catalog id) fetches the ONNX graph, its `model.onnx_data` external-data sidecar when the export ships one (Qwen3-Embedding, EmbeddingGemma, BGE-M3 do; ModernBERT-embed is self-contained), and the tokenizer from HuggingFace as a co-located bundle onto the persistent models directory, then registers the encoder — pooling family and dimensions come from the catalog entry. Passing explicit `path` + `tokenizer_path` + `family` instead loads a self-hosted file already on disk. Once loaded, `tenzro_textEmbed` serves from the local runtime handle; when the model is not loaded on this node, the router dispatches to a remote provider serving it. The same choice a node makes for language models and blobs applies to embeddings: run it locally or use the network. CLI: `tenzro embed-text {catalog,load,unload,list,run}`.
+
+**OpenAI-compatible endpoint.** `POST /v1/embeddings` (handler: `handle_openai_embeddings`) serves any loaded encoder in the OpenAI wire shape — `input` as a string or array, optional `dimensions` for Matryoshka truncation, response `{ object, data: [{ object, index, embedding }], model, usage }`. It sits on the same router as `/v1/chat/completions` and is HTTP 402-gated when a payment gate is configured, open otherwise. The ORT encoder path does not meter tokens, so `usage` reports 0.
 
 **Execution providers.** All ONNX runtimes share one session builder that registers hardware execution providers before falling back to CPU. The `onnx-tensorrt`, `onnx-cuda`, and `onnx-coreml` cargo features compile in the corresponding providers; the default registration priority is TensorRT → CUDA → CoreML, restricted to whichever features are compiled in. The `TENZRO_ONNX_EP` environment variable overrides the priority as a comma-separated list drawn from `tensorrt`, `cuda`, `coreml`, `cpu` (`cpu` terminates the list). A provider that fails to register logs a warning and falls through to the next — a GPU-featured binary on a machine without the matching driver still serves on CPU. The CUDA container image and GPU model-serving setup are covered in [`deploy/validator-deployment.md`](../deploy/validator-deployment.md).
 

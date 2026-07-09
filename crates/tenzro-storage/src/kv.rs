@@ -107,6 +107,23 @@ pub const CF_VALIDATOR_MODULES: &str = "validator_modules";
 ///   `da/cert/<blob_commitment_hex>` → JSON `AvailabilityCertificate`
 ///       (shape, blob_len, `2f+1` per-validator attestation signatures).
 pub const CF_DA_COMMITTEE: &str = "da_committee";
+/// Verifiable-inference commitments and challenges (TOPLOC scheme).
+/// Keys:
+///   `commitment/<hash_hex>` → bincode `StoredCommitment` (serving
+///       context plus the full top-k logit blob the provider committed
+///       to; hash_hex is the SHA-256 of the commitment's canonical
+///       encoding).
+///   `challenge/<challenge_id>` → JSON `InferenceChallenge` (filed
+///       disputes over a commitment, with lifecycle state).
+pub const CF_CHALLENGES: &str = "challenges";
+/// Distributed database layer registry. Records the databases a node serves
+/// and their placement (local single-node, LAN-cluster, or network-sharded).
+/// Keys:
+///   `db/<database_id>` → JSON `DatabaseDescriptor` (engine, placement mode,
+///       partition count, replica count).
+///   `partition/<database_id>/<partition_index>` → JSON `PartitionPlacement`
+///       (the HRW-selected holder endpoint ids for this partition).
+pub const CF_DATABASES: &str = "databases";
 
 /// Key-value store trait
 pub trait KvStore: Send + Sync {
@@ -223,6 +240,8 @@ const ALL_CFS: &[&str] = &[
     CF_BRIDGE_ANALYTICS,
     CF_VALIDATOR_MODULES,
     CF_DA_COMMITTEE,
+    CF_CHALLENGES,
+    CF_DATABASES,
 ];
 
 /// Force a file through compaction at least this often even when write
@@ -591,6 +610,8 @@ impl MemoryStore {
         data.insert(CF_AUDIT.to_string(), HashMap::new());
         data.insert(CF_APPROVALS.to_string(), HashMap::new());
         data.insert(CF_DA_COMMITTEE.to_string(), HashMap::new());
+        data.insert(CF_CHALLENGES.to_string(), HashMap::new());
+        data.insert(CF_DATABASES.to_string(), HashMap::new());
 
         Self {
             data: Arc::new(RwLock::new(data)),

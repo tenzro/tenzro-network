@@ -91,31 +91,11 @@ pub enum Backend {
     Sycl,
 }
 
-/// Data-plane reachability of a candidate member. Only members the head can
-/// reach directly may carry pipeline activations; relayed or symmetric-NAT
-/// members cannot sustain per-token traffic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MemberReachability {
-    /// Reachable on the same local segment (mDNS / private range). Ideal.
-    LocalDirect,
-    /// Directly dialable (public or hole-punched) without a relay.
-    Direct,
-    /// Reachable only through a circuit relay. The relay budget carries a
-    /// handful of tokens at most — never admit on the data plane.
-    RelayOnly,
-    /// Behind symmetric NAT with no working hole-punch. Excluded.
-    SymmetricNat,
-}
-
-impl MemberReachability {
-    /// Whether a member with this reachability may carry pipeline
-    /// activations (the per-token data plane). Relayed and symmetric-NAT
-    /// members are excluded — the relay budget (a couple of tokens before
-    /// it is exhausted) makes it useless as a pipeline hop.
-    pub fn data_plane_eligible(self) -> bool {
-        matches!(self, Self::LocalDirect | Self::Direct)
-    }
-}
+/// Data-plane reachability of a candidate member. Re-exported from the
+/// engine-agnostic cluster substrate: only members the head can reach directly
+/// may carry pipeline activations; relayed or symmetric-NAT members cannot
+/// sustain per-token traffic.
+pub use tenzro_cluster::MemberReachability;
 
 /// Why a candidate member was rejected from a cluster, for surfacing to the
 /// user in the assisted-setup UI.
@@ -339,27 +319,10 @@ pub fn assign_layers(total_layers: u32, members: &[ClusterMember]) -> HashMap<Ad
 }
 
 /// A probed pairwise link between two candidate members: round-trip latency
-/// and usable bandwidth. Populated by the active probe burst at form time.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct LinkProbe {
-    /// Round-trip time, milliseconds.
-    pub rtt_ms: f32,
-    /// Usable bandwidth, gigabits per second.
-    pub bandwidth_gbps: f32,
-}
-
-impl LinkProbe {
-    /// Estimated per-token transfer cost (ms) for one boundary activation
-    /// over this link: RTT plus serialization of `activation_bytes`.
-    pub fn transfer_ms(&self, activation_bytes: u32) -> f32 {
-        if self.bandwidth_gbps <= 0.0 {
-            return f32::INFINITY;
-        }
-        let bits = activation_bytes as f32 * 8.0;
-        let serialize_ms = bits / (self.bandwidth_gbps * 1e9) * 1e3;
-        self.rtt_ms + serialize_ms
-    }
-}
+/// and usable bandwidth. Re-exported from the engine-agnostic cluster
+/// substrate; populated by the active probe burst at form time. For pipeline
+/// serving the per-token transfer weight is one boundary activation.
+pub use tenzro_cluster::LinkProbe;
 
 /// Network gate result: the data-plane-eligible members ordered to minimize
 /// end-to-end pipeline latency, plus the members excluded with a reason.
@@ -373,65 +336,57 @@ pub struct NetworkGate {
 }
 
 /// Admit only data-plane-reachable members and order them to minimize total
-/// pipeline transfer cost. Ordering is a greedy nearest-neighbour chain over
-/// the probed cost graph starting from the head — the simpler of greedy vs
-/// shortest-path ordering, correct for the small member
-/// counts a single LAN cluster has. `probes` is keyed by an unordered member
-/// pair; `activation_bytes` sets the per-token transfer weight.
+/// pipeline transfer cost. Delegates the ordering to the engine-agnostic
+/// [`tenzro_cluster::order_members`] greedy nearest-neighbour chain over the
+/// probed cost graph, then maps its opaque member ids back to [`Address`] and
+/// its exclusions to [`RejectReason`]. `probes` is keyed by an unordered
+/// member pair; `activation_bytes` sets the per-token transfer weight.
 pub fn order_stages(
     head: Address,
     members: &[ClusterMember],
     probes: &HashMap<(Address, Address), LinkProbe>,
     activation_bytes: u32,
 ) -> NetworkGate {
-    let mut excluded = Vec::new();
-    let mut eligible: Vec<&ClusterMember> = Vec::new();
-    for m in members {
-        if m.reachability.data_plane_eligible() {
-            eligible.push(m);
-        } else {
-            excluded.push((m.address, RejectReason::NotDataPlaneReachable(m.reachability)));
-        }
-    }
+    use tenzro_cluster::{order_members, CostMember, MemberId};
 
-    // Greedy nearest-neighbour chain from the head: repeatedly append the
-    // unvisited member with the cheapest transfer from the current tail.
-    let mut ordered: Vec<Address> = Vec::new();
-    let mut current = head;
-    let mut remaining: Vec<Address> = eligible.iter().map(|m| m.address).collect();
-    // Stable tie-break: address order.
-    remaining.sort_by(|a, b| a.0.cmp(&b.0));
+    let head_id = address_member_id(head);
+    let cost_members: Vec<CostMember> = members
+        .iter()
+        .map(|m| CostMember { id: address_member_id(m.address), reachability: m.reachability })
+        .collect();
 
-    while !remaining.is_empty() {
-        let mut best_idx = 0usize;
-        let mut best_cost = f32::INFINITY;
-        for (i, cand) in remaining.iter().enumerate() {
-            let cost = probe_cost(probes, current, *cand, activation_bytes);
-            if cost < best_cost {
-                best_cost = cost;
-                best_idx = i;
-            }
-        }
-        let next = remaining.remove(best_idx);
-        ordered.push(next);
-        current = next;
-    }
+    // Re-key the probe graph onto opaque member ids. `address_member_id` is
+    // order-preserving hex, so the id-order tie-break matches address order.
+    let id_probes: HashMap<(MemberId, MemberId), LinkProbe> = probes
+        .iter()
+        .map(|((a, b), p)| {
+            (tenzro_cluster::link_key(&address_member_id(*a), &address_member_id(*b)), *p)
+        })
+        .collect();
+
+    let out = order_members(&head_id, &cost_members, &id_probes, activation_bytes);
+
+    // Map ids back to addresses via the member roster.
+    let by_id: HashMap<String, Address> =
+        members.iter().map(|m| (address_member_id(m.address).0, m.address)).collect();
+    let ordered: Vec<Address> =
+        out.ordered.iter().filter_map(|id| by_id.get(&id.0).copied()).collect();
+    let excluded: Vec<(Address, RejectReason)> = out
+        .excluded
+        .into_iter()
+        .filter_map(|(id, reach)| {
+            by_id.get(&id.0).map(|a| (*a, RejectReason::NotDataPlaneReachable(reach)))
+        })
+        .collect();
 
     NetworkGate { ordered, excluded }
 }
 
-fn probe_cost(
-    probes: &HashMap<(Address, Address), LinkProbe>,
-    a: Address,
-    b: Address,
-    activation_bytes: u32,
-) -> f32 {
-    let key = link_key(a, b);
-    probes
-        .get(&key)
-        .map(|p| p.transfer_ms(activation_bytes))
-        // No probe for this pair: treat as worst-case so probed links win.
-        .unwrap_or(f32::INFINITY)
+/// Order-preserving [`MemberId`] for an address: fixed-width lowercase hex, so
+/// lexicographic id order equals the address's byte-array order and the
+/// shared ordering's id-order tie-break stays byte-for-byte identical.
+fn address_member_id(addr: Address) -> tenzro_cluster::MemberId {
+    tenzro_cluster::MemberId(hex::encode(addr.0))
 }
 
 /// Canonical (order-independent) key for a member-pair probe.

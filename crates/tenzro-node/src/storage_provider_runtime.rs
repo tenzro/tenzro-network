@@ -29,7 +29,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use tenzro_settlement::obligations::ProviderObligations;
 use tenzro_settlement::rental::StakeLedger;
-use tenzro_storage_market::{
+use tenzro_storage_provider::{
     answer_challenge, new_challenge, verify_challenge, ChargeOutcome, RedundancyScheme,
     StorageDeal, StorageMeter, StoragePricing, StorageProvider,
 };
@@ -223,17 +223,21 @@ impl StorageProviderRuntime {
         self.pricing.read().effective_rate()
     }
 
-    /// Stores an object on behalf of `owner`, erasure-coded under `scheme`, and
-    /// returns its content-addressed shard descriptor.
+    /// Stores an object on behalf of `owner`, erasure-coded under `scheme` and
+    /// gated by `access_policy`, and returns its content-addressed shard
+    /// descriptor. Pass `confidential` to record per-DID wrapped-key envelopes
+    /// for a network-tier encrypted object.
     pub async fn store_object(
         &self,
         object_id: impl Into<String>,
         owner_hex: impl Into<String>,
         data: &[u8],
         scheme: RedundancyScheme,
-    ) -> tenzro_storage_market::Result<tenzro_storage_market::ObjectDescriptor> {
+        access_policy: tenzro_types::access_policy::AccessPolicy,
+        confidential: Option<tenzro_types::access_policy::ConfidentialSeal>,
+    ) -> tenzro_storage_provider::Result<tenzro_storage_provider::ObjectDescriptor> {
         self.store
-            .store_object(object_id, owner_hex, data, scheme)
+            .store_object(object_id, owner_hex, data, scheme, access_policy, confidential)
             .await
     }
 
@@ -248,7 +252,7 @@ impl StorageProviderRuntime {
         asset_id: AssetId,
         size_bytes: u64,
         total_epochs: u64,
-    ) -> tenzro_storage_market::Result<StorageDeal> {
+    ) -> tenzro_storage_provider::Result<StorageDeal> {
         self.meter.open_deal(
             object_id,
             renter,
@@ -268,7 +272,7 @@ impl StorageProviderRuntime {
     pub async fn charge_epoch(
         &self,
         deal_id: &str,
-    ) -> tenzro_storage_market::Result<ChargeOutcome> {
+    ) -> tenzro_storage_provider::Result<ChargeOutcome> {
         let deal = self.meter.deal(deal_id)?;
         let passed = self.run_challenge(&deal.object_id).await;
         if !passed {
@@ -328,7 +332,7 @@ impl StorageProviderRuntime {
                 return false;
             }
         };
-        let shards = match tenzro_storage_market::encode(&object_bytes, descriptor.scheme) {
+        let shards = match tenzro_storage_provider::encode(&object_bytes, descriptor.scheme) {
             Ok(s) => s,
             Err(e) => {
                 debug!(object = %object_id, error = %e, "Cannot re-encode shards to answer challenge");
@@ -341,7 +345,7 @@ impl StorageProviderRuntime {
                 .iter()
                 .find(|s| s.index == idx)
                 .map(|s| s.bytes.clone())
-                .ok_or_else(|| tenzro_storage_market::StorageMarketError::ShardNotFound {
+                .ok_or_else(|| tenzro_storage_provider::StorageProviderError::ShardNotFound {
                     object_id: object_id.to_string(),
                     shard_index: idx,
                 })

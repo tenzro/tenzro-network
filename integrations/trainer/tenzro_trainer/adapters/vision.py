@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover
 
 
 from tenzro_trainer.muon import build_inner_optimizer
+from tenzro_trainer.shards import resolve_shard
 
 log = logging.getLogger(__name__)
 
@@ -79,19 +80,13 @@ class VisionAdapter:
     def shard_batches(self, shard_uri: str) -> Iterable[object]:
         if torch is None:
             raise RuntimeError("PyTorch is required")
-        # Resolve the shard URI. Confidential-tier shards arrive
+        # Resolve the shard URI. tenzro:// fetches from the local node's
+        # iroh blob store (ImageFolder shards travel as tarballs over
+        # content-addressed schemes and are unpacked here); ipfs:// / ar://
+        # / http(s):// go through gateways. Confidential-tier shards arrive
         # pre-decrypted as `file://` pointers into an enclave-private
         # tmpfs; see `tenzro_trainer.confidential.unwrap_shard`.
-        if shard_uri.startswith("file://"):
-            root = Path(shard_uri[len("file://") :])
-        elif shard_uri.startswith(("ipfs://", "ar://", "https://", "http://")):
-            raise NotImplementedError(
-                f"remote shard scheme not supported in reference trainer "
-                f"(fetch upstream, expose as file:// or via the confidential "
-                f"unwrap helper): {shard_uri}"
-            )
-        else:
-            root = Path(shard_uri)
+        root = resolve_shard(shard_uri, extract=True)
 
         if not root.is_dir():
             raise ValueError(

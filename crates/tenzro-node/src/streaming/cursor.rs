@@ -40,9 +40,10 @@ pub enum BackpressureSignal {
 #[derive(Debug, Clone)]
 pub struct RecordedChunk {
     pub seq: u64,
-    /// The full SSE `data: ...\n\n` line(s) as bytes. Storing the
-    /// already-encoded form means replay is a verbatim byte copy — no
-    /// risk of re-serialization drift between live and replay paths.
+    /// The raw event payload (JSON, no `data:` framing — axum's
+    /// `Event::data()` adds the SSE line framing). Storing the exact
+    /// payload the live path emitted means replay is a verbatim copy —
+    /// no risk of re-serialization drift between live and replay paths.
     pub encoded: String,
     /// Optional named SSE event type (e.g. "content_block_delta"). For
     /// the OpenAI-shape stream this is `None`.

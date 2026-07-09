@@ -1,7 +1,7 @@
 //! Prepaid balance ledger for streaming settlement.
 //!
 //! Streaming services — capacity [`rental`](crate::rental) and per-byte storage
-//! [`metering`](../../tenzro_storage_market/metering) — bill against a renter's
+//! [`metering`](../../tenzro_storage_provider/metering) — bill against a renter's
 //! *prepaid* TNZO balance rather than debiting the on-chain account each epoch.
 //! Booking locks the full term inside this balance; each epoch streams one slice
 //! out to the provider (or refunds it on a miss). That shared balance map is the

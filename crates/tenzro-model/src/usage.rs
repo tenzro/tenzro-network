@@ -244,6 +244,28 @@ impl ProviderUsageStats {
         self.total_bytes_in.saturating_add(self.total_bytes_out)
     }
 
+    /// Realized output-token throughput in tokens/sec, measured over the
+    /// wall-clock window between the first and last inference this provider
+    /// served. This is the *measured* counterpart to the provider's
+    /// self-declared `ProviderCapacity.requests_per_second`: consumers compare
+    /// the two to judge whether a provider delivers what it advertises.
+    ///
+    /// Returns `None` when there is not yet enough history to measure — fewer
+    /// than two inferences, or a zero-length window (all inferences in the same
+    /// millisecond). A brand-new provider therefore reports "no measurement"
+    /// rather than a misleading zero or infinity.
+    pub fn measured_tokens_per_sec(&self) -> Option<f64> {
+        let (first, last) = (self.first_inference?, self.last_inference?);
+        if self.inference_count < 2 {
+            return None;
+        }
+        let window_ms = last.as_millis().saturating_sub(first.as_millis());
+        if window_ms <= 0 {
+            return None;
+        }
+        Some(self.total_output_tokens as f64 * 1000.0 / window_ms as f64)
+    }
+
     /// Updates stats with a new usage record
     fn update(&mut self, record: &UsageRecord) {
         self.inference_count = self.inference_count.saturating_add(1);

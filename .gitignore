@@ -22,13 +22,19 @@
 *.p12
 
 # Never commit API keys
-# Use env vars instead of hardcoding
+# Use DRPC_API_KEY env var instead of hardcoding
 
 # OS
 .DS_Store
 Thumbs.db
 
 # Local tooling / editor scratch
+CLAUDE.md
+**/CLAUDE.md
+.claude/
+.claude.json
+.claude.local.json
+**/.claude/
 .cursor/
 .cursorrules
 .cursorrules.local
@@ -40,6 +46,21 @@ Thumbs.db
 .github/copilot/
 
 # Local-only working drafts
+docs/upstream-staging/
+docs/upstream-registrations.md
+docs/recognition-commands.md
+docs/recognition-roadmap.md
+docs/architecture/agentic-internet.md
+docs/architecture/gap-matrix.md
+docs/architecture/prior-art.md
+docs/operators/
+docs/agent-launch-test-plan.md
+docs/landscape-2026.md
+docs/protocol-coverage-2026-05.md
+docs/protocol-coverage-2026-06.md
+docs/protocol-research-2026-05/
+docs/papers/
+docs/pitch/
 ARCHITECTURE-*.md
 ROADMAP*.md
 *-DRAFT*.md
@@ -79,6 +100,21 @@ crates/tenzro-node/data/
 # Docker
 .docker/
 
+# Terraform
+deploy/terraform/**/terraform.tfvars
+deploy/terraform/**/.terraform/
+deploy/terraform/**/.terraform.lock.hcl
+deploy/terraform/**/tfplan
+deploy/terraform/**/*.tfplan
+deploy/terraform/**/*.tfstate
+deploy/terraform/**/*.tfstate.backup
+deploy/terraform/*.tfstate.backup
+
+# Kubernetes secrets (never commit)
+deploy/kubernetes/secrets/
+deploy/kubernetes/*-secret.yaml
+deploy/kubernetes/*-credentials.yaml
+
 # Coverage
 *.profraw
 *.profdata
@@ -92,3 +128,6 @@ apps/tenzro-desktop/src-tauri/gen/
 website/
 apps/
 sdk/
+
+# Marketing / campaign content — never published to GitHub
+marketing/

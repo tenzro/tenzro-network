@@ -26,7 +26,7 @@ Three properties shape the storage surface:
 
 The crates that implement this:
 
-- `tenzro-storage-market` — `StorageProvider`, `ObjectDescriptor`, `StorageMeter`, `StoragePricing`, `StorageDeal`, `ChargeOutcome`, the proof-of-retrievability challenge (`por`), and redundancy
+- `tenzro-storage-provider` — `StorageProvider`, `ObjectDescriptor`, `StorageMeter`, `StoragePricing`, `StorageDeal`, `ChargeOutcome`, the proof-of-retrievability challenge (`por`), and redundancy
 - `tenzro-settlement` — `ProviderObligations`, the coverage tracker shared with compute
 - `tenzro-node` — the storage provider runtime that wires identity, stake, obligations, and pricing into a `StorageMeter`
 
@@ -87,7 +87,22 @@ Objects can be stored with redundancy so the loss of a single provider does not 
 
 ---
 
-## 5. Money flow
+## 5. Access control
+
+Every stored object is owned, and retrieval is gated. `ObjectDescriptor` carries the same `AccessPolicy` (from `tenzro-types`) that gates a database, so a file and a database are protected identically:
+
+- **`public`** — any caller may retrieve; only the owner administers.
+- **`owner_only`** — only the owner DID may retrieve or administer. The default when a store request supplies just `owner_did`.
+- **`did_allowlist`** — a named set of reader DIDs may retrieve; the owner administers.
+- **`capability_required`** — retrieval requires an AAP capability naming the policy's read action; the owner always administers.
+
+`tenzro_storageStoreObject` accepts either a full `access_policy` object or a bare `owner_did` (which defaults to `owner_only`). The node adjudicates every retrieval fail-closed before returning shards.
+
+**Confidential seal.** A sensitive object can additionally carry a `ConfidentialSeal`: encryption-at-rest with one wrapped data key per authorized DID (`hpke-x25519-hkdf-sha256-aes-256-gcm`). The descriptor records the wrapped-key envelopes; the node and client do the crypto. This is opt-in on top of the always-on access policy — a capability gate for every object, encryption-at-rest for sensitive data.
+
+---
+
+## 6. Money flow
 
 The invariant is the same one the whole network settles on: **the consumer pays from their TNZO balance; the provider earns into theirs.** Holding data credits the provider per byte-epoch; consuming storage debits the consumer. A missed retrievability proof moves nothing and is the network's signal that the provider is not holding what it agreed to.
 
@@ -97,7 +112,7 @@ Before a deal can stream, the renter funds a prepaid balance: TNZO is locked out
 
 ---
 
-## 6. Interfaces
+## 7. Interfaces
 
 ### RPC
 
@@ -120,6 +135,6 @@ Both the Rust and TypeScript SDKs expose a `storage` client mirroring the RPC su
 
 ---
 
-## 7. How storage relates to compute
+## 8. How storage relates to compute
 
 Storage and compute rental are two roles against one stake. They share the same `ProviderObligations` tracker and the same balance map; they differ only in the gate. Storage settles on a proof of retrievability per byte-epoch; compute settles on an availability proof per epoch. When a provider's stake no longer covers what it owes, both shed coverage through the same recheck. See [`docs/COMPUTE.md`](COMPUTE.md) for the compute side of the same substrate.

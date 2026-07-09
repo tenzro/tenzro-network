@@ -103,6 +103,13 @@ pub enum MessagePayload {
     /// peers can populate their network_providers cache.
     ProviderAnnouncement(ProviderAnnouncementMessage),
 
+    /// Database announcement — broadcast by nodes that spin up database
+    /// engines so peers know which engine ids (postgres, qdrant, milvus,
+    /// dgraph, valkey, …) a member can host. Engine-aware placement filters
+    /// candidates by advertised engine before running tiered HRW selection,
+    /// so a partition only lands on a member that actually runs its engine.
+    DatabaseAnnouncement(DatabaseAnnouncementMessage),
+
     /// Blob availability announcement — broadcast by nodes whose iroh blob
     /// store holds content so peers can populate their blob-provider hint
     /// caches and fetch `tenzro://blob/...` URIs without an explicit
@@ -142,6 +149,7 @@ impl MessagePayload {
             Self::ModelRegistration(_) => "tenzro/models",
             Self::AgentAnnouncement(_) => "tenzro/agents",
             Self::ProviderAnnouncement(_) => "tenzro/providers",
+            Self::DatabaseAnnouncement(_) => "tenzro/databases",
             Self::BlobAnnouncement(_) | Self::ShardReplication(_) => "tenzro/blobs",
             Self::Status(_) | Self::Ping | Self::Pong => "tenzro/status",
             Self::Custom { topic, .. } => topic,
@@ -430,6 +438,7 @@ pub struct ModelRegistrationMessage {
 const MODEL_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/model";
 const AGENT_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/agent";
 const PROVIDER_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/provider";
+const DATABASE_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/database";
 const BLOB_ANNOUNCE_DOMAIN: &[u8] = b"tenzro/announce/blobs";
 const SHARD_REPLICATION_DOMAIN: &[u8] = b"tenzro/announce/shard-replication";
 
@@ -629,6 +638,14 @@ pub struct ProviderAnnouncementMessage {
     /// memory / GPU / TEE class without an extra RPC round-trip.
     #[serde(default)]
     pub hardware: HardwareCapabilities,
+    /// Advertised serving throughput/concurrency envelope — max concurrent
+    /// requests, declared requests-per-second ceiling, batch size, and MTP
+    /// availability. Populated at announcement-build time from the provider's
+    /// `ProviderCapacity`. Consumers rank by this declared capacity but gate
+    /// every number on observed serving metrics (measured throughput +
+    /// latency) before trusting it. Covered by the announcement signature.
+    #[serde(default)]
+    pub capacity: tenzro_types::AdvertisedCapacity,
     /// Geographic locality declared by the operator (free-form identifier
     /// such as `us-east`, `eu-west`, `ap-southeast`). `None` means
     /// the provider declined to declare a region; consumers must treat
@@ -683,6 +700,84 @@ impl ProviderAnnouncementMessage {
         unsigned.signature = Vec::new();
         verify_announce_signature(
             PROVIDER_ANNOUNCE_DOMAIN,
+            &unsigned,
+            &self.pubkey,
+            &self.signature,
+        )
+    }
+}
+
+fn default_database_ttl() -> u64 {
+    120
+}
+
+/// Database announcement — broadcast over gossipsub topic "tenzro/databases"
+/// by nodes that spin up database engines. Peers merge incoming announcements
+/// into their database-provider cache keyed by `(engine_id, endpoint_id)`, so
+/// engine-aware placement can filter candidates to members that actually run a
+/// given engine before running tiered HRW selection. A Milvus partition never
+/// lands on a member that only advertises Postgres.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseAnnouncementMessage {
+    /// libp2p peer ID of the announcing node.
+    pub peer_id: String,
+    /// Wallet/account address of the database provider.
+    pub provider_address: String,
+    /// Catalog engine ids this node can host (e.g. "postgres", "qdrant",
+    /// "milvus", "dgraph", "valkey", "lance", "tantivy").
+    #[serde(default)]
+    pub engine_ids: Vec<String>,
+    /// HTTP RPC endpoint for direct query routing.
+    #[serde(default)]
+    pub rpc_endpoint: String,
+    /// iroh `EndpointId` (lowercase hex) — the dialable identity used as the
+    /// candidate identity for tiered HRW partition placement. Empty when the
+    /// node has no iroh resolver bound.
+    #[serde(default)]
+    pub iroh_endpoint_id: String,
+    /// Lifecycle status (e.g. "active", "draining").
+    #[serde(default)]
+    pub status: String,
+    /// Unix timestamp (ms) when this announcement was created.
+    pub timestamp: i64,
+    /// TTL in seconds — entries expire if not refreshed (default 120s).
+    #[serde(default = "default_database_ttl")]
+    pub ttl_secs: u64,
+    /// Ed25519 public key (raw 32B) of the announcing provider. Empty on
+    /// unsigned announcements, which consumers reject.
+    #[serde(default)]
+    pub pubkey: Vec<u8>,
+    /// Ed25519 signature over the canonical preimage. Empty on unsigned
+    /// announcements, which consumers reject.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+impl DatabaseAnnouncementMessage {
+    /// Sign this announcement with the provider's Ed25519 announce key,
+    /// populating `pubkey` + `signature`. Call after all fields are set — the
+    /// signature covers the entire struct (endpoint, engine ids, status,
+    /// timestamp, ttl), so no field can be mutated post-signing without
+    /// invalidating the signature.
+    pub fn sign(&mut self, signer: &dyn tenzro_crypto::signatures::Signer) -> Result<(), String> {
+        self.pubkey = signer.public_key().as_bytes().to_vec();
+        self.signature = Vec::new();
+        let preimage = announce_preimage(DATABASE_ANNOUNCE_DOMAIN, self)?;
+        let sig = signer.sign(&preimage).map_err(|e| e.to_string())?;
+        self.signature = sig.as_bytes().to_vec();
+        Ok(())
+    }
+
+    /// Verify the embedded signature over the whole-struct preimage. Returns
+    /// an error for unsigned (empty `pubkey`/`signature`) or tampered messages.
+    pub fn verify(&self) -> Result<(), String> {
+        if self.pubkey.is_empty() || self.signature.is_empty() {
+            return Err("unsigned database announcement".to_string());
+        }
+        let mut unsigned = self.clone();
+        unsigned.signature = Vec::new();
+        verify_announce_signature(
+            DATABASE_ANNOUNCE_DOMAIN,
             &unsigned,
             &self.pubkey,
             &self.signature,

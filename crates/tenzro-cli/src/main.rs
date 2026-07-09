@@ -34,7 +34,7 @@ use commands::{
     KeyCommand,
     WorkflowCommand, Eip7702Command, Permit2Command, SecureMintCommand, StableAssetCommand,
     HyperlaneCommand, AxelarCommand, BabylonCommand, CaipCommand,
-    DiscoverCommand, ClusterCommand,
+    DiscoverCommand, ClusterCommand, database::DatabaseCommand,
     urwa::UrwaCommand, ivms101::Ivms101Command, attested_clock::AttestedClockCommand,
     bridge_fee::BridgeFeeCommand, wormhole_ntt::WormholeNttCommand,
 };
@@ -461,6 +461,10 @@ enum Command {
     #[command(subcommand)]
     Cluster(ClusterCommand),
 
+    /// Distributed databases: create, query, scale, and issue connections
+    #[command(subcommand)]
+    Database(DatabaseCommand),
+
     /// Interactive chat with AI models
     Chat(ChatCmd),
 
@@ -502,8 +506,26 @@ struct FaucetCmd {
 /// Interactive chat with AI models
 #[derive(Debug, Parser)]
 struct ChatCmd {
-    /// Model ID to use
-    model_id: String,
+    /// Model ID to use. Omit to select one from `--use-case` + `--budget`.
+    model_id: Option<String>,
+
+    /// Use case for intent selection when no model_id is given:
+    /// chat, code, reasoning, summarize, extract, or embed.
+    #[arg(long)]
+    use_case: Option<String>,
+
+    /// Per-request cost cap in smallest TNZO unit (decimal string) for
+    /// intent selection. Only used when no model_id is given.
+    #[arg(long)]
+    budget: Option<String>,
+
+    /// Cost-quality knob in [0.0, 1.0] for intent selection.
+    #[arg(long)]
+    optimize: Option<f32>,
+
+    /// Reject models below this tier during intent selection: cheap or strong.
+    #[arg(long)]
+    quality_floor: Option<String>,
 
     /// Maximum tokens to generate
     #[arg(long, default_value = "512")]
@@ -665,6 +687,7 @@ async fn main() -> Result<()> {
         Command::Moe(cmd) => cmd.execute().await?,
         Command::Discover(cmd) => cmd.execute().await?,
         Command::Cluster(cmd) => cmd.execute().await?,
+        Command::Database(cmd) => cmd.execute().await?,
         Command::Faucet(cmd) => execute_faucet(cmd).await?,
         Command::Chat(cmd) => execute_chat(cmd).await?,
         Command::Hardware(cmd) => commands::hardware::execute(&cmd.format).await?,
@@ -752,14 +775,64 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
     let runtime = Arc::new(ModelRuntime::new());
     let downloader = HfDownloader::new(models_dir);
 
+    // Resolve the model: an explicit model_id wins; otherwise select one from
+    // the stated intent (use_case + budget + quality_floor + optimize) via the
+    // node's MetaRouter, so callers can chat without naming a model.
+    let model_id: String = match &cmd.model_id {
+        Some(m) if !m.trim().is_empty() => m.clone(),
+        _ => {
+            let use_case = cmd.use_case.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provide a model_id or --use-case (chat|code|reasoning|research|summarize|extract|embed)"
+                )
+            })?;
+            let mut params = serde_json::Map::new();
+            params.insert(
+                "use_case".to_string(),
+                serde_json::Value::String(use_case.to_string()),
+            );
+            if let Some(b) = &cmd.budget {
+                params.insert("budget".to_string(), serde_json::Value::String(b.clone()));
+            }
+            if let Some(o) = cmd.optimize {
+                params.insert("optimize".to_string(), serde_json::json!(o));
+            }
+            if let Some(q) = &cmd.quality_floor {
+                params.insert(
+                    "quality_floor".to_string(),
+                    serde_json::Value::String(q.clone()),
+                );
+            }
+
+            let rpc = rpc::RpcClient::new(&cmd.rpc);
+            let spinner = output::create_spinner("Selecting a model for the intent...");
+            let decision: serde_json::Value = rpc
+                .call("tenzro_routeIntent", serde_json::Value::Object(params))
+                .await
+                .map_err(|e| anyhow::anyhow!("calling tenzro_routeIntent: {e}"))?;
+            spinner.finish_and_clear();
+
+            let selected = decision
+                .get("model_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("intent router returned no model"))?
+                .to_string();
+            output::print_field("Selected model", &selected);
+            if let Some(reason) = decision.get("reason").and_then(|v| v.as_str()) {
+                output::print_field("Reason", reason);
+            }
+            selected
+        }
+    };
+
     // Determine inference source: local model or network
-    let use_local = if let Some(entry) = get_model_by_id(&cmd.model_id) {
-        let gguf_path = downloader.model_path(&cmd.model_id);
+    let use_local = if let Some(entry) = get_model_by_id(&model_id) {
+        let gguf_path = downloader.model_path(&model_id);
         if gguf_path.exists() || gguf_path.is_symlink() {
             // Auto-load model if downloaded but not yet loaded
-            if !runtime.is_loaded(&cmd.model_id) {
+            if !runtime.is_loaded(&model_id) {
                 let spinner = output::create_spinner(&format!("Loading {} into memory...", entry.name));
-                match runtime.load_model_with_context(&cmd.model_id, &gguf_path, Some(entry.context_length)).await {
+                match runtime.load_model_with_context(&model_id, &gguf_path, Some(entry.context_length)).await {
                     Ok(()) => {
                         spinner.finish_and_clear();
                         output::print_success(&format!("Model {} loaded", entry.name));
@@ -769,7 +842,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                         output::print_warning(&format!("Failed to load locally: {}. Falling back to network.", e));
                     }
                 }
-                runtime.is_loaded(&cmd.model_id)
+                runtime.is_loaded(&model_id)
             } else {
                 true
             }
@@ -782,9 +855,9 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
 
     let source_label = if use_local { "local" } else { "network" };
 
-    output::print_header(&format!("Chat with {}", cmd.model_id));
+    output::print_header(&format!("Chat with {}", model_id));
     println!();
-    output::print_field("Model", &cmd.model_id);
+    output::print_field("Model", &model_id);
     output::print_field("Source", source_label);
     output::print_field("Max Tokens", &cmd.max_tokens.to_string());
     output::print_field("Temperature", &format!("{:.1}", cmd.temperature));
@@ -812,6 +885,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
         repeat_last_n: 64,
         seed: 42,
         draft_n: cmd.draft_n,
+        commitment_k: None,
     };
 
     loop {
@@ -953,7 +1027,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                 messages.push(ModelChatMessage { role, content });
             }
 
-            match runtime.generate_chat(&cmd.model_id, &messages, &gen_config).await {
+            match runtime.generate_chat(&model_id, &messages, &gen_config).await {
                 Ok(result) => {
                     spinner.finish_and_clear();
 
@@ -1007,7 +1081,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
             }
 
             let mut request = serde_json::json!({
-                "model_id": cmd.model_id,
+                "model_id": model_id,
                 "message": input,
                 "history": history,
                 "max_tokens": cmd.max_tokens,

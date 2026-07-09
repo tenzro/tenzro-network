@@ -77,7 +77,8 @@ pub enum TextEncoderFamily {
     /// Bidirectional encoder, CLS pooling (BGE-M3, Snowflake Arctic
     /// Embed L v2.0 use [CLS] at position 0).
     Cls,
-    /// Bidirectional encoder, mean pooling over non-pad positions.
+    /// Bidirectional encoder, mean pooling over non-pad positions
+    /// (ModernBERT-embed base/large).
     Mean,
     /// Pre-pooled `sentence_embedding` output (EmbeddingGemma's Optimum
     /// export). The runtime asserts the `sentence_embedding` output is

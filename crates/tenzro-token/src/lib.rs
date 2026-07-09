@@ -6,7 +6,9 @@
 //! - **Treasury**: Multi-asset treasury accumulating network fees
 //! - **Staking**: Staking system for validators and service providers
 //! - **Governance**: On-chain governance with proposals and voting
-//! - **Rewards**: Reward distribution engine for stakers
+//! - **Rewards**: Work-gated reward coupons minted against verified work
+//! - **Vesting**: Reward, grant, and contributor vesting schedules
+//! - **Sponsorship**: Foundation-delegated stake for qualifying operators
 //! - **Fee Distribution**: Network fee processing and distribution
 //!
 //! # Architecture
@@ -43,6 +45,8 @@ pub mod treasury;
 pub mod staking;
 pub mod governance;
 pub mod rewards;
+pub mod vesting;
+pub mod sponsorship;
 pub mod fee_distribution;
 pub mod liquid_staking;
 pub mod cross_vm;
@@ -70,7 +74,25 @@ pub use staking::{
     DEFAULT_MIN_STAKE, DEFAULT_UNBONDING_PERIOD_MS
 };
 pub use governance::{GovernanceEngine, VotingRecord};
-pub use rewards::{RewardDistributor, EpochRewards, RewardClaim};
+pub use rewards::{
+    ClaimOutcome, CouponStatus, EpochRewardSummary, MintingSchedule, RewardCoupon,
+    RewardEngine, RewardEngineState, RoleBucket, WorkClass,
+    CLAIM_WINDOW_EPOCHS, DEFAULT_EPOCHS_PER_YEAR, DEFAULT_LIQUID_BPS,
+    NETWORK_REWARDS_POOL, ONE_TNZO, REWARD_COUPON_PREFIX, REWARD_EPOCH_PREFIX,
+    REWARD_METER_PREFIX, REWARD_PENDING_PREFIX, REWARD_STATE_KEY,
+};
+pub use vesting::{
+    VestingKind, VestingManager, VestingSchedule,
+    CONTRIBUTOR_CLIFF_MS, CONTRIBUTOR_VESTING_MS, DAY_MILLIS, GRANT_VESTING_MS,
+    REWARD_VESTING_MS, VESTING_PREFIX,
+};
+pub use sponsorship::{
+    ConversionOutcome, RevocationReason, SponsorshipManager, SponsorshipPool,
+    SponsorshipSlot, SponsorshipStatus, SponsorshipTrack,
+    MAX_ASN_SLOT_BPS, MAX_CONTROLLER_SLOT_BPS, MAX_SPONSORED_STAKE_BPS,
+    REAPPLICATION_BAR_MS, SLOT_EXPIRY_MS, SPONSORSHIP_POOL, SPONSOR_POOL_KEY,
+    SPONSOR_SLOT_PREFIX, T2_DELEGATION, T2_JUNIOR_BOND, T3_DELEGATION, T3_JUNIOR_BOND,
+};
 pub use fee_distribution::{FeeProcessor, FeeStats, DistributionHistory};
 pub use liquid_staking::{LiquidStakingPool, LiquidStakingConfig, LiquidStakingStats};
 pub use cross_vm::{

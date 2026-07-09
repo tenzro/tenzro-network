@@ -1316,6 +1316,14 @@ pub struct NodeConfig {
     /// accumulate snapshot directories on their data volume.
     #[serde(default)]
     pub snapshot: crate::snapshot::SnapshotConfig,
+
+    /// Managed-database engine endpoints this node serves. Each configured
+    /// endpoint registers a live [`crate::db_engine_registry::EngineRegistry`]
+    /// backend for that engine id, so a `tenzro_databaseQuery` against a
+    /// partition this node holds dispatches to a real engine. Default serves
+    /// no engines.
+    #[serde(default)]
+    pub databases: DatabasesConfig,
 }
 
 /// Operator-supplied Canton/DAML mirror config for the ERC-8004
@@ -1369,6 +1377,49 @@ pub struct McpPluginHostConfig {
     /// stdio MCP gets its own subprocess for the lifetime of the node).
     #[serde(default)]
     pub max_persistent_subprocesses: Option<usize>,
+}
+
+/// Managed-database engine endpoints this node serves.
+///
+/// The `tenzro-database` protocol layer records *what* databases exist and
+/// *where* their partitions land; a query against a partition this node holds
+/// dispatches to a live engine backend. This config supplies the operator-run
+/// engine endpoints the node connects to (connect-to-existing model): the node
+/// does not spawn the engine, it holds a client to one the operator runs.
+///
+/// Absent an endpoint for an engine, the node serves no backend of that kind —
+/// a query for it returns a routing error, not a panic. Embedded engines
+/// (Lance / Tantivy) need no endpoint; they serve in-process under `data_dir`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DatabasesConfig {
+    /// PostgreSQL connection string (`host=… port=… user=… password=…`). When
+    /// set, the node serves the `postgres` engine against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postgres_url: Option<String>,
+
+    /// Qdrant REST base URL (`http://host:6333`). When set, the node serves the
+    /// `qdrant` engine against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qdrant_url: Option<String>,
+
+    /// Optional Qdrant API key, sent as the `api-key` header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qdrant_api_key: Option<String>,
+
+    /// Valkey connection URL (`redis://host:6379`). When set, the node serves
+    /// the `valkey` engine against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valkey_url: Option<String>,
+
+    /// Serve the embedded Lance vector store in-process. Data lives under
+    /// `{data_dir}/databases/lance/`.
+    #[serde(default)]
+    pub lance_embedded: bool,
+
+    /// Serve the embedded Tantivy full-text index in-process. Data lives under
+    /// `{data_dir}/databases/tantivy/`.
+    #[serde(default)]
+    pub tantivy_embedded: bool,
 }
 
 impl Default for NodeConfig {
@@ -1433,6 +1484,7 @@ impl NodeConfig {
             da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
+            databases: DatabasesConfig::default(),
         }
     }
 
@@ -1473,6 +1525,7 @@ impl NodeConfig {
             da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
+            databases: DatabasesConfig::default(),
         }
     }
 
@@ -1513,6 +1566,7 @@ impl NodeConfig {
             da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
+            databases: DatabasesConfig::default(),
         }
     }
 
@@ -1553,6 +1607,7 @@ impl NodeConfig {
             da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
+            databases: DatabasesConfig::default(),
         }
     }
 

@@ -51,7 +51,7 @@ tenzro model list
 tenzro chat
 ```
 
-## Commands (63 command modules)
+## Commands (96 command modules)
 
 All commands use real JSON-RPC calls via reqwest. No artificial delays.
 
@@ -135,6 +135,46 @@ tenzro cluster members
 model across a cluster you do not need to compute or pass a plan: `tenzro
 model serve` reads the model shape from the GGUF and auto-discovers members
 over local gossip (see the Model Management section above and AI.md §3.5).
+
+### Managed Databases
+
+```bash
+# List the engines this node can serve, with their data models, license, and
+# native-cluster topology (calls tenzro_listDatabaseEngines). Five engines
+# have a driver — PostgreSQL, Qdrant, Valkey as thin clients to an
+# operator-run engine, Lance and Tantivy embedded in-process. Milvus and
+# Dgraph are cataloged but need a driver linked before a create succeeds.
+tenzro database engines
+
+# Register a database, computing and persisting its partition placement over
+# the live cluster membership. --placement moves it along the
+# local → lan_cluster → network continuum; --config is opaque per-engine JSON
+# validated against the engine before placement.
+tenzro database create --id <id> --engine <engine> \
+  --placement <local|lan_cluster|network> \
+  --partitions <n> --replicas <n> --owner-did <did> [--config <json>]
+
+# Mint a managed-database connection credential scoped to a single database
+# (calls tenzro_issueDatabaseConnection). Returns an AAP capability pinned to
+# that database id, a read_only / read_write mode, a TTL, and the query method.
+tenzro database connect --id <id> --caller-did <did> [--write] [--ttl <secs>]
+
+# Run an engine-dialect query against a partition (calls tenzro_databaseQuery).
+# --body is the engine's own payload: SQL for Postgres, a vector search for
+# Qdrant or Lance, a full-text search for Tantivy, a command for Valkey.
+tenzro database query --id <id> --caller-did <did> --body <json> [--write]
+
+# Grow or shrink a database in place along the continuum (calls
+# tenzro_rescaleDatabase); a network-tier result is re-gossiped so peers
+# converge on the new shape.
+tenzro database rescale --id <id> --caller-did <did> --placement <mode>
+
+tenzro database get --id <id>
+tenzro database list
+tenzro database partitions --id <id>
+tenzro database authorize --id <id> --caller-did <did>
+tenzro database drop --id <id> --caller-did <did>
+```
 
 ### Wallet Operations
 
@@ -384,6 +424,35 @@ tenzro x402 list-schemes
 # (calls tenzro_payX402). The CLI does not sign payloads — that is the
 # principal's job per the AP2 separation-of-duties rule.
 tenzro x402 pay --challenge-file ./challenge.json --payload-file ./payment.json
+```
+
+The **Bazaar** is the discovery catalog for paid resources: a seller publishes
+what a buyer must pay to reach a resource, and buyers browse listings before
+they ever hit a `402`.
+
+```bash
+# Publish a paid resource listing. The listing id is derived from
+# (seller-did, resource), so re-registering the same pair updates it in place
+# (calls tenzro_x402RegisterResource).
+tenzro x402 register-resource --seller-did <did> --resource <url> \
+  --scheme <tenzro-hybrid|permit2|exact-eip3009|erc7710> \
+  --network <chain-id> --asset <asset> --pay-to <address> \
+  --max-amount-required <base-units> [--description <text>] [--tags a,b,c]
+
+# Browse the catalog, narrowed by scheme / network / tags
+# (calls tenzro_x402DiscoverResources).
+tenzro x402 discover-resources [--scheme <s>] [--network <n>] [--tags a,b]
+
+# Remove a listing you published (calls tenzro_x402DeregisterResource).
+tenzro x402 deregister-resource --seller-did <did> --resource <url>
+
+# Verify a server-signed offer carried in a 402 requirement
+# (calls tenzro_x402VerifyOffer).
+tenzro x402 verify-offer --offer-file ./offer.json
+
+# Derive the deterministic pay_<hex> idempotency id for a payment
+# (calls tenzro_x402PaymentId).
+tenzro x402 payment-id --scheme <s> --network <n> --payload-file ./payment.json
 ```
 
 For the higher-level `tenzro payment pay --protocol x402` flow, see the

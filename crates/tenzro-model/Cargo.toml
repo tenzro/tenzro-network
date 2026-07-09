@@ -11,6 +11,7 @@ tenzro-types = { workspace = true }
 tenzro-crypto = { workspace = true }
 tenzro-network = { workspace = true }
 tenzro-storage = { workspace = true }
+tenzro-cluster = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

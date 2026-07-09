@@ -27,6 +27,8 @@ except ImportError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
 
 
+from tenzro_trainer.distributed import add_into, copy_into, full_tensor
+
 log = logging.getLogger(__name__)
 
 
@@ -123,12 +125,17 @@ def snapshot_state(model: "torch.nn.Module") -> dict[str, "torch.Tensor"]:
     that follows carry adapter deltas only — never zero-deltas over a frozen
     base. Buffers (non-parameter state-dict entries such as RoPE caches) are
     excluded because they are not trained.
+
+    Under FSDP2 the parameters are DTensors; each is gathered to its full
+    (unsharded) value first. That gather is a collective, so every rank must
+    call this function at the same points in the round — which the driver
+    guarantees by snapshotting on all ranks.
     """
     if torch is None:
         raise RuntimeError("PyTorch is required")
     trainable = trainable_param_names(model)
     return {
-        name: p.detach().to("cpu").clone()
+        name: full_tensor(p.detach()).to("cpu").clone()
         for name, p in model.named_parameters()
         if name in trainable
     }
@@ -150,7 +157,7 @@ def load_partial_state(
         for k, v in partial.items():
             if k not in sd:
                 raise KeyError(f"state-dict key {k!r} not found in model")
-            sd[k].copy_(v.to(sd[k].device, sd[k].dtype))
+            copy_into(sd[k], v)
 
 
 def apply_state_delta(
@@ -164,7 +171,7 @@ def apply_state_delta(
         for k, d in delta.items():
             if k not in sd:
                 raise KeyError(f"state-dict key {k!r} not found in model")
-            sd[k].add_(d.to(sd[k].device, sd[k].dtype))
+            add_into(sd[k], d)
 
 
 @dataclass

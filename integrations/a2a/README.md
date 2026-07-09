@@ -130,7 +130,7 @@ The Tenzro A2A agent exposes skills covering blockchain, AI, identity, payments,
 |-------|-----|-------------|
 | **Identity Management** | `identity` | Register/resolve DIDs (TDIP), set usernames, GDPR Article 17 right-to-erasure (`forget_identity`) |
 | **Settlement & Payments** | `settlement` | Micropayment channels, escrow, batch settlement |
-| **AP2 Payments** | `ap2-payments` | AP2 v0.2 sign + verify + validate-pair (intent → cart) for agent-to-agent autonomous financial transactions, with three-axis ceiling enforcement (mandate constraints + TDIP DelegationScope + runtime SpendingPolicy) |
+| **AP2 & x402 Payments** | `ap2-payments` | AP2 v0.2 sign + verify + validate-pair (intent → cart) for agent-to-agent autonomous financial transactions, with three-axis ceiling enforcement (mandate constraints + TDIP DelegationScope + runtime SpendingPolicy). Also covers the x402 Bazaar: sellers register HTTP-402 monetized resources (scheme `tenzro-hybrid` / `exact-eip3009` / `permit2` / `erc7710`), buyers discover them by scheme / network / asset / tags, and either side verifies a server-signed offer or derives a deterministic payment id |
 | **Stripe SPT** | `stripe-spt` | SharedPaymentToken issuance + verify with TDIP cap-resolver, AP2 cart-mandate cross-check, ERC-8004 ReputationRegistry cross-write on settled outcome, `granted_token.deactivated` webhook cascade into TDIP `apply_remote_revocation` |
 
 ### AI & Agents
@@ -177,6 +177,7 @@ The Tenzro A2A agent exposes skills covering blockchain, AI, identity, payments,
 | **Distributed MoE Serving** | `moe` | Decentralized expert-shard serving — shard map, top-k dispatch planning, replication policy, catalog topology, expert/gate weight loading into the local expert runtime, runtime status, and distributed layer forwards that fan hidden states out to expert holders and gather gate-weighted outputs |
 | **Operability Inspection** | `operability` | Read-only surface for SREs and monitoring agents — Tenzro Train inspection (list runs, run state, sealed receipts, Confidential-tier sealed-shard manifests, trainer auto-provisioning daemon status), SLA fault-detector parameters and probes (list outstanding, issue liveness probe), and state-sync snapshot inspection (list, manifest by height, chunk fetch); validator-registry reads route through the validator-lifecycle skill |
 | **Local Discovery & LAN Clustering** | `discovery` | mDNS local-segment peers, connectivity tier (`direct` / `relay_only` / `unreachable`), hardware self-profile, and deterministic layer-wise LAN cluster planning. Serving auto-triggers the cluster when a model exceeds one host: the node reads the GGUF header for shape, discovers members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline — opt out with `force_single`. |
+| **Managed Databases** | `database` | Register and query owned databases the node serves across local / lan_cluster / network placement over an operator-run engine (PostgreSQL / Qdrant / Valkey) or an embedded index (Lance / Tantivy). List engines, create a database, issue a connection credential scoped to one database, run an engine-dialect query, rescale in place, and drop. Access is gated by `AccessPolicy` + an optional confidential seal |
 
 ## A2A Methods
 

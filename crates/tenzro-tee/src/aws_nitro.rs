@@ -822,14 +822,34 @@ impl TeeProvider for AwsNitroProvider {
             metadata.insert("simulated".to_string(), "true".to_string());
         }
 
+        // Parse once: PCR0 (enclave image measurement) is projected into the
+        // returned report and the COSE leaf certificate + cabundle become the
+        // verification chain.
+        let (measurement, certificates) = match self.parse_document(&attestation_data) {
+            Ok(doc) => {
+                let measurement = doc.pcrs.get(&0).cloned().unwrap_or_default();
+                let mut certificates = Vec::with_capacity(1 + doc.cabundle.len());
+                if !doc.certificate.is_empty() {
+                    certificates.push(doc.certificate);
+                }
+                certificates.extend(doc.cabundle);
+                (measurement, certificates)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse generated Nitro document: {}", e);
+                (Vec::new(), Vec::new())
+            }
+        };
+
         Ok(AttestationReport {
             id: Uuid::new_v4(),
             vendor: TeeVendor::AwsNitro,
             user_data: user_data.to_vec(),
             attestation_data,
-            certificates: vec![], // Populated from COSE document cabundle in real mode
+            certificates,
             timestamp: tenzro_types::Timestamp::now(),
             metadata,
+            measurement,
             ..Default::default()
         })
     }

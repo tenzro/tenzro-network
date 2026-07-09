@@ -470,10 +470,16 @@ impl AmdSevSnpProvider {
             )));
         }
 
+        // Report versions 2-5 share one field layout: v3 added CPUID
+        // family/model/stepping (0x188-0x18A) and v5 added the mitigation
+        // vectors, all carved out of previously-reserved bytes. Every field
+        // read below sits at the same offset in all four versions and the
+        // firmware report length is constant at 1184 bytes. GCP Milan
+        // firmware emits version 5.
         let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        if version != 2 {
+        if !(2..=5).contains(&version) {
             return Err(TeeError::InvalidAttestationReport(format!(
-                "Unsupported SNP report version: {} (expected 2)", version
+                "Unsupported SNP report version: {} (expected 2-5)", version
             )));
         }
 
@@ -1046,53 +1052,59 @@ impl TeeProvider for AmdSevSnpProvider {
             metadata.insert("simulated".to_string(), "true".to_string());
         }
 
+        // Parse once: the launch measurement is projected into the returned
+        // report and (in real mode) chip_id + reported_tcb drive cert fetching.
+        let parsed = match self.parse_report(&attestation_data) {
+            Ok(report) => Some(report),
+            Err(e) => {
+                tracing::warn!("Failed to parse generated SNP report: {}", e);
+                None
+            }
+        };
+        let measurement = parsed
+            .as_ref()
+            .map(|r| r.measurement.clone())
+            .unwrap_or_default();
+
         // In real mode, fetch VCEK and cert chain from AMD KDS
-        let certificates = if !self.simulate && attestation_data.len() >= SNP_REPORT_SIZE {
-            // Parse the report to extract chip_id, measurement, and reported_tcb
-            match self.parse_binary_report(&attestation_data) {
-                Ok(report) => {
-                    // Bind enclave key derivation to this platform's measurement
-                    self.bind_platform_measurement(&report.measurement);
+        let certificates = match (&parsed, self.simulate) {
+            (Some(report), false) => {
+                // Bind enclave key derivation to this platform's measurement
+                self.bind_platform_measurement(&report.measurement);
 
-                    let mut certs = Vec::new();
+                let mut certs = Vec::new();
 
-                    // Fetch VCEK certificate
-                    match self.fetch_vcek_certificate(&report.chip_id, report.reported_tcb).await {
-                        Ok(vcek) => {
-                            tracing::info!("Fetched VCEK certificate ({} bytes)", vcek.len());
-                            certs.push(vcek);
+                // Fetch VCEK certificate
+                match self.fetch_vcek_certificate(&report.chip_id, report.reported_tcb).await {
+                    Ok(vcek) => {
+                        tracing::info!("Fetched VCEK certificate ({} bytes)", vcek.len());
+                        certs.push(vcek);
 
-                            // Try fetching cert chain for Milan first, then Genoa
-                            for product_name in &["Milan", "Genoa"] {
-                                match self.fetch_cert_chain(product_name).await {
-                                    Ok(chain) if !chain.is_empty() => {
-                                        tracing::info!("Fetched {} certs from AMD KDS cert_chain ({})", chain.len(), product_name);
-                                        certs.extend(chain);
-                                        break;
-                                    }
-                                    Ok(_) => {
-                                        tracing::debug!("No certs in AMD KDS cert_chain for {}", product_name);
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!("Failed to fetch cert_chain for {}: {}", product_name, e);
-                                    }
+                        // Try fetching cert chain for Milan first, then Genoa
+                        for product_name in &["Milan", "Genoa"] {
+                            match self.fetch_cert_chain(product_name).await {
+                                Ok(chain) if !chain.is_empty() => {
+                                    tracing::info!("Fetched {} certs from AMD KDS cert_chain ({})", chain.len(), product_name);
+                                    certs.extend(chain);
+                                    break;
+                                }
+                                Ok(_) => {
+                                    tracing::debug!("No certs in AMD KDS cert_chain for {}", product_name);
+                                }
+                                Err(e) => {
+                                    tracing::debug!("Failed to fetch cert_chain for {}: {}", product_name, e);
                                 }
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to fetch VCEK certificate: {}", e);
-                        }
                     }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch VCEK certificate: {}", e);
+                    }
+                }
 
-                    certs
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse SNP report for cert fetching: {}", e);
-                    vec![]
-                }
+                certs
             }
-        } else {
-            vec![]
+            _ => vec![],
         };
 
         Ok(AttestationReport {
@@ -1103,6 +1115,7 @@ impl TeeProvider for AmdSevSnpProvider {
             certificates,
             timestamp: tenzro_types::Timestamp::now(),
             metadata,
+            measurement,
             ..Default::default()
         })
     }

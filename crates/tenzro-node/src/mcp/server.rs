@@ -191,16 +191,64 @@ pub struct CortexReasonParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ChatCompletionParams {
     /// Accept both `model` (OpenAI-style, canonical for MCP) and `model_id`
-    /// (Tenzro RPC-style). Either key is valid in the JSON payload.
-    #[serde(alias = "model_id")]
-    #[schemars(description = "Model ID or service instance UUID (alias: model_id)")]
-    pub model: String,
+    /// (Tenzro RPC-style). Either key is valid in the JSON payload. Optional:
+    /// when absent, `use_case` selects a model via the intent router.
+    #[serde(default, alias = "model_id")]
+    #[schemars(description = "Model ID or service instance UUID (alias: model_id). Omit to select a model from use_case + budget")]
+    pub model: Option<String>,
     #[schemars(description = "The user message to send")]
     pub message: String,
     #[schemars(description = "Temperature (0.0-2.0, default 0.7)")]
     pub temperature: Option<f64>,
     #[schemars(description = "Maximum tokens to generate (default 512)")]
     pub max_tokens: Option<u32>,
+    #[schemars(description = "Intent use case when 'model' is omitted: chat|code|reasoning|research|summarize|extract|embed. Ignored when 'model' is set")]
+    pub use_case: Option<String>,
+    #[schemars(description = "Per-request cost cap in smallest TNZO unit for intent selection. Accepts number or decimal string. Optional", with = "Option<String>")]
+    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
+    pub budget: Option<u128>,
+    #[schemars(description = "Cost-quality knob in [0.0, 1.0] for intent selection. Optional")]
+    pub optimize: Option<f64>,
+    #[schemars(description = "Reject models below this tier during intent selection: 'cheap' or 'strong'. Optional")]
+    pub quality_floor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RouteByIntentParams {
+    #[schemars(description = "Use case: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Maps to a modality and biases quality tiering")]
+    pub use_case: String,
+    #[schemars(description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional", with = "Option<String>")]
+    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
+    pub budget: Option<u128>,
+    #[schemars(description = "Cost-quality knob in [0.0, 1.0]: 0.0 = cheapest acceptable, 1.0 = strongest. Optional")]
+    pub optimize: Option<f64>,
+    #[schemars(description = "Reject any model below this tier: 'cheap' or 'strong'. Optional")]
+    pub quality_floor: Option<String>,
+    #[schemars(description = "Estimated input tokens for cost estimation. Optional")]
+    pub est_input_tokens: Option<u64>,
+    #[schemars(description = "Estimated output tokens for cost estimation. Optional")]
+    pub est_output_tokens: Option<u64>,
+    #[schemars(description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced. Optional")]
+    pub payer_did: Option<String>,
+    #[schemars(description = "Payer wallet address (hex). When set, the payer's on-chain TNZO balance is a hard ceiling: unaffordable models are dropped. Optional")]
+    pub payer_address: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct OrchestrateParams {
+    #[schemars(description = "Natural-language goal to satisfy. The planner decomposes it into an ordered set of capability steps (models, registered skills, registered tools, agent/swarm delegation)")]
+    pub intent: String,
+    #[schemars(description = "Primary use case hint: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Defaults to 'chat'. Optional")]
+    pub use_case: Option<String>,
+    #[schemars(description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional", with = "Option<String>")]
+    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
+    pub budget: Option<u128>,
+    #[schemars(description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced on model steps. Optional")]
+    pub payer_did: Option<String>,
+    #[schemars(description = "Payer wallet address (hex). When set, the plan's aggregate estimated cost is checked against the payer's on-chain TNZO balance before any step runs; an over-budget plan is rejected. Optional")]
+    pub payer_address: Option<String>,
+    #[schemars(description = "Max re-plan iterations, clamped to [1, 6]. 1 = single-shot. Optional")]
+    pub max_iterations: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -253,6 +301,168 @@ pub struct SetDelegationScopeParams {
     pub allowed_payment_protocols: Option<Vec<String>>,
     #[schemars(description = "Allowed chains (e.g. ['tenzro', 'base', 'ethereum'])")]
     pub allowed_chains: Option<Vec<String>>,
+}
+
+// ─── x402 Bazaar params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct X402RegisterResourceParams {
+    #[schemars(description = "Seller DID that owns the listing")]
+    pub seller_did: String,
+    #[schemars(description = "Resource URI the buyer pays to access")]
+    pub resource: String,
+    #[schemars(description = "x402 scheme id: 'tenzro-hybrid', 'exact-eip3009', 'permit2', or 'erc7710'")]
+    pub scheme: String,
+    #[schemars(description = "Settlement network (e.g. 'tenzro', 'base', 'ethereum')")]
+    pub network: String,
+    #[schemars(description = "Settlement asset (e.g. a USDC contract address or 'TNZO')")]
+    pub asset: String,
+    #[schemars(description = "Recipient address the payment settles to")]
+    pub pay_to: String,
+    #[schemars(description = "Maximum amount required, as a decimal string in the asset's smallest unit")]
+    pub max_amount_required: String,
+    #[schemars(description = "Human-readable description of the resource")]
+    pub description: Option<String>,
+    #[schemars(description = "MIME type of the resource (default application/json)")]
+    pub mime_type: Option<String>,
+    #[schemars(description = "Max seconds a buyer may take to settle after receiving the 402 (default 300)")]
+    pub max_timeout_seconds: Option<u64>,
+    #[schemars(description = "Free-form tags for discovery filtering")]
+    pub tags: Option<Vec<String>>,
+    #[schemars(description = "Optional extra fields carried verbatim in the x402 PaymentRequirement")]
+    pub extra: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct X402DiscoverResourcesParams {
+    #[schemars(description = "Filter by scheme id")]
+    pub scheme: Option<String>,
+    #[schemars(description = "Filter by settlement network")]
+    pub network: Option<String>,
+    #[schemars(description = "Filter by settlement asset")]
+    pub asset: Option<String>,
+    #[schemars(description = "Filter by seller DID")]
+    pub seller_did: Option<String>,
+    #[schemars(description = "Filter by tags (all must match)")]
+    pub tags: Option<Vec<String>>,
+    #[schemars(description = "Cap the number of results; 0 = unlimited")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct X402DeregisterResourceParams {
+    #[schemars(description = "Listing id to remove")]
+    pub listing_id: String,
+    #[schemars(description = "Seller DID — must own the listing")]
+    pub seller_did: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct X402VerifyOfferParams {
+    #[schemars(description = "Full X402PaymentRequirement JSON exactly as it appeared in the 402 body")]
+    pub requirement: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct X402PaymentIdParams {
+    #[schemars(description = "Payer DID")]
+    pub payer_did: String,
+    #[schemars(description = "Full requirement JSON (node recomputes the commitment); pass this or offer_commitment")]
+    pub requirement: Option<serde_json::Value>,
+    #[schemars(description = "Pre-computed 64-hex offer commitment; pass this or requirement")]
+    pub offer_commitment: Option<String>,
+}
+
+// ─── Managed database params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateDatabaseParams {
+    #[schemars(description = "Unique database id")]
+    pub database_id: String,
+    #[schemars(description = "Engine id: 'postgres', 'qdrant', 'valkey', 'lance', or 'tantivy'")]
+    pub engine_id: String,
+    #[schemars(description = "Owner DID — becomes the database's admin authority")]
+    pub owner_did: String,
+    #[schemars(description = "Placement: 'local', 'lan_cluster', or 'network' (default local)")]
+    pub placement: Option<String>,
+    #[schemars(description = "Partition count (default 1)")]
+    pub partitions: Option<usize>,
+    #[schemars(description = "Replica count per partition (default 1)")]
+    pub replicas: Option<usize>,
+    #[schemars(description = "Per-engine configuration passed opaque to the driver")]
+    pub engine_config: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseIdParams {
+    #[schemars(description = "Database id")]
+    pub database_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetDatabasePartitionParams {
+    #[schemars(description = "Database id")]
+    pub database_id: String,
+    #[schemars(description = "Partition index")]
+    pub partition_index: usize,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct IssueDatabaseConnectionParams {
+    #[schemars(description = "Database id the credential is scoped to")]
+    pub database_id: String,
+    #[schemars(description = "Caller DID — the owner or a holder of the write-action capability")]
+    pub caller_did: String,
+    #[schemars(description = "DID the credential is minted for (defaults to caller_did)")]
+    pub bearer_did: Option<String>,
+    #[schemars(description = "When true the token also carries the admin (write) action")]
+    pub write: Option<bool>,
+    #[schemars(description = "Credential lifetime in seconds")]
+    pub ttl_secs: Option<u64>,
+    #[schemars(description = "AAP capability token when the caller is not the owner")]
+    pub capability: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseQueryParams {
+    #[schemars(description = "Database id")]
+    pub database_id: String,
+    #[schemars(description = "Caller DID, authorized against the access policy")]
+    pub caller_did: String,
+    #[schemars(description = "Engine-dialect body: SQL {sql, params} for Postgres, {op, ...} for Qdrant/Lance/Tantivy, {command: [...]} for Valkey")]
+    pub body: serde_json::Value,
+    #[schemars(description = "Target partition index (default 0)")]
+    pub partition_index: Option<usize>,
+    #[schemars(description = "When true the query is gated against the admin (write) action")]
+    pub write: Option<bool>,
+    #[schemars(description = "AAP capability token when the caller is not the owner")]
+    pub capability: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AuthorizeDatabaseReadParams {
+    #[schemars(description = "Database id")]
+    pub database_id: String,
+    #[schemars(description = "Caller DID to check")]
+    pub caller_did: String,
+    #[schemars(description = "AAP capability token when the caller is not the owner")]
+    pub capability: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RescaleDatabaseParams {
+    #[schemars(description = "Database id")]
+    pub database_id: String,
+    #[schemars(description = "Caller DID — gated on the write action")]
+    pub caller_did: String,
+    #[schemars(description = "Target placement: 'local', 'lan_cluster', or 'network'")]
+    pub placement: String,
+    #[schemars(description = "New partition count (defaults to current)")]
+    pub partitions: Option<usize>,
+    #[schemars(description = "New replica count (defaults to current)")]
+    pub replicas: Option<usize>,
+    #[schemars(description = "AAP capability token when the caller is not the owner")]
+    pub capability: Option<String>,
 }
 
 // ─── OAuth 2.1 + AAP delegation params ───
@@ -829,10 +1039,18 @@ pub struct DownloadModelParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ServeModelMcpParams {
-    #[schemars(description = "Model ID to start serving (must be downloaded first)")]
+    #[schemars(description = "Model ID to start serving (must be downloaded first, unless fronting an external engine)")]
     pub model_id: String,
     #[schemars(description = "Optional maximum number of concurrent inference requests")]
     pub max_concurrent: Option<u32>,
+    #[schemars(description = "Front an external OpenAI-compatible serving engine instead of loading weights in-process: vllm, sglang, llama-server, or external. Requires base_url.")]
+    pub engine: Option<String>,
+    #[schemars(description = "Base URL of the external engine (e.g. http://127.0.0.1:8000)")]
+    pub base_url: Option<String>,
+    #[schemars(description = "Model name the external engine was launched with, when it differs from the catalog id")]
+    pub upstream_model: Option<String>,
+    #[schemars(description = "Bearer token when the external engine was launched with an API key")]
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1991,6 +2209,64 @@ pub struct GetAgentDailySpendParams {
     pub agent_did: String,
 }
 
+// ─── Verifiable Inference Params (TOPLOC commitments + challenges) ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetInferenceCommitmentParams {
+    #[schemars(description = "Commitment hash (hex, with or without 0x prefix) returned alongside a verifiable chat response. Returns the stored envelope {commitment_hash, model_id, provider, created_at, commitment: {k, prompt_tokens, steps}} or null when unknown.")]
+    pub commitment_hash: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct VerifyInferenceCommitmentParams {
+    #[schemars(description = "Commitment hash (hex, with or without 0x prefix) of the stored commitment to verify.")]
+    pub commitment_hash: String,
+    #[schemars(description = "The exact prompt the committed response was generated from. Prompts are never stored with commitments — the verifier supplies it at verification time. The node re-executes prompt+output as a single prefill and compares per-step top-k logits.")]
+    pub prompt: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FileInferenceChallengeParams {
+    #[schemars(description = "Commitment hash (hex, with or without 0x prefix) being disputed. Unknown hashes are rejected.")]
+    pub commitment_hash: String,
+    #[schemars(description = "Challenger identity (DID or address). Recorded verbatim on the challenge.")]
+    pub challenger: String,
+    #[serde(default)]
+    #[schemars(description = "Optional free-text reason for the dispute.")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetInferenceChallengeParams {
+    #[schemars(description = "Challenge id (UUID) returned by file_inference_challenge. Returns the full challenge record or null when unknown.")]
+    pub challenge_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListInferenceChallengesParams {
+    #[serde(default)]
+    #[schemars(description = "Optional status filter: filed, upheld, or dismissed.")]
+    pub status: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional provider filter (announce-signer pubkey hex).")]
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ResolveInferenceChallengeParams {
+    #[schemars(description = "Challenge id (UUID) to resolve.")]
+    pub challenge_id: String,
+    #[serde(default)]
+    #[schemars(description = "Re-execute this prompt locally to decide the verdict — a failing verification upholds the challenge. Mutually exclusive with `upheld`.")]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Explicit verdict when no prompt is supplied: true upholds the challenge (provider penalized), false dismisses it.")]
+    pub upheld: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "Optional compute-bond provider DID; skips the bond-registry address scan when recording the bond failure.")]
+    pub provider_did: Option<String>,
+}
+
 // ─── Crypto Params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3037,6 +3313,8 @@ pub struct StorageStoreObjectParams {
     pub data_shards: Option<u32>,
     #[schemars(description = "Erasure-code parity shard count (default 2)")]
     pub parity_shards: Option<u32>,
+    #[schemars(description = "DID that may retrieve the object (owner-only gate). Defaults to the owner address when unset.")]
+    pub owner_did: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3490,6 +3768,42 @@ fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthrou
     Ok(Json(RpcPassthroughOutput {
         result: serde_json::json!({ "message": text.into() }),
     }))
+}
+
+/// Route an MCP tool through the in-process JSON-RPC dispatcher.
+///
+/// Builds a JSON-RPC 2.0 request for `method` with object `params`, runs it
+/// through [`crate::rpc::dispatch_embedded`] with default (unauthenticated)
+/// auth, and unwraps the response into the MCP passthrough envelope. This is
+/// the seam MCP tools use to reach handlers that already own their auth
+/// adjudication and cluster routing (managed databases, x402 Bazaar) instead
+/// of reimplementing that logic against node internals.
+async fn dispatch_rpc(
+    node: &Arc<TenzroNode>,
+    method: &str,
+    params: serde_json::Value,
+) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    let response =
+        crate::rpc::dispatch_embedded(node, payload, crate::rpc::EmbeddedAuth::default()).await;
+    if let Some(err) = response.get("error").filter(|e| !e.is_null()) {
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("RPC error")
+            .to_string();
+        return Err(ErrorData {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(message),
+            data: None,
+        });
+    }
+    json_result(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
 }
 
 /// Map a short-form capability name (matching the JSON-RPC and CLI
@@ -5073,6 +5387,237 @@ impl TenzroMcpServer {
         }))
     }
 
+    // ─── x402 Bazaar ───
+
+    #[tool(description = "Describe the x402 protocol surface this node exposes: registered schemes, supported networks/assets, and the Bazaar discovery endpoints.")]
+    async fn x402_protocol_info(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(&self.node, "tenzro_x402ProtocolInfo", serde_json::json!({})).await
+    }
+
+    #[tool(description = "List a paid HTTP resource in the x402 Bazaar so buyers can discover it. scheme is an x402 scheme id ('tenzro-hybrid', 'exact-eip3009', 'permit2', 'erc7710'). Returns the assigned listingId.")]
+    async fn x402_register_resource(
+        &self,
+        Parameters(p): Parameters<X402RegisterResourceParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({
+            "sellerDid": p.seller_did,
+            "resource": p.resource,
+            "scheme": p.scheme,
+            "network": p.network,
+            "asset": p.asset,
+            "payTo": p.pay_to,
+            "maxAmountRequired": p.max_amount_required,
+            "description": p.description.unwrap_or_default(),
+            "mimeType": p.mime_type.unwrap_or_else(|| "application/json".to_string()),
+            "maxTimeoutSeconds": p.max_timeout_seconds.unwrap_or(300),
+            "tags": p.tags.unwrap_or_default(),
+        });
+        if let Some(extra) = p.extra {
+            params["extra"] = extra;
+        }
+        dispatch_rpc(&self.node, "tenzro_x402RegisterResource", params).await
+    }
+
+    #[tool(description = "Query the x402 Bazaar for paid resources. All set filters are ANDed; unset filters match everything. Results are freshest-first, capped by limit when non-zero. Returns {listings, count}.")]
+    async fn x402_discover_resources(
+        &self,
+        Parameters(p): Parameters<X402DiscoverResourcesParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({
+            "tags": p.tags.unwrap_or_default(),
+            "limit": p.limit.unwrap_or(0),
+        });
+        if let Some(v) = p.scheme { params["scheme"] = serde_json::json!(v); }
+        if let Some(v) = p.network { params["network"] = serde_json::json!(v); }
+        if let Some(v) = p.asset { params["asset"] = serde_json::json!(v); }
+        if let Some(v) = p.seller_did { params["sellerDid"] = serde_json::json!(v); }
+        dispatch_rpc(&self.node, "tenzro_x402DiscoverResources", params).await
+    }
+
+    #[tool(description = "Remove a Bazaar listing. Refused unless seller_did owns the listing. Returns {removed}.")]
+    async fn x402_deregister_resource(
+        &self,
+        Parameters(p): Parameters<X402DeregisterResourceParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(
+            &self.node,
+            "tenzro_x402DeregisterResource",
+            serde_json::json!({ "listingId": p.listing_id, "sellerDid": p.seller_did }),
+        )
+        .await
+    }
+
+    #[tool(description = "Verify a server-signed x402 offer before paying. Pass the full X402PaymentRequirement JSON exactly as it appeared in the 402 body. The node recomputes the commitment and verifies the Ed25519 signature under the carried signer key. Returns {valid, offerCommitment, offerSigner}.")]
+    async fn x402_verify_offer(
+        &self,
+        Parameters(p): Parameters<X402VerifyOfferParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(
+            &self.node,
+            "tenzro_x402VerifyOffer",
+            serde_json::json!({ "requirement": p.requirement }),
+        )
+        .await
+    }
+
+    #[tool(description = "Derive the deterministic pay_<hex> idempotency id for an (offer, payer) pair so a buyer can detect and skip a retry client-side. Pass either the full requirement (node recomputes the commitment) or a 64-hex offer_commitment, plus payer_did.")]
+    async fn x402_payment_id(
+        &self,
+        Parameters(p): Parameters<X402PaymentIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({ "payerDid": p.payer_did });
+        if let Some(req) = p.requirement {
+            params["requirement"] = req;
+        } else if let Some(commitment) = p.offer_commitment {
+            params["offerCommitment"] = serde_json::json!(commitment);
+        }
+        dispatch_rpc(&self.node, "tenzro_x402PaymentId", params).await
+    }
+
+    // ─── Managed databases ───
+
+    #[tool(description = "List the database engines this node can serve — each with its data models, license, sharding model, and native-cluster topology. Engines are operator-run externals (PostgreSQL, Qdrant, Valkey) and in-process embedded engines (Lance, Tantivy).")]
+    async fn list_database_engines(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(&self.node, "tenzro_listDatabaseEngines", serde_json::json!([])).await
+    }
+
+    #[tool(description = "Register a database this node serves, computing and persisting its partition placement over the live cluster. owner_did becomes the admin authority (owner-only access policy). placement is 'local', 'lan_cluster', or 'network'. Returns {database, partitions}.")]
+    async fn create_database(
+        &self,
+        Parameters(p): Parameters<CreateDatabaseParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({
+            "database_id": p.database_id,
+            "engine_id": p.engine_id,
+            "owner_did": p.owner_did,
+            "placement": p.placement.unwrap_or_else(|| "local".to_string()),
+            "partitions": p.partitions.unwrap_or(1),
+            "replicas": p.replicas.unwrap_or(1),
+        });
+        if let Some(cfg) = p.engine_config {
+            params["engine_config"] = cfg;
+        }
+        dispatch_rpc(&self.node, "tenzro_createDatabase", params).await
+    }
+
+    #[tool(description = "Look up a database descriptor by id.")]
+    async fn get_database(
+        &self,
+        Parameters(p): Parameters<DatabaseIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(
+            &self.node,
+            "tenzro_getDatabase",
+            serde_json::json!({ "database_id": p.database_id }),
+        )
+        .await
+    }
+
+    #[tool(description = "List every database this node serves.")]
+    async fn list_databases(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(&self.node, "tenzro_listDatabases", serde_json::json!([])).await
+    }
+
+    #[tool(description = "List every partition placement of a database.")]
+    async fn list_database_partitions(
+        &self,
+        Parameters(p): Parameters<DatabaseIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(
+            &self.node,
+            "tenzro_listDatabasePartitions",
+            serde_json::json!({ "database_id": p.database_id }),
+        )
+        .await
+    }
+
+    #[tool(description = "Return the placement of one partition.")]
+    async fn get_database_partition(
+        &self,
+        Parameters(p): Parameters<GetDatabasePartitionParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(
+            &self.node,
+            "tenzro_getDatabasePartition",
+            serde_json::json!({ "database_id": p.database_id, "partition_index": p.partition_index }),
+        )
+        .await
+    }
+
+    #[tool(description = "Mint a managed-database connection credential bound to bearer_did, scoped to this one database. The owner (caller_did) — or a caller holding the write-action capability — issues it. When write is true the token also carries the admin action. Returns the credential a developer presents on every query.")]
+    async fn issue_database_connection(
+        &self,
+        Parameters(p): Parameters<IssueDatabaseConnectionParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({
+            "database_id": p.database_id,
+            "caller_did": p.caller_did,
+            "write": p.write.unwrap_or(false),
+        });
+        if let Some(v) = p.bearer_did { params["bearer_did"] = serde_json::json!(v); }
+        if let Some(v) = p.ttl_secs { params["ttl_secs"] = serde_json::json!(v); }
+        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        dispatch_rpc(&self.node, "tenzro_issueDatabaseConnection", params).await
+    }
+
+    #[tool(description = "Run an engine-dialect query against a database partition. caller_did is authorized against the access policy (writes require the admin action, reads the read action) before any engine is touched. When this node holds the target partition the result carries served_here=true and the engine result; otherwise it carries holder endpoints.")]
+    async fn database_query(
+        &self,
+        Parameters(p): Parameters<DatabaseQueryParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({
+            "database_id": p.database_id,
+            "caller_did": p.caller_did,
+            "body": p.body,
+            "partition_index": p.partition_index.unwrap_or(0),
+            "write": p.write.unwrap_or(false),
+        });
+        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        dispatch_rpc(&self.node, "tenzro_databaseQuery", params).await
+    }
+
+    #[tool(description = "Check — without side effects — whether caller_did may read the database. Returns {authorized, reason}.")]
+    async fn authorize_database_read(
+        &self,
+        Parameters(p): Parameters<AuthorizeDatabaseReadParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({
+            "database_id": p.database_id,
+            "caller_did": p.caller_did,
+        });
+        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        dispatch_rpc(&self.node, "tenzro_authorizeDatabaseRead", params).await
+    }
+
+    #[tool(description = "Grow or shrink a database along the local → lan_cluster → network continuum in place. Administrative — gated on the write action. partitions/replicas default to the database's current counts when omitted.")]
+    async fn rescale_database(
+        &self,
+        Parameters(p): Parameters<RescaleDatabaseParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({
+            "database_id": p.database_id,
+            "caller_did": p.caller_did,
+            "placement": p.placement,
+        });
+        if let Some(v) = p.partitions { params["partitions"] = serde_json::json!(v); }
+        if let Some(v) = p.replicas { params["replicas"] = serde_json::json!(v); }
+        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        dispatch_rpc(&self.node, "tenzro_rescaleDatabase", params).await
+    }
+
+    #[tool(description = "Remove a database and all its partition placements, tearing down the engine backing for every partition this node holds.")]
+    async fn drop_database(
+        &self,
+        Parameters(p): Parameters<DatabaseIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(
+            &self.node,
+            "tenzro_dropDatabase",
+            serde_json::json!({ "database_id": p.database_id }),
+        )
+        .await
+    }
+
     #[tool(description = "List all providers discovered on the Tenzro Network. Providers broadcast announcements every 60s on the tenzro/providers gossipsub topic. Returns both the local node (if serving) and all remotely discovered providers. Optionally filter by provider_type: 'llm', 'tee', or 'general'.")]
     async fn list_providers(
         &self,
@@ -5127,6 +5672,16 @@ impl TenzroMcpServer {
         }
 
         json_result(serde_json::to_value(result).map_err(|e| err_internal(e.to_string()))?)
+    }
+
+    #[tool(description = "List providers with published capacity across the Tenzro network. For each provider returns both the advertised capacity (its own claim: max concurrent requests, requests/sec, batch size, MTP support) and the measured throughput this node has observed (tokens/sec, p95 latency, reputation, and a reputation-discounted throughput figure). Includes this node's local providers (source=local) and gossip-discovered peers (source=network). Mirrors tenzro_listProviderCapacity.")]
+    async fn list_provider_capacity(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listProviderCapacity", serde_json::json!([]))
+            .await
+            .map_err(|e| err_internal(format!("listProviderCapacity failed: {}", e)))?;
+        json_result(result)
     }
 
     // ─── Models & Inference ───
@@ -5376,10 +5931,71 @@ impl TenzroMcpServer {
         &self,
         Parameters(params): Parameters<ChatCompletionParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let model = params.model;
         let message = params.message;
         let temperature = params.temperature;
         let max_tokens = params.max_tokens;
+
+        // Resolve the model: an explicit `model` wins; otherwise select one from
+        // the stated intent (use_case + budget + quality_floor + optimize) via
+        // the MetaRouter, so callers can chat without naming a model.
+        let model = match params.model {
+            Some(m) if !m.trim().is_empty() => m,
+            _ => {
+                use tenzro_model::meta_router::{Budget, QualityTier, RouteIntent, UseCase};
+
+                let valid_use_cases = UseCase::ALL.join("|");
+                let use_case_str = params.use_case.as_deref().ok_or_else(|| ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Provide 'model' or 'use_case' to select one ({valid_use_cases})"
+                    )),
+                    data: None,
+                })?;
+                let use_case = UseCase::parse(use_case_str).ok_or_else(|| ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Unknown use_case '{use_case_str}' (expected {valid_use_cases})"
+                    )),
+                    data: None,
+                })?;
+                let budget = match params.budget {
+                    Some(cap) => Budget::PerRequestTnzo(cap),
+                    None => Budget::None,
+                };
+                let mut intent = RouteIntent::new(use_case, budget);
+                if let Some(o) = params.optimize {
+                    intent = intent.with_optimize(o as f32);
+                }
+                if let Some(floor_str) = params.quality_floor.as_deref() {
+                    let floor = match floor_str.trim().to_lowercase().as_str() {
+                        "cheap" => QualityTier::Cheap,
+                        "strong" => QualityTier::Strong,
+                        other => {
+                            return Err(ErrorData {
+                                code: ErrorCode::INVALID_PARAMS,
+                                message: Cow::from(format!(
+                                    "Unknown quality_floor '{other}' (expected cheap|strong)"
+                                )),
+                                data: None,
+                            });
+                        }
+                    };
+                    intent = intent.with_quality_floor(floor);
+                }
+
+                let meta = self.node.meta_router().ok_or_else(|| ErrorData {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from("MetaRouter not initialized on this node"),
+                    data: None,
+                })?;
+                match meta.route(&intent) {
+                    Ok(decision) => decision.model_id,
+                    Err(e) => {
+                        return text_result(format!("No model matched the intent: {e}"));
+                    }
+                }
+            }
+        };
 
         // Find the model service by model_id or instance_id
         let service = self.node.find_model_service_by_model_id(&model)
@@ -5487,6 +6103,157 @@ impl TenzroMcpServer {
                     remote_url, e
                 )),
             }
+        }
+    }
+
+    #[tool(description = "Discover the best model for an intent (use case + budget + quality floor + cost-quality knob) without naming a model. Returns the selected model_id, tier, estimated cost, and a fallback chain. Discovery only — dispatches nothing and records no spend. Feed the returned model_id into chat_completion to run it")]
+    async fn route_by_intent(
+        &self,
+        Parameters(params): Parameters<RouteByIntentParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        use tenzro_model::meta_router::{Budget, QualityTier, RouteIntent, UseCase};
+
+        let use_case = UseCase::parse(&params.use_case).ok_or_else(|| ErrorData {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!(
+                "Unknown use_case '{}' (expected one of {})",
+                params.use_case,
+                UseCase::ALL.join("|")
+            )),
+            data: None,
+        })?;
+
+        let budget = match params.budget {
+            Some(cap) => Budget::PerRequestTnzo(cap),
+            None => Budget::None,
+        };
+
+        let mut intent = RouteIntent::new(use_case, budget);
+
+        if let Some(o) = params.optimize {
+            intent = intent.with_optimize(o as f32);
+        }
+
+        if let Some(floor_str) = params.quality_floor.as_deref() {
+            let floor = match floor_str.trim().to_lowercase().as_str() {
+                "cheap" => QualityTier::Cheap,
+                "strong" => QualityTier::Strong,
+                other => {
+                    return Err(ErrorData {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "Unknown quality_floor '{other}' (expected cheap|strong)"
+                        )),
+                        data: None,
+                    });
+                }
+            };
+            intent = intent.with_quality_floor(floor);
+        }
+
+        if params.est_input_tokens.is_some() || params.est_output_tokens.is_some() {
+            intent = intent.with_tokens(
+                params.est_input_tokens.unwrap_or(intent.est_input_tokens),
+                params.est_output_tokens.unwrap_or(intent.est_output_tokens),
+            );
+        }
+
+        if let Some(did) = params.payer_did {
+            intent = intent.with_payer_did(did);
+        }
+
+        if let Some(addr_str) = params.payer_address.as_deref() {
+            intent = intent.with_payer_address(parse_address(addr_str)?);
+        }
+
+        let meta = self.node.meta_router().ok_or_else(|| ErrorData {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from("MetaRouter not initialized on this node"),
+            data: None,
+        })?;
+
+        match meta.route(&intent) {
+            Ok(decision) => json_result(serde_json::json!({
+                "model_id": decision.model_id,
+                "tier": format!("{:?}", decision.tier).to_lowercase(),
+                "estimated_cost": decision.estimated_cost.to_string(),
+                "fallback_chain": decision.fallback_chain,
+                "reason": decision.reason,
+            })),
+            Err(e) => text_result(format!("No model matched the intent: {e}")),
+        }
+    }
+
+    #[tool(description = "Satisfy a natural-language intent by planning and running an ordered set of capabilities — models, registered skills, registered tools, and agent/swarm delegation. One layer above route_by_intent: that resolves a single model, this composes models with the skill/tool registries and the swarm runtime. The plan's aggregate estimated cost is checked against the payer's wallet balance before any step runs. Returns the plan, per-step outputs, aggregate estimated cost, and the number of re-plan iterations")]
+    async fn orchestrate(
+        &self,
+        Parameters(params): Parameters<OrchestrateParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        use crate::orchestrator::OrchestratorError;
+        use tenzro_model::meta_router::{Budget, UseCase};
+
+        if params.intent.trim().is_empty() {
+            return Err(ErrorData {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("'intent' must be a non-empty natural-language goal"),
+                data: None,
+            });
+        }
+
+        let mut request = crate::orchestrator::OrchestrationRequest::new(&params.intent);
+
+        if let Some(ref uc_str) = params.use_case {
+            let use_case = UseCase::parse(uc_str).ok_or_else(|| ErrorData {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "Unknown use_case '{uc_str}' (expected one of {})",
+                    UseCase::ALL.join("|")
+                )),
+                data: None,
+            })?;
+            request = request.with_use_case(use_case);
+        }
+
+        if let Some(cap) = params.budget {
+            request = request.with_budget(Budget::PerRequestTnzo(cap));
+        }
+        if let Some(did) = params.payer_did {
+            request = request.with_payer_did(did);
+        }
+        if let Some(addr_str) = params.payer_address.as_deref() {
+            request = request.with_payer_address(parse_address(addr_str)?);
+        }
+        if let Some(n) = params.max_iterations {
+            request = request.with_max_iterations(n);
+        }
+
+        let catalog = crate::orchestrator_bridge::build_catalog_snapshot(&self.node);
+        let orchestrator = crate::orchestrator_bridge::build_orchestrator(self.node.clone());
+
+        match orchestrator.execute(&request, &catalog).await {
+            Ok(outcome) => {
+                let steps: Vec<serde_json::Value> = outcome
+                    .steps
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "kind": s.kind,
+                            "output": s.output,
+                            "detail": s.detail,
+                        })
+                    })
+                    .collect();
+                json_result(serde_json::json!({
+                    "plan": outcome.plan,
+                    "steps": steps,
+                    "estimated_cost": outcome.estimated_cost.to_string(),
+                    "iterations": outcome.iterations,
+                }))
+            }
+            Err(OrchestratorError::OverBudget { estimated, balance }) => text_result(format!(
+                "Plan exceeds wallet ceiling: estimated {estimated} > balance {balance}"
+            )),
+            Err(e) => text_result(format!("Orchestration failed: {e}")),
         }
     }
 
@@ -7673,11 +8440,32 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Start serving a downloaded model for inference. The model must be downloaded first. Returns the serving endpoint URL and configuration.")]
+    #[tool(description = "Start serving a model for inference. Local mode loads downloaded GGUF weights in-process (the model must be downloaded first). External mode fronts an already-running OpenAI-compatible engine (vLLM, SGLang, llama-server) — pass engine + base_url. Returns the serving status and configuration.")]
     async fn serve_model_mcp(
         &self,
         Parameters(params): Parameters<ServeModelMcpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        if params.engine.is_some() {
+            // External engines go through the full tenzro_serveModel handler,
+            // which health-probes the engine, publishes the model in the
+            // registry, persists the binding, and announces it to peers.
+            let mut req = serde_json::Map::new();
+            req.insert("model_id".into(), serde_json::json!(params.model_id));
+            req.insert("engine".into(), serde_json::json!(params.engine));
+            if let Some(base_url) = &params.base_url {
+                req.insert("base_url".into(), serde_json::json!(base_url));
+            }
+            if let Some(upstream_model) = &params.upstream_model {
+                req.insert("upstream_model".into(), serde_json::json!(upstream_model));
+            }
+            if let Some(api_key) = &params.api_key {
+                req.insert("api_key".into(), serde_json::json!(api_key));
+            }
+            let result = rpc_dispatch(&self.node, "tenzro_serveModel", serde_json::Value::Object(req))
+                .await
+                .map_err(|e| err_internal(format!("serveModel failed: {}", e)))?;
+            return json_result(result);
+        }
         let model_id = &params.model_id;
         let entry = get_model_by_id(model_id)
             .ok_or_else(|| err_internal(format!("Model '{}' not found in catalog", model_id)))?;
@@ -7705,7 +8493,7 @@ impl TenzroMcpServer {
         let max_concurrent = {
             let hw = self.node.hardware_profile.read();
             if let Some(ref profile) = *hw {
-                let gpu_vram = profile.gpus.first().map(|g| g.vram_gb).unwrap_or(0.0);
+                let gpu_vram = profile.gpus.first().map(|g| g.vram_gb as f64).unwrap_or(0.0);
                 let has_gpu = !profile.gpus.is_empty() && gpu_vram > 0.0;
                 tenzro_model::estimate_max_concurrent(entry.min_ram_gb, profile.total_ram_gb, gpu_vram, has_gpu)
             } else {
@@ -11685,6 +12473,125 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
+    // ─── Verifiable Inference Tools (TOPLOC commitments + challenges) ───
+
+    #[tool(description = "Fetch a stored TOPLOC inference commitment by hash. Returns the envelope {commitment_hash, model_id, provider, created_at, commitment: {k, prompt_tokens, steps}} or null when no commitment is stored under that hash. Mirrors tenzro_getInferenceCommitment.")]
+    async fn get_inference_commitment(
+        &self,
+        Parameters(params): Parameters<GetInferenceCommitmentParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getInferenceCommitment",
+            serde_json::json!({ "commitment_hash": params.commitment_hash }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getInferenceCommitment failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Verify a stored inference commitment by re-executing the prompt+output as a single prefill and comparing per-step top-k logits. The caller supplies the exact prompt (never stored). Requires the model loaded in serial (llama.cpp) mode on this node. Returns {commitment_hash, model_id, provider, pass, steps_total, steps_passed, failing_steps}. Mirrors tenzro_verifyInferenceCommitment.")]
+    async fn verify_inference_commitment(
+        &self,
+        Parameters(params): Parameters<VerifyInferenceCommitmentParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_verifyInferenceCommitment",
+            serde_json::json!({
+                "commitment_hash": params.commitment_hash,
+                "prompt": params.prompt,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("verifyInferenceCommitment failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "File a challenge against a stored inference commitment. Open to any caller; the model and provider are read from the stored envelope so filings cannot misattribute. Returns the filed challenge record with its challenge_id. Mirrors tenzro_fileInferenceChallenge.")]
+    async fn file_inference_challenge(
+        &self,
+        Parameters(params): Parameters<FileInferenceChallengeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_fileInferenceChallenge",
+            serde_json::json!({
+                "commitment_hash": params.commitment_hash,
+                "challenger": params.challenger,
+                "reason": params.reason,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("fileInferenceChallenge failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch an inference challenge by id. Returns the full record (status, filed_at, resolved_at, verification) or null when unknown. Mirrors tenzro_getInferenceChallenge.")]
+    async fn get_inference_challenge(
+        &self,
+        Parameters(params): Parameters<GetInferenceChallengeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getInferenceChallenge",
+            serde_json::json!({ "challenge_id": params.challenge_id }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("getInferenceChallenge failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List inference challenges, optionally filtered by status (filed/upheld/dismissed) and provider. Returns {count, challenges: [...]} sorted newest first. Mirrors tenzro_listInferenceChallenges.")]
+    async fn list_inference_challenges(
+        &self,
+        Parameters(params): Parameters<ListInferenceChallengesParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_listInferenceChallenges",
+            serde_json::json!({
+                "status": params.status,
+                "provider": params.provider,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("listInferenceChallenges failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Resolve an inference challenge (operator only — requires X-Tenzro-Admin-Token). Provide `prompt` for local re-execution (a failing verification upholds the challenge) or an explicit `upheld` verdict. Upheld verdicts decrement the provider's reputation and record a compute-bond failure; the response carries reputation_penalized + bond_failure_recorded booleans. Mirrors tenzro_resolveInferenceChallenge.")]
+    async fn resolve_inference_challenge(
+        &self,
+        Parameters(params): Parameters<ResolveInferenceChallengeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut req = serde_json::Map::new();
+        req.insert(
+            "challenge_id".to_string(),
+            serde_json::Value::String(params.challenge_id),
+        );
+        if let Some(prompt) = params.prompt {
+            req.insert("prompt".to_string(), serde_json::Value::String(prompt));
+        } else if let Some(upheld) = params.upheld {
+            req.insert("upheld".to_string(), serde_json::Value::Bool(upheld));
+        } else {
+            return Err(err_internal(
+                "Provide either prompt (local re-execution) or upheld (explicit verdict)".to_string(),
+            ));
+        }
+        if let Some(did) = params.provider_did {
+            req.insert("provider_did".to_string(), serde_json::Value::String(did));
+        }
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_resolveInferenceChallenge",
+            serde_json::Value::Object(req),
+        )
+        .await
+        .map_err(|e| err_internal(format!("resolveInferenceChallenge failed: {}", e)))?;
+        json_result(result)
+    }
+
     // ─── Prepaid streaming-service balance tools ───
 
     #[tool(description = "Pre-fund the streaming settlement path: lock `amount` (wei) of the renter's on-chain TNZO into the prepaid ledger so storage/compute runtimes can stream per epoch out of it. Returns `{renter, asset, deposited, balance}`. Requires the node to run with storage + token subsystems.")]
@@ -13837,13 +14744,16 @@ impl TenzroMcpServer {
         &self,
         Parameters(params): Parameters<StorageStoreObjectParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "object_id": params.object_id,
             "owner": params.owner,
             "data": params.data,
             "data_shards": params.data_shards,
             "parity_shards": params.parity_shards,
         });
+        if let Some(did) = params.owner_did {
+            payload["owner_did"] = serde_json::Value::String(did);
+        }
         let result = rpc_dispatch(&self.node, "tenzro_storageStoreObject", payload)
             .await
             .map_err(|e| err_internal(format!("storageStoreObject failed: {}", e)))?;
@@ -14228,6 +15138,13 @@ impl ServerHandler for TenzroMcpServer {
              • list_models — Browse available AI models\n\
              • chat_completion — Send inference request to a model\n\
              • list_model_endpoints — List model service API/MCP URLs\n\n\
+             Verifiable Inference (TOPLOC):\n\
+             • get_inference_commitment — Fetch a stored top-k logit commitment by hash\n\
+             • verify_inference_commitment — Re-execute a prompt and compare per-step logits\n\
+             • file_inference_challenge — Dispute a stored commitment\n\
+             • get_inference_challenge — Fetch a challenge by id\n\
+             • list_inference_challenges — List challenges (status/provider filters)\n\
+             • resolve_inference_challenge — Operator verdict; upheld penalizes the provider\n\n\
              Model Lifecycle:\n\
              • download_model — Download a model from HuggingFace Hub\n\
              • serve_model_mcp — Start serving a downloaded model\n\

@@ -38,6 +38,15 @@ pub struct X402PaymentServer {
     /// Registry of credential-verification backends, dispatched per
     /// `challenge.extra["scheme"]`.
     scheme_registry: SchemeRegistry,
+    /// Optional server key that signs the offer commitment on the 402 body so
+    /// a buyer can prove which price it agreed to. When present, the offer
+    /// commitment is also carried on the challenge `extra` so `settle` can
+    /// derive the idempotency key.
+    offer_signer: Option<Arc<tenzro_crypto::signatures::Ed25519SignerImpl>>,
+    /// Optional idempotency ledger. When present, a settlement whose challenge
+    /// carries an offer commitment is keyed by `(commitment, payer_did)`; a
+    /// replay returns the prior receipt instead of charging twice.
+    idempotency: Option<Arc<crate::x402::offer::IdempotencyLedger>>,
 }
 
 impl X402PaymentServer {
@@ -51,6 +60,8 @@ impl X402PaymentServer {
             settlement_engine: None,
             challenge_store: ChallengeStore::new(),
             scheme_registry: SchemeRegistry::with_defaults(),
+            offer_signer: None,
+            idempotency: None,
         }
     }
 
@@ -80,14 +91,76 @@ impl X402PaymentServer {
         self
     }
 
+    /// Attach the Ed25519 signer that signs the offer commitment on the 402
+    /// body. Enables `sign_requirement` and offer-keyed idempotency at settle.
+    pub fn with_offer_signer(
+        mut self,
+        signer: Arc<tenzro_crypto::signatures::Ed25519SignerImpl>,
+    ) -> Self {
+        self.offer_signer = Some(signer);
+        self
+    }
+
+    /// Attach the idempotency ledger. A settlement whose challenge carries an
+    /// offer commitment is keyed by `(commitment, payer_did)`; replays return
+    /// the prior receipt.
+    pub fn with_idempotency_ledger(
+        mut self,
+        ledger: Arc<crate::x402::offer::IdempotencyLedger>,
+    ) -> Self {
+        self.idempotency = Some(ledger);
+        self
+    }
+
     /// Returns a reference to the challenge store
     pub fn challenge_store(&self) -> &ChallengeStore {
         &self.challenge_store
     }
 
+    /// Sign an [`X402PaymentRequirement`] with the configured offer signer,
+    /// attaching the signed-offer triple to the requirement's `extra` so a
+    /// buyer can verify the price before paying. No-op (returns the input
+    /// unchanged) when no offer signer is configured.
+    ///
+    /// Call this on the requirement placed in the 402 body. Also stash the
+    /// resulting commitment on the corresponding [`PaymentChallenge`] `extra`
+    /// under [`crate::x402::offer::OFFER_COMMITMENT_KEY`] so `settle` can
+    /// derive the idempotency key.
+    pub fn sign_requirement(
+        &self,
+        requirement: &mut crate::x402::payment_required::X402PaymentRequirement,
+    ) -> Result<()> {
+        if let Some(signer) = &self.offer_signer {
+            let signed = crate::x402::offer::SignedOffer::sign(requirement, signer)?;
+            signed.attach_to(requirement);
+        }
+        Ok(())
+    }
+
     /// Returns a reference to the configured scheme registry.
     pub fn scheme_registry(&self) -> &SchemeRegistry {
         &self.scheme_registry
+    }
+
+    /// Derive the idempotency key for a settlement, if the challenge carries a
+    /// valid offer commitment. Returns `None` when no offer was signed (so
+    /// idempotency simply doesn't apply to that flow).
+    fn payment_id_for(
+        &self,
+        challenge: &PaymentChallenge,
+        payer_did: &str,
+    ) -> Option<String> {
+        let hex = challenge
+            .extra
+            .get(crate::x402::offer::OFFER_COMMITMENT_KEY)
+            .and_then(|v| v.as_str())?;
+        let bytes = hex::decode(hex).ok()?;
+        if bytes.len() != crate::x402::offer::X402_OFFER_COMMITMENT_LEN {
+            return None;
+        }
+        let mut commitment = [0u8; crate::x402::offer::X402_OFFER_COMMITMENT_LEN];
+        commitment.copy_from_slice(&bytes);
+        Some(crate::x402::offer::derive_payment_id(&commitment, payer_did))
     }
 }
 
@@ -116,6 +189,51 @@ impl PaymentProtocol for X402PaymentServer {
     ) -> Result<PaymentChallenge> {
         info!("Creating x402 challenge for resource {}", resource);
 
+        let chain = self
+            .supported_chains
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "tenzro".to_string());
+        let scheme = crate::x402::DEFAULT_SCHEME.to_string();
+        let network = format!("eip155:{}", 1337);
+
+        let mut extra = HashMap::new();
+        extra.insert("scheme".to_string(), serde_json::json!(scheme));
+        extra.insert("network".to_string(), serde_json::json!(network));
+
+        // If an offer signer is configured, sign the price-determining fields
+        // and carry the offer commitment + signature on the challenge `extra`.
+        // The buyer verifies it against the 402 requirement; `settle` reads the
+        // commitment back to key the idempotency ledger.
+        if self.offer_signer.is_some() {
+            let mut requirement = crate::x402::payment_required::X402PaymentRequirement::new(
+                &scheme,
+                &network,
+                amount.to_string(),
+                recipient,
+                asset,
+                resource,
+                "",
+                "application/json",
+                300,
+            );
+            self.sign_requirement(&mut requirement)?;
+            if let Some(offer) = crate::x402::offer::SignedOffer::extract_from(&requirement) {
+                extra.insert(
+                    crate::x402::offer::OFFER_COMMITMENT_KEY.to_string(),
+                    serde_json::json!(offer.offer_commitment),
+                );
+                extra.insert(
+                    crate::x402::offer::OFFER_SIG_KEY.to_string(),
+                    serde_json::json!(offer.offer_sig),
+                );
+                extra.insert(
+                    crate::x402::offer::OFFER_SIGNER_KEY.to_string(),
+                    serde_json::json!(offer.offer_signer),
+                );
+            }
+        }
+
         let challenge = PaymentChallenge {
             challenge_id: uuid::Uuid::new_v4().to_string(),
             protocol: "x402".to_string(),
@@ -123,24 +241,9 @@ impl PaymentProtocol for X402PaymentServer {
             amount,
             asset: asset.to_string(),
             recipient: recipient.to_string(),
-            chain: self
-                .supported_chains
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "tenzro".to_string()),
+            chain,
             expires_at: Utc::now() + chrono::Duration::minutes(5),
-            extra: {
-                let mut extra = HashMap::new();
-                extra.insert(
-                    "scheme".to_string(),
-                    serde_json::json!(crate::x402::DEFAULT_SCHEME),
-                );
-                extra.insert(
-                    "network".to_string(),
-                    serde_json::json!(format!("eip155:{}", 1337)),
-                );
-                extra
-            },
+            extra,
         };
 
         // Store the challenge for later lookup during settlement
@@ -173,8 +276,26 @@ impl PaymentProtocol for X402PaymentServer {
             ));
         }
 
-        // 3. Verify amounts match
-        if credential.amount != challenge.amount {
+        // 3. Amount admission. For the `upto` usage-metered scheme and the
+        // `batch-settlement` channel scheme the challenge amount is a
+        // *ceiling*: the credential's actual charge (usage for `upto`, this
+        // voucher's increment for `batch-settlement`) must be `<= ceiling`.
+        // Every other scheme requires exact equality.
+        let scheme_id = challenge
+            .extra
+            .get("scheme")
+            .and_then(|v| v.as_str())
+            .unwrap_or(crate::x402::scheme::DEFAULT_SCHEME);
+        let is_metered = scheme_id == crate::x402::scheme::UPTO_SCHEME
+            || scheme_id == crate::x402::scheme::BATCH_SETTLEMENT_SCHEME;
+        if is_metered {
+            if credential.amount > challenge.amount {
+                return Err(PaymentError::VerificationFailed(format!(
+                    "{} charge {} exceeds challenge ceiling {}",
+                    scheme_id, credential.amount, challenge.amount
+                )));
+            }
+        } else if credential.amount != challenge.amount {
             return Err(PaymentError::VerificationFailed(format!(
                 "Amount mismatch: expected {}, got {}",
                 challenge.amount, credential.amount
@@ -202,6 +323,20 @@ impl PaymentProtocol for X402PaymentServer {
             backend.name()
         );
 
+        // For the metered schemes (`upto` / `batch-settlement`), the settled
+        // amount is the credential's amount (usage or this voucher's
+        // increment, ≤ the challenge ceiling). Persist it onto the stored
+        // challenge so `settle` — which only sees the verification — charges
+        // the actual, not the ceiling.
+        if is_metered {
+            let mut settled_challenge = challenge.clone();
+            settled_challenge.extra.insert(
+                "metered_settled".to_string(),
+                serde_json::json!(credential.amount.to_string()),
+            );
+            self.challenge_store.store(&settled_challenge);
+        }
+
         Ok(PaymentVerification {
             verified: true,
             credential_id: credential.credential_id.clone(),
@@ -226,14 +361,37 @@ impl PaymentProtocol for X402PaymentServer {
                 ))
             })?;
 
+        // Idempotency: if this challenge carried a signed offer and a ledger is
+        // configured, a settlement with the same `(offer commitment, payer)` is
+        // a replay — return the prior receipt without charging again.
+        let payment_id = self.payment_id_for(&challenge, &verification.payer_did);
+        if let (Some(ledger), Some(pid)) = (&self.idempotency, &payment_id) {
+            if let Some(prior) = ledger.get(pid) {
+                info!("x402 replay for {pid} — returning prior receipt");
+                self.challenge_store.remove(&challenge.challenge_id);
+                return Ok(prior);
+            }
+        }
+
+        // The amount to charge. For the metered schemes (`upto` /
+        // `batch-settlement`), `verify_credential` stashed the actual charge
+        // (≤ ceiling) in `extra["metered_settled"]`; charge that. Every other
+        // scheme charges the fixed challenge amount.
+        let settle_amount: u128 = challenge
+            .extra
+            .get("metered_settled")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u128>().ok())
+            .unwrap_or(challenge.amount);
+
         // If a settlement engine is configured, execute real settlement
         if let Some(engine) = &self.settlement_engine {
             debug!(
                 "Executing x402 settlement via engine for amount={}",
-                challenge.amount
+                settle_amount
             );
 
-            let amount_u64 = u64::try_from(challenge.amount).map_err(|_| {
+            let amount_u64 = u64::try_from(settle_amount).map_err(|_| {
                 PaymentError::SettlementError("Settlement amount exceeds u64 range".to_string())
             })?;
 
@@ -287,7 +445,7 @@ impl PaymentProtocol for X402PaymentServer {
                 &verification.credential_id,
                 &challenge.resource,
                 &challenge.asset,
-                &challenge.amount.to_string(),
+                &settle_amount.to_string(),
                 &verification.payer_did,
                 &challenge.recipient,
                 &tx_hash_hex,
@@ -309,7 +467,7 @@ impl PaymentProtocol for X402PaymentServer {
                 }
             }
 
-            return Ok(PaymentReceipt {
+            let payment_receipt = PaymentReceipt {
                 receipt_id: receipt.receipt_id,
                 protocol: "x402".to_string(),
                 challenge_id: challenge.challenge_id,
@@ -321,22 +479,30 @@ impl PaymentProtocol for X402PaymentServer {
                 settled_at: Utc::now(),
                 principal_chain: receipt.principal_chain,
                 extra,
-            });
+            };
+
+            // Bind the receipt to the idempotency key. `record` is idempotent —
+            // a racing settle gets the first receipt back, so we return whatever
+            // the ledger now holds.
+            if let (Some(ledger), Some(pid)) = (&self.idempotency, &payment_id) {
+                return ledger.record(pid, payment_receipt);
+            }
+            return Ok(payment_receipt);
         }
 
         // No settlement engine — generate receipt with real amount from challenge
         info!(
             "No settlement engine configured, generating x402 receipt for amount={}",
-            challenge.amount
+            settle_amount
         );
         self.challenge_store.remove(&challenge.challenge_id);
 
-        Ok(PaymentReceipt {
+        let payment_receipt = PaymentReceipt {
             receipt_id: uuid::Uuid::new_v4().to_string(),
             protocol: "x402".to_string(),
             challenge_id: challenge.challenge_id,
             credential_id: verification.credential_id.clone(),
-            amount: challenge.amount,
+            amount: settle_amount,
             asset: challenge.asset,
             settlement_tx: verification.settlement_ref.clone(),
             chain: challenge.chain,
@@ -346,7 +512,12 @@ impl PaymentProtocol for X402PaymentServer {
                 tenzro_types::primitives::BlockHeight::new(0),
             ),
             extra: HashMap::new(),
-        })
+        };
+
+        if let (Some(ledger), Some(pid)) = (&self.idempotency, &payment_id) {
+            return ledger.record(pid, payment_receipt);
+        }
+        Ok(payment_receipt)
     }
 
     async fn create_credential(
@@ -581,6 +752,70 @@ mod tests {
             .unwrap();
         assert!(v.verified);
         assert_eq!(counter.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_x402_signed_offer_attached_and_verifies() {
+        let kp = tenzro_crypto::KeyPair::generate(tenzro_crypto::KeyType::Ed25519).unwrap();
+        let signer = Arc::new(tenzro_crypto::signatures::Ed25519SignerImpl::new(kp).unwrap());
+        let server = X402PaymentServer::new("0xrecipient", vec!["tenzro".to_string()])
+            .with_offer_signer(signer);
+
+        let challenge = server
+            .create_challenge("/api/paid", 1000, "USDC", "0xrecipient")
+            .await
+            .unwrap();
+
+        // The offer commitment + sig + signer are carried on the challenge.
+        assert!(challenge
+            .extra
+            .contains_key(crate::x402::offer::OFFER_COMMITMENT_KEY));
+        assert!(challenge.extra.contains_key(crate::x402::offer::OFFER_SIG_KEY));
+        assert!(challenge
+            .extra
+            .contains_key(crate::x402::offer::OFFER_SIGNER_KEY));
+    }
+
+    #[tokio::test]
+    async fn test_x402_idempotent_settle_returns_prior_receipt() {
+        let kp = tenzro_crypto::KeyPair::generate(tenzro_crypto::KeyType::Ed25519).unwrap();
+        let signer = Arc::new(tenzro_crypto::signatures::Ed25519SignerImpl::new(kp).unwrap());
+        let ledger = Arc::new(crate::x402::offer::IdempotencyLedger::new());
+        let server = X402PaymentServer::new("0xrecipient", vec!["tenzro".to_string()])
+            .with_offer_signer(signer)
+            .with_idempotency_ledger(ledger.clone());
+
+        let challenge = server
+            .create_challenge("/api/paid", 4200, "USDC", "0xrecipient")
+            .await
+            .unwrap();
+
+        let verification = PaymentVerification {
+            verified: true,
+            credential_id: "cred-1".to_string(),
+            challenge_id: challenge.challenge_id.clone(),
+            payer_did: "did:tenzro:human:alice".to_string(),
+            verified_at: Utc::now(),
+            settlement_ref: None,
+        };
+
+        let first = server.settle(&verification).await.unwrap();
+        assert_eq!(first.amount, 4200);
+        assert_eq!(ledger.len(), 1);
+
+        // Re-store the challenge (settle removed it) and replay the settle with
+        // a *different* credential id but the same payer — the offer commitment
+        // is identical, so the payment id is identical and the prior receipt is
+        // returned unchanged.
+        server.challenge_store().store(&challenge);
+        let replay = PaymentVerification {
+            credential_id: "cred-2".to_string(),
+            ..verification.clone()
+        };
+        let second = server.settle(&replay).await.unwrap();
+        assert_eq!(second.receipt_id, first.receipt_id);
+        assert_eq!(second.credential_id, "cred-1");
+        assert_eq!(ledger.len(), 1);
     }
 
     #[tokio::test]

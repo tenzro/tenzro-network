@@ -19,11 +19,14 @@ cargo install --git https://github.com/tenzro/tenzro-network --bin tenzro
 export TENZRO_RPC_URL=https://rpc.tenzro.network
 
 tenzro join --name "Alice"               # provisions DID + MPC wallet
-tenzro faucet                            # request 100 testnet TNZO
+tenzro faucet                            # request testnet TNZO
 tenzro wallet balance
 tenzro model list
 tenzro chat
 ```
+
+To earn from network demand instead of just consuming it, run a node and
+become a provider in one command — see §4.3.
 
 Live testnet endpoints:
 
@@ -217,6 +220,21 @@ Restrict RPC to loopback with `--rpc-addr 127.0.0.1:8545`. The default binds to 
 ./target/release/tenzro-node --roles ai --data-dir ./data
 ```
 
+Then become a network provider in one command:
+
+```bash
+tenzro join --provider
+```
+
+Against the running local node this provisions an identity and wallet,
+detects your hardware (CPU, RAM, GPUs, TEE), funds the wallet from the
+testnet faucet if needed, posts the 100 TNZO compute bond, registers you as
+a model provider with default per-token pricing, and downloads + serves the
+largest catalog model that fits the machine. Your node advertises its
+capacity on the provider gossip topic automatically; inference demand routes
+to you and settles in TNZO. Use `--rpc <url>` to target a node you operate
+remotely.
+
 ### 4.4 Verify it's running
 
 ```bash
@@ -244,6 +262,10 @@ cargo install --path crates/tenzro-cli
 
 # Join the network (provisions identity + MPC wallet + hardware profile)
 tenzro join --name "Alice"
+
+# Join AND become an inference provider (bond + register + pricing + model
+# pull + serve, all automatic — requires a running local node, see §4.3)
+tenzro join --provider
 
 # Mint a DPoP-bound bearer JWT for authenticated RPC/MCP access
 tenzro auth onboard-human --display-name "Alice"

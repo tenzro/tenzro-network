@@ -24,7 +24,7 @@ from typing import Any
 
 import requests
 
-from tenzro_trainer.types import OuterGradient, hash_hex
+from tenzro_trainer.types import OuterGradient, TrainingTaskSpec, hash_hex
 
 
 class RpcError(RuntimeError):
@@ -70,6 +70,29 @@ class RpcClient:
                 data=err.get("data"),
             )
         return body.get("result")
+
+    # ── sponsor-facing method ─────────────────────────────────────────
+
+    def post_task(
+        self,
+        task_spec: TrainingTaskSpec,
+        syncer_did: str | None = None,
+        syncer_address: bytes | None = None,
+    ) -> dict[str, Any]:
+        """Register a new training run on the node.
+
+        The node constructs a ``SyncerState`` from ``task_spec`` and becomes
+        the syncer for the run. ``syncer_address`` is a 32-byte address; when
+        omitted the node defaults it to all-zero.
+        """
+        params: dict[str, Any] = {"task_spec": task_spec.to_json()}
+        if syncer_did is not None:
+            params["syncer_did"] = syncer_did
+        if syncer_address is not None:
+            if len(syncer_address) != 32:
+                raise ValueError("syncer_address must be 32 bytes")
+            params["syncer_address"] = syncer_address.hex()
+        return self._call("tenzro_training_postTask", params)
 
     # ── trainer-facing methods ────────────────────────────────────────
 

@@ -14,6 +14,24 @@ pub enum InferenceCommand {
     /// Read the inference router's live metrics (requests routed, hedges
     /// dispatched, hedges won, deadline-exceeded requests).
     RouterMetrics(RouterMetricsCmd),
+    /// Fetch a stored TOPLOC inference commitment by hash.
+    GetCommitment(GetCommitmentCmd),
+    /// Re-execute a prompt against a stored commitment and report the
+    /// per-step verification outcome.
+    VerifyCommitment(VerifyCommitmentCmd),
+    /// File a challenge against a stored inference commitment.
+    FileChallenge(FileChallengeCmd),
+    /// Fetch an inference challenge by id.
+    GetChallenge(GetChallengeCmd),
+    /// List inference challenges, optionally filtered by status or provider.
+    ListChallenges(ListChallengesCmd),
+    /// Resolve an inference challenge (operator only). Upheld verdicts
+    /// decrement the provider's reputation and record a compute-bond failure.
+    ResolveChallenge(ResolveChallengeCmd),
+    /// Select a model for an intent (use case + budget + quality floor +
+    /// cost-quality knob) without naming one. Discovery only — dispatches
+    /// nothing. With `--message`, discovers and runs in one call.
+    Route(RouteCmd),
 }
 
 impl InferenceCommand {
@@ -22,7 +40,547 @@ impl InferenceCommand {
             Self::Request(cmd) => cmd.execute().await,
             Self::Stream(cmd) => cmd.execute().await,
             Self::RouterMetrics(cmd) => cmd.execute().await,
+            Self::GetCommitment(cmd) => cmd.execute().await,
+            Self::VerifyCommitment(cmd) => cmd.execute().await,
+            Self::FileChallenge(cmd) => cmd.execute().await,
+            Self::GetChallenge(cmd) => cmd.execute().await,
+            Self::ListChallenges(cmd) => cmd.execute().await,
+            Self::ResolveChallenge(cmd) => cmd.execute().await,
+            Self::Route(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// `tenzro inference route --use-case <u> [--budget <b>] [--optimize <f>]
+///   [--quality-floor cheap|strong] [--message <m>]`
+///
+/// Runs the model-selection pipeline. Without `--message`, calls
+/// `tenzro_routeIntent` and prints the chosen model, tier, estimated cost,
+/// and fallback chain (discovery only). With `--message`, calls
+/// `tenzro_chatByIntent`, which discovers a model then dispatches it.
+#[derive(Debug, Parser)]
+pub struct RouteCmd {
+    /// Use case: chat, code, reasoning, summarize, extract, or embed.
+    #[arg(long)]
+    use_case: String,
+
+    /// Per-request cost cap in smallest TNZO unit (decimal string).
+    #[arg(long)]
+    budget: Option<String>,
+
+    /// Cost-quality knob in [0.0, 1.0]: 0.0 cheapest acceptable, 1.0 strongest.
+    #[arg(long)]
+    optimize: Option<f32>,
+
+    /// Reject any model below this tier: cheap or strong.
+    #[arg(long)]
+    quality_floor: Option<String>,
+
+    /// Estimated input tokens for cost estimation.
+    #[arg(long)]
+    est_input_tokens: Option<u64>,
+
+    /// Estimated output tokens for cost estimation.
+    #[arg(long)]
+    est_output_tokens: Option<u64>,
+
+    /// Payer DID — enables the per-DID rolling-window budget gate.
+    #[arg(long)]
+    payer_did: Option<String>,
+
+    /// When set, discover a model and run this prompt in one call.
+    #[arg(long)]
+    message: Option<String>,
+
+    /// Maximum output tokens (only used with --message).
+    #[arg(long, default_value_t = 256)]
+    max_tokens: u64,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl RouteCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "use_case".to_string(),
+            serde_json::Value::String(self.use_case.clone()),
+        );
+        if let Some(b) = &self.budget {
+            params.insert("budget".to_string(), serde_json::Value::String(b.clone()));
+        }
+        if let Some(o) = self.optimize {
+            params.insert(
+                "optimize".to_string(),
+                serde_json::json!(o),
+            );
+        }
+        if let Some(q) = &self.quality_floor {
+            params.insert(
+                "quality_floor".to_string(),
+                serde_json::Value::String(q.clone()),
+            );
+        }
+        if let Some(n) = self.est_input_tokens {
+            params.insert("est_input_tokens".to_string(), serde_json::json!(n));
+        }
+        if let Some(n) = self.est_output_tokens {
+            params.insert("est_output_tokens".to_string(), serde_json::json!(n));
+        }
+        if let Some(did) = &self.payer_did {
+            params.insert(
+                "payer_did".to_string(),
+                serde_json::Value::String(did.clone()),
+            );
+        }
+
+        let rpc = RpcClient::new(&self.rpc);
+
+        // With a message, discover + dispatch; otherwise discovery only.
+        if let Some(message) = &self.message {
+            params.insert(
+                "message".to_string(),
+                serde_json::Value::String(message.clone()),
+            );
+            params.insert("max_tokens".to_string(), serde_json::json!(self.max_tokens));
+
+            let spinner = output::create_spinner("Routing intent and dispatching...");
+            let result: serde_json::Value = rpc
+                .call("tenzro_chatByIntent", serde_json::Value::Object(params))
+                .await
+                .context("calling tenzro_chatByIntent")?;
+            spinner.finish_and_clear();
+
+            if self.format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+
+            if let Some(route) = result.get("route") {
+                output::print_header("Selected Model");
+                print_route(route);
+                println!();
+            }
+            let response_text = result
+                .get("response")
+                .or_else(|| result.get("result").and_then(|r| r.get("response")))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !response_text.is_empty() {
+                output::print_header("Response");
+                println!(
+                    "{}",
+                    tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(response_text)
+                );
+            }
+            return Ok(());
+        }
+
+        let spinner = output::create_spinner("Selecting a model for the intent...");
+        let result: serde_json::Value = rpc
+            .call("tenzro_routeIntent", serde_json::Value::Object(params))
+            .await
+            .context("calling tenzro_routeIntent")?;
+        spinner.finish_and_clear();
+
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+        output::print_header("Selected Model");
+        print_route(&result);
+        Ok(())
+    }
+}
+
+fn print_route(route: &serde_json::Value) {
+    for key in ["model_id", "tier", "estimated_cost", "reason"] {
+        if let Some(v) = route.get(key)
+            && !v.is_null()
+        {
+            let rendered = match v.as_str() {
+                Some(s) => s.to_string(),
+                None => v.to_string(),
+            };
+            output::print_field(key, &rendered);
+        }
+    }
+    if let Some(chain) = route.get("fallback_chain").and_then(|v| v.as_array())
+        && !chain.is_empty()
+    {
+        let joined: Vec<String> = chain
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        output::print_field("fallback_chain", &joined.join(" → "));
+    }
+}
+
+fn print_challenge(challenge: &serde_json::Value) {
+    for key in [
+        "challenge_id",
+        "commitment_hash",
+        "model_id",
+        "provider",
+        "challenger",
+        "reason",
+        "status",
+        "filed_at",
+        "resolved_at",
+    ] {
+        if let Some(v) = challenge.get(key)
+            && !v.is_null()
+        {
+            let rendered = match v.as_str() {
+                Some(s) => s.to_string(),
+                None => v.to_string(),
+            };
+            output::print_field(key, &rendered);
+        }
+    }
+}
+
+/// `tenzro inference get-commitment <hash>`
+#[derive(Debug, Parser)]
+pub struct GetCommitmentCmd {
+    /// Commitment hash (hex, with or without 0x prefix).
+    commitment_hash: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl GetCommitmentCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getInferenceCommitment",
+                serde_json::json!({ "commitment_hash": self.commitment_hash }),
+            )
+            .await?;
+
+        if result.is_null() {
+            output::print_warning("No commitment stored under that hash");
+            return Ok(());
+        }
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
+/// `tenzro inference verify-commitment <hash> <prompt>`
+///
+/// The prompt is never stored with the commitment — the verifier must
+/// supply the exact prompt that produced the output. Verification
+/// requires the node to have the model loaded in serial (llama.cpp) mode.
+#[derive(Debug, Parser)]
+pub struct VerifyCommitmentCmd {
+    /// Commitment hash (hex, with or without 0x prefix).
+    commitment_hash: String,
+
+    /// The exact prompt the committed response was generated from.
+    prompt: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl VerifyCommitmentCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let spinner = output::create_spinner("Re-executing prompt against stored commitment...");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_verifyInferenceCommitment",
+                serde_json::json!({
+                    "commitment_hash": self.commitment_hash,
+                    "prompt": self.prompt,
+                }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        output::print_header("Commitment Verification");
+        for key in ["commitment_hash", "model_id", "provider"] {
+            if let Some(v) = result.get(key).and_then(|v| v.as_str()) {
+                output::print_field(key, v);
+            }
+        }
+        let steps_total = result.get("steps_total").and_then(|v| v.as_u64()).unwrap_or(0);
+        let steps_passed = result.get("steps_passed").and_then(|v| v.as_u64()).unwrap_or(0);
+        output::print_field("steps", &format!("{steps_passed}/{steps_total} passed"));
+        if result.get("pass").and_then(|v| v.as_bool()).unwrap_or(false) {
+            output::print_success("Commitment verified: provider output matches re-execution");
+        } else {
+            output::print_warning("Commitment FAILED verification");
+            if let Some(failing) = result.get("failing_steps")
+                && !failing.is_null()
+            {
+                output::print_field("failing_steps", &failing.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `tenzro inference file-challenge <hash> <challenger> [--reason ...]`
+#[derive(Debug, Parser)]
+pub struct FileChallengeCmd {
+    /// Commitment hash being disputed (hex, with or without 0x prefix).
+    commitment_hash: String,
+
+    /// Challenger identity (DID or address).
+    challenger: String,
+
+    /// Optional free-text reason for the dispute.
+    #[arg(long)]
+    reason: Option<String>,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl FileChallengeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_fileInferenceChallenge",
+                serde_json::json!({
+                    "commitment_hash": self.commitment_hash,
+                    "challenger": self.challenger,
+                    "reason": self.reason,
+                }),
+            )
+            .await?;
+
+        output::print_success("Challenge filed");
+        print_challenge(&result);
+        Ok(())
+    }
+}
+
+/// `tenzro inference get-challenge <challenge_id>`
+#[derive(Debug, Parser)]
+pub struct GetChallengeCmd {
+    /// Challenge id (UUID).
+    challenge_id: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl GetChallengeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getInferenceChallenge",
+                serde_json::json!({ "challenge_id": self.challenge_id }),
+            )
+            .await?;
+
+        if result.is_null() {
+            output::print_warning("No challenge with that id");
+            return Ok(());
+        }
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+        output::print_header("Inference Challenge");
+        print_challenge(&result);
+        if let Some(verification) = result.get("verification")
+            && !verification.is_null()
+        {
+            println!();
+            output::print_header("Verification");
+            output::print_json(verification)?;
+        }
+        Ok(())
+    }
+}
+
+/// `tenzro inference list-challenges [--status filed|upheld|dismissed] [--provider 0x..]`
+#[derive(Debug, Parser)]
+pub struct ListChallengesCmd {
+    /// Filter by status (filed, upheld, dismissed).
+    #[arg(long)]
+    status: Option<String>,
+
+    /// Filter by provider (announce-signer pubkey hex).
+    #[arg(long)]
+    provider: Option<String>,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ListChallengesCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_listInferenceChallenges",
+                serde_json::json!({
+                    "status": self.status,
+                    "provider": self.provider,
+                }),
+            )
+            .await?;
+
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+        output::print_header(&format!("Inference Challenges ({count})"));
+        if let Some(challenges) = result.get("challenges").and_then(|v| v.as_array()) {
+            for (i, challenge) in challenges.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+                print_challenge(challenge);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `tenzro inference resolve-challenge <challenge_id> (--prompt ... | --upheld <bool>)`
+///
+/// Operator-only (requires the node admin token, via `--admin-token` or
+/// the `TENZRO_ADMIN_TOKEN` env var). With `--prompt`, the node
+/// re-executes locally and the verification outcome decides the verdict;
+/// with `--upheld`, the caller supplies the verdict directly.
+#[derive(Debug, Parser)]
+pub struct ResolveChallengeCmd {
+    /// Challenge id (UUID).
+    challenge_id: String,
+
+    /// Re-execute this prompt locally to decide the verdict.
+    #[arg(long, conflicts_with = "upheld")]
+    prompt: Option<String>,
+
+    /// Explicit verdict when no prompt is supplied.
+    #[arg(long)]
+    upheld: Option<bool>,
+
+    /// Compute-bond provider DID (skips the bond-registry address scan).
+    #[arg(long)]
+    provider_did: Option<String>,
+
+    /// Node admin token (falls back to TENZRO_ADMIN_TOKEN).
+    #[arg(long)]
+    admin_token: Option<String>,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ResolveChallengeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token.clone());
+        }
+
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "challenge_id".to_string(),
+            serde_json::Value::String(self.challenge_id.clone()),
+        );
+        if let Some(prompt) = &self.prompt {
+            params.insert("prompt".to_string(), serde_json::Value::String(prompt.clone()));
+        } else if let Some(upheld) = self.upheld {
+            params.insert("upheld".to_string(), serde_json::Value::Bool(upheld));
+        } else {
+            anyhow::bail!("provide either --prompt (local re-execution) or --upheld <bool>");
+        }
+        if let Some(did) = &self.provider_did {
+            params.insert(
+                "provider_did".to_string(),
+                serde_json::Value::String(did.clone()),
+            );
+        }
+
+        let spinner = output::create_spinner("Resolving challenge...");
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_resolveInferenceChallenge",
+                serde_json::Value::Object(params),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status == "upheld" {
+            output::print_warning("Challenge UPHELD — provider penalties applied");
+        } else {
+            output::print_success("Challenge dismissed");
+        }
+        print_challenge(&result);
+        for key in ["reputation_penalized", "bond_failure_recorded"] {
+            if let Some(v) = result.get(key).and_then(|v| v.as_bool()) {
+                output::print_field(key, if v { "yes" } else { "no" });
+            }
+        }
+        if let Some(verification) = result.get("verification")
+            && !verification.is_null()
+        {
+            println!();
+            output::print_header("Verification");
+            output::print_json(verification)?;
+        }
+        Ok(())
     }
 }
 

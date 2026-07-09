@@ -23,6 +23,8 @@ This document specifies the economic model, the rationale behind each parameter 
 11. [Bridge fee model](#11-bridge-fee-model)
 12. [Treasury](#12-treasury)
 13. [SeedAgent bootstrap allocation](#13-seedagent-bootstrap-allocation)
+13b. [Operator sponsorship program](#13b-operator-sponsorship-program)
+13c. [Vesting](#13c-vesting)
 14. [Agent-economy specific surfaces](#14-agent-economy-specific-surfaces)
 15. [Distributed training economics](#15-distributed-training-economics)
 16. [Governance economics](#16-governance-economics)
@@ -202,7 +204,7 @@ Tenzro has two independent demand-driven burn channels. Net supply change is the
 
 ```
 Net supply change per epoch =
-    + staking rewards paid             (inflationary, capped at 5% APY)
+    + reward minting                    (inflationary, work-gated coupons on a declining schedule; ≤ 5% APY-of-staked ceiling)
     − base-fee burn                     (deflationary, EIP-1559)
     − commission burn                   (deflationary, 0.15% of all settled volume)
     − paymaster burn                    (deflationary, 100% of paymaster fees)
@@ -324,9 +326,10 @@ The clean line: **economic finality lives in the staked validator set; service a
 |---|---|---|
 | Default minimum stake | 1,000 TNZO | `tenzro-token/staking.rs` |
 | Default unbonding period | 7 days | `tenzro-token/staking.rs` |
-| Base reward rate | 5% APY (500 bps) | `tenzro-token/rewards.rs` |
+| Reward model | Work-gated coupons on a declining annual schedule | `tenzro-token/rewards.rs` |
 | Epoch duration | 14,400 blocks (~1 day at 6-second block target) | `tenzro-token/rewards.rs` |
 | Epochs per year | 365 | |
+| Reward claim liquid fraction | `liquid_bps` (remainder opens 12-month reward vesting) | `tenzro-token/rewards.rs` |
 | Equivocation slash | 10% of stake | `tenzro-consensus + tenzro-token` |
 | Consensus quorum threshold | 6,667 / 10,000 stake-weight (smallest integer > 2/3) | `tenzro-consensus/config.rs` |
 | Per-validator weight cap | 10% of active set, excess redistributed proportionally | `tenzro-consensus` |
@@ -337,29 +340,43 @@ The minimum stake, unbonding period, resource profile thresholds, quorum/cap par
 
 ### Reward calculation
 
+Rewards are **work-gated**: an epoch's minting rights are earned by verified work done in that epoch, not by holding stake. There is no stake-proportional payout. Nothing a participant self-reports can create reward-eligible work — every unit of work weight is measured by the protocol (finalized blocks and quorum-certificate participation for validators, metered proof-of-service for providers, on-chain-recorded contribution acceptance for the ecosystem bucket).
+
+The engine (`tenzro-token/rewards.rs`) closes each epoch by issuing **reward coupons** rather than paying balances directly:
+
 ```
-epoch_budget = (total_staked × reward_rate_bps / 10,000) / epochs_per_year
-epoch_budget = min(epoch_budget, reward_pool_available)
+For each closed epoch:
+    year          = year_for(epoch)
+    annual_rights = declining_annual_schedule(year)       // fixed, no open emission
+    epoch_rights  = annual_rights / epochs_per_year
+    (val_bps, prov_bps, eco_bps) = role_split_for(year)   // shifts infra → apps over years
 
-For each staker:
-    stake_proportion = stake_amount / total_staked
-    base_reward      = epoch_budget × stake_proportion
-    qos_adjusted     = base_reward × uptime_multiplier      // 0.0 to 1.0
-    final_reward     = qos_adjusted × provider_multiplier   // 1.0× to 1.2×
+    For each role bucket (Validator, Provider, Ecosystem):
+        bucket_rights = epoch_rights × bucket_bps / 10,000
+        For each address with verified work in the bucket:
+            work_share = address_work_weight / bucket_total_work_weight
+            coupon     = bucket_rights × work_share        // an unclaimed minting right
 ```
 
-### Provider reward multipliers
+A coupon is a bounded, per-address right to mint — not a minted balance. Rights left unmatched (a bucket with unclaimed capacity because insufficient verified work was submitted) are **permanently unminted**, and coupons unclaimed within the claim window **expire unminted**. Supply only ever moves for work that was both done and claimed; there is no leftover that leaks into circulation.
 
-| Provider class | Multiplier | Rationale |
+### Declining schedule and role split
+
+Annual minting rights decline year over year on a fixed schedule — the network never runs an open-ended emission. Within each year, the role split (`role_split_for_year`) shifts weight from infrastructure buckets (validator, provider) toward the ecosystem bucket over time, so that as the base layer matures, a growing share of minting rights flows to application and tooling contributions rather than raw capacity.
+
+### Role buckets and what counts as work
+
+| Bucket | Work weight is | Measured by |
 |---|---|---|
-| Validator | 1.0× | Baseline — secures consensus |
-| Model provider | 1.1× | Operational cost (GPU, bandwidth) |
-| TEE provider | 1.2× | Capital cost (confidential hardware) |
-| Storage provider | 1.0× | Baseline |
+| Validator | Finalized-block participation and quorum-certificate signing | Consensus records — no self-report |
+| Provider | Metered proof-of-service (inference, storage, TEE, compute) | Usage metering + reputation |
+| Ecosystem | Accepted technical, application, and tooling contributions | On-chain contribution acceptance via governance / foundation review |
 
-### Quality of service
+The ecosystem bucket is how TNZO rewards flow to development contributions, apps, and tools — a proposal accepted through the foundation/governance path records ecosystem work weight for the accepted contributor's address, which then earns coupons in that epoch's ecosystem bucket. This keeps "earn TNZO by building" on the same work-gated rail as validation and service, with no path for self-reported work to mint.
 
-The `uptime_multiplier` (0.0 to 1.0) scales rewards by actual contribution: a 95% uptime validator earns 95% of the potential reward, a 50% uptime validator earns 50%, zero uptime means zero reward. Reputation tracking (separate from stake) further influences proposer-election probability through reputation-weighted leader selection.
+### Claiming, vesting, and quality of service
+
+Claiming a coupon (`tenzro_claimRewards`) splits the payout: a liquid fraction (`liquid_bps`) mints immediately, and the remainder opens a **12-month linear reward-vesting schedule** (no cliff). This aligns rewarded participants with the network over a year rather than paying fully liquid up front. Provider and validator work weight is itself quality-scaled — uptime and reputation reduce the measured work weight before coupons are issued, so a low-availability operator earns proportionally fewer rights.
 
 ### Slashing
 
@@ -660,6 +677,52 @@ SeedAgents make Tenzro work the day it launches. They demonstrate every protocol
 
 ---
 
+## 13b. Operator sponsorship program
+
+The staking floors for validators and providers exist to anchor security and align operators — but they should not be a wall that keeps a capable operator with qualifying hardware off the network for want of TNZO. The sponsorship program (`tenzro-token/sponsorship.rs`) lets the foundation **delegate stake** to a qualifying operator so they can meet the bond requirement from day one, without the foundation giving away tokens or the operator taking a speculative position.
+
+This is distinct from the bridge-fee sponsorship pools in the fee model — those subsidize per-route settlement fees for end users. This program sponsors an **operator's stake bond** so they can run a validator or provider.
+
+### How it works
+
+An operator applies to the foundation to join as a validator, AI provider, or RPC provider. On approval, the foundation delegates stake from a sponsorship pool into a **sponsorship slot** bound to the operator's DID:
+
+- **The delegation is foundation-owned and revocable.** The sponsored stake is not transferred to the operator; it is delegated. The foundation retains ownership and can revoke it. The operator never holds sponsored TNZO as a spendable balance.
+- **The operator posts a junior bond.** A modest operator-owned junior bond sits ahead of the foundation delegation in the slashing order — the operator has real skin in the game even while sponsored.
+- **Rewards convert to owned stake.** While sponsored, 100% of the operator's earned reward coupons convert directly into operator-owned stake (`convert_reward_to_stake`) rather than paying out liquid. The operator earns their way off sponsorship by doing verified work.
+- **Graduation returns the delegation.** Once the operator's own accumulated stake meets the bond requirement, the slot graduates: the foundation delegation is returned to the pool for the next operator, and the operator continues on fully self-owned stake. The sponsorship is a ramp, not a subsidy.
+
+### Guardrails against speculation and capture
+
+- **Slots expire.** A sponsorship slot has an expiry. An operator who never accumulates enough owned stake through work does not sit on a foundation delegation indefinitely.
+- **Re-application bar.** An operator whose slot is revoked for cause faces a re-application bar before they can be sponsored again.
+- **Concentration caps.** The program enforces per-controller, per-ASN, and total-sponsored-stake caps (as a share of network stake), so sponsorship cannot concentrate consensus weight in one operator, one hosting provider, or one jurisdiction.
+- **Slashing order.** On misbehavior the slashing order is junior bond first, then any vesting balance, then owned stake — the operator's own capital absorbs loss before the foundation delegation is touched.
+- **Revocation reasons are typed and on-chain.** Equivocation, censorship, non-participation, attestation failure, and concentration breach each map to an explicit revocation reason recorded on the slot.
+- **Master switch.** The whole track has a governance/foundation enable switch that can pause new sponsorship without disturbing existing slots.
+
+All sponsorship lifecycle mutations — delegating, revoking, slashing the junior bond, and toggling the master switch — are foundation-operator-only, gated behind the admin token. The read surface (pool state, individual slots, the slot list) is open.
+
+### Why this shape
+
+The program grows the operator set without giving away tokens and without inviting speculators. A sponsored operator's only path to keeping their slot is to do real, verified work that accumulates owned stake; a speculator holding sponsored delegation cannot sell it, cannot vote a foundation delegation they do not own, and loses the slot on expiry if they contribute nothing. Concentration caps keep the program from centralizing the very set it is meant to broaden. This is the same principle the rest of the model runs on: value accrues to verified contribution, not to holding.
+
+---
+
+## 13c. Vesting
+
+The protocol has a single vesting primitive (`tenzro-token/vesting.rs`) used wherever TNZO is committed to a future release curve rather than paid liquid. All schedules are linear after any cliff, overflow-safe over 18-decimal u128 amounts, and expose an `outstanding()` view; `release` pays out the vested-but-unreleased portion at a given time.
+
+| Kind | Cliff | Duration | Used for |
+|---|---|---|---|
+| Reward | None | 12 months linear | The non-liquid fraction of a claimed reward coupon |
+| Grant | None | 6 months linear | Foundation-issued grants (ecosystem funding, milestone awards) |
+| Contributor | 12 months | 36 months linear after cliff | Long-term technical/application contributors |
+
+Reward vesting is opened automatically at claim time (section 7) and needs no operator action. Grant and contributor schedules are foundation-issued and gated behind the admin token — creating one commits treasury supply to a release curve, so only the foundation operator may open them. Vesting keeps rewarded participants, funded projects, and long-term contributors aligned with the network over the release window instead of taking a fully-liquid position up front.
+
+---
+
 ## 14. Agent-economy specific surfaces
 
 The agentic economy has a few specific economic surfaces that do not exist in human-only systems.
@@ -784,10 +847,10 @@ The adaptive burn dial (section 6) gives governance a finer instrument to keep n
 
 ### Break-even target
 
-At a hypothetical 30% staking ratio (300M TNZO staked) earning 5% APY:
+Holding reward minting at its conservative ceiling — a hypothetical 30% staking ratio (300M TNZO staked) with the reward schedule ceiling at 5% APY-of-staked:
 
-- Annual staking rewards paid: 15M TNZO
-- Required annual burn to offset: 15M TNZO
+- Annual reward minting (ceiling): 15M TNZO — actual minting is lower, since unmatched bucket rights and unclaimed coupons never mint and the non-liquid claim fraction vests over 12 months
+- Required annual burn to offset the ceiling: 15M TNZO
 - At Ethereum-class utilization (15M gas/block at 30 Gwei base fee), gas burn alone produces a fraction of this; commission burn at moderate usage closes the gap.
 
 Once commission throughput crosses a threshold, net supply is deflationary. The threshold depends on the gas burn baseline and the commission throughput; both grow with the network, and so does the offset.
@@ -811,25 +874,25 @@ The model is verified through closed-form analysis and scenario simulation acros
 Define the per-epoch (one-day) supply equation:
 
 ```
-ΔS_epoch = R_stake − B_basefee − B_commission − B_paymaster − B_slash − B_seedagent_surplus
+ΔS_epoch = R_reward − B_basefee − B_commission − B_paymaster − B_slash − B_seedagent_surplus
 ```
 
 Where:
 
-- `R_stake` = epoch staking reward paid = `(S_staked × r_apy) / 365`
+- `R_reward` = epoch reward minting = the epoch's share of the declining annual schedule (section 7). Rewards are work-gated coupons, not stake-proportional emission; unmatched rights and unclaimed coupons are never minted, so `R_reward` is an **upper bound** on what actually enters circulation in an epoch. The tables below hold `R_reward` at a conservative reference rate (the historical `5% APY of staked supply` figure) purely as a worst-case ceiling — actual minting is lower whenever a bucket's verified work is below its issued rights, or a claimed coupon's non-liquid fraction is still vesting.
 - `B_basefee` = `Σ (base_fee_block × gas_used_block)` over all blocks in the epoch, multiplied by `base_fee_burn_bps / 10,000`
 - `B_commission` = `0.30 × 0.005 × V_settlement_epoch`
 - `B_paymaster` = `1.00 × F_paymaster_epoch`
 - `B_slash` = sum of slashed bonds (typically zero in honest operation)
 - `B_seedagent_surplus` = nonzero only at SeedAgent sunset
 
-Setting parameters from sections 4 and 7 (`base_fee_burn_bps = 10,000`, `r_apy = 0.05`, commission burn share = 30%). All quantities below are denominated in TNZO; settlement volume is in TNZO (not in USD-equivalent) so the burn math is price-independent.
+Setting parameters from sections 4 and 7 (`base_fee_burn_bps = 10,000`, commission burn share = 30%, `R_reward` held at the conservative 5%-APY-of-staked ceiling). All quantities below are denominated in TNZO; settlement volume is in TNZO (not in USD-equivalent) so the burn math is price-independent. Because `R_reward` is a ceiling and real minting is work- and claim-gated below it, every net-supply figure in the tables errs toward more inflation / less deflation than the network will actually see.
 
 Gas burn baseline: assume an average base fee `b_avg` across the epoch and a total gas used per epoch `G_epoch`. With a 6-second block target and 14,400 blocks/epoch, `G_epoch = blocks_per_epoch × avg_gas_per_block`. Default `b_avg` track-rate is 1 Gwei (≈ 10⁻⁹ TNZO/gas) at the EIP-1559 floor; sustained congestion drives `b_avg` upward through the ±12.5% adjustment.
 
 Commission burn: `B_commission = 0.30 × 0.005 × V_settlement_TNZO_per_epoch = 0.0015 × V_TNZO`.
 
-| Regime | `S_staked` (TNZO) | Avg block gas | `b_avg` | Gas burn (TNZO/day) | Settlement vol (TNZO/day) | Commission burn (TNZO/day) | `R_stake` (TNZO/day) | ΔS/day | Annualized |
+| Regime | `S_staked` (TNZO) | Avg block gas | `b_avg` | Gas burn (TNZO/day) | Settlement vol (TNZO/day) | Commission burn (TNZO/day) | `R_reward` ceiling (TNZO/day) | ΔS/day | Annualized |
 |---|---|---|---|---|---|---|---|---|---|
 | Low (bootstrap) | 100M | 1M | 1 Gwei | 14.4 | 100K | 150 | 13,699 | +13,535 | +4.94% / yr |
 | Moderate | 200M | 5M | 5 Gwei | 360 | 5M | 7,500 | 27,397 | +19,537 | +3.57% / yr |
@@ -853,15 +916,15 @@ Two observations:
 
 Define the staking participation function: `participation_rate = f(real_yield, opportunity_cost)`.
 
-Real yield to a staker:
+Real yield to a staked operator who is also doing verified work (the two are coupled — rewards are work-gated, not paid on idle stake):
 
 ```
-real_yield = (r_apy × type_multiplier × qos_multiplier) − protocol_fee
+real_yield = (work_reward_rate × type_multiplier × qos_multiplier) − protocol_fee
            + staker_share_of_commission
            − expected_slash_rate
 ```
 
-Plugging in defaults (`r_apy = 5%`, validator `type_multiplier = 1.0`, QoS = 1.0, no protocol fee on native staking, expected slash rate ≈ 0 under honest operation, staker share of commission at moderate activity ≈ 0.5% APY):
+Here `work_reward_rate` is the effective annualized return a fully-participating operator sees from their share of the declining reward schedule, expressed against their bonded stake for comparison with other networks. Plugging in the conservative reference (`work_reward_rate ≈ 5%` for a full-uptime operator, validator `type_multiplier = 1.0`, QoS = 1.0, no protocol fee on native staking, expected slash rate ≈ 0 under honest operation, staker share of commission at moderate activity ≈ 0.5% APY):
 
 - Validator real yield: **≈ 5.5% APY**
 - TEE provider real yield: **≈ 6.5% APY** (1.2× multiplier)

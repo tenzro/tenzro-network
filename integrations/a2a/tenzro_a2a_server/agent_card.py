@@ -93,12 +93,17 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                 "name": "AI Inference",
                 "description": (
                     "Route AI inference requests to model providers on the "
-                    "Tenzro network, with settlement in TNZO."
+                    "Tenzro network, with settlement in TNZO. Supports intent "
+                    "routing: state a use case (chat/code/reasoning/summarize/"
+                    "extract/embed) plus budget and quality floor in metadata "
+                    "to have the network select a model instead of naming one."
                 ),
-                "tags": ["ai", "inference", "models"],
+                "tags": ["ai", "inference", "models", "intent-routing"],
                 "examples": [
                     "List available AI models",
                     "Run inference on model X",
+                    "Route by intent for a reasoning use case",
+                    "Chat by intent with budget 1000000000000000000",
                 ],
                 "inputModes": ["text/plain"],
                 "outputModes": ["text/plain", "application/json"],
@@ -366,17 +371,23 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
             },
             {
                 "id": "ap2-payments",
-                "name": "AP2 Payments & Mandates",
+                "name": "AP2 & x402 Payments",
                 "description": (
                     "Agent Payments Protocol (AP2) session lifecycle plus "
                     "Google-spec mandate verification. Create sessions, "
                     "authorize/execute/cancel payments, verify Checkout/Payment "
                     "Verifiable Digital Credentials (VDCs), validate Checkout+Payment pairs "
-                    "for consistency, and fetch protocol metadata."
+                    "for consistency, and fetch protocol metadata. Also covers the "
+                    "x402 Bazaar: sellers register HTTP-402 monetized resources "
+                    "(scheme tenzro-hybrid / exact-eip3009 / permit2 / erc7710), "
+                    "buyers discover them by scheme / network / asset / tags, and "
+                    "either side verifies an offer or derives a deterministic "
+                    "payment id."
                 ),
                 "tags": [
-                    "payments", "ap2", "agentic", "settlement", "mandates",
-                    "vdc", "checkout", "payment", "verifiable-credentials",
+                    "payments", "ap2", "x402", "bazaar", "agentic", "settlement",
+                    "mandates", "vdc", "checkout", "payment", "verifiable-credentials",
+                    "resource-discovery", "monetization",
                 ],
                 "examples": [
                     "AP2 protocol info",
@@ -386,6 +397,13 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Cancel session <id>",
                     "Verify AP2 mandate (metadata.vdc)",
                     "Validate AP2 checkout/payment pair (metadata.checkout_vdc, payment_vdc)",
+                    "x402 protocol info",
+                    "x402 register resource (metadata: sellerDid, resource, payTo, "
+                    "maxAmountRequired, scheme, network, asset, tags)",
+                    "x402 discover resources (metadata: scheme, network, asset, tags, limit)",
+                    "x402 deregister resource (metadata: listingId, sellerDid)",
+                    "x402 verify offer (metadata: requirement)",
+                    "x402 payment id (metadata: payerDid, requirement|offerCommitment)",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
@@ -1476,6 +1494,42 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
                     "Look up storage deal <id>",
                     "Set dynamic byte-epoch pricing with capacity 1e12",
                     "Show this node's storage-provider status",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "database",
+                "name": "Managed Databases",
+                "description": (
+                    "Register and query owned databases the node serves across "
+                    "external engines (PostgreSQL, Qdrant, Valkey) and embedded "
+                    "engines (Lance, Tantivy). Compute partition placement over "
+                    "the live cluster along a local → LAN-cluster → network "
+                    "continuum, gate reads and writes behind an owner-or-capability "
+                    "access policy, mint a bearer connection credential for a "
+                    "developer, run an engine-dialect query against the partition a "
+                    "node holds (or receive the holder endpoints when it does not), "
+                    "rescale a database in place, and drop it. Databases may be "
+                    "marked confidential for encryption at rest."
+                ),
+                "tags": [
+                    "database", "sql", "vector", "kv", "search", "partition",
+                    "access-policy", "capability", "confidential",
+                ],
+                "examples": [
+                    "List database engines",
+                    "Create database (metadata: database_id, engine_id=qdrant, "
+                    "owner_did, placement=lan_cluster, partitions=3, replicas=2)",
+                    "List databases",
+                    "List database partitions (metadata: database_id)",
+                    "Issue database connection (metadata: database_id, caller_did, "
+                    "bearer_did, write=true, ttl_secs=3600)",
+                    "Database query (metadata: database_id, caller_did, body)",
+                    "Authorize database read (metadata: database_id, caller_did)",
+                    "Rescale database (metadata: database_id, caller_did, "
+                    "placement=network, partitions=6)",
+                    "Drop database (metadata: database_id)",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],

@@ -21,7 +21,7 @@
 //! # Why a separate ledger rather than threading one manager into the other
 //!
 //! Rentals live in [`crate::rental`] and storage deals live in the
-//! `tenzro-storage-market` crate, which depends on this one. Putting the shared
+//! `tenzro-storage-provider` crate, which depends on this one. Putting the shared
 //! view here lets both consult a common [`Arc<ProviderObligations>`] without the
 //! settlement crate having to know about storage, or the two managers having to
 //! reference each other. Each manager remains the source of truth for its own
@@ -38,7 +38,7 @@ use tenzro_types::primitives::Address;
 pub enum ObligationSource {
     /// Capacity rental (`tenzro_settlement::rental`).
     Rental,
-    /// Decentralized storage deals (`tenzro-storage-market`).
+    /// Decentralized storage deals (`tenzro-storage-provider`).
     Storage,
 }
 

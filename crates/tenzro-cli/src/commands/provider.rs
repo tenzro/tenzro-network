@@ -15,6 +15,8 @@ pub enum ProviderCommand {
     Models(ProviderModelsCmd),
     /// List all providers discovered on the network
     List(ProviderListCmd),
+    /// Show published capacity (advertised) alongside measured throughput
+    Capacity(ProviderCapacityCmd),
     /// Provider pricing management
     #[command(subcommand)]
     Pricing(PricingCommand),
@@ -30,6 +32,7 @@ impl ProviderCommand {
             Self::Status(cmd) => cmd.execute().await,
             Self::Models(cmd) => cmd.execute().await,
             Self::List(cmd) => cmd.execute().await,
+            Self::Capacity(cmd) => cmd.execute().await,
             Self::Pricing(cmd) => cmd.execute().await,
             Self::Bond(cmd) => cmd.execute().await,
         }
@@ -851,6 +854,103 @@ impl ProviderListCmd {
         if local_count > 0 {
             output::print_field("Local Node", "included");
         }
+
+        Ok(())
+    }
+}
+
+/// Show published provider capacity next to measured throughput.
+///
+/// Advertised numbers are what each provider claims (max concurrency,
+/// requests/sec, batch size). Measured numbers are what the node has
+/// observed for that address (throughput in tokens/sec, p95 latency,
+/// reputation). Both are shown so callers can rank on observed behaviour
+/// rather than the advertised claim alone.
+#[derive(Debug, Parser)]
+pub struct ProviderCapacityCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ProviderCapacityCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Provider Capacity");
+
+        let spinner = output::create_spinner("Fetching published capacity...");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call("tenzro_listProviderCapacity", serde_json::json!([]))
+            .await?;
+        spinner.finish_and_clear();
+
+        let providers = result
+            .get("providers")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if providers.is_empty() {
+            output::print_info("No providers with published capacity discovered yet.");
+            return Ok(());
+        }
+
+        let headers = vec![
+            "Address",
+            "Source",
+            "Adv Max Conc",
+            "Adv RPS",
+            "Meas Tok/s",
+            "Trust Tok/s",
+            "P95 ms",
+            "Reputation",
+        ];
+        let mut rows = Vec::new();
+
+        let fmt_f64 = |v: Option<f64>| v.map(|x| format!("{:.1}", x)).unwrap_or_else(|| "—".to_string());
+        let fmt_u64 = |v: Option<u64>| v.map(|x| x.to_string()).unwrap_or_else(|| "—".to_string());
+
+        for p in &providers {
+            let addr = p.get("provider_address").and_then(|v| v.as_str()).unwrap_or("");
+            let source = p.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let adv = p.get("advertised");
+            let meas = p.get("measured");
+
+            let adv_max = adv
+                .and_then(|a| a.get("max_concurrent_requests"))
+                .and_then(|v| v.as_u64());
+            let adv_rps = adv
+                .and_then(|a| a.get("requests_per_second"))
+                .and_then(|v| v.as_u64());
+            let meas_tps = meas
+                .and_then(|m| m.get("measured_tokens_per_sec"))
+                .and_then(|v| v.as_f64());
+            let trust_tps = meas
+                .and_then(|m| m.get("reputation_discounted_tokens_per_sec"))
+                .and_then(|v| v.as_f64());
+            let p95 = meas.and_then(|m| m.get("p95_latency_ms")).and_then(|v| v.as_u64());
+            let reputation = meas.and_then(|m| m.get("reputation")).and_then(|v| v.as_u64());
+
+            rows.push(vec![
+                output::format_address(addr),
+                source.to_string(),
+                fmt_u64(adv_max),
+                fmt_u64(adv_rps),
+                fmt_f64(meas_tps),
+                fmt_f64(trust_tps),
+                fmt_u64(p95),
+                fmt_u64(reputation),
+            ]);
+        }
+
+        output::print_table(&headers, &rows);
+        println!();
+        output::print_field("Total Providers", &providers.len().to_string());
+        output::print_info(
+            "Adv = advertised (provider claim); Meas = measured (observed on this node). Trust Tok/s = measured throughput discounted by reputation.",
+        );
 
         Ok(())
     }
