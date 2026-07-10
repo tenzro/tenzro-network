@@ -134,3 +134,4 @@ marketing/
 
 # Internal architecture research — dev-tree only
 docs/architecture/
+/cloudbuild-train-bench.yaml
