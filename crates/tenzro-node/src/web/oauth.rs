@@ -1,6 +1,6 @@
 //! OAuth 2.1 / RFC 8693 / RFC 7662 / RFC 7009 / RFC 9728 endpoints
 //! exposed on the public Web API (port 8080, served at
-//! `api.tenzro.network`).
+//! `api.tenzro.xyz`).
 //!
 //! These endpoints sit *alongside* the MCP-specific OAuth 2.1
 //! authorization-code flow at `mcp/oauth.rs`. The MCP module owns the
@@ -471,7 +471,7 @@ fn derive_base_url(headers: &HeaderMap) -> String {
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("api.tenzro.network");
+        .unwrap_or("api.tenzro.xyz");
     format!("{}://{}", scheme, host)
 }
 

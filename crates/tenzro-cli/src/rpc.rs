@@ -46,11 +46,11 @@ impl RpcClient {
         // Derive API URL from RPC URL
         // localhost:8545 → localhost:8080
         // localhost:9944 → localhost:8080
-        // rpc.tenzro.network → api.tenzro.network
+        // rpc.tenzro.xyz → api.tenzro.xyz
         // Derive Web API URL from RPC URL:
         // - localhost:8545 → localhost:8080
         // - localhost:18545 → localhost:18080 (test ports: subtract 465)
-        // - rpc.tenzro.network → api.tenzro.network
+        // - rpc.tenzro.xyz → api.tenzro.xyz
         let api_url = if rpc_url.contains("localhost") || rpc_url.contains("127.0.0.1") {
             // Try to extract port and map to API port
             if let Some(port_start) = rpc_url.rfind(':') {
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(client.rpc_url, "http://localhost:8545");
         assert_eq!(client.api_url, "http://localhost:8080");
 
-        let client2 = RpcClient::new("https://rpc.tenzro.network");
-        assert_eq!(client2.api_url, "https://api.tenzro.network");
+        let client2 = RpcClient::new("https://rpc.tenzro.xyz");
+        assert_eq!(client2.api_url, "https://api.tenzro.xyz");
     }
 }

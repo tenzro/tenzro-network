@@ -50,12 +50,12 @@
   "download_count": 0,
   "rating": 0,
   "content_hash": null,
-  "docs_url": "https://docs.tenzro.network/agent-kit/templates/intelligent-payment-router",
+  "docs_url": "https://docs.tenzro.xyz/agent-kit/templates/intelligent-payment-router",
   "metadata": {},
   "execution_spec": {
     "backend": {
       "MppPayment": {
-        "endpoint": "https://pay.tenzro.network/mpp"
+        "endpoint": "https://pay.tenzro.xyz/mpp"
       }
     },
     "delegation": {

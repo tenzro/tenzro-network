@@ -49,6 +49,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -69,6 +70,22 @@ const ATTEST_TAG: &[u8] = b"tenzro/da/committee/attest";
 /// Domain-separation tag folding the collected attestations into the
 /// certificate root recorded in `DaPointer::attestation_root`.
 const CERT_TAG: &[u8] = b"tenzro/da/committee/cert";
+/// Domain-separation tag for the message a member signs when answering a
+/// possession challenge: binds the blob commitment, the challenger-chosen
+/// nonce, and the responder's own address.
+const CHALLENGE_TAG: &[u8] = b"tenzro/da/committee/challenge";
+
+/// Availability score ceiling (and starting value) for a committee member.
+pub const AVAILABILITY_SCORE_MAX: u32 = 1000;
+/// Score increment for a passed challenge. Asymmetric with the failure
+/// deltas (same shape as provider reputation's +1/−5): recovering trust is
+/// slow, losing it is fast.
+const CHALLENGE_PASS_DELTA: u32 = 1;
+/// Score decrement for a non-response or an honest "not held" answer.
+const CHALLENGE_FAIL_DELTA: u32 = 5;
+/// Score decrement for a proof that fails verification — an actively invalid
+/// signature or sliver is worse than admitting the sliver is gone.
+const CHALLENGE_BAD_PROOF_DELTA: u32 = 25;
 
 /// Errors from the committee DA backend.
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +120,9 @@ pub enum DaCommitteeError {
     /// Persistence failure.
     #[error("committee store: {0}")]
     Store(String),
+    /// A challenge named a committee index that is not in the current set.
+    #[error("no committee member at index {0}")]
+    NoSuchMember(usize),
 }
 
 type Result<T> = std::result::Result<T, DaCommitteeError>;
@@ -160,6 +180,21 @@ pub trait DaCommitteeSurface: Send + Sync {
         to_index: usize,
         commitment: &Hash,
     ) -> Result<Option<SliverPair>>;
+
+    /// Challenge member `to_index` to prove *current* possession of its sliver
+    /// for `commitment`. The member replies with a [`PossessionProof`] — the
+    /// sliver itself plus a signature over the nonce-bound challenge message —
+    /// or `None` if it does not hold the sliver. The redstuff Merkle tree
+    /// commits whole slivers as leaves (not per-symbol), so the honest proof
+    /// carries the full sliver and the challenger re-verifies it against the
+    /// commitment; a cached Merkle path alone would prove nothing about
+    /// possession.
+    async fn challenge_sliver(
+        &self,
+        to_index: usize,
+        commitment: &Hash,
+        nonce: &[u8; 32],
+    ) -> Result<Option<PossessionProof>>;
 }
 
 /// A single committee member's signed acknowledgment that it stored its sliver.
@@ -171,6 +206,109 @@ pub struct MemberAttestation {
     pub address: Address,
     /// Ed25519 signature over `attestation_message(commitment, address)`.
     pub signature: tenzro_crypto::signatures::Signature,
+}
+
+/// A committee member's nonce-bound proof that it currently holds its sliver
+/// for a challenged commitment. The challenger verifies the signature over
+/// [`challenge_message`] against the member's committee key AND re-runs
+/// [`redstuff::verify_sliver`] on the carried sliver, so a member cannot pass
+/// with stale metadata or someone else's sliver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PossessionProof {
+    /// Committee index of the responding member.
+    pub index: usize,
+    /// The member's on-chain address (bound into the signed message).
+    pub address: Address,
+    /// Ed25519 signature over `challenge_message(commitment, nonce, address)`.
+    pub signature: tenzro_crypto::signatures::Signature,
+    /// The sliver the member claims custody of — re-verified by the challenger.
+    pub sliver: SliverPair,
+}
+
+/// Resolution of a single possession challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChallengeOutcome {
+    /// Valid signature + sliver verified against the commitment.
+    Passed,
+    /// No reply before the deadline (transport error or timeout).
+    FailedNoResponse,
+    /// The member answered honestly that it does not hold the sliver.
+    FailedNotHeld,
+    /// The member replied but the signature or sliver failed verification.
+    FailedBadProof,
+}
+
+/// Durable record of one issued possession challenge and its resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChallengeRecord {
+    /// `SHA-256(CHALLENGE_TAG ‖ commitment ‖ nonce ‖ target_address)`.
+    pub id: Hash,
+    /// Blob commitment the challenge was issued against.
+    pub commitment: Hash,
+    /// Committee index of the challenged member at issue time.
+    pub target_index: usize,
+    /// On-chain address of the challenged member.
+    pub target_address: Address,
+    /// The challenger-chosen random nonce.
+    pub nonce: [u8; 32],
+    /// When the challenge was issued (ms since epoch).
+    pub issued_at_ms: i64,
+    /// When the challenge resolved (ms since epoch).
+    pub resolved_at_ms: i64,
+    /// How the challenge resolved.
+    pub outcome: ChallengeOutcome,
+}
+
+/// Rolling availability score for a committee member, keyed by address so it
+/// survives per-epoch index reshuffles. Starts at [`AVAILABILITY_SCORE_MAX`];
+/// passes recover slowly (+1), failures cost fast (−5 for silence / not-held,
+/// −25 for an invalid proof).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailabilityScore {
+    /// The scored member's on-chain address.
+    pub address: Address,
+    /// Current score in `0..=AVAILABILITY_SCORE_MAX`.
+    pub score: u32,
+    /// Lifetime passed challenges.
+    pub passes: u64,
+    /// Lifetime failed challenges (all failure kinds).
+    pub failures: u64,
+    /// Outcome of the most recent challenge.
+    pub last_outcome: ChallengeOutcome,
+    /// When the most recent challenge resolved (ms since epoch).
+    pub last_challenge_ms: i64,
+}
+
+impl AvailabilityScore {
+    fn fresh(address: Address) -> Self {
+        Self {
+            address,
+            score: AVAILABILITY_SCORE_MAX,
+            passes: 0,
+            failures: 0,
+            last_outcome: ChallengeOutcome::Passed,
+            last_challenge_ms: 0,
+        }
+    }
+
+    fn apply(&mut self, outcome: ChallengeOutcome, now_ms: i64) {
+        match outcome {
+            ChallengeOutcome::Passed => {
+                self.passes += 1;
+                self.score = (self.score + CHALLENGE_PASS_DELTA).min(AVAILABILITY_SCORE_MAX);
+            }
+            ChallengeOutcome::FailedNoResponse | ChallengeOutcome::FailedNotHeld => {
+                self.failures += 1;
+                self.score = self.score.saturating_sub(CHALLENGE_FAIL_DELTA);
+            }
+            ChallengeOutcome::FailedBadProof => {
+                self.failures += 1;
+                self.score = self.score.saturating_sub(CHALLENGE_BAD_PROOF_DELTA);
+            }
+        }
+        self.last_outcome = outcome;
+        self.last_challenge_ms = now_ms;
+    }
 }
 
 /// The point-of-availability certificate: `2f+1` committee members have signed
@@ -264,11 +402,37 @@ pub fn committee_address(keypair: &KeyPair) -> Result<Address> {
 /// Canonical message a member signs to attest sliver custody: the blob
 /// commitment bound to the member's own address, under a domain tag.
 pub fn attestation_message(commitment: &Hash, address: &Address) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(ATTEST_TAG.len() + 32 + 20);
+    let mut msg = Vec::with_capacity(ATTEST_TAG.len() + 32 + 32);
     msg.extend_from_slice(ATTEST_TAG);
     msg.extend_from_slice(commitment.as_bytes());
     msg.extend_from_slice(address.as_bytes());
     msg
+}
+
+/// Canonical message a member signs to answer a possession challenge: the blob
+/// commitment, the challenger-chosen nonce, and the responder's own address,
+/// under the challenge domain tag. The nonce binding is what makes the
+/// signature fresh — it cannot be replayed from an earlier challenge.
+pub fn challenge_message(commitment: &Hash, nonce: &[u8; 32], address: &Address) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(CHALLENGE_TAG.len() + 32 + 32 + 32);
+    msg.extend_from_slice(CHALLENGE_TAG);
+    msg.extend_from_slice(commitment.as_bytes());
+    msg.extend_from_slice(nonce);
+    msg.extend_from_slice(address.as_bytes());
+    msg
+}
+
+/// Deterministic challenge-record id: `SHA-256(CHALLENGE_TAG ‖ commitment ‖
+/// nonce ‖ target_address)`.
+pub fn challenge_id(commitment: &Hash, nonce: &[u8; 32], target: &Address) -> Hash {
+    let mut h = Sha256::new();
+    h.update(CHALLENGE_TAG);
+    h.update(commitment.as_bytes());
+    h.update(nonce);
+    h.update(target.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&h.finalize());
+    Hash::new(out)
 }
 
 /// Per-validator custody store: the sliver this node was assigned for a blob,
@@ -279,6 +443,10 @@ pub struct DaCommitteeStore {
     slivers: DashMap<String, StoredSliver>,
     /// blob commitment hex → availability certificate (writer-side only).
     certs: DashMap<String, AvailabilityCertificate>,
+    /// challenge id hex → resolved possession-challenge record.
+    challenges: DashMap<String, ChallengeRecord>,
+    /// member address hex → rolling availability score.
+    availability: DashMap<String, AvailabilityScore>,
     storage: Option<Arc<dyn KvStore>>,
 }
 
@@ -295,12 +463,16 @@ pub struct StoredSliver {
 impl DaCommitteeStore {
     const SLIVER_PREFIX: &'static [u8] = b"da/sliver/";
     const CERT_PREFIX: &'static [u8] = b"da/cert/";
+    const CHALLENGE_PREFIX: &'static [u8] = b"da/challenge/";
+    const AVAILABILITY_PREFIX: &'static [u8] = b"da/availability/";
 
     /// In-memory-only store (tests, or a node that has no durable custody yet).
     pub fn new() -> Self {
         Self {
             slivers: DashMap::new(),
             certs: DashMap::new(),
+            challenges: DashMap::new(),
+            availability: DashMap::new(),
             storage: None,
         }
     }
@@ -335,6 +507,24 @@ impl DaCommitteeStore {
             if let Ok(cert) = serde_json::from_slice::<AvailabilityCertificate>(&value) {
                 let hex = hex::encode(cert.commitment.as_bytes());
                 self.certs.insert(hex, cert);
+            }
+        }
+        let challenge_rows = storage
+            .scan_prefix(CF_DA_COMMITTEE, Self::CHALLENGE_PREFIX)
+            .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+        for (_key, value) in challenge_rows {
+            if let Ok(record) = serde_json::from_slice::<ChallengeRecord>(&value) {
+                let hex = hex::encode(record.id.as_bytes());
+                self.challenges.insert(hex, record);
+            }
+        }
+        let availability_rows = storage
+            .scan_prefix(CF_DA_COMMITTEE, Self::AVAILABILITY_PREFIX)
+            .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+        for (_key, value) in availability_rows {
+            if let Ok(score) = serde_json::from_slice::<AvailabilityScore>(&value) {
+                let hex = hex::encode(score.address.as_bytes());
+                self.availability.insert(hex, score);
             }
         }
         Ok(())
@@ -396,6 +586,116 @@ impl DaCommitteeStore {
         self.certs
             .get(&hex::encode(commitment.as_bytes()))
             .map(|v| v.value().clone())
+    }
+
+    /// All writer-side certificates this node holds. The periodic possession
+    /// challenger draws from this set because a certificate names exactly the
+    /// members that signed for custody — challenging a member that never
+    /// attested would score it down unfairly (`submit` stops distributing at
+    /// quorum).
+    pub fn list_certs(&self) -> Vec<AvailabilityCertificate> {
+        self.certs.iter().map(|c| c.value().clone()).collect()
+    }
+
+    fn challenge_key(id: &Hash) -> Vec<u8> {
+        [Self::CHALLENGE_PREFIX, hex::encode(id.as_bytes()).as_bytes()].concat()
+    }
+
+    fn availability_key(address: &Address) -> Vec<u8> {
+        [Self::AVAILABILITY_PREFIX, hex::encode(address.as_bytes()).as_bytes()].concat()
+    }
+
+    /// Persist a resolved possession-challenge record.
+    pub fn put_challenge(&self, record: ChallengeRecord) -> Result<()> {
+        let hex = hex::encode(record.id.as_bytes());
+        if let Some(storage) = &self.storage {
+            let value = serde_json::to_vec(&record)
+                .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+            storage
+                .write_batch_sync(vec![WriteOp::Put {
+                    cf: CF_DA_COMMITTEE.to_string(),
+                    key: Self::challenge_key(&record.id),
+                    value,
+                }])
+                .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+        }
+        self.challenges.insert(hex, record);
+        Ok(())
+    }
+
+    /// All resolved challenge records, most recently resolved first, capped at
+    /// `limit`.
+    pub fn list_challenges(&self, limit: usize) -> Vec<ChallengeRecord> {
+        let mut records: Vec<ChallengeRecord> =
+            self.challenges.iter().map(|r| r.value().clone()).collect();
+        records.sort_by_key(|r| std::cmp::Reverse(r.resolved_at_ms));
+        records.truncate(limit);
+        records
+    }
+
+    /// Apply a challenge outcome to the target's rolling availability score
+    /// (creating a fresh full-score entry on first challenge) and persist it.
+    pub fn apply_challenge_outcome(
+        &self,
+        address: &Address,
+        outcome: ChallengeOutcome,
+        now_ms: i64,
+    ) -> Result<AvailabilityScore> {
+        let hex = hex::encode(address.as_bytes());
+        let mut score = self
+            .availability
+            .get(&hex)
+            .map(|v| v.value().clone())
+            .unwrap_or_else(|| AvailabilityScore::fresh(*address));
+        score.apply(outcome, now_ms);
+        if let Some(storage) = &self.storage {
+            let value = serde_json::to_vec(&score)
+                .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+            storage
+                .write_batch_sync(vec![WriteOp::Put {
+                    cf: CF_DA_COMMITTEE.to_string(),
+                    key: Self::availability_key(address),
+                    value,
+                }])
+                .map_err(|e| DaCommitteeError::Store(e.to_string()))?;
+        }
+        self.availability.insert(hex, score.clone());
+        Ok(score)
+    }
+
+    /// A member's current availability score, if it has ever been challenged.
+    pub fn get_availability(&self, address: &Address) -> Option<AvailabilityScore> {
+        self.availability
+            .get(&hex::encode(address.as_bytes()))
+            .map(|v| v.value().clone())
+    }
+
+    /// All availability scores, lowest score first (the members most at risk).
+    pub fn list_availability(&self) -> Vec<AvailabilityScore> {
+        let mut scores: Vec<AvailabilityScore> =
+            self.availability.iter().map(|s| s.value().clone()).collect();
+        scores.sort_by_key(|s| s.score);
+        scores
+    }
+
+    /// Every blob commitment this node knows about — the union of held slivers
+    /// and writer-side certificates. Challenge targets are drawn from this set.
+    pub fn known_commitments(&self) -> Vec<Hash> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for entry in self.slivers.iter() {
+            let c = entry.value().commitment;
+            if seen.insert(c) {
+                out.push(c);
+            }
+        }
+        for entry in self.certs.iter() {
+            let c = entry.value().commitment;
+            if seen.insert(c) {
+                out.push(c);
+            }
+        }
+        out
     }
 }
 
@@ -460,11 +760,6 @@ impl DaCommitteeBackend {
         self
     }
 
-    /// Wrap as a `DaBackend` trait object for the node's backend registry.
-    pub fn arc(self) -> Arc<dyn DaBackend> {
-        Arc::new(self)
-    }
-
     fn now_ms() -> i64 {
         Timestamp::now().0
     }
@@ -498,6 +793,223 @@ impl DaCommitteeBackend {
         }
         let msg = attestation_message(commitment, &att.address);
         signatures::verify(&member.public_key, &msg, &att.signature).is_ok()
+    }
+
+    /// This node's custody store (RPC read surface: held slivers, certificates,
+    /// challenge records, availability scores).
+    pub fn custody_store(&self) -> Arc<DaCommitteeStore> {
+        self.store.clone()
+    }
+
+    /// The current committee snapshot (RPC read surface).
+    pub fn committee_members(&self) -> Vec<CommitteeMember> {
+        self.committee.members()
+    }
+
+    /// This node's committee address.
+    pub fn local_address(&self) -> Address {
+        self.local_address
+    }
+
+    /// Issue a possession challenge against committee member `target_index`
+    /// for `commitment`: send a fresh random nonce, verify the returned proof
+    /// (signature over the nonce-bound challenge message AND full sliver
+    /// verification against the commitment), score the member, and persist the
+    /// resolved record. Requires local shape metadata — a held certificate or
+    /// this node's own sliver — because sliver verification needs the encoding
+    /// shape and lengths.
+    pub async fn challenge_possession(
+        &self,
+        commitment: &Hash,
+        target_index: usize,
+    ) -> Result<ChallengeRecord> {
+        let members = self.committee.members();
+        let member = members
+            .iter()
+            .find(|m| m.index == target_index)
+            .ok_or(DaCommitteeError::NoSuchMember(target_index))?;
+
+        let (shape, blob_len, symbol_len) = if let Some(cert) = self.store.get_cert(commitment) {
+            (cert.shape, cert.blob_len, cert.symbol_len)
+        } else if let Some(s) = self.store.get_sliver(commitment) {
+            (s.shape, s.blob_len, s.symbol_len)
+        } else {
+            return Err(DaCommitteeError::Store(
+                "cannot challenge without local shape metadata (no certificate or sliver held for this commitment)"
+                    .into(),
+            ));
+        };
+
+        let mut nonce = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        let issued_at_ms = Self::now_ms();
+
+        let outcome = if member.address == self.local_address {
+            // Self-audit: verify our own custody directly (no wire hop, no
+            // signature — we would be signing to ourselves).
+            match self.store.get_sliver(commitment) {
+                Some(s)
+                    if s.sliver.node_index == member.index
+                        && redstuff::verify_sliver(
+                            &s.sliver, shape, blob_len, symbol_len, commitment,
+                        ) =>
+                {
+                    ChallengeOutcome::Passed
+                }
+                Some(_) => ChallengeOutcome::FailedBadProof,
+                None => ChallengeOutcome::FailedNotHeld,
+            }
+        } else {
+            let challenge_fut = self
+                .surface
+                .challenge_sliver(target_index, commitment, &nonce);
+            match tokio::time::timeout(self.per_member_timeout, challenge_fut).await {
+                Err(_) | Ok(Err(_)) => ChallengeOutcome::FailedNoResponse,
+                Ok(Ok(None)) => ChallengeOutcome::FailedNotHeld,
+                Ok(Ok(Some(proof))) => {
+                    let msg = challenge_message(commitment, &nonce, &proof.address);
+                    let sig_ok = proof.index == member.index
+                        && proof.address == member.address
+                        && signatures::verify(&member.public_key, &msg, &proof.signature)
+                            .is_ok();
+                    // The member must prove possession of ITS OWN assigned
+                    // sliver — a valid sliver fetched from a neighbor at
+                    // challenge time would carry the wrong node_index.
+                    let sliver_ok = sig_ok
+                        && proof.sliver.node_index == member.index
+                        && redstuff::verify_sliver(
+                            &proof.sliver,
+                            shape,
+                            blob_len,
+                            symbol_len,
+                            commitment,
+                        );
+                    if sliver_ok {
+                        ChallengeOutcome::Passed
+                    } else {
+                        ChallengeOutcome::FailedBadProof
+                    }
+                }
+            }
+        };
+
+        let resolved_at_ms = Self::now_ms();
+        let record = ChallengeRecord {
+            id: challenge_id(commitment, &nonce, &member.address),
+            commitment: *commitment,
+            target_index,
+            target_address: member.address,
+            nonce,
+            issued_at_ms,
+            resolved_at_ms,
+            outcome,
+        };
+        self.store.put_challenge(record.clone())?;
+        self.store
+            .apply_challenge_outcome(&member.address, outcome, resolved_at_ms)?;
+        Ok(record)
+    }
+
+    /// Pick a random held certificate and a random attesting member (other
+    /// than this node) and challenge it. Returns `Ok(None)` when there is
+    /// nothing to challenge — no certificates held, or no live committee
+    /// member matches an attester. Driven by [`spawn_possession_challenger`].
+    pub async fn challenge_random(&self) -> Result<Option<ChallengeRecord>> {
+        let certs = self.store.list_certs();
+        if certs.is_empty() {
+            return Ok(None);
+        }
+        let mut rng = rand::rngs::OsRng;
+        let cert = &certs[(rng.next_u64() as usize) % certs.len()];
+        let members = self.committee.members();
+        // Only members that actually signed for custody — and still sit at the
+        // same (index, address) slot in the live set — are fair targets.
+        let targets: Vec<&CommitteeMember> = members
+            .iter()
+            .filter(|m| m.address != self.local_address)
+            .filter(|m| {
+                cert.attestations
+                    .iter()
+                    .any(|a| a.index == m.index && a.address == m.address)
+            })
+            .collect();
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        let target = targets[(rng.next_u64() as usize) % targets.len()];
+        self.challenge_possession(&cert.commitment, target.index)
+            .await
+            .map(Some)
+    }
+}
+
+/// Handle to the background possession-challenge driver. Aborts the task on
+/// `stop()` or drop.
+pub struct PossessionChallenger {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl PossessionChallenger {
+    /// Stop the background challenger.
+    pub fn stop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for PossessionChallenger {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Spawn the periodic possession challenger: every `interval`, pick a random
+/// held certificate and a random attesting member and audit its custody via
+/// [`DaCommitteeBackend::challenge_random`]. Pass/fail is scored into the
+/// member's rolling [`AvailabilityScore`] and every resolution is persisted as
+/// a [`ChallengeRecord`].
+pub fn spawn_possession_challenger(
+    backend: Arc<DaCommitteeBackend>,
+    interval: Duration,
+) -> PossessionChallenger {
+    let handle = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick fires immediately; skip it so a freshly-started node
+        // does not challenge before its stores hydrate and peers connect.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match backend.challenge_random().await {
+                Ok(Some(record)) => match record.outcome {
+                    ChallengeOutcome::Passed => {
+                        tracing::debug!(
+                            commitment = %hex::encode(record.commitment.as_bytes()),
+                            target_index = record.target_index,
+                            "DA possession challenge passed"
+                        );
+                    }
+                    outcome => {
+                        tracing::warn!(
+                            commitment = %hex::encode(record.commitment.as_bytes()),
+                            target_index = record.target_index,
+                            ?outcome,
+                            "DA possession challenge failed"
+                        );
+                    }
+                },
+                Ok(None) => {
+                    tracing::trace!("DA possession challenger: nothing to challenge");
+                }
+                Err(e) => {
+                    tracing::warn!("DA possession challenge could not be issued: {e}");
+                }
+            }
+        }
+    });
+    PossessionChallenger {
+        handle: Some(handle),
     }
 }
 
@@ -887,6 +1399,12 @@ mod tests {
     use super::*;
     use tenzro_crypto::keys::KeyType;
 
+    /// Duplicates a keypair for tests. `KeyPair` deliberately does not impl
+    /// `Clone`; reconstruct from the (cloneable) secret key instead.
+    fn clone_kp(kp: &KeyPair) -> KeyPair {
+        KeyPair::from_secret_key(kp.secret_key().clone()).unwrap()
+    }
+
     /// A static committee view for tests: `n` freshly-generated Ed25519
     /// validators.
     struct StaticCommittee {
@@ -937,7 +1455,7 @@ mod tests {
             let mut addresses = Vec::with_capacity(n);
             for kp in &committee.keypairs {
                 stores.push(Arc::new(DaCommitteeStore::new()));
-                signers.push(Ed25519SignerImpl::new(kp.clone()).unwrap());
+                signers.push(Ed25519SignerImpl::new(clone_kp(kp)).unwrap());
                 addresses.push(committee_address(kp).unwrap());
             }
             Self {
@@ -995,6 +1513,88 @@ mod tests {
             }
             Ok(self.stores[to_index].get_sliver(commitment).map(|s| s.sliver))
         }
+
+        async fn challenge_sliver(
+            &self,
+            to_index: usize,
+            commitment: &Hash,
+            nonce: &[u8; 32],
+        ) -> Result<Option<PossessionProof>> {
+            if self.offline.contains(&to_index) {
+                return Err(DaCommitteeError::Transport("member offline".into()));
+            }
+            let Some(stored) = self.stores[to_index].get_sliver(commitment) else {
+                return Ok(None);
+            };
+            let address = self.addresses[to_index];
+            let msg = challenge_message(commitment, nonce, &address);
+            let signature = self.signers[to_index]
+                .sign(&msg)
+                .map_err(|e| DaCommitteeError::Signing(e.to_string()))?;
+            Ok(Some(PossessionProof {
+                index: to_index,
+                address,
+                signature,
+                sliver: stored.sliver,
+            }))
+        }
+    }
+
+    /// A surface that answers challenges with another member's sliver — a
+    /// Byzantine member trying to pass a custody audit with data it fetched
+    /// from a neighbor at challenge time.
+    struct WrongSliverSurface {
+        inner: MeshSurface,
+        /// The index whose sliver is substituted into every challenge reply.
+        substitute_from: usize,
+    }
+
+    #[async_trait]
+    impl DaCommitteeSurface for WrongSliverSurface {
+        async fn store_sliver(
+            &self,
+            to_index: usize,
+            commitment: &Hash,
+            shape: CommitteeShape,
+            blob_len: u64,
+            symbol_len: usize,
+            sliver: &SliverPair,
+        ) -> Result<MemberAttestation> {
+            self.inner
+                .store_sliver(to_index, commitment, shape, blob_len, symbol_len, sliver)
+                .await
+        }
+
+        async fn fetch_sliver(
+            &self,
+            to_index: usize,
+            commitment: &Hash,
+        ) -> Result<Option<SliverPair>> {
+            self.inner.fetch_sliver(to_index, commitment).await
+        }
+
+        async fn challenge_sliver(
+            &self,
+            to_index: usize,
+            commitment: &Hash,
+            nonce: &[u8; 32],
+        ) -> Result<Option<PossessionProof>> {
+            let Some(stolen) = self.inner.stores[self.substitute_from].get_sliver(commitment)
+            else {
+                return Ok(None);
+            };
+            let address = self.inner.addresses[to_index];
+            let msg = challenge_message(commitment, nonce, &address);
+            let signature = self.inner.signers[to_index]
+                .sign(&msg)
+                .map_err(|e| DaCommitteeError::Signing(e.to_string()))?;
+            Ok(Some(PossessionProof {
+                index: to_index,
+                address,
+                signature,
+                sliver: stolen.sliver,
+            }))
+        }
     }
 
     /// Build a backend whose local node is committee member 0.
@@ -1002,10 +1602,10 @@ mod tests {
         committee: &StaticCommittee,
         surface: Arc<dyn DaCommitteeSurface>,
     ) -> DaCommitteeBackend {
-        let local_kp = committee.keypairs[0].clone();
+        let local_kp = clone_kp(&committee.keypairs[0]);
         let view = Arc::new(StaticCommittee {
             members: committee.members.clone(),
-            keypairs: committee.keypairs.clone(),
+            keypairs: committee.keypairs.iter().map(clone_kp).collect(),
         });
         DaCommitteeBackend::new(
             local_kp,
@@ -1057,7 +1657,7 @@ mod tests {
 
         let payload = vec![1u8; 1000];
         let err = backend.submit(b"ns", &payload).await.unwrap_err();
-        assert!(err.to_string().contains("Generic"));
+        assert!(err.to_string().contains("availability quorum not reached"));
     }
 
     #[tokio::test]
@@ -1119,10 +1719,10 @@ mod tests {
         }
         // Preserve the writer's cert + local sliver by reusing its store.
         let fetch_backend = DaCommitteeBackend::new(
-            committee.keypairs[0].clone(),
+            clone_kp(&committee.keypairs[0]),
             Arc::new(StaticCommittee {
                 members: committee.members.clone(),
-                keypairs: committee.keypairs.clone(),
+                keypairs: committee.keypairs.iter().map(clone_kp).collect(),
             }),
             Arc::new(offline_surface),
             backend.store.clone(),
@@ -1153,10 +1753,10 @@ mod tests {
     #[test]
     fn attestation_message_is_domain_separated() {
         let c = Hash::new([9u8; 32]);
-        let a = Address::new([1u8; 20]);
+        let a = Address::new([1u8; 32]);
         let msg = attestation_message(&c, &a);
         assert!(msg.starts_with(ATTEST_TAG));
-        assert_eq!(msg.len(), ATTEST_TAG.len() + 32 + 20);
+        assert_eq!(msg.len(), ATTEST_TAG.len() + 32 + 32);
     }
 
     #[test]
@@ -1192,5 +1792,255 @@ mod tests {
         let store2 = DaCommitteeStore::with_storage(storage).unwrap();
         assert!(store2.get_sliver(&encoded.commitment).is_some());
         assert!(store2.get_cert(&encoded.commitment).is_some());
+    }
+
+    /// Rebuild a backend as committee member 0 over a different surface while
+    /// reusing an existing custody store (cert + local sliver survive).
+    fn backend_over(
+        committee: &StaticCommittee,
+        surface: Arc<dyn DaCommitteeSurface>,
+        store: Arc<DaCommitteeStore>,
+    ) -> DaCommitteeBackend {
+        DaCommitteeBackend::new(
+            clone_kp(&committee.keypairs[0]),
+            Arc::new(StaticCommittee {
+                members: committee.members.clone(),
+                keypairs: committee.keypairs.iter().map(clone_kp).collect(),
+            }),
+            surface,
+            store,
+        )
+        .unwrap()
+        .with_per_member_timeout(Duration::from_secs(2))
+    }
+
+    fn commitment_of(pointer: &DaPointer) -> Hash {
+        let mut b = [0u8; 32];
+        b.copy_from_slice(&pointer.locator);
+        Hash::new(b)
+    }
+
+    #[tokio::test]
+    async fn challenge_passes_for_holding_member() {
+        let committee = StaticCommittee::new(4); // f=1, quorum=3
+        let surface = Arc::new(MeshSurface::new(&committee, &[]));
+        let backend = backend_for(&committee, surface.clone());
+        let pointer = backend.submit(b"ns", &vec![0x42u8; 2048]).await.unwrap();
+        let commitment = commitment_of(&pointer);
+
+        // Pick a remote member that actually holds a sliver (submit stops
+        // distributing at quorum, so not every member necessarily does).
+        let holder = (1..4)
+            .find(|i| surface.stores[*i].get_sliver(&commitment).is_some())
+            .expect("quorum requires at least one remote holder");
+
+        let record = backend
+            .challenge_possession(&commitment, holder)
+            .await
+            .unwrap();
+        assert_eq!(record.outcome, ChallengeOutcome::Passed);
+        assert_eq!(record.target_index, holder);
+
+        let score = backend
+            .store
+            .get_availability(&committee.members[holder].address)
+            .unwrap();
+        assert_eq!(score.score, AVAILABILITY_SCORE_MAX);
+        assert_eq!(score.passes, 1);
+        assert_eq!(score.failures, 0);
+        assert_eq!(score.last_outcome, ChallengeOutcome::Passed);
+    }
+
+    #[tokio::test]
+    async fn challenge_self_audit_passes_for_local_member() {
+        let committee = StaticCommittee::new(4);
+        let surface = Arc::new(MeshSurface::new(&committee, &[]));
+        let backend = backend_for(&committee, surface);
+        let pointer = backend.submit(b"ns", &vec![0x21u8; 1024]).await.unwrap();
+        let commitment = commitment_of(&pointer);
+
+        // Member 0 is this node — the writer stored its own sliver locally.
+        let record = backend.challenge_possession(&commitment, 0).await.unwrap();
+        assert_eq!(record.outcome, ChallengeOutcome::Passed);
+    }
+
+    #[tokio::test]
+    async fn challenge_not_held_and_no_response() {
+        let committee = StaticCommittee::new(4);
+        let submit_surface = Arc::new(MeshSurface::new(&committee, &[]));
+        let backend = backend_for(&committee, submit_surface);
+        let pointer = backend.submit(b"ns", &vec![0x11u8; 1500]).await.unwrap();
+        let commitment = commitment_of(&pointer);
+
+        // Members lost their slivers: fresh empty mesh, same custody store.
+        let empty = Arc::new(MeshSurface::new(&committee, &[]));
+        let b2 = backend_over(&committee, empty, backend.store.clone());
+        let rec = b2.challenge_possession(&commitment, 1).await.unwrap();
+        assert_eq!(rec.outcome, ChallengeOutcome::FailedNotHeld);
+        let addr1 = committee.members[1].address;
+        assert_eq!(
+            b2.store.get_availability(&addr1).unwrap().score,
+            AVAILABILITY_SCORE_MAX - CHALLENGE_FAIL_DELTA
+        );
+
+        // Member 2 offline: transport error maps to FailedNoResponse.
+        let offline = Arc::new(MeshSurface::new(&committee, &[2]));
+        let b3 = backend_over(&committee, offline, backend.store.clone());
+        let rec = b3.challenge_possession(&commitment, 2).await.unwrap();
+        assert_eq!(rec.outcome, ChallengeOutcome::FailedNoResponse);
+    }
+
+    #[tokio::test]
+    async fn challenge_rejects_neighbor_sliver_as_bad_proof() {
+        let committee = StaticCommittee::new(4);
+        // Member answers every challenge with member 0's (the writer's)
+        // sliver: valid against the commitment, valid signature, but the
+        // wrong node_index — custody of someone else's data is not custody.
+        let surface = Arc::new(WrongSliverSurface {
+            inner: MeshSurface::new(&committee, &[]),
+            substitute_from: 0,
+        });
+        let backend = backend_for(&committee, surface.clone());
+        let pointer = backend.submit(b"ns", &vec![0x77u8; 3000]).await.unwrap();
+        let commitment = commitment_of(&pointer);
+        // Seed the substitute store: WrongSliverSurface steals from member 0's
+        // mesh slot, which submit never fills (the writer stores locally). Copy
+        // the writer's sliver in.
+        surface.inner.stores[0]
+            .put_sliver(backend.store.get_sliver(&commitment).unwrap())
+            .unwrap();
+
+        let record = backend.challenge_possession(&commitment, 1).await.unwrap();
+        assert_eq!(record.outcome, ChallengeOutcome::FailedBadProof);
+        let score = backend
+            .store
+            .get_availability(&committee.members[1].address)
+            .unwrap();
+        assert_eq!(score.score, AVAILABILITY_SCORE_MAX - CHALLENGE_BAD_PROOF_DELTA);
+    }
+
+    #[tokio::test]
+    async fn challenge_random_targets_an_attester() {
+        let committee = StaticCommittee::new(4);
+        let surface = Arc::new(MeshSurface::new(&committee, &[]));
+        let backend = backend_for(&committee, surface);
+        // Nothing held yet → nothing to challenge.
+        assert!(backend.challenge_random().await.unwrap().is_none());
+
+        let pointer = backend.submit(b"ns", &vec![0x99u8; 2500]).await.unwrap();
+        let commitment = commitment_of(&pointer);
+        let record = backend
+            .challenge_random()
+            .await
+            .unwrap()
+            .expect("a certificate is held, so a target must exist");
+        assert_eq!(record.commitment, commitment);
+        // Fair targeting: only attesters are challenged, and attesters stored
+        // + verified their slivers, so an honest mesh always passes.
+        assert_eq!(record.outcome, ChallengeOutcome::Passed);
+        assert_ne!(record.target_address, backend.local_address());
+        let cert = backend.store.get_cert(&commitment).unwrap();
+        assert!(cert
+            .attestations
+            .iter()
+            .any(|a| a.index == record.target_index && a.address == record.target_address));
+    }
+
+    #[tokio::test]
+    async fn challenge_requires_member_and_shape_metadata() {
+        let committee = StaticCommittee::new(4);
+        let surface = Arc::new(MeshSurface::new(&committee, &[]));
+        let backend = backend_for(&committee, surface);
+
+        let err = backend
+            .challenge_possession(&Hash::new([0xEEu8; 32]), 99)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DaCommitteeError::NoSuchMember(99)));
+
+        let err = backend
+            .challenge_possession(&Hash::new([0xEEu8; 32]), 1)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("shape metadata"));
+    }
+
+    #[test]
+    fn availability_score_asymmetry_floor_and_ceiling() {
+        let mut s = AvailabilityScore::fresh(Address::new([1u8; 32]));
+        assert_eq!(s.score, AVAILABILITY_SCORE_MAX);
+        s.apply(ChallengeOutcome::FailedNotHeld, 10);
+        assert_eq!(s.score, AVAILABILITY_SCORE_MAX - CHALLENGE_FAIL_DELTA);
+        s.apply(ChallengeOutcome::FailedBadProof, 11);
+        assert_eq!(
+            s.score,
+            AVAILABILITY_SCORE_MAX - CHALLENGE_FAIL_DELTA - CHALLENGE_BAD_PROOF_DELTA
+        );
+        s.apply(ChallengeOutcome::Passed, 12);
+        assert_eq!(
+            s.score,
+            AVAILABILITY_SCORE_MAX - CHALLENGE_FAIL_DELTA - CHALLENGE_BAD_PROOF_DELTA
+                + CHALLENGE_PASS_DELTA
+        );
+        assert_eq!(s.passes, 1);
+        assert_eq!(s.failures, 2);
+        assert_eq!(s.last_challenge_ms, 12);
+
+        // Ceiling: passes never push the score above the max.
+        for i in 0..(AVAILABILITY_SCORE_MAX as i64) {
+            s.apply(ChallengeOutcome::Passed, 13 + i);
+        }
+        assert_eq!(s.score, AVAILABILITY_SCORE_MAX);
+        // Floor: repeated bad proofs saturate at zero.
+        for i in 0..((AVAILABILITY_SCORE_MAX / CHALLENGE_BAD_PROOF_DELTA) as i64 + 2) {
+            s.apply(ChallengeOutcome::FailedBadProof, 5000 + i);
+        }
+        assert_eq!(s.score, 0);
+    }
+
+    #[test]
+    fn challenge_message_is_domain_separated() {
+        let c = Hash::new([9u8; 32]);
+        let nonce = [3u8; 32];
+        let a = Address::new([1u8; 32]);
+        let msg = challenge_message(&c, &nonce, &a);
+        assert!(msg.starts_with(CHALLENGE_TAG));
+        assert_eq!(msg.len(), CHALLENGE_TAG.len() + 32 + 32 + 32);
+        // Distinct domain from the attestation message.
+        assert!(!attestation_message(&c, &a).starts_with(CHALLENGE_TAG));
+        // Nonce is bound: a different nonce yields a different message.
+        assert_ne!(msg, challenge_message(&c, &[4u8; 32], &a));
+    }
+
+    #[test]
+    fn challenges_and_scores_persist_and_hydrate() {
+        use tenzro_storage::MemoryStore;
+        let storage: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+        let addr = Address::new([7u8; 32]);
+        let commitment = Hash::new([1u8; 32]);
+        let nonce = [2u8; 32];
+        let record = ChallengeRecord {
+            id: challenge_id(&commitment, &nonce, &addr),
+            commitment,
+            target_index: 3,
+            target_address: addr,
+            nonce,
+            issued_at_ms: 5,
+            resolved_at_ms: 6,
+            outcome: ChallengeOutcome::FailedNotHeld,
+        };
+        {
+            let store = DaCommitteeStore::with_storage(storage.clone()).unwrap();
+            store.put_challenge(record.clone()).unwrap();
+            store
+                .apply_challenge_outcome(&addr, ChallengeOutcome::FailedNotHeld, 6)
+                .unwrap();
+        }
+        let store2 = DaCommitteeStore::with_storage(storage).unwrap();
+        assert_eq!(store2.list_challenges(10), vec![record]);
+        let score = store2.get_availability(&addr).unwrap();
+        assert_eq!(score.score, AVAILABILITY_SCORE_MAX - CHALLENGE_FAIL_DELTA);
+        assert_eq!(score.failures, 1);
+        assert_eq!(store2.list_availability().len(), 1);
     }
 }

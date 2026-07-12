@@ -12,7 +12,7 @@ The Tenzro MCP server is an installable Python package that exposes blockchain a
 
 The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **414 tools** (Tenzro Ledger + multi-modal AI + AgentBond/insurance + agent memory) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
 
-**Testnet endpoint:** `https://mcp.tenzro.network/mcp`
+**Testnet endpoint:** `https://mcp.tenzro.xyz/mcp`
 **Local:** `http://localhost:3001/mcp`
 
 ## Installation
@@ -41,7 +41,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "tenzro": {
-      "url": "https://mcp.tenzro.network/mcp"
+      "url": "https://mcp.tenzro.xyz/mcp"
     }
   }
 }
@@ -70,7 +70,7 @@ Add to your project's `.mcp.json`:
   "mcpServers": {
     "tenzro": {
       "type": "url",
-      "url": "https://mcp.tenzro.network/mcp"
+      "url": "https://mcp.tenzro.xyz/mcp"
     }
   }
 }
@@ -94,7 +94,7 @@ Add to your project's `.mcp.json`:
 **Option A: Connect to live testnet**
 - **Name:** tenzro
 - **Transport:** Streamable HTTP
-- **URL:** `https://mcp.tenzro.network/mcp`
+- **URL:** `https://mcp.tenzro.xyz/mcp`
 
 **Option B: Run locally**
 - **Name:** tenzro
@@ -567,7 +567,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const transport = new StreamableHTTPClientTransport(
-  new URL("https://mcp.tenzro.network/mcp")
+  new URL("https://mcp.tenzro.xyz/mcp")
 );
 const client = new Client({ name: "my-app", version: "1.0.0" }, {});
 await client.connect(transport);
@@ -600,7 +600,7 @@ const nft = await client.callTool({
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-async with streamablehttp_client("https://mcp.tenzro.network/mcp") as (read, write):
+async with streamablehttp_client("https://mcp.tenzro.xyz/mcp") as (read, write):
     async with ClientSession(read, write) as session:
         await session.initialize()
 
@@ -624,19 +624,19 @@ async with streamablehttp_client("https://mcp.tenzro.network/mcp") as (read, wri
 
 ```bash
 # Initialize
-curl -s -X POST https://mcp.tenzro.network/mcp \
+curl -s -X POST https://mcp.tenzro.xyz/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
 
 # List tools
-curl -s -X POST https://mcp.tenzro.network/mcp \
+curl -s -X POST https://mcp.tenzro.xyz/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 
 # Call a tool
-curl -s -X POST https://mcp.tenzro.network/mcp \
+curl -s -X POST https://mcp.tenzro.xyz/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_node_status","arguments":{}}}'
@@ -669,8 +669,8 @@ curl -s -X POST http://localhost:3001/mcp \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TENZRO_RPC_URL` | `https://rpc.tenzro.network` | Tenzro JSON-RPC endpoint |
-| `TENZRO_API_URL` | `https://api.tenzro.network` | Tenzro Web API endpoint |
+| `TENZRO_RPC_URL` | `https://rpc.tenzro.xyz` | Tenzro JSON-RPC endpoint |
+| `TENZRO_API_URL` | `https://api.tenzro.xyz` | Tenzro Web API endpoint |
 
 Command-line options:
 

@@ -98,6 +98,14 @@ pub const SELECTOR_POST_AGENT_BOND: [u8; 4] = [0x01, 0x00, 0x00, 0x20];
 pub const SELECTOR_INCREASE_AGENT_BOND: [u8; 4] = [0x01, 0x00, 0x00, 0x21];
 pub const SELECTOR_WITHDRAW_AGENT_BOND: [u8; 4] = [0x01, 0x00, 0x00, 0x22];
 pub const SELECTOR_PAY_INSURANCE_CLAIM: [u8; 4] = [0x01, 0x00, 0x00, 0x23];
+// x402 consensus-mediated settlement selector. Authorized by on-chain state,
+// not by a payer signature: the node's system key signs the dispatching tx
+// (like insurance-claim payout), the VM moves payer→payee balance, and a
+// per-payment_id marker under `SYSTEM_ADDRESS` makes the settlement
+// idempotent so a replayed dispatch cannot double-debit the payer. Exposed
+// `pub` so the node-side encoder in `convert_transaction` can synthesise the
+// dispatch payload from `SignedTransaction::X402Settle`.
+pub const SELECTOR_X402_SETTLE: [u8; 4] = [0x01, 0x00, 0x00, 0x24];
 // Dynamic validator-set selectors. Permissionless join / voluntary exit /
 // metadata update. Authorization, churn caps, and state-machine transitions
 // live in `tenzro_token::ValidatorRegistry` (the on-chain source of truth);
@@ -157,6 +165,11 @@ const GAS_BOND_WITHDRAW: u64 = 60_000;
 // bond ops because they cross from singleton pool vault into a user wallet
 // and persist a per-claim marker to make double-pay impossible.
 const GAS_PAY_INSURANCE_CLAIM: u64 = 90_000;
+// x402 settlement: one payer→payee balance move + per-payment_id replay
+// marker. Priced at the transfer-plus-marker tier — heavier than a bare
+// Transfer (writes a storage marker + emits an audit Log) but lighter than
+// escrow release (no vault indirection, no proof verification).
+const GAS_X402_SETTLE: u64 = 40_000;
 // Dynamic validator-set gas costs. Register is the most expensive (writes
 // 2 KiB+ of PQ key material to the registry index); update is cheap; exit
 // is mid-tier (state-machine transition + index update).
@@ -2184,6 +2197,151 @@ impl NativeExecutor {
         ))
     }
 
+    /// Handle an `X402Settle` native transaction.
+    ///
+    /// Moves `amount` from `payer` to `payee` on-chain, gated by a
+    /// per-`payment_id` replay marker under `SYSTEM_ADDRESS`. The dispatching
+    /// tx is signed by the node's system key (not the payer), so authorization
+    /// derives from the settlement having been consensus-ordered by the node's
+    /// `TnzoSettlementCallback` — the same privileged-dispatch model used by
+    /// insurance-claim payouts. The system key pays gas.
+    async fn execute_x402_settle(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_X402_SETTLE)?;
+
+        let payload: X402SettlePayload = serde_json::from_slice(&tx.data[4..])
+            .map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid X402Settle payload: {}", e))
+            })?;
+
+        if payload.payment_id.is_empty() || payload.payment_id.len() > 128 {
+            return Err(VmError::InvalidTransaction(
+                "payment_id must be 1..=128 chars".to_string(),
+            ));
+        }
+        if payload.amount == 0 {
+            return Err(VmError::InvalidTransaction(
+                "X402Settle amount must be > 0".to_string(),
+            ));
+        }
+        if payload.payer == payload.payee {
+            return Err(VmError::InvalidTransaction(
+                "X402Settle payer and payee must differ".to_string(),
+            ));
+        }
+
+        // Reject replay: marker exists → this payment_id already settled.
+        let marker_key = x402_settle_storage_key(&payload.payment_id);
+        if state
+            .get_storage(&SYSTEM_ADDRESS, marker_key.as_bytes())
+            .is_some()
+        {
+            return Err(VmError::InvalidTransaction(format!(
+                "x402 payment {} already settled",
+                payload.payment_id
+            )));
+        }
+
+        // System key pays gas.
+        let gas_cost = tx.gas_price.saturating_mul(GAS_X402_SETTLE as u128);
+        let caller_balance = state.get_balance(&tx.from);
+        if caller_balance < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: caller_balance,
+            });
+        }
+        let new_caller_balance = caller_balance.saturating_sub(gas_cost);
+        state.set_balance(&tx.from, new_caller_balance);
+
+        // Debit payer.
+        let payer_bytes = payload.payer.as_bytes().to_vec();
+        let old_payer_balance = state.get_balance(&payer_bytes);
+        if old_payer_balance < payload.amount {
+            return Err(VmError::InsufficientBalance {
+                required: payload.amount,
+                available: old_payer_balance,
+            });
+        }
+        let new_payer_balance = old_payer_balance.saturating_sub(payload.amount);
+        state.set_balance(&payer_bytes, new_payer_balance);
+
+        // Credit payee.
+        let payee_bytes = payload.payee.as_bytes().to_vec();
+        let old_payee_balance = state.get_balance(&payee_bytes);
+        let new_payee_balance = old_payee_balance
+            .checked_add(payload.amount)
+            .ok_or_else(|| VmError::Internal("x402 payee balance overflow".to_string()))?;
+        state.set_balance(&payee_bytes, new_payee_balance);
+
+        // Persist the per-payment_id "settled" marker (body: LE amount, for audit).
+        let marker_blob = payload.amount.to_le_bytes().to_vec();
+        state.set_storage(&SYSTEM_ADDRESS, marker_key.as_bytes(), marker_blob.clone());
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(caller_balance.to_le_bytes().to_vec()),
+                Some(new_caller_balance.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                payer_bytes.clone(),
+                b"balance".to_vec(),
+                Some(old_payer_balance.to_le_bytes().to_vec()),
+                Some(new_payer_balance.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                payee_bytes.clone(),
+                b"balance".to_vec(),
+                Some(old_payee_balance.to_le_bytes().to_vec()),
+                Some(new_payee_balance.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                marker_key.as_bytes().to_vec(),
+                None,
+                Some(marker_blob),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(old_nonce.to_le_bytes().to_vec()),
+                Some((old_nonce + 1).to_le_bytes().to_vec()),
+            ),
+        ];
+
+        // Log layout (parseable by node-side scan): `payment_id_len_le(4) ||
+        //  payment_id_bytes || payer(32) || payee(32) || amount_le(16)`.
+        let mut log_data =
+            Vec::with_capacity(4 + payload.payment_id.len() + 32 + 32 + 16);
+        log_data.extend_from_slice(&(payload.payment_id.len() as u32).to_le_bytes());
+        log_data.extend_from_slice(payload.payment_id.as_bytes());
+        log_data.extend_from_slice(payload.payer.as_bytes());
+        log_data.extend_from_slice(payload.payee.as_bytes());
+        log_data.extend_from_slice(&payload.amount.to_le_bytes());
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"X402Settled".to_vec()],
+            log_data,
+        );
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            payload.payment_id.as_bytes().to_vec(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
     // ---- Dynamic validator-set handlers ----------------------------------
     //
     // These three handlers form the on-chain control surface for the
@@ -3020,6 +3178,25 @@ struct PayInsuranceClaimPayload {
     amount: u128,
 }
 
+/// JSON payload decoded from `tx.data[4..]` for `X402Settle`.
+///
+/// `payer` / `payee` are the settling parties' native addresses.
+/// `payment_id` is the x402 payment identifier — the idempotency key. The VM
+/// records a per-`payment_id` marker under `SYSTEM_ADDRESS` on first success
+/// so a replayed dispatch is rejected before it can debit the payer twice.
+///
+/// The `from` of the dispatching tx is the node's system key, NOT the payer —
+/// authorization derives from the on-chain settlement being consensus-ordered
+/// via the node's `TnzoSettlementCallback`, exactly as insurance-claim payouts
+/// are authorized by governance rather than the claimant's signature.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct X402SettlePayload {
+    payer: Address,
+    payee: Address,
+    amount: u128,
+    payment_id: String,
+}
+
 /// Storage key for an escrow record under `SYSTEM_ADDRESS`: `escrow:<hex_id>`.
 fn escrow_storage_key(escrow_id_hex: &str) -> String {
     format!("escrow:{}", escrow_id_hex)
@@ -3132,6 +3309,13 @@ fn derive_insurance_pool_address() -> Address {
 /// are rejected even if the off-chain BondManager state allowed them.
 fn paid_claim_storage_key(claim_id_hex: &str) -> String {
     format!("paid_claim:{}", claim_id_hex)
+}
+
+/// Storage key for the per-payment_id "already settled" guard. Set the first
+/// time `X402Settle` succeeds for a given payment_id; subsequent dispatches
+/// are rejected so a replayed settlement cannot debit the payer twice.
+fn x402_settle_storage_key(payment_id: &str) -> String {
+    format!("x402_settle:{}", payment_id)
 }
 
 /// Slash math — must match `tenzro_token::bond::BondManager::slash`
@@ -3382,6 +3566,9 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_PAY_INSURANCE_CLAIM => {
                 self.execute_pay_insurance_claim(tx, state, &mut gas_meter).await
             }
+            SELECTOR_X402_SETTLE => {
+                self.execute_x402_settle(tx, state, &mut gas_meter).await
+            }
             SELECTOR_VALIDATOR_REGISTER => {
                 self.execute_validator_register(tx, state, &mut gas_meter).await
             }
@@ -3481,6 +3668,7 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_INCREASE_AGENT_BOND => GAS_BOND_INCREASE,
             SELECTOR_WITHDRAW_AGENT_BOND => GAS_BOND_WITHDRAW,
             SELECTOR_PAY_INSURANCE_CLAIM => GAS_PAY_INSURANCE_CLAIM,
+            SELECTOR_X402_SETTLE => GAS_X402_SETTLE,
             SELECTOR_VALIDATOR_REGISTER => GAS_VALIDATOR_REGISTER,
             SELECTOR_VALIDATOR_EXIT => GAS_VALIDATOR_EXIT,
             SELECTOR_VALIDATOR_UPDATE_METADATA => GAS_VALIDATOR_UPDATE_METADATA,

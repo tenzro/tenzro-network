@@ -34,7 +34,7 @@ pub enum AuthAction {
 #[derive(Debug, Parser)]
 pub struct RefreshArgs {
     /// RPC endpoint
-    #[arg(long, default_value = "https://rpc.tenzro.network")]
+    #[arg(long, default_value = "https://rpc.tenzro.xyz")]
     pub rpc: String,
 
     /// Refresh token. If omitted, reads from `~/.tenzro/config.json`.
@@ -50,7 +50,7 @@ pub struct RefreshArgs {
 #[derive(Debug, Parser)]
 pub struct LinkWalletArgs {
     /// RPC endpoint
-    #[arg(long, default_value = "https://rpc.tenzro.network")]
+    #[arg(long, default_value = "https://rpc.tenzro.xyz")]
     pub rpc: String,
 
     /// Wallet ID to link (the `wallet_id` returned by `tenzro_createWallet`).

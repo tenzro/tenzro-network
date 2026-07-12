@@ -16,6 +16,7 @@ from tenzro_trainer.types import (
     OuterGradient,
     PipelineAssignment,
     PipelineConfig,
+    RlConfig,
     Signature,
     SyncStrategy,
     TrainingAttestation,
@@ -26,6 +27,8 @@ from tenzro_trainer.types import (
     address_to_json,
     hash_from_json,
     hash_to_json,
+    objective_from_json,
+    objective_to_json,
 )
 
 
@@ -221,3 +224,88 @@ def test_training_task_spec_roundtrip():
     assert spec2.sync_strategy == SyncStrategy.full()
     assert spec2.quantization == GradientQuantization.none()
     assert spec2.pipeline is None
+    # Supervised default: absent / "Supervised" wire values both map to None.
+    assert j["objective"] == "Supervised"
+    assert spec2.objective is None
+    legacy = dict(spec.to_json())
+    del legacy["objective"]
+    assert TrainingTaskSpec.from_json(legacy).objective is None
+
+
+def test_training_objective_wire_format():
+    # serde externally-tagged encoding of TrainingObjective, locked
+    # against the Rust `tenzro_types::training::TrainingObjective` shape.
+    assert objective_to_json(None) == "Supervised"
+    assert objective_from_json(None) is None
+    assert objective_from_json("Supervised") is None
+    rl = RlConfig(
+        group_size=8,
+        kl_coeff=0.05,
+        clip_epsilon=0.2,
+        max_new_tokens=256,
+        temperature=1.0,
+        reward_ref="py:my_rewards.math:score_completion",
+    )
+    j = objective_to_json(rl)
+    assert j == {
+        "RlPostTraining": {
+            "group_size": 8,
+            "kl_coeff": 0.05,
+            "clip_epsilon": 0.2,
+            "max_new_tokens": 256,
+            "temperature": 1.0,
+            "reward_ref": "py:my_rewards.math:score_completion",
+        }
+    }
+    assert objective_from_json(json.loads(json.dumps(j))) == rl
+    try:
+        objective_from_json({"SomethingElse": {}})
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_training_task_spec_rl_objective_roundtrip():
+    rl = RlConfig(
+        group_size=4,
+        kl_coeff=0.1,
+        clip_epsilon=0.2,
+        max_new_tokens=64,
+        temperature=0.7,
+        reward_ref="py:rewards:score",
+    )
+    spec = TrainingTaskSpec(
+        task_id="task-rl",
+        sponsor_did="did:tenzro:human:sponsor",
+        sponsor_address=bytes([3] * 32),
+        architecture=ArchitectureSpec(
+            family="qwen3",
+            param_count=600_000_000,
+            modality=TrainingModality.LANGUAGE,
+            fragment_count=4,
+            dtype="bf16",
+            metadata={},
+        ),
+        tier=TrainingTier.OPEN,
+        aggregation=AggregationRule.mean(),
+        clip_l2_norm=1.0,
+        sync_strategy=SyncStrategy.full(),
+        quantization=GradientQuantization.none(),
+        delayed_apply=False,
+        pipeline=None,
+        trainer_count=2,
+        quorum=2,
+        inner_steps=8,
+        max_rounds=2,
+        grace_window_ms=30_000,
+        reward_pool=10**18,
+        dataset_ref="tenzro://shard/prompts",
+        dataset_hash=bytes([5] * 32),
+        min_throughput=None,
+        created_at=1_745_539_200_000,
+        metadata={},
+        objective=rl,
+    )
+    j = json.loads(json.dumps(spec.to_json()))
+    assert j["objective"] == {"RlPostTraining": rl.to_json()}
+    assert TrainingTaskSpec.from_json(j) == spec

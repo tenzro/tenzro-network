@@ -30,6 +30,9 @@ pub enum TrainCommand {
     /// Ask the syncer whether the current round should finalize, wait, or
     /// advance on a no-endorsement certificate given the DiLoCo grace window
     DecideRound(TrainDecideRoundCmd),
+    /// Challenge a buffered gradient's activation commitment against a
+    /// re-executed one (Open-tier fraud-proof flow)
+    ChallengeCommitment(TrainChallengeCommitmentCmd),
     /// Install a sponsor's sealed-shard manifest for a Confidential-tier run
     InstallSealedManifest(TrainInstallSealedManifestCmd),
     /// Look up the installed sealed-shard manifest for a task
@@ -49,6 +52,7 @@ impl TrainCommand {
             Self::SubmitGradient(c) => c.execute().await,
             Self::FinalizeRound(c) => c.execute().await,
             Self::DecideRound(c) => c.execute().await,
+            Self::ChallengeCommitment(c) => c.execute().await,
             Self::InstallSealedManifest(c) => c.execute().await,
             Self::GetSealedManifest(c) => c.execute().await,
             Self::DaemonStatus(c) => c.execute().await,
@@ -252,6 +256,98 @@ impl TrainDecideRoundCmd {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Challenge commitment
+// ---------------------------------------------------------------------------
+
+/// Challenge a buffered gradient's TOPLOC-class activation commitment. The
+/// challenger re-executes the trainer's inner loop from the same checkpoint
+/// and shard (via the Python reference trainer), writes the recomputed
+/// `ActivationCommitment` to a JSON file, and submits it here. A failed
+/// comparison evicts the trainer and drops the buffered gradient.
+#[derive(Debug, Parser)]
+pub struct TrainChallengeCommitmentCmd {
+    /// Task ID of the run
+    #[arg(long)]
+    task_id: String,
+
+    /// Round of the buffered gradient
+    #[arg(long)]
+    round: u32,
+
+    /// Fragment index of the buffered gradient
+    #[arg(long)]
+    fragment: u32,
+
+    /// DID of the trainer being challenged
+    #[arg(long)]
+    trainer_did: String,
+
+    /// Path to a JSON file containing the recomputed `ActivationCommitment`
+    #[arg(long)]
+    recomputed: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl TrainChallengeCommitmentCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let recomputed_text = std::fs::read_to_string(&self.recomputed)
+            .map_err(|e| anyhow!("read recomputed file '{}': {}", self.recomputed, e))?;
+        let recomputed: serde_json::Value = serde_json::from_str(&recomputed_text)
+            .map_err(|e| anyhow!("parse recomputed JSON: {}", e))?;
+
+        output::print_header("Challenge Activation Commitment");
+        let spinner = output::create_spinner("Submitting...");
+        let rpc = RpcClient::new(&self.rpc);
+
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_training_challengeCommitment",
+                serde_json::json!({
+                    "task_id": self.task_id,
+                    "round": self.round,
+                    "fragment": self.fragment,
+                    "trainer_did": self.trainer_did,
+                    "recomputed": recomputed,
+                }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        let passed = result
+            .get("passed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if passed {
+            output::print_success("Challenge failed to prove fraud — commitment verified.");
+        } else {
+            output::print_success("Challenge succeeded — trainer evicted.");
+        }
+        output::print_field("Passed", &passed.to_string());
+        if let Some(v) = result.get("shape_match").and_then(|v| v.as_bool()) {
+            output::print_field("Shape match", &v.to_string());
+        }
+        if let Some(v) = result.get("mean_loss_rel_delta").and_then(|v| v.as_f64()) {
+            output::print_field("Mean loss rel delta", &format!("{v:.6}"));
+        }
+        if let Some(v) = result.get("probe_index_overlap").and_then(|v| v.as_f64()) {
+            output::print_field("Probe index overlap", &format!("{v:.4}"));
+        }
+        if let Some(v) = result.get("mean_probe_rel_delta").and_then(|v| v.as_f64()) {
+            output::print_field("Mean probe rel delta", &format!("{v:.6}"));
+        }
+        if let Some(v) = result.get("evicted").and_then(|v| v.as_bool()) {
+            output::print_field("Evicted", &v.to_string());
         }
         Ok(())
     }

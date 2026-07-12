@@ -1,7 +1,7 @@
 # Quantum-Resistance Audit — Tenzro Network
 
 **Audit date:** 2026-04-27
-**Audit method:** Repository-wide static analysis (7 parallel auditors) + live testnet TLS probe (`openssl s_client -trace` against `rpc.tenzro.network`, `api.tenzro.network`, `mcp.tenzro.network`, `a2a.tenzro.network`).
+**Audit method:** Repository-wide static analysis (7 parallel auditors) + live testnet TLS probe (`openssl s_client -trace` against `rpc.tenzro.xyz`, `api.tenzro.xyz`, `mcp.tenzro.xyz`, `a2a.tenzro.xyz`).
 **Target migration:** Hybrid Ed25519 + ML-DSA-65 (FIPS 204) signing; hybrid X25519 + ML-KEM-768 (FIPS 203) key exchange; pure-PQ ZK as a separate follow-up; forward-compatible wire format.
 **Threat models considered:** Shor's algorithm (breaks ECDLP — affects Ed25519, Secp256k1, BLS12-381, X25519); Grover's algorithm (halves symmetric/hash effective security); HNDL (Harvest Now Decrypt Later — relevant to recorded TLS sessions and any encrypted-at-rest material whose plaintext stays sensitive past CRQC).
 
@@ -17,7 +17,7 @@ Tenzro Network's cryptographic surface separates cleanly into three categories:
 | **DUAL_END** | W3C DID Documents, Verifiable Credentials | Add second `verificationMethod` entry; current spec already supports it |
 | **EXTERNAL_LOCKED** | Secp256k1 EVM transaction signing, ERC-8004 Ethereum mirror, Wormhole VAA, LayerZero DVN, Chainlink CCIP DON, EVM `ecrecover` precompile, Solana Ed25519 | Cannot migrate unilaterally; document residual risk and accept |
 
-**One pleasant surprise from the live probe:** the public TLS pipe (everything behind Caddy at `*.tenzro.network`) is **already negotiating X25519MLKEM768** as of 2026-04-27. ServerHello carries `key_share: NamedGroup: X25519MLKEM768 (4588)` and `signature_algorithms` advertises `mldsa65 (0x0905)`. Caddy 2.11 + Go 1.24 `crypto/tls` does this transparently. No Caddyfile change is required. Public client→RPC traffic is therefore not on the critical path for this migration; the work is internal.
+**One pleasant surprise from the live probe:** the public TLS pipe (everything behind Caddy at `*.tenzro.xyz`) is **already negotiating X25519MLKEM768** as of 2026-04-27. ServerHello carries `key_share: NamedGroup: X25519MLKEM768 (4588)` and `signature_algorithms` advertises `mldsa65 (0x0905)`. Caddy 2.11 + Go 1.24 `crypto/tls` does this transparently. No Caddyfile change is required. Public client→RPC traffic is therefore not on the critical path for this migration; the work is internal.
 
 **The migration is consensus-breaking.** `Transaction::hash()` preimage (in `crates/tenzro-types/src/transaction.rs:75-95`) feeds the consensus layer; adding `pq_signature` and `pq_public_key` fields changes the hash and invalidates pre-PQ blocks. Tenzro is pre-alpha with no live users, so this round will execute as a flag-day cutover at the next testnet wipe. No dual-codepath, no backwards-compat shim.
 
@@ -88,7 +88,7 @@ These must be refactored to `Vec<u8>` before adding ML-DSA-65:
 | All axum servers HTTP-only | `crates/tenzro-node/src/{rpc.rs,web/server.rs,mcp/server.rs,a2a/server.rs}` | TLS terminated by Caddy; not Tenzro's concern |
 | X25519 wallet envelope encryption (NON_TRANSPORT) | `crates/tenzro-crypto/src/encryption.rs:117-162,193,157` | Defer to follow-up; not consensus-critical |
 
-**Live probe confirmation (2026-04-27):** Caddy `2-alpine` (resolves ≥2.11.x) negotiates X25519MLKEM768 by default. ServerHello on all four `*.tenzro.network` endpoints carried `NamedGroup: X25519MLKEM768 (4588)` and signature_algorithms `mldsa65 (0x0905)`. Public-facing TLS is already PQ-hybrid.
+**Live probe confirmation (2026-04-27):** Caddy `2-alpine` (resolves ≥2.11.x) negotiates X25519MLKEM768 by default. ServerHello on all four `*.tenzro.xyz` endpoints carried `NamedGroup: X25519MLKEM768 (4588)` and signature_algorithms `mldsa65 (0x0905)`. Public-facing TLS is already PQ-hybrid.
 
 ### 2.3 Hash and symmetric crypto (Grover degradation)
 

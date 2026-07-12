@@ -42,7 +42,7 @@ pub struct TenzroIrohConfig {
 
     /// Tenzro-operated Pkarr relay URL.
     ///
-    /// When set (e.g. `https://pkarr.tenzro.network`), the iroh endpoint
+    /// When set (e.g. `https://pkarr.tenzro.xyz`), the iroh endpoint
     /// publishes its addressing record (`SignedPacket`) to this relay *in
     /// addition to* or *instead of* the n0 default (`dns.iroh.link/pkarr`),
     /// depending on [`Self::publish_to_n0_default_discovery`]. The relay
@@ -150,7 +150,7 @@ impl TenzroIrohConfig {
     }
 
     /// Direct the endpoint to publish its addressing record to a
-    /// Tenzro-operated Pkarr relay (e.g. `https://pkarr.tenzro.network`).
+    /// Tenzro-operated Pkarr relay (e.g. `https://pkarr.tenzro.xyz`).
     pub fn with_pkarr_relay_url(mut self, url: Url) -> Self {
         self.pkarr_relay_url = Some(url);
         self
@@ -176,7 +176,7 @@ impl TenzroIrohConfig {
 
 impl Default for TenzroIrohConfig {
     /// Production default — TDIP-anchored, publishing to the Tenzro-operated
-    /// Pkarr relay (`https://pkarr.tenzro.network`), with the n0 fallback
+    /// Pkarr relay (`https://pkarr.tenzro.xyz`), with the n0 fallback
     /// disabled so discovery cannot leak off-network.
     ///
     /// The `data_dir` is set to `./data/iroh` and is expected to be
@@ -189,8 +189,8 @@ impl Default for TenzroIrohConfig {
             data_dir: PathBuf::from("./data/iroh"),
             publish_to_n0_default_discovery: false,
             pkarr_relay_url: Some(
-                Url::parse("https://pkarr.tenzro.network")
-                    .expect("pkarr.tenzro.network is a valid URL"),
+                Url::parse("https://pkarr.tenzro.xyz")
+                    .expect("pkarr.tenzro.xyz is a valid URL"),
             ),
             secret_key_seed: None,
             enable_docs: true,
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn builder_methods_set_pkarr_and_seed() {
-        let url = Url::parse("https://pkarr.tenzro.network").unwrap();
+        let url = Url::parse("https://pkarr.tenzro.xyz").unwrap();
         let seed = [7u8; 32];
         let cfg = TenzroIrohConfig::with_data_dir(PathBuf::from("/tmp"))
             .with_pkarr_relay_url(url.clone())
@@ -242,7 +242,7 @@ mod tests {
         let cfg = TenzroIrohConfig::default();
         assert_eq!(
             cfg.pkarr_relay_url,
-            Some(Url::parse("https://pkarr.tenzro.network").unwrap())
+            Some(Url::parse("https://pkarr.tenzro.xyz").unwrap())
         );
         assert!(!cfg.publish_to_n0_default_discovery);
         assert!(cfg.enable_docs);

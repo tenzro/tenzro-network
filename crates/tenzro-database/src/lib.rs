@@ -28,6 +28,10 @@
 //!   wrapped once per authorized DID. This crate records the policy and the
 //!   wrapped-key envelopes; a node layer that links `tenzro-auth` and the crypto
 //!   adjudicates capabilities and unwraps keys.
+//! - [`pricing`] — the per-query [`DatabasePricing`] every descriptor carries
+//!   and the write-through [`DatabaseUsageMeter`] a holder uses to count served
+//!   queries and settled payments. The node layer gates the query path on the
+//!   price via the payment gateway; the owner always queries free.
 //! - [`runtime`] — the [`DatabaseEngine`] trait: the seam to node-layer backends
 //!   that actually spin an engine up and run queries. The registry tracks *what*
 //!   exists and *where* its partitions land; the runtime backend does the rest.
@@ -48,6 +52,7 @@ pub mod engine_config;
 pub mod error;
 pub mod gossip;
 pub mod placement;
+pub mod pricing;
 pub mod runtime;
 
 pub use access_control::{
@@ -73,6 +78,7 @@ pub use placement::{
     partition_key, select_holders, select_tiered_holders, should_replicate,
     should_replicate_tiered, MemberReachability, TieredCandidate, TieredHolders,
 };
+pub use pricing::{DatabasePricing, DatabaseUsageMeter, DatabaseUsageStats};
 pub use runtime::{
     DatabaseEngine, PartitionHandle, PartitionHealth, QueryRequest, QueryResponse,
 };

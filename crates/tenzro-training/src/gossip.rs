@@ -151,6 +151,7 @@ mod tests {
             submitted_at: Timestamp::now(),
             signature: Signature::default(),
             attestation: None,
+            commitment: None,
         }
     }
 

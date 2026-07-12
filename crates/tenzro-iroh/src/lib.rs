@@ -58,7 +58,7 @@
 //!
 //! [`IrohBackedResolver::bind_with_config`] accepts a [`TenzroIrohConfig`]
 //! with a `pkarr_relay_url` (Tenzro-operated relay, e.g.
-//! `https://pkarr.tenzro.network/pkarr`) and a `secret_key_seed` (the
+//! `https://pkarr.tenzro.xyz/pkarr`) and a `secret_key_seed` (the
 //! node's TDIP Ed25519 seed). The resulting iroh `EndpointId` is
 //! byte-identical to the node's TDIP public key, and Pkarr addressing
 //! records are published to the Tenzro relay — anchoring discovery to

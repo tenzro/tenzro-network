@@ -48,7 +48,7 @@ pub struct AuthClaims {
     pub iss: String,
 
     /// Audience — typically the resource server URL (e.g.,
-    /// `"https://rpc.tenzro.network"`). Used in conjunction with the
+    /// `"https://rpc.tenzro.xyz"`). Used in conjunction with the
     /// DPoP `htu` field to bind a token to a specific deployment.
     pub aud: String,
 

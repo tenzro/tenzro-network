@@ -8,7 +8,7 @@ Canton (DAML 3.x) enterprise skill for the Tenzro Network. Backed by the Tenzro 
 |---|---|
 | Server | Tenzro Canton MCP server |
 | Port | 3005 |
-| Testnet endpoint | `https://canton-mcp.tenzro.network/mcp` |
+| Testnet endpoint | `https://canton-mcp.tenzro.xyz/mcp` |
 | Local endpoint | `http://localhost:3005/mcp` |
 | Transport | Streamable HTTP |
 
@@ -33,7 +33,7 @@ Discover it from any Tenzro node via `tenzro_listSkills` / `tenzro_searchSkills`
 ## Quick Start
 
 ```bash
-curl -X POST https://canton-mcp.tenzro.network/mcp \
+curl -X POST https://canton-mcp.tenzro.xyz/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"canton_list_domains","arguments":{}}}'

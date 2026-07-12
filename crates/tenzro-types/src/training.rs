@@ -306,6 +306,48 @@ pub struct ArchitectureSpec {
 }
 
 // ---------------------------------------------------------------------------
+// Training objective
+// ---------------------------------------------------------------------------
+
+/// What the inner loop optimizes. `Supervised` is the classic DiLoCo
+/// next-token / regression objective. `RlPostTraining` is a GRPO-style
+/// reinforcement-learning post-training objective (group-relative advantages
+/// over sampled rollouts, clipped surrogate, KL penalty against the
+/// sampling-time policy). Either way the outer gradient is `Δθ = θ⁽ᴴ⁾ − θ⁽⁰⁾`,
+/// so aggregation, quantization, commitments, and receipts are unchanged —
+/// only the Python inner loop differs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub enum TrainingObjective {
+    /// Supervised loss over the assigned shard (default).
+    #[default]
+    Supervised,
+    /// RL post-training with GRPO-style group-relative policy optimization.
+    RlPostTraining(RlConfig),
+}
+
+/// GRPO-style RL post-training hyperparameters. Consumed by the Python
+/// reference trainer; the Rust protocol only validates ranges at task
+/// registration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RlConfig {
+    /// Rollouts sampled per prompt (G). Advantages are computed relative to
+    /// the group mean/std, so this must be >= 2.
+    pub group_size: u32,
+    /// Coefficient on the KL penalty against the sampling-time policy.
+    pub kl_coeff: f32,
+    /// PPO-style clip range ε for the surrogate ratio (0 < ε <= 1).
+    pub clip_epsilon: f32,
+    /// Maximum new tokens generated per rollout.
+    pub max_new_tokens: u32,
+    /// Sampling temperature for rollout generation.
+    pub temperature: f32,
+    /// Reward function reference resolved by the trainer, e.g.
+    /// `py:my_rewards.math:score_completion`. The callable receives
+    /// `(prompt: str, completion: str) -> float`.
+    pub reward_ref: String,
+}
+
+// ---------------------------------------------------------------------------
 // Training task spec
 // ---------------------------------------------------------------------------
 
@@ -378,6 +420,9 @@ pub struct TrainingTaskSpec {
     pub min_throughput: Option<u64>,
     /// Posting timestamp.
     pub created_at: Timestamp,
+    /// What the inner loop optimizes (supervised vs. RL post-training).
+    #[serde(default)]
+    pub objective: TrainingObjective,
     /// Free-form metadata (eval suite, target perplexity, etc.).
     #[serde(default)]
     pub metadata: HashMap<String, serde_json::Value>,
@@ -423,6 +468,12 @@ pub struct OuterGradient {
     pub signature: Signature,
     /// Optional TEE attestation (Verified and Confidential tiers).
     pub attestation: Option<TrainingAttestation>,
+    /// Activation commitment (required in the Open tier, where no TEE
+    /// attestation backs the submission). TOPLOC-class verifiable-compute
+    /// evidence: the per-step loss trajectory plus top-k probes over the
+    /// flattened fragment delta. Its hash is bound into the gradient
+    /// signature, so a trainer cannot swap the commitment after signing.
+    pub commitment: Option<ActivationCommitment>,
 }
 
 /// Per-round TEE attestation a trainer submits in Verified or Confidential
@@ -439,6 +490,100 @@ pub struct TrainingAttestation {
     pub program_hash: Hash,
     /// Hash of the assigned data shard.
     pub shard_hash: Hash,
+}
+
+// ---------------------------------------------------------------------------
+// Activation commitment (Open tier)
+// ---------------------------------------------------------------------------
+
+/// Domain tag prefixing the canonical byte serialization of an
+/// [`ActivationCommitment`].
+pub const ACTIVATION_COMMITMENT_DOMAIN_TAG: &[u8] = b"tenzro/train/activation-commitment";
+
+/// Default number of delta probes a trainer records per fragment.
+pub const DEFAULT_PROBE_K: u8 = 16;
+
+/// Upper bound on `k` accepted by verifiers. Keeps commitments small while
+/// making probe collisions with a fabricated delta improbable.
+pub const MAX_PROBE_K: u8 = 64;
+
+/// One probe into the flattened fragment delta: a coordinate index and the
+/// float32 delta value at that coordinate.
+///
+/// The flattened layout is the trainer-side canonical one: tensor keys
+/// sorted by name, each tensor cast to float32 and made C-contiguous, then
+/// concatenated (the Python trainer's `flatten_fragment_values`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DeltaProbe {
+    /// Coordinate index into the flattened fragment delta.
+    pub index: u64,
+    /// Delta value at that coordinate.
+    pub value: f32,
+}
+
+/// TOPLOC-class activation commitment for Open-tier training.
+///
+/// In the Open tier no TEE attestation backs a gradient submission; trust
+/// comes from stake bonding plus this commitment. The trainer records:
+///
+/// - the **loss trajectory**: one float32 loss per inner step (length must
+///   equal the task spec's `inner_steps`), and
+/// - the **delta probes**: the `k` largest-magnitude coordinates of the
+///   flattened fragment delta, ordered by descending `|value|` with ties
+///   broken by ascending index; indices are unique.
+///
+/// A challenger re-executes the inner loop from the same checkpoint and
+/// shard and fuzzy-compares trajectories and probes (bounded per-step loss
+/// drift, bounded probe index churn and value drift) — floating-point
+/// nondeterminism across hardware is tolerated, a fabricated gradient is
+/// not. Verification lives in `tenzro-training::activation`.
+///
+/// `canonical_bytes()` is byte-identical to the Python trainer's
+/// serialization so both sides compute the same `commitment_hash`, which is
+/// bound into the outer-gradient signing preimage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActivationCommitment {
+    /// Number of delta probes recorded (1..=[`MAX_PROBE_K`]).
+    pub k: u8,
+    /// Per-inner-step training loss, in step order.
+    pub loss_trajectory: Vec<f32>,
+    /// Top-k probes over the flattened fragment delta.
+    pub probes: Vec<DeltaProbe>,
+}
+
+impl ActivationCommitment {
+    /// Canonical byte serialization: domain tag, `k` byte, LE u32 loss
+    /// count, per-loss LE f32 bits, LE u32 probe count, per-probe LE u64
+    /// index + LE f32 value bits.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(
+            ACTIVATION_COMMITMENT_DOMAIN_TAG.len()
+                + 1
+                + 4
+                + self.loss_trajectory.len() * 4
+                + 4
+                + self.probes.len() * 12,
+        );
+        buf.extend_from_slice(ACTIVATION_COMMITMENT_DOMAIN_TAG);
+        buf.push(self.k);
+        buf.extend_from_slice(&(self.loss_trajectory.len() as u32).to_le_bytes());
+        for loss in &self.loss_trajectory {
+            buf.extend_from_slice(&loss.to_le_bytes());
+        }
+        buf.extend_from_slice(&(self.probes.len() as u32).to_le_bytes());
+        for probe in &self.probes {
+            buf.extend_from_slice(&probe.index.to_le_bytes());
+            buf.extend_from_slice(&probe.value.to_le_bytes());
+        }
+        buf
+    }
+
+    /// SHA-256 over [`canonical_bytes`](Self::canonical_bytes). This is the
+    /// value bound into the outer-gradient signing preimage.
+    pub fn commitment_hash(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(self.canonical_bytes()).into()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -783,5 +928,26 @@ mod tests {
         assert_eq!(GradientQuantization::None.to_string(), "none");
         assert_eq!(GradientQuantization::Int8 { block_size: 256 }.to_string(), "int8/256");
         assert_eq!(GradientQuantization::Int4 { block_size: 128 }.to_string(), "int4/128");
+    }
+
+    /// Cross-language golden vector: the Python trainer pins the identical
+    /// bytes + hash in `integrations/trainer/tests/test_activation_commitment.py`.
+    /// If either side changes the canonical serialization, both tests break.
+    #[test]
+    fn activation_commitment_golden_vector() {
+        let commitment = ActivationCommitment {
+            k: 2,
+            loss_trajectory: vec![1.5, 0.75, 0.5],
+            probes: vec![
+                DeltaProbe { index: 7, value: -2.5 },
+                DeltaProbe { index: 3, value: 1.25 },
+            ],
+        };
+        let bytes = commitment.canonical_bytes();
+        assert_eq!(bytes.len(), 79);
+        assert_eq!(
+            hex::encode(commitment.commitment_hash()),
+            "87f7d6c68ed78aa893a9186e57676e9cbbff7c58d6e1d1f4510ea71a4d7bbc60"
+        );
     }
 }

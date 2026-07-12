@@ -345,6 +345,8 @@ pub struct X402DiscoverResourcesParams {
     pub seller_did: Option<String>,
     #[schemars(description = "Filter by tags (all must match)")]
     pub tags: Option<Vec<String>>,
+    #[schemars(description = "Minimum seller reputation floor; unscored sellers are excluded when set")]
+    pub min_reputation: Option<u64>,
     #[schemars(description = "Cap the number of results; 0 = unlimited")]
     pub limit: Option<u64>,
 }
@@ -391,6 +393,10 @@ pub struct CreateDatabaseParams {
     pub replicas: Option<usize>,
     #[schemars(description = "Per-engine configuration passed opaque to the driver")]
     pub engine_config: Option<serde_json::Value>,
+    #[schemars(description = "Price a non-owner caller pays per query, in the pricing asset's base units, as a decimal string (omit for a free database)")]
+    pub price_per_query: Option<String>,
+    #[schemars(description = "Asset the per-query price is denominated in (default 'TNZO')")]
+    pub pricing_asset: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -421,6 +427,8 @@ pub struct IssueDatabaseConnectionParams {
     pub ttl_secs: Option<u64>,
     #[schemars(description = "AAP capability token when the caller is not the owner")]
     pub capability: Option<String>,
+    #[schemars(description = "Hex-encoded signed DID envelope proving control of caller_did")]
+    pub envelope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -437,6 +445,10 @@ pub struct DatabaseQueryParams {
     pub write: Option<bool>,
     #[schemars(description = "AAP capability token when the caller is not the owner")]
     pub capability: Option<String>,
+    #[schemars(description = "Hex-encoded signed DID envelope proving control of caller_did")]
+    pub envelope: Option<String>,
+    #[schemars(description = "Payment credential answering a prior 402 challenge (paid databases only)")]
+    pub payment_credential: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -447,6 +459,8 @@ pub struct AuthorizeDatabaseReadParams {
     pub caller_did: String,
     #[schemars(description = "AAP capability token when the caller is not the owner")]
     pub capability: Option<String>,
+    #[schemars(description = "Hex-encoded signed DID envelope proving control of caller_did")]
+    pub envelope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -463,6 +477,32 @@ pub struct RescaleDatabaseParams {
     pub replicas: Option<usize>,
     #[schemars(description = "AAP capability token when the caller is not the owner")]
     pub capability: Option<String>,
+    #[schemars(description = "Hex-encoded signed DID envelope proving control of caller_did")]
+    pub envelope: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DropDatabaseParams {
+    #[schemars(description = "Database id")]
+    pub database_id: String,
+    #[schemars(description = "Caller DID — gated on the admin (write) action")]
+    pub caller_did: String,
+    #[schemars(description = "AAP capability token when the caller is not the owner")]
+    pub capability: Option<String>,
+    #[schemars(description = "Hex-encoded signed DID envelope proving control of caller_did")]
+    pub envelope: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseUsageParams {
+    #[schemars(description = "Database id")]
+    pub database_id: String,
+    #[schemars(description = "Caller DID — gated on the admin (write) action")]
+    pub caller_did: String,
+    #[schemars(description = "AAP capability token when the caller is not the owner")]
+    pub capability: Option<String>,
+    #[schemars(description = "Hex-encoded signed DID envelope proving control of caller_did")]
+    pub envelope: Option<String>,
 }
 
 // ─── OAuth 2.1 + AAP delegation params ───
@@ -3195,6 +3235,28 @@ pub struct ListMemoryRecordsParams {
     pub kind: Option<String>,
 }
 
+// ─── Committee-DA possession challenge params ───
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DaChallengeParams {
+    #[schemars(description = "0x-prefixed 32-byte blob commitment whose sliver custody should be challenged")]
+    pub commitment: String,
+    #[schemars(description = "Committee index of the member to challenge")]
+    pub target_index: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DaListChallengesParams {
+    #[schemars(description = "Max challenge records to return, newest-first (default 100)")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DaAvailabilityParams {
+    #[schemars(description = "Optional 0x-prefixed member address. Omit to list every scored member, lowest score first")]
+    pub address: Option<String>,
+}
+
 // ─── Operability inspection params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -5148,9 +5210,9 @@ impl TenzroMcpServer {
             "participant_type": participant_type_str,
             "role": "micro_node",
             "network": {
-                "rpc": "https://rpc.tenzro.network",
-                "mcp": "https://mcp.tenzro.network/mcp",
-                "a2a": "https://a2a.tenzro.network",
+                "rpc": "https://rpc.tenzro.xyz",
+                "mcp": "https://mcp.tenzro.xyz/mcp",
+                "a2a": "https://a2a.tenzro.xyz",
             },
             "message": format!(
                 "Welcome to Tenzro Network! Your DID is {} and your wallet address is {}. \
@@ -5418,7 +5480,7 @@ impl TenzroMcpServer {
         dispatch_rpc(&self.node, "tenzro_x402RegisterResource", params).await
     }
 
-    #[tool(description = "Query the x402 Bazaar for paid resources. All set filters are ANDed; unset filters match everything. Results are freshest-first, capped by limit when non-zero. Returns {listings, count}.")]
+    #[tool(description = "Query the x402 Bazaar for paid resources. All set filters are ANDed; unset filters match everything. Each listing carries seller_reputation joined from the provider-reputation ledger (settled payments are the only score-up path). Results are highest-reputation-first (unscored last), freshest within the same score, capped by limit when non-zero. Returns {listings, count}.")]
     async fn x402_discover_resources(
         &self,
         Parameters(p): Parameters<X402DiscoverResourcesParams>,
@@ -5431,6 +5493,7 @@ impl TenzroMcpServer {
         if let Some(v) = p.network { params["network"] = serde_json::json!(v); }
         if let Some(v) = p.asset { params["asset"] = serde_json::json!(v); }
         if let Some(v) = p.seller_did { params["sellerDid"] = serde_json::json!(v); }
+        if let Some(v) = p.min_reputation { params["minReputation"] = serde_json::json!(v); }
         dispatch_rpc(&self.node, "tenzro_x402DiscoverResources", params).await
     }
 
@@ -5497,6 +5560,12 @@ impl TenzroMcpServer {
         if let Some(cfg) = p.engine_config {
             params["engine_config"] = cfg;
         }
+        if let Some(price) = p.price_per_query {
+            params["pricing"] = serde_json::json!({
+                "asset_id": p.pricing_asset.unwrap_or_else(|| "TNZO".to_string()),
+                "price_per_query": price,
+            });
+        }
         dispatch_rpc(&self.node, "tenzro_createDatabase", params).await
     }
 
@@ -5557,6 +5626,7 @@ impl TenzroMcpServer {
         if let Some(v) = p.bearer_did { params["bearer_did"] = serde_json::json!(v); }
         if let Some(v) = p.ttl_secs { params["ttl_secs"] = serde_json::json!(v); }
         if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
         dispatch_rpc(&self.node, "tenzro_issueDatabaseConnection", params).await
     }
 
@@ -5573,6 +5643,8 @@ impl TenzroMcpServer {
             "write": p.write.unwrap_or(false),
         });
         if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
+        if let Some(v) = p.payment_credential { params["payment_credential"] = v; }
         dispatch_rpc(&self.node, "tenzro_databaseQuery", params).await
     }
 
@@ -5586,6 +5658,7 @@ impl TenzroMcpServer {
             "caller_did": p.caller_did,
         });
         if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
         dispatch_rpc(&self.node, "tenzro_authorizeDatabaseRead", params).await
     }
 
@@ -5602,20 +5675,36 @@ impl TenzroMcpServer {
         if let Some(v) = p.partitions { params["partitions"] = serde_json::json!(v); }
         if let Some(v) = p.replicas { params["replicas"] = serde_json::json!(v); }
         if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
         dispatch_rpc(&self.node, "tenzro_rescaleDatabase", params).await
     }
 
-    #[tool(description = "Remove a database and all its partition placements, tearing down the engine backing for every partition this node holds.")]
+    #[tool(description = "Remove a database and all its partition placements, tearing down the engine backing for every partition this node holds. Administrative — caller_did is gated on the admin (write) action and its usage counters are removed with it.")]
     async fn drop_database(
         &self,
-        Parameters(p): Parameters<DatabaseIdParams>,
+        Parameters(p): Parameters<DropDatabaseParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        dispatch_rpc(
-            &self.node,
-            "tenzro_dropDatabase",
-            serde_json::json!({ "database_id": p.database_id }),
-        )
-        .await
+        let mut params = serde_json::json!({
+            "database_id": p.database_id,
+            "caller_did": p.caller_did,
+        });
+        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
+        dispatch_rpc(&self.node, "tenzro_dropDatabase", params).await
+    }
+
+    #[tool(description = "Read per-query pricing and cumulative usage counters (queries, writes, bytes in/out, total billed) for a database. Administrative — caller_did is gated on the admin (write) action.")]
+    async fn database_usage(
+        &self,
+        Parameters(p): Parameters<DatabaseUsageParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({
+            "database_id": p.database_id,
+            "caller_did": p.caller_did,
+        });
+        if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
+        if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
+        dispatch_rpc(&self.node, "tenzro_databaseUsage", params).await
     }
 
     #[tool(description = "List all providers discovered on the Tenzro Network. Providers broadcast announcements every 60s on the tenzro/providers gossipsub topic. Returns both the local node (if serving) and all remotely discovered providers. Optionally filter by provider_type: 'llm', 'tee', or 'general'.")]
@@ -6152,9 +6241,11 @@ impl TenzroMcpServer {
         }
 
         if params.est_input_tokens.is_some() || params.est_output_tokens.is_some() {
+            let cur_in = intent.est_input_tokens;
+            let cur_out = intent.est_output_tokens;
             intent = intent.with_tokens(
-                params.est_input_tokens.unwrap_or(intent.est_input_tokens),
-                params.est_output_tokens.unwrap_or(intent.est_output_tokens),
+                params.est_input_tokens.unwrap_or(cur_in),
+                params.est_output_tokens.unwrap_or(cur_out),
             );
         }
 
@@ -9098,6 +9189,71 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_listMemoryRecords", payload)
             .await
             .map_err(|e| err_internal(format!("listMemoryRecords failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Challenge a DA committee member to prove current possession of its Red Stuff sliver for a blob commitment. The target must return the full sliver plus a nonce-bound Ed25519 signature; the challenger re-verifies the sliver against the commitment. The outcome (passed / failed_no_response / failed_not_held / failed_bad_proof) feeds the target's rolling availability score. Validator-only.")]
+    async fn da_challenge(
+        &self,
+        Parameters(params): Parameters<DaChallengeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let p = serde_json::json!({
+            "commitment": params.commitment,
+            "target_index": params.target_index,
+        });
+        let result = rpc_dispatch(&self.node, "tenzro_daChallenge", p)
+            .await
+            .map_err(|e| err_internal(format!("daChallenge: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List resolved DA possession-challenge records, newest-first. Each record carries the blob commitment, target member index + address, nonce, timestamps, and outcome.")]
+    async fn da_list_challenges(
+        &self,
+        Parameters(params): Parameters<DaListChallengesParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut p = serde_json::json!({});
+        if let Some(l) = params.limit {
+            p["limit"] = serde_json::json!(l);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_daListChallenges", p)
+            .await
+            .map_err(|e| err_internal(format!("daListChallenges: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read DA committee availability scores (0-1000, +1 per passed possession challenge, -5 silence or honest not-held, -25 bad proof). Pass an address for one member's score, omit for all scored members lowest-first.")]
+    async fn da_availability(
+        &self,
+        Parameters(params): Parameters<DaAvailabilityParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut p = serde_json::json!({});
+        if let Some(a) = params.address {
+            p["address"] = serde_json::json!(a);
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_daAvailability", p)
+            .await
+            .map_err(|e| err_internal(format!("daAvailability: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Show the current DA committee roster: each member's index, address, whether it is the local node, and its availability score if it has ever been challenged.")]
+    async fn da_committee(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_daCommittee", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("daCommittee: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List blob commitments known to the local DA committee store, with the locally-held sliver index (if any) and the availability certificate (attesting member indices, quorum, root, timestamp) when one is held.")]
+    async fn da_list_blobs(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_daListBlobs", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("daListBlobs: {}", e)))?;
         json_result(result)
     }
 
@@ -13451,7 +13607,7 @@ impl TenzroMcpServer {
 
     // ─── Chainlink CCIP MCP tools ────────────────────────────────────────────
     // Mirror of the standalone chainlink-mcp server's 8 CCIP tools on the
-    // main mcp.tenzro.network surface, plus a 9th `ccip_bridge` that
+    // main mcp.tenzro.xyz surface, plus a 9th `ccip_bridge` that
     // routes through the BridgeRouter with the CCIP adapter pinned.
     // Each method is a thin forward to the `tenzro_ccip*` JSON-RPC
     // handler — no logic duplication.
@@ -15199,6 +15355,12 @@ impl ServerHandler for TenzroMcpServer {
              • memory_recall — Hybrid (RRF k=60) / vector / BM25 retrieval\n\
              • memory_archive — Push payload to DA backend, rewrite on-tier row with pointer\n\
              • list_memory_records — Newest-first listing, optional kind filter\n\n\
+             Committee Data Availability:\n\
+             • da_challenge — Nonce-bound possession challenge against a committee member\n\
+             • da_list_challenges — Resolved challenge records, newest-first\n\
+             • da_availability — Rolling availability scores (0-1000) per member\n\
+             • da_committee — Committee roster with per-member availability\n\
+             • da_list_blobs — Locally-known blob commitments + certificates\n\n\
              Task Marketplace:\n\
              • post_task — Post a new AI task to the decentralized marketplace\n\
              • list_tasks — Browse and filter open tasks\n\
@@ -15367,7 +15529,7 @@ pub async fn start_mcp_server_with_shutdown(
             "127.0.0.1".to_string(),
             "::1".to_string(),
             "0.0.0.0".to_string(),
-            "mcp.tenzro.network".to_string(),
+            "mcp.tenzro.xyz".to_string(),
         ]);
 
     // ── OAuth 2.1 Authentication ──

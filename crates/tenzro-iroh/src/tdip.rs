@@ -14,7 +14,7 @@
 //! attestation layer.
 //!
 //! The TDIP-anchored Pkarr relay (operator-deployed at e.g.
-//! `https://pkarr.tenzro.network/pkarr`) accepts `SignedPacket`s whose
+//! `https://pkarr.tenzro.xyz/pkarr`) accepts `SignedPacket`s whose
 //! signing key was issued by Tenzro's identity registry. The relay's
 //! admission policy lives in the relay deployment (not in this crate); on
 //! the client side the contribution is to *use the right key* so the relay

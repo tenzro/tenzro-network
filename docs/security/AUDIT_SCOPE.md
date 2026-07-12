@@ -89,7 +89,7 @@ and can support DoS-cost reasoning.
 
 ### Live deployment
 4-validator testnet on GCE (genesis schema v3: Ed25519 + ML-DSA-65 +
-BLS12-381 per validator), public RPC at `rpc.tenzro.network`. TEE
+BLS12-381 per validator), public RPC at `rpc.tenzro.xyz`. TEE
 simulation disabled on all live nodes.
 
 ## Known limitations to probe

@@ -22,7 +22,7 @@ Tenzro draws a sharp line between two kinds of resources:
 
 API key issuance lives on the left. **Every node operator is sovereign
 over their own node's API keys** — Tenzro Labs (operating
-`rpc.tenzro.network`), validator operators (each on their own validator
+`rpc.tenzro.xyz`), validator operators (each on their own validator
 node), and self-hosted operators all hold their own admin token and
 issue their own keys. There is no global "Tenzro Labs token," no
 network-wide key registry, and no operator can mint or revoke keys at
@@ -102,7 +102,7 @@ Issuance is per-operator: there is no public mint endpoint on any
 Tenzro node. To request a key:
 
 1. Identify which operator runs the node you want to use (e.g. Tenzro
-   Labs for `rpc.tenzro.network`; a particular validator or
+   Labs for `rpc.tenzro.xyz`; a particular validator or
    self-hosted operator for any other endpoint).
 2. Reach out to that operator out of band with your Tenzro DID (or
    org), the scopes you need (currently just `canton`), and the
@@ -125,7 +125,7 @@ input.
 ### `tenzro_createApiKey`
 
 ```bash
-curl -s -X POST https://rpc.tenzro.network \
+curl -s -X POST https://rpc.tenzro.xyz \
   -H "content-type: application/json" \
   -H "X-Tenzro-Admin-Token: $TENZRO_ADMIN_TOKEN" \
   -d '{
@@ -173,7 +173,7 @@ Params:
 ### `tenzro_listApiKeys`
 
 ```bash
-curl -s -X POST https://rpc.tenzro.network \
+curl -s -X POST https://rpc.tenzro.xyz \
   -H "content-type: application/json" \
   -H "X-Tenzro-Admin-Token: $TENZRO_ADMIN_TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tenzro_listApiKeys","params":{}}'
@@ -186,7 +186,7 @@ and revoked, including its `class`. No plaintext keys are returned
 ### `tenzro_revokeApiKey`
 
 ```bash
-curl -s -X POST https://rpc.tenzro.network \
+curl -s -X POST https://rpc.tenzro.xyz \
   -H "content-type: application/json" \
   -H "X-Tenzro-Admin-Token: $TENZRO_ADMIN_TOKEN" \
   -d '{
@@ -213,7 +213,7 @@ key in the `X-Tenzro-Api-Key` header.
 ### `tenzro_listMyApiKeys`
 
 ```bash
-curl -s -X POST https://rpc.tenzro.network \
+curl -s -X POST https://rpc.tenzro.xyz \
   -H "content-type: application/json" \
   -H "X-Tenzro-Api-Key: tnz_3v8q7s2XQYf..." \
   -d '{"jsonrpc":"2.0","id":1,"method":"tenzro_listMyApiKeys","params":{}}'
@@ -225,7 +225,7 @@ from the presented key). Other subjects' keys are never exposed.
 ### `tenzro_revokeMyApiKey`
 
 ```bash
-curl -s -X POST https://rpc.tenzro.network \
+curl -s -X POST https://rpc.tenzro.xyz \
   -H "content-type: application/json" \
   -H "X-Tenzro-Api-Key: tnz_3v8q7s2XQYf..." \
   -d '{
@@ -253,7 +253,7 @@ Once an operator hands you a `tnz_...` key, present it in the
 required.
 
 ```bash
-curl -s -X POST https://rpc.tenzro.network \
+curl -s -X POST https://rpc.tenzro.xyz \
   -H "content-type: application/json" \
   -H "X-Tenzro-Api-Key: tnz_3v8q7s2XQYf..." \
   -d '{"jsonrpc":"2.0","id":1,"method":"tenzro_listCantonDomains","params":[]}'

@@ -105,7 +105,12 @@ impl TantivyEngine {
             text: schema.get_field("text").unwrap(),
             fields_json: schema.get_field("fields_json").unwrap(),
         };
-        let partition = Arc::new(PartitionIndex { index, reader, writer, fields });
+        let partition = Arc::new(PartitionIndex {
+            index,
+            reader,
+            writer: parking_lot::Mutex::new(writer),
+            fields,
+        });
         self.indexes.lock().await.insert(key.to_string(), partition.clone());
         Ok(partition)
     }
@@ -176,7 +181,7 @@ impl DatabaseEngine for TantivyEngine {
                     .parse_query(&query)
                     .map_err(|e| DatabaseError::InvalidRequest(format!("tantivy parse_query: {e}")))?;
                 let hits = searcher
-                    .search(&parsed, &TopDocs::with_limit(limit.max(1)))
+                    .search(&parsed, &TopDocs::with_limit(limit.max(1)).order_by_score())
                     .map_err(|e| DatabaseError::Query(format!("tantivy search: {e}")))?;
                 let mut rows = Vec::with_capacity(hits.len());
                 for (score, addr) in hits {

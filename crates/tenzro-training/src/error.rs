@@ -45,6 +45,21 @@ pub enum TrainingError {
     #[error("attestation required for tier {0:?}")]
     AttestationRequired(tenzro_types::training::TrainingTier),
 
+    #[error("activation commitment required for Open-tier submissions")]
+    CommitmentRequired,
+
+    #[error("invalid activation commitment: {what}")]
+    CommitmentInvalid { what: &'static str },
+
+    #[error(
+        "no buffered gradient for trainer {trainer_did} at round {round} fragment {fragment}"
+    )]
+    GradientNotFound {
+        round: u32,
+        fragment: u32,
+        trainer_did: String,
+    },
+
     #[error("Confidential-tier task {task_id} has no sealed-shard manifest installed")]
     SealedManifestMissing { task_id: String },
 
@@ -166,9 +181,10 @@ impl TrainingError {
     /// outside the current active shard, which honest trainers hit routinely).
     ///
     /// Slashable: bad signature, quantization mismatch, pipeline-stage
-    /// violation, missing attestation at a tier that requires it, and malformed
-    /// / hash-mismatched payloads — all of which require the submitter to
-    /// deviate from the task spec they enrolled under.
+    /// violation, missing attestation at a tier that requires it, a missing or
+    /// structurally invalid activation commitment at the Open tier, and
+    /// malformed / hash-mismatched payloads — all of which require the
+    /// submitter to deviate from the task spec they enrolled under.
     ///
     /// Not slashable: unenrolled submitter (already rejected, nothing to
     /// slash), wrong round, fragment out of range, fragment not in the active
@@ -180,6 +196,8 @@ impl TrainingError {
                 | TrainingError::QuantizationMismatch { .. }
                 | TrainingError::PipelineStageMismatch { .. }
                 | TrainingError::AttestationRequired(_)
+                | TrainingError::CommitmentRequired
+                | TrainingError::CommitmentInvalid { .. }
                 | TrainingError::QuantizedPayloadMalformed(_)
                 | TrainingError::PayloadSizeMismatch { .. }
                 | TrainingError::PayloadHashMismatch

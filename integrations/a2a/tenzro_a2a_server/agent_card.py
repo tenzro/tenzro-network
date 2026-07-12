@@ -1,7 +1,7 @@
 """Agent Card builder — serves at /.well-known/agent.json for A2A discovery."""
 
 
-def build_agent_card(base_url: str = "https://a2a.tenzro.network") -> dict:
+def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
     """Build the A2A Agent Card with the full skill catalog."""
     return {
         "name": "Tenzro Network Agent",

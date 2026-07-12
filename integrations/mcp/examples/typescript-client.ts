@@ -12,7 +12,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const MCP_ENDPOINT =
-  process.env.TENZRO_MCP_URL ?? "https://mcp.tenzro.network/mcp";
+  process.env.TENZRO_MCP_URL ?? "https://mcp.tenzro.xyz/mcp";
 
 async function main() {
   console.log("=== Tenzro MCP Client ===\n");

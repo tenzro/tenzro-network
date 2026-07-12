@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import nacl.signing
 import numpy as np
@@ -40,7 +40,15 @@ except ImportError:  # pragma: no cover - torch is a runtime dep for serializati
     torch = None  # type: ignore[assignment]
 
 from tenzro_trainer.quantization import dequantize, quantize
-from tenzro_trainer.types import GradientQuantization, OuterGradient, Signature
+from tenzro_trainer.types import (
+    DEFAULT_PROBE_K,
+    MAX_PROBE_K,
+    ActivationCommitment,
+    DeltaProbe,
+    GradientQuantization,
+    OuterGradient,
+    Signature,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +139,50 @@ def flatten_fragment_values(
     if not parts:
         return np.zeros(0, dtype=np.float32)
     return np.concatenate(parts).astype(np.float32, copy=False)
+
+
+def top_k_delta_probes(delta: "np.ndarray", k: int) -> list[DeltaProbe]:
+    """Select the top-k probes from a flattened fragment delta.
+
+    The ``k`` largest-magnitude coordinates, ordered by descending
+    ``|value|`` with ties broken by ascending index — the identical
+    selection to the Rust challenger's
+    ``tenzro_training::activation::top_k_delta_probes``. Non-finite values
+    sort last so a delta containing NaN/Inf never contributes probes.
+    """
+    flat = np.asarray(delta, dtype=np.float32).reshape(-1)
+    k = min(int(k), flat.size)
+    if k <= 0:
+        return []
+    magnitude = np.abs(flat)
+    magnitude[~np.isfinite(flat)] = -np.inf
+    # lexsort's last key is primary: ascending -|value| (i.e. descending
+    # |value|), ties broken by ascending index.
+    order = np.lexsort((np.arange(flat.size), -magnitude))[:k]
+    return [DeltaProbe(index=int(i), value=float(flat[i])) for i in order]
+
+
+def build_activation_commitment(
+    loss_trajectory: Sequence[float],
+    flat_delta: "np.ndarray",
+    k: int = DEFAULT_PROBE_K,
+) -> ActivationCommitment:
+    """Build the Open-tier activation commitment for one fragment.
+
+    ``loss_trajectory`` is the round's per-inner-step losses — its length
+    must equal the task spec's ``inner_steps`` or the syncer's structural
+    validator rejects the submission. ``flat_delta`` is the
+    :func:`flatten_fragment_values` output for the fragment being
+    committed. ``k`` is clamped to ``MAX_PROBE_K`` and the fragment size.
+    """
+    probes = top_k_delta_probes(flat_delta, min(int(k), MAX_PROBE_K))
+    if not probes:
+        raise ValueError("cannot build a commitment over an empty fragment delta")
+    return ActivationCommitment(
+        k=len(probes),
+        loss_trajectory=[float(loss) for loss in loss_trajectory],
+        probes=probes,
+    )
 
 
 def serialize_fragment(
@@ -311,13 +363,18 @@ def gradient_signing_bytes(
     quantization: GradientQuantization,
     inner_step_count: int,
     submitted_at: int,
+    commitment: ActivationCommitment | None = None,
 ) -> bytes:
     """Canonical preimage signed by the trainer.
 
     Mirrors the Rust convention of domain-prefixed BE-encoded fields. Order
     matches the field order on ``OuterGradient`` minus the signature itself;
     the quantization is bound as its canonical display label
-    (``none`` / ``int8/N`` / ``int4/N``).
+    (``none`` / ``int8/N`` / ``int4/N``). The trailing byte binds the
+    activation commitment: ``0x01`` + 32-byte ``commitment_hash`` when
+    present, ``0x00`` when absent — byte-identical to the Rust
+    ``outer_gradient_signing_bytes``, so a trainer cannot swap the
+    commitment after signing.
     """
     buf = bytearray()
     buf.extend(b"tenzro/train/outer-gradient")
@@ -331,6 +388,11 @@ def gradient_signing_bytes(
     buf.extend(inner_step_count.to_bytes(8, "big"))
     # Two's-complement encoding of i64 millis to match Rust's i64 timestamp.
     buf.extend(submitted_at.to_bytes(8, "big", signed=True))
+    if commitment is not None:
+        buf.append(1)
+        buf.extend(commitment.commitment_hash())
+    else:
+        buf.append(0)
     return bytes(buf)
 
 
@@ -345,8 +407,13 @@ def build_outer_gradient(
     inner_step_count: int,
     key: TrainerKey,
     submitted_at_ms: int | None = None,
+    commitment: ActivationCommitment | None = None,
 ) -> OuterGradient:
-    """Assemble + sign an ``OuterGradient`` for one fragment."""
+    """Assemble + sign an ``OuterGradient`` for one fragment.
+
+    ``commitment`` is required for Open-tier tasks — the syncer's accept
+    gate rejects Open-tier submissions without one.
+    """
     submitted = (
         submitted_at_ms if submitted_at_ms is not None else int(time.time() * 1000)
     )
@@ -360,6 +427,7 @@ def build_outer_gradient(
         quantization=quantization,
         inner_step_count=inner_step_count,
         submitted_at=submitted,
+        commitment=commitment,
     )
     sig_bytes = key.sign(msg)
     sig = Signature(bytes_=sig_bytes, public_key=key.public_key_bytes)
@@ -376,6 +444,7 @@ def build_outer_gradient(
         submitted_at=submitted,
         signature=sig,
         attestation=None,
+        commitment=commitment,
     )
 
 
@@ -389,8 +458,14 @@ def build_round_gradients(
     quantization: GradientQuantization,
     inner_step_count: int,
     key: TrainerKey,
+    commitments: dict[int, ActivationCommitment] | None = None,
 ) -> list[OuterGradient]:
-    """Convenience: build one ``OuterGradient`` per fragment in a round."""
+    """Convenience: build one ``OuterGradient`` per fragment in a round.
+
+    ``commitments`` maps fragment index → activation commitment; fragments
+    without an entry are submitted commitment-free (Verified/Confidential
+    tiers, where the TEE attestation carries the trust instead).
+    """
     submitted = int(time.time() * 1000)
     return [
         build_outer_gradient(
@@ -403,6 +478,7 @@ def build_round_gradients(
             inner_step_count=inner_step_count,
             key=key,
             submitted_at_ms=submitted,
+            commitment=(commitments or {}).get(b.fragment),
         )
         for b in blobs
     ]

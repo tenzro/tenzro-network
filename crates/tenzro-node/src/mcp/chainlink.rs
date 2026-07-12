@@ -2133,7 +2133,7 @@ pub async fn start_chainlink_mcp_server_with_shutdown(
             "127.0.0.1".to_string(),
             "::1".to_string(),
             "0.0.0.0".to_string(),
-            "chainlink-mcp.tenzro.network".to_string(),
+            "chainlink-mcp.tenzro.xyz".to_string(),
         ]);
 
     let service = StreamableHttpService::new(

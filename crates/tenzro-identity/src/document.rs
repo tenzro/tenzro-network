@@ -43,7 +43,7 @@ impl DidDocument {
             context: vec![
                 "https://www.w3.org/ns/did/v1".to_string(),
                 "https://w3id.org/security/suites/ed25519-2020/v1".to_string(),
-                "https://ns.tenzro.network/v1".to_string(),
+                "https://ns.tenzro.xyz/v1".to_string(),
             ],
             id: id.into(),
             controller: None,

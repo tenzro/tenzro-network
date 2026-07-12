@@ -222,7 +222,7 @@ mod tests {
         AuthClaims {
             sub: "did:tenzro:human:abc".into(),
             iss: "did:tenzro:node:1".into(),
-            aud: "https://rpc.tenzro.network".into(),
+            aud: "https://rpc.tenzro.xyz".into(),
             iat: 1_700_000_000,
             nbf: 1_700_000_000,
             exp: 1_700_003_600,

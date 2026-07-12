@@ -10,7 +10,7 @@
 //!
 //! - **SRV** `_tenzro-boot._tcp.<NAME>` → `priority weight port target`
 //!   records, one per bootstrap host. The target is a DNS A/AAAA name
-//!   (e.g. `v0.boot.tenzro.network`) that resolves to one or more IPs.
+//!   (e.g. `v0.boot.tenzro.xyz`) that resolves to one or more IPs.
 //! - **TXT** `_tenzro-id._tcp.<TARGET>` → a single quoted string of the
 //!   form `peer_id=<base58>` for that host. One TXT record per SRV
 //!   target.
@@ -25,7 +25,7 @@
 //! - DNS is universally cacheable + has TTLs out of the box.
 //! - SRV + TXT lets operators rotate hosts without touching every
 //!   validator's wrapper.
-//! - The pkarr relay on `pkarr.tenzro.network` is a separate primitive
+//! - The pkarr relay on `pkarr.tenzro.xyz` is a separate primitive
 //!   for iroh `EndpointId` resolution — it does not speak libp2p PeerId.
 //!   Conflating the two would mean dragging iroh's address-lookup
 //!   machinery into the libp2p boot path. Keeping bootstrap-DNS as a

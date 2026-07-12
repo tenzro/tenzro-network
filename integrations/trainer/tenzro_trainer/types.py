@@ -20,6 +20,8 @@ through ``serde_json`` on the Rust side — the integration tests in
 
 from __future__ import annotations
 
+import hashlib
+import struct
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -319,6 +321,65 @@ class ArchitectureSpec:
 
 
 # ---------------------------------------------------------------------------
+# Training objective
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RlConfig:
+    """Mirror of ``tenzro_types::training::RlConfig``.
+
+    GRPO-style RL post-training hyperparameters. On the wire the objective is
+    the Rust enum ``TrainingObjective``: the string ``"Supervised"`` or the
+    single-key object ``{"RlPostTraining": {...}}``.
+    """
+
+    group_size: int
+    kl_coeff: float
+    clip_epsilon: float
+    max_new_tokens: int
+    temperature: float
+    reward_ref: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "group_size": self.group_size,
+            "kl_coeff": self.kl_coeff,
+            "clip_epsilon": self.clip_epsilon,
+            "max_new_tokens": self.max_new_tokens,
+            "temperature": self.temperature,
+            "reward_ref": self.reward_ref,
+        }
+
+    @classmethod
+    def from_json(cls, j: dict[str, Any]) -> "RlConfig":
+        return cls(
+            group_size=int(j["group_size"]),
+            kl_coeff=float(j["kl_coeff"]),
+            clip_epsilon=float(j["clip_epsilon"]),
+            max_new_tokens=int(j["max_new_tokens"]),
+            temperature=float(j["temperature"]),
+            reward_ref=j["reward_ref"],
+        )
+
+
+def objective_to_json(rl: RlConfig | None) -> str | dict[str, Any]:
+    """Serialize the objective to the Rust ``TrainingObjective`` wire form."""
+    if rl is None:
+        return "Supervised"
+    return {"RlPostTraining": rl.to_json()}
+
+
+def objective_from_json(j: str | dict[str, Any] | None) -> RlConfig | None:
+    """Parse the Rust ``TrainingObjective`` wire form; absent key = Supervised."""
+    if j is None or j == "Supervised":
+        return None
+    if isinstance(j, dict) and "RlPostTraining" in j:
+        return RlConfig.from_json(j["RlPostTraining"])
+    raise ValueError(f"unrecognized TrainingObjective wire value: {j!r}")
+
+
+# ---------------------------------------------------------------------------
 # Task spec
 # ---------------------------------------------------------------------------
 
@@ -353,6 +414,7 @@ class TrainingTaskSpec:
     dataset_hash: bytes  # 32 bytes
     min_throughput: int | None
     created_at: int  # Unix millis (matches Rust Timestamp)
+    objective: RlConfig | None = None  # None = Supervised
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -378,6 +440,7 @@ class TrainingTaskSpec:
             "dataset_hash": hash_to_json(self.dataset_hash),
             "min_throughput": self.min_throughput,
             "created_at": self.created_at,
+            "objective": objective_to_json(self.objective),
             "metadata": self.metadata,
         }
 
@@ -413,6 +476,7 @@ class TrainingTaskSpec:
                 int(j["min_throughput"]) if j.get("min_throughput") is not None else None
             ),
             created_at=int(j["created_at"]),
+            objective=objective_from_json(j.get("objective")),
             metadata=j.get("metadata") or {},
         )
 
@@ -444,6 +508,89 @@ class TrainingAttestation:
             report_hex=j["report_hex"],
             program_hash=hash_from_json(j["program_hash"]),
             shard_hash=hash_from_json(j["shard_hash"]),
+        )
+
+
+# Domain tag prefixing the canonical activation-commitment serialization.
+# Byte-identical to Rust ``ACTIVATION_COMMITMENT_DOMAIN_TAG``.
+ACTIVATION_COMMITMENT_DOMAIN_TAG = b"tenzro/train/activation-commitment"
+
+#: Default number of delta probes recorded per fragment.
+DEFAULT_PROBE_K = 16
+
+#: Upper bound on ``k`` accepted by verifiers.
+MAX_PROBE_K = 64
+
+
+@dataclass
+class DeltaProbe:
+    """One probe into the flattened fragment delta.
+
+    ``index`` addresses the trainer-side canonical flattening
+    (``flatten_fragment_values``: tensor keys sorted by name, each tensor cast
+    to float32 and made C-contiguous, then concatenated); ``value`` is the
+    float32 delta at that coordinate.
+    """
+
+    index: int
+    value: float
+
+    def to_json(self) -> dict[str, Any]:
+        return {"index": self.index, "value": self.value}
+
+    @classmethod
+    def from_json(cls, j: dict[str, Any]) -> "DeltaProbe":
+        return cls(index=int(j["index"]), value=float(j["value"]))
+
+
+@dataclass
+class ActivationCommitment:
+    """TOPLOC-class activation commitment for Open-tier training.
+
+    Carries the per-inner-step loss trajectory (length must equal the task
+    spec's ``inner_steps``) plus the ``k`` largest-magnitude coordinates of
+    the flattened fragment delta, ordered by descending ``|value|`` with ties
+    broken by ascending index. ``canonical_bytes()`` is byte-identical to the
+    Rust ``ActivationCommitment::canonical_bytes`` so both sides compute the
+    same ``commitment_hash``, which is bound into the outer-gradient signing
+    preimage (see ``gradient.gradient_signing_bytes``).
+    """
+
+    k: int
+    loss_trajectory: list[float]
+    probes: list[DeltaProbe]
+
+    def canonical_bytes(self) -> bytes:
+        """Domain tag, ``k`` byte, LE u32 loss count, per-loss LE f32 bits,
+        LE u32 probe count, per-probe LE u64 index + LE f32 value bits."""
+        buf = bytearray(ACTIVATION_COMMITMENT_DOMAIN_TAG)
+        buf += struct.pack("<B", self.k)
+        buf += struct.pack("<I", len(self.loss_trajectory))
+        for loss in self.loss_trajectory:
+            buf += struct.pack("<f", loss)
+        buf += struct.pack("<I", len(self.probes))
+        for probe in self.probes:
+            buf += struct.pack("<Qf", probe.index, probe.value)
+        return bytes(buf)
+
+    def commitment_hash(self) -> bytes:
+        """SHA-256 over :meth:`canonical_bytes` — the value bound into the
+        outer-gradient signing preimage."""
+        return hashlib.sha256(self.canonical_bytes()).digest()
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "k": self.k,
+            "loss_trajectory": list(self.loss_trajectory),
+            "probes": [p.to_json() for p in self.probes],
+        }
+
+    @classmethod
+    def from_json(cls, j: dict[str, Any]) -> "ActivationCommitment":
+        return cls(
+            k=int(j["k"]),
+            loss_trajectory=[float(v) for v in j["loss_trajectory"]],
+            probes=[DeltaProbe.from_json(p) for p in j["probes"]],
         )
 
 
@@ -484,6 +631,7 @@ class OuterGradient:
     submitted_at: int  # Unix millis (matches Rust Timestamp)
     signature: Signature
     attestation: TrainingAttestation | None = None
+    commitment: ActivationCommitment | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -499,6 +647,7 @@ class OuterGradient:
             "submitted_at": self.submitted_at,
             "signature": self.signature.to_json(),
             "attestation": self.attestation.to_json() if self.attestation else None,
+            "commitment": self.commitment.to_json() if self.commitment else None,
         }
 
     @classmethod
@@ -518,6 +667,11 @@ class OuterGradient:
             attestation=(
                 TrainingAttestation.from_json(j["attestation"])
                 if j.get("attestation")
+                else None
+            ),
+            commitment=(
+                ActivationCommitment.from_json(j["commitment"])
+                if j.get("commitment")
                 else None
             ),
         )

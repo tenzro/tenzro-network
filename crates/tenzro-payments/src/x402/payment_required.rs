@@ -32,7 +32,7 @@ pub struct X402PaymentRequired {
 }
 
 /// A single payment requirement option, per Coinbase x402 V2 spec.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct X402PaymentRequirement {
     /// Scheme identifier (e.g., "tenzro-hybrid", "exact-eip3009", "permit2",
@@ -176,7 +176,7 @@ mod tests {
             "1000",
             "0xrecipient",
             "USDC",
-            "https://api.tenzro.network/paid/resource",
+            "https://api.tenzro.xyz/paid/resource",
             "Test resource",
             "application/json",
             60,

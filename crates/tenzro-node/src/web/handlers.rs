@@ -2075,8 +2075,10 @@ pub async fn get_execution_receipt(
 /// Public, ungated endpoint that lets any buyer (agent or human) browse the
 /// paid resources a seller has listed on this node. Query parameters narrow
 /// the result set (all ANDed): `scheme`, `network`, `asset`, `sellerDid`,
-/// `tags` (comma-separated, all must be present), `limit` (default 100).
-/// Listings are returned freshest-first.
+/// `tags` (comma-separated, all must be present), `minReputation` (floor —
+/// unscored sellers are excluded when set), `limit` (default 100).
+/// Listings are returned highest seller reputation first (unscored sellers
+/// last), freshest-first within the same score.
 pub async fn discover_resources(
     State(state): State<Arc<WebState>>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
@@ -2105,6 +2107,9 @@ pub async fn discover_resources(
             .filter(|t| !t.is_empty())
             .collect();
     }
+    query.min_reputation = params
+        .get("minReputation")
+        .and_then(|s| s.parse::<u64>().ok());
     if let Some(limit) = params.get("limit").and_then(|s| s.parse::<usize>().ok()) {
         query.limit = limit;
     }

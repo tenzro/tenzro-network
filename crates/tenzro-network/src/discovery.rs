@@ -173,8 +173,8 @@ impl BootstrapConfig {
     pub fn testnet() -> Self {
         Self {
             boot_nodes: vec![
-                "/dns4/testnet-boot-1.tenzro.network/tcp/9000".parse().unwrap(),
-                "/dns4/testnet-boot-2.tenzro.network/tcp/9000".parse().unwrap(),
+                "/dns4/testnet-boot-1.tenzro.xyz/tcp/9000".parse().unwrap(),
+                "/dns4/testnet-boot-2.tenzro.xyz/tcp/9000".parse().unwrap(),
             ],
             ..Default::default()
         }
@@ -184,9 +184,9 @@ impl BootstrapConfig {
     pub fn mainnet() -> Self {
         Self {
             boot_nodes: vec![
-                "/dns4/mainnet-boot-1.tenzro.network/tcp/9000".parse().unwrap(),
-                "/dns4/mainnet-boot-2.tenzro.network/tcp/9000".parse().unwrap(),
-                "/dns4/mainnet-boot-3.tenzro.network/tcp/9000".parse().unwrap(),
+                "/dns4/mainnet-boot-1.tenzro.xyz/tcp/9000".parse().unwrap(),
+                "/dns4/mainnet-boot-2.tenzro.xyz/tcp/9000".parse().unwrap(),
+                "/dns4/mainnet-boot-3.tenzro.xyz/tcp/9000".parse().unwrap(),
             ],
             ..Default::default()
         }

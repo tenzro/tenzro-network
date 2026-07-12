@@ -615,7 +615,7 @@ Any other relevant information, logs, or screenshots.
 
 ### Security Issues
 
-**DO NOT** report security vulnerabilities as public issues. Instead, email security@tenzro.network with:
+**DO NOT** report security vulnerabilities as public issues. Instead, email security@tenzro.xyz with:
 - Description of the vulnerability
 - Steps to reproduce
 - Potential impact
@@ -640,6 +640,6 @@ By submitting a contribution, you represent that:
 
 - Open a discussion on GitHub
 - Join our Discord (link TBD)
-- Email dev@tenzro.network
+- Email dev@tenzro.xyz
 
 Thank you for contributing to Tenzro Network!

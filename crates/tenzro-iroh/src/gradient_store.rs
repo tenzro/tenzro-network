@@ -195,6 +195,7 @@ mod tests {
             submitted_at: Timestamp::new(1_700_000_000_000),
             signature: Signature::new(vec![0u8; 64], vec![0u8; 32]),
             attestation: None,
+            commitment: None,
         }
     }
 

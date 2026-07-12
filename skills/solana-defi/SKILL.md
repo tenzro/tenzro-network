@@ -23,7 +23,7 @@ Interact with the Solana blockchain for DeFi operations, token management, NFTs,
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Solana MCP | `https://solana-mcp.tenzro.network/mcp` | Solana MCP Server (port 3003) |
+| Solana MCP | `https://solana-mcp.tenzro.xyz/mcp` | Solana MCP Server (port 3003) |
 
 For local development, use `http://localhost:3003/mcp`.
 

@@ -195,11 +195,12 @@ impl DatabaseEngine for LanceEngine {
                 }
                 let batch = Self::rows_to_batch(&rows, dim)?;
                 match self.open_table(&conn).await? {
-                    Some(tbl) => tbl
-                        .add(vec![batch])
-                        .execute()
-                        .await
-                        .map_err(|e| DatabaseError::Query(format!("lance add: {e}")))?,
+                    Some(tbl) => {
+                        tbl.add(vec![batch])
+                            .execute()
+                            .await
+                            .map_err(|e| DatabaseError::Query(format!("lance add: {e}")))?;
+                    }
                     None => {
                         conn.create_table(TABLE_NAME, vec![batch])
                             .execute()

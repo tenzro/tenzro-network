@@ -789,7 +789,7 @@ async def handle_bridge(text: str, metadata: dict = None) -> str:
             f"  - Destination chain\n"
             f"  - Token symbol\n"
             f"  - Sender and recipient addresses\n"
-            f"Use the MCP server at mcp.tenzro.network/mcp for programmatic bridging."
+            f"Use the MCP server at mcp.tenzro.xyz/mcp for programmatic bridging."
         )
 
     return (
@@ -1170,7 +1170,7 @@ async def handle_events(text: str, metadata: dict = None) -> str:
     if "websocket" in t or "subscribe" in t:
         return (
             "WebSocket event streaming:\n"
-            "  Connect to ws://rpc.tenzro.network and call eth_subscribe.\n"
+            "  Connect to ws://rpc.tenzro.xyz and call eth_subscribe.\n"
             "  Supported subscriptions:\n"
             "    - newHeads (new blocks)\n"
             "    - logs (contract events, with optional address/topics filter)\n"
@@ -1256,7 +1256,7 @@ async def handle_canton(text: str, metadata: dict = None) -> str:
             "  - base64-encode the .dar file bytes\n"
             "  - Canton 3.5+ JSON Ledger API: POST /v2/packages\n"
             "  - returns the installed package ids\n"
-            "Use the canton-mcp.tenzro.network/mcp `canton_upload_dar` tool for direct upload."
+            "Use the canton-mcp.tenzro.xyz/mcp `canton_upload_dar` tool for direct upload."
         )
 
     if "transaction" in t and ("get" in t or "lookup" in t or "fetch" in t):

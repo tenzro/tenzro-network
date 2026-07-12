@@ -332,7 +332,7 @@ async fn agent_card_handler(
             card,
             format!("hash:{}", hex::encode(canonical_hash)),
             Some("unsigned".to_string()),
-            Some("did:web:tenzro.network".to_string()),
+            Some("did:web:tenzro.xyz".to_string()),
         );
         Json(signed).into_response()
     } else {

@@ -23,7 +23,7 @@ The most complete LayerZero V2 MCP server available. 20 tools covering every Lay
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| LayerZero MCP | `https://layerzero-mcp.tenzro.network/mcp` | LayerZero MCP Server (port 3006) |
+| LayerZero MCP | `https://layerzero-mcp.tenzro.xyz/mcp` | LayerZero MCP Server (port 3006) |
 
 For local development, use `http://localhost:3006/mcp`.
 

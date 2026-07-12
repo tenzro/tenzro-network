@@ -966,7 +966,7 @@ pub async fn start_solana_mcp_server_with_rpc_and_shutdown(
             "127.0.0.1".to_string(),
             "::1".to_string(),
             "0.0.0.0".to_string(),
-            "solana-mcp.tenzro.network".to_string(),
+            "solana-mcp.tenzro.xyz".to_string(),
         ]);
 
     let rpc = rpc_url.clone();

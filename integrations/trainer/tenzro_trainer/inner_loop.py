@@ -71,6 +71,9 @@ class InnerStepReport:
     avg_loss: float
     wall_seconds: float = 0.0
     samples_processed: int = 0
+    # Per-inner-step losses in step order — the loss half of the Open-tier
+    # activation commitment (gradient.build_activation_commitment).
+    loss_trajectory: list[float] = field(default_factory=list)
 
     @property
     def samples_per_second(self) -> float:
@@ -265,6 +268,7 @@ def run_inner_loop(
         avg_loss=(sum(losses) / len(losses)) if losses else float("nan"),
         wall_seconds=wall_seconds,
         samples_processed=samples_processed,
+        loss_trajectory=losses,
     )
     log.info(
         "inner loop: %d steps, %d samples in %.3fs → %.1f samples/s, %.2f steps/s",

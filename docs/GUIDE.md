@@ -16,7 +16,7 @@ cargo install --git https://github.com/tenzro/tenzro-network --bin tenzro
 # https://github.com/tenzro/tenzro-network/releases
 
 # Talk to the live testnet
-export TENZRO_RPC_URL=https://rpc.tenzro.network
+export TENZRO_RPC_URL=https://rpc.tenzro.xyz
 
 tenzro join --name "Alice"               # provisions DID + MPC wallet
 tenzro faucet                            # request testnet TNZO
@@ -32,11 +32,11 @@ Live testnet endpoints:
 
 | Service | URL |
 |---------|-----|
-| JSON-RPC | `https://rpc.tenzro.network` |
-| Web API | `https://api.tenzro.network` |
-| Faucet | `https://api.tenzro.network/faucet` |
-| MCP | `https://mcp.tenzro.network/mcp` |
-| A2A | `https://a2a.tenzro.network` |
+| JSON-RPC | `https://rpc.tenzro.xyz` |
+| Web API | `https://api.tenzro.xyz` |
+| Faucet | `https://api.tenzro.xyz/faucet` |
+| MCP | `https://mcp.tenzro.xyz/mcp` |
+| A2A | `https://a2a.tenzro.xyz` |
 
 Continue below if you want to run a node locally.
 
@@ -286,7 +286,7 @@ tenzro chat
 tenzro
 ```
 
-The CLI talks to `http://localhost:8545` by default. Point at the live testnet with `--rpc-url https://rpc.tenzro.network`.
+The CLI talks to `http://localhost:8545` by default. Point at the live testnet with `--rpc-url https://rpc.tenzro.xyz`.
 
 ---
 
@@ -481,8 +481,8 @@ curl http://localhost:8080/status
 
 Point CLI at the live testnet if local node is not ready:
 ```bash
-tenzro --rpc-url https://rpc.tenzro.network join --name "Alice"
-tenzro --rpc-url https://rpc.tenzro.network faucet
+tenzro --rpc-url https://rpc.tenzro.xyz join --name "Alice"
+tenzro --rpc-url https://rpc.tenzro.xyz faucet
 ```
 
 ### 9.10 libp2p peer discovery: "no peers connected" for > 60 s

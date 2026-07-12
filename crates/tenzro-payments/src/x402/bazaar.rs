@@ -13,6 +13,15 @@
 //! the node's concern — the node wires a RocksDB-backed store and exposes the
 //! query.
 //!
+//! # Reputation
+//!
+//! Discovery results carry an optional seller reputation joined at query time
+//! through the pluggable [`SellerReputationResolver`] seam. The node bridges
+//! the resolver to its provider-reputation ledger, where the only score-up
+//! path is a settled payment — so a listing cannot buy rank by re-registering
+//! itself. Buyers can require a floor via [`ResourceQuery::min_reputation`];
+//! results sort by reputation descending, then freshness.
+//!
 //! # Domain separation
 //!
 //! Listing ids are derived by domain-separated SHA-256 over the canonical
@@ -97,6 +106,10 @@ pub struct ResourceQuery {
     /// Require all of these tags to be present on the listing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Require the seller's reputation to be at least this floor (0-1000).
+    /// A listing whose seller has no reputation record fails the floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_reputation: Option<u64>,
     /// Cap the number of listings returned (0 = unbounded).
     #[serde(default)]
     pub limit: usize,
@@ -134,6 +147,30 @@ impl ResourceQuery {
     }
 }
 
+/// A discovery result: the listing plus the seller's reputation joined at
+/// query time. Serializes with the listing fields flattened so existing
+/// consumers of the listing shape keep working; `seller_reputation` rides
+/// alongside (omitted when no resolver is wired or the seller is unscored).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiscoveredListing {
+    /// The catalog listing.
+    #[serde(flatten)]
+    pub listing: X402ResourceListing,
+    /// Seller reputation in [0, 1000] as of query time, when resolvable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seller_reputation: Option<u64>,
+}
+
+/// Reputation seam for discovery. The node bridges this to its
+/// provider-reputation ledger keyed by the listing's pay-to address, where
+/// the only score-up path is a settled payment.
+pub trait SellerReputationResolver: Send + Sync + std::fmt::Debug {
+    /// Resolve the seller's reputation in [0, 1000]. `pay_to` is the
+    /// listing's settlement address; `seller_did` the publishing DID.
+    /// `None` means no record — unscored, not zero.
+    fn reputation(&self, seller_did: &str, pay_to: &str) -> Option<u64>;
+}
+
 /// Persistence seam for the resource catalog. The default in-memory
 /// implementation lives on [`ResourceCatalog`]; the node injects a
 /// RocksDB-backed store so listings survive restart.
@@ -153,6 +190,7 @@ pub struct ResourceCatalog {
     /// listing_id → listing.
     index: RwLock<std::collections::HashMap<String, X402ResourceListing>>,
     store: Option<Arc<dyn ResourceCatalogStore>>,
+    reputation: Option<Arc<dyn SellerReputationResolver>>,
 }
 
 impl Default for ResourceCatalog {
@@ -167,6 +205,7 @@ impl ResourceCatalog {
         Self {
             index: RwLock::new(std::collections::HashMap::new()),
             store: None,
+            reputation: None,
         }
     }
 
@@ -181,7 +220,15 @@ impl ResourceCatalog {
         Ok(Self {
             index: RwLock::new(index),
             store: Some(store),
+            reputation: None,
         })
+    }
+
+    /// Attach a reputation resolver so discovery joins and ranks by seller
+    /// reputation.
+    pub fn with_reputation_resolver(mut self, resolver: Arc<dyn SellerReputationResolver>) -> Self {
+        self.reputation = Some(resolver);
+        self
     }
 
     /// Register (or replace) a listing. Writes through to the durable store
@@ -238,18 +285,37 @@ impl ResourceCatalog {
         self.index.read().get(listing_id).cloned()
     }
 
-    /// Discover listings matching `query`. Results are sorted by
-    /// `updated_at_ms` descending (freshest first) and truncated to
-    /// `query.limit` when non-zero.
-    pub fn discover(&self, query: &ResourceQuery) -> Vec<X402ResourceListing> {
-        let mut out: Vec<X402ResourceListing> = self
+    /// Discover listings matching `query`. Each result carries the seller's
+    /// reputation when a [`SellerReputationResolver`] is attached. Results
+    /// sort by reputation descending (unscored last), then `updated_at_ms`
+    /// descending, and truncate to `query.limit` when non-zero. When
+    /// `query.min_reputation` is set, unscored sellers fail the floor.
+    pub fn discover(&self, query: &ResourceQuery) -> Vec<DiscoveredListing> {
+        let mut out: Vec<DiscoveredListing> = self
             .index
             .read()
             .values()
             .filter(|l| query.matches(l))
-            .cloned()
+            .map(|l| {
+                let seller_reputation = self
+                    .reputation
+                    .as_ref()
+                    .and_then(|r| r.reputation(&l.seller_did, &l.requirement.pay_to));
+                DiscoveredListing {
+                    listing: l.clone(),
+                    seller_reputation,
+                }
+            })
+            .filter(|d| match query.min_reputation {
+                Some(floor) => d.seller_reputation.is_some_and(|rep| rep >= floor),
+                None => true,
+            })
             .collect();
-        out.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        out.sort_by(|a, b| {
+            b.seller_reputation
+                .cmp(&a.seller_reputation)
+                .then_with(|| b.listing.updated_at_ms.cmp(&a.listing.updated_at_ms))
+        });
         if query.limit > 0 && out.len() > query.limit {
             out.truncate(query.limit);
         }
@@ -346,7 +412,9 @@ mod tests {
         let q = ResourceQuery { scheme: Some("upto".into()), tags: vec!["vision".into()], ..Default::default() };
         let r = cat.discover(&q);
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].requirement.resource, "https://x/a");
+        assert_eq!(r[0].listing.requirement.resource, "https://x/a");
+        // No resolver wired → reputation is unjoined.
+        assert_eq!(r[0].seller_reputation, None);
 
         // asset filter
         let q = ResourceQuery { asset: Some("EURC".into()), ..Default::default() };
@@ -365,13 +433,70 @@ mod tests {
         cat.register(listing("did:s", "upto", "n", "USDC", "https://x/mid", &[], 5)).unwrap();
 
         let all = cat.discover(&ResourceQuery::default());
-        assert_eq!(all[0].requirement.resource, "https://x/new");
-        assert_eq!(all[2].requirement.resource, "https://x/old");
+        assert_eq!(all[0].listing.requirement.resource, "https://x/new");
+        assert_eq!(all[2].listing.requirement.resource, "https://x/old");
 
         let limited = cat.discover(&ResourceQuery { limit: 2, ..Default::default() });
         assert_eq!(limited.len(), 2);
-        assert_eq!(limited[0].requirement.resource, "https://x/new");
-        assert_eq!(limited[1].requirement.resource, "https://x/mid");
+        assert_eq!(limited[0].listing.requirement.resource, "https://x/new");
+        assert_eq!(limited[1].listing.requirement.resource, "https://x/mid");
+    }
+
+    /// Test resolver: maps seller DID → fixed reputation.
+    #[derive(Debug)]
+    struct MapResolver(std::collections::HashMap<String, u64>);
+    impl SellerReputationResolver for MapResolver {
+        fn reputation(&self, seller_did: &str, _pay_to: &str) -> Option<u64> {
+            self.0.get(seller_did).copied()
+        }
+    }
+
+    #[test]
+    fn discover_joins_reputation_and_ranks_scored_sellers_first() {
+        let resolver = MapResolver(
+            [("did:high".to_string(), 900u64), ("did:low".to_string(), 200u64)]
+                .into_iter()
+                .collect(),
+        );
+        let cat = ResourceCatalog::new().with_reputation_resolver(Arc::new(resolver));
+        // Freshest listing belongs to the LOW-reputation seller — reputation
+        // must win over freshness.
+        cat.register(listing("did:low", "upto", "n", "USDC", "https://x/low", &[], 9)).unwrap();
+        cat.register(listing("did:high", "upto", "n", "USDC", "https://x/high", &[], 1)).unwrap();
+        cat.register(listing("did:unscored", "upto", "n", "USDC", "https://x/unscored", &[], 5)).unwrap();
+
+        let r = cat.discover(&ResourceQuery::default());
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].listing.seller_did, "did:high");
+        assert_eq!(r[0].seller_reputation, Some(900));
+        assert_eq!(r[1].listing.seller_did, "did:low");
+        assert_eq!(r[1].seller_reputation, Some(200));
+        // Unscored sorts last regardless of freshness.
+        assert_eq!(r[2].listing.seller_did, "did:unscored");
+        assert_eq!(r[2].seller_reputation, None);
+    }
+
+    #[test]
+    fn min_reputation_floor_excludes_low_and_unscored_sellers() {
+        let resolver = MapResolver(
+            [("did:high".to_string(), 900u64), ("did:low".to_string(), 200u64)]
+                .into_iter()
+                .collect(),
+        );
+        let cat = ResourceCatalog::new().with_reputation_resolver(Arc::new(resolver));
+        cat.register(listing("did:high", "upto", "n", "USDC", "https://x/high", &[], 1)).unwrap();
+        cat.register(listing("did:low", "upto", "n", "USDC", "https://x/low", &[], 2)).unwrap();
+        cat.register(listing("did:unscored", "upto", "n", "USDC", "https://x/unscored", &[], 3)).unwrap();
+
+        let q = ResourceQuery { min_reputation: Some(500), ..Default::default() };
+        let r = cat.discover(&q);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].listing.seller_did, "did:high");
+
+        // Floor with no resolver wired → nothing can prove reputation.
+        let bare = ResourceCatalog::new();
+        bare.register(listing("did:high", "upto", "n", "USDC", "https://x/high", &[], 1)).unwrap();
+        assert!(bare.discover(&q).is_empty());
     }
 
     #[test]

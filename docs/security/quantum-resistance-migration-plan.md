@@ -305,10 +305,10 @@ After pods are Ready, smoke tests:
 
 ```
 # 1. Verify TLS still negotiates X25519MLKEM768
-echo | openssl s_client -connect rpc.tenzro.network:443 -tls1_3 -trace 2>&1 | grep "NamedGroup: X25519MLKEM768"
+echo | openssl s_client -connect rpc.tenzro.xyz:443 -tls1_3 -trace 2>&1 | grep "NamedGroup: X25519MLKEM768"
 
 # 2. Faucet a wallet, submit a hybrid-signed tx, confirm receipt
-curl -sX POST https://api.tenzro.network/faucet -H 'content-type: application/json' \
+curl -sX POST https://api.tenzro.xyz/faucet -H 'content-type: application/json' \
   -d '{"address":"0x...","amount":"100"}'
 # (then `tenzro-cli wallet send` with new hybrid wallet — should succeed)
 ```

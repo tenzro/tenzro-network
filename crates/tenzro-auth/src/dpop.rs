@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! header  = { typ: "dpop+jwt", alg: "EdDSA", jwk: <holder pubkey JWK> }
-//! payload = { htm: "POST", htu: "https://rpc.tenzro.network/", iat: <unix>,
+//! payload = { htm: "POST", htu: "https://rpc.tenzro.xyz/", iat: <unix>,
 //!             jti: <random>, ath: base64url(SHA-256(access_token)) }
 //! ```
 //!

@@ -282,8 +282,8 @@ fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthrou
 ///
 /// Communicates with a Canton participant node via:
 /// - JSON Ledger API v2 — `ledger_api_url` is the BASE url (e.g.
-///   `https://json.devnet.tenzro.network`); request paths append `/v2/...`
-/// - Admin API (e.g. `https://admin.devnet.tenzro.network`)
+///   `https://json.devnet.tenzro.xyz`); request paths append `/v2/...`
+/// - Admin API (e.g. `https://admin.devnet.tenzro.xyz`)
 ///
 /// Authentication precedence:
 /// 1. If a [`CantonTokenProvider`] is attached via [`with_token_provider`],
@@ -293,9 +293,9 @@ fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthrou
 ///    [`with_jwt_token`]. This is the local / unauth path.
 #[derive(Clone)]
 pub struct CantonMcpServer {
-    /// Canton JSON Ledger API base URL (e.g. "https://json.devnet.tenzro.network")
+    /// Canton JSON Ledger API base URL (e.g. "https://json.devnet.tenzro.xyz")
     ledger_api_url: String,
-    /// Canton Admin API base URL (e.g. "https://admin.devnet.tenzro.network")
+    /// Canton Admin API base URL (e.g. "https://admin.devnet.tenzro.xyz")
     admin_api_url: String,
     /// Optional static JWT token (used only when no token provider is attached).
     jwt_token: Option<String>,
@@ -339,8 +339,8 @@ impl CantonMcpServer {
     /// [`with_admin_api_url`] for self-hosted participants.
     pub fn new() -> Self {
         Self {
-            ledger_api_url: "https://json.devnet.tenzro.network".to_string(),
-            admin_api_url: "https://admin.devnet.tenzro.network".to_string(),
+            ledger_api_url: "https://json.devnet.tenzro.xyz".to_string(),
+            admin_api_url: "https://admin.devnet.tenzro.xyz".to_string(),
             jwt_token: None,
             token_provider: None,
             analytics: None,
@@ -1333,7 +1333,7 @@ impl CantonMcpServer {
         // bytes and `Content-Type: application/octet-stream`. The
         // legacy `/admin/packages/upload-dar` path is only on the gRPC
         // Admin API, which the Tenzro-operated devnet
-        // (`json.devnet.tenzro.network`) does not expose.
+        // (`json.devnet.tenzro.xyz`) does not expose.
         let url = format!("{}/v2/packages", self.ledger_api_url);
         let mut builder = self
             .http
@@ -1575,7 +1575,7 @@ impl ServerHandler for CantonMcpServer {
 /// Axum middleware that gates every request on a scope-`canton` API key
 /// presented as the `X-Tenzro-Api-Key` header.
 ///
-/// The Canton MCP server runs as its own subdomain (`canton-mcp.tenzro.network`)
+/// The Canton MCP server runs as its own subdomain (`canton-mcp.tenzro.xyz`)
 /// and dispatches tool calls directly to the upstream Canton JSON Ledger and
 /// Admin APIs using the operator's bearer JWT. Without this gate, anyone able
 /// to reach the endpoint would get full operator-authority access to the
@@ -1693,7 +1693,7 @@ pub async fn start_canton_mcp_server_with_shutdown(
             "127.0.0.1".to_string(),
             "::1".to_string(),
             "0.0.0.0".to_string(),
-            "canton-mcp.tenzro.network".to_string(),
+            "canton-mcp.tenzro.xyz".to_string(),
         ]);
 
     // Capture Canton endpoints into the per-session factory. The closure is

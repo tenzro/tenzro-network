@@ -3,8 +3,8 @@
 import httpx
 import os
 
-TENZRO_RPC_URL = os.environ.get("TENZRO_RPC_URL", "https://rpc.tenzro.network")
-TENZRO_API_URL = os.environ.get("TENZRO_API_URL", "https://api.tenzro.network")
+TENZRO_RPC_URL = os.environ.get("TENZRO_RPC_URL", "https://rpc.tenzro.xyz")
+TENZRO_API_URL = os.environ.get("TENZRO_API_URL", "https://api.tenzro.xyz")
 _REQUEST_ID = 0
 
 

@@ -82,6 +82,12 @@ steps:
         # --lib avoids integration tests that need a live node/network.
         cargo test -p tenzro-node --lib --locked
 
+        # The x402 on-chain settlement test boots a self-contained node
+        # (127.0.0.1:0 RPC, no boot nodes) and drives one settlement through
+        # the consensus/block path, so it runs without peer networking.
+        echo "==== cargo test -p tenzro-node --test x402_onchain_settlement ===="
+        cargo test -p tenzro-node --test x402_onchain_settlement --locked -- --nocapture
+
         echo "==== ALL TESTS PASSED ===="
 
 # n1-highcpu-32 is the largest non-private-pool option; ~18 min for the

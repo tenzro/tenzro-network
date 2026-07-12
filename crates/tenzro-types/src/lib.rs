@@ -132,9 +132,11 @@ pub use cortex::{
     CortexRequest, CortexResponse, ReasoningBudget, ReasoningTier, CORTEX_FAMILY_KEY,
 };
 pub use training::{
-    AggregationRule, ArchitectureSpec, FragmentQuorumStatus, OuterGradient,
-    SealedDatasetManifest, SealedShardEnvelope, SyncRound, TrainingAttestation, TrainingModality,
-    TrainingReceipt, TrainingRun, TrainingRunStatus, TrainingTaskSpec, TrainingTier,
+    ActivationCommitment, AggregationRule, ArchitectureSpec, DeltaProbe, FragmentQuorumStatus,
+    OuterGradient, RlConfig, SealedDatasetManifest, SealedShardEnvelope, SyncRound,
+    TrainingAttestation, TrainingModality, TrainingObjective, TrainingReceipt, TrainingRun,
+    TrainingRunStatus, TrainingTaskSpec, TrainingTier, ACTIVATION_COMMITMENT_DOMAIN_TAG,
+    DEFAULT_PROBE_K, MAX_PROBE_K,
 };
 pub use principal_chain::{
     ControllerActivitySummary, PrincipalChain, PrincipalChainSummary, PrincipalLink,

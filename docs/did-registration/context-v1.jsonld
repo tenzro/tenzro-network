@@ -4,53 +4,53 @@
     "@protected": true,
 
     "TenzroIdentity": {
-      "@id": "https://ns.tenzro.network/v1#TenzroIdentity",
+      "@id": "https://ns.tenzro.xyz/v1#TenzroIdentity",
       "@context": {
         "@version": 1.1,
         "@protected": true,
         "id": "@id",
         "type": "@type",
-        "identityType": "https://ns.tenzro.network/v1#identityType",
-        "kycTier": "https://ns.tenzro.network/v1#kycTier",
+        "identityType": "https://ns.tenzro.xyz/v1#identityType",
+        "kycTier": "https://ns.tenzro.xyz/v1#kycTier",
         "controller": "https://www.w3.org/ns/did#controller",
-        "controlledMachines": "https://ns.tenzro.network/v1#controlledMachines",
-        "delegationScope": "https://ns.tenzro.network/v1#delegationScope",
-        "tenzroAgentId": "https://ns.tenzro.network/v1#tenzroAgentId"
+        "controlledMachines": "https://ns.tenzro.xyz/v1#controlledMachines",
+        "delegationScope": "https://ns.tenzro.xyz/v1#delegationScope",
+        "tenzroAgentId": "https://ns.tenzro.xyz/v1#tenzroAgentId"
       }
     },
 
     "DelegationScope": {
-      "@id": "https://ns.tenzro.network/v1#DelegationScope",
+      "@id": "https://ns.tenzro.xyz/v1#DelegationScope",
       "@context": {
         "@version": 1.1,
         "@protected": true,
-        "maxTransactionValue": "https://ns.tenzro.network/v1#maxTransactionValue",
-        "maxDailySpend": "https://ns.tenzro.network/v1#maxDailySpend",
-        "allowedOperations": "https://ns.tenzro.network/v1#allowedOperations",
-        "allowedContracts": "https://ns.tenzro.network/v1#allowedContracts",
-        "timeBound": "https://ns.tenzro.network/v1#timeBound",
-        "allowedPaymentProtocols": "https://ns.tenzro.network/v1#allowedPaymentProtocols",
-        "allowedChains": "https://ns.tenzro.network/v1#allowedChains"
+        "maxTransactionValue": "https://ns.tenzro.xyz/v1#maxTransactionValue",
+        "maxDailySpend": "https://ns.tenzro.xyz/v1#maxDailySpend",
+        "allowedOperations": "https://ns.tenzro.xyz/v1#allowedOperations",
+        "allowedContracts": "https://ns.tenzro.xyz/v1#allowedContracts",
+        "timeBound": "https://ns.tenzro.xyz/v1#timeBound",
+        "allowedPaymentProtocols": "https://ns.tenzro.xyz/v1#allowedPaymentProtocols",
+        "allowedChains": "https://ns.tenzro.xyz/v1#allowedChains"
       }
     },
 
-    "KycCredential": "https://ns.tenzro.network/v1#KycCredential",
-    "CapabilityCredential": "https://ns.tenzro.network/v1#CapabilityCredential",
-    "AttestationCredential": "https://ns.tenzro.network/v1#AttestationCredential",
+    "KycCredential": "https://ns.tenzro.xyz/v1#KycCredential",
+    "CapabilityCredential": "https://ns.tenzro.xyz/v1#CapabilityCredential",
+    "AttestationCredential": "https://ns.tenzro.xyz/v1#AttestationCredential",
 
     "kycTier": {
-      "@id": "https://ns.tenzro.network/v1#kycTier",
-      "@type": "https://ns.tenzro.network/v1#KycTier"
+      "@id": "https://ns.tenzro.xyz/v1#kycTier",
+      "@type": "https://ns.tenzro.xyz/v1#KycTier"
     },
 
     "capabilities": {
-      "@id": "https://ns.tenzro.network/v1#capabilities",
+      "@id": "https://ns.tenzro.xyz/v1#capabilities",
       "@container": "@set"
     },
 
-    "walletId": "https://ns.tenzro.network/v1#walletId",
-    "tenzroDid": "https://ns.tenzro.network/v1#tenzroDid",
-    "registrationFee": "https://ns.tenzro.network/v1#registrationFee",
-    "reputation": "https://ns.tenzro.network/v1#reputation"
+    "walletId": "https://ns.tenzro.xyz/v1#walletId",
+    "tenzroDid": "https://ns.tenzro.xyz/v1#tenzroDid",
+    "registrationFee": "https://ns.tenzro.xyz/v1#registrationFee",
+    "reputation": "https://ns.tenzro.xyz/v1#reputation"
   }
 }

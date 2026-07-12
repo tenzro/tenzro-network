@@ -45,7 +45,7 @@
   "download_count": 0,
   "rating": 0,
   "content_hash": null,
-  "docs_url": "https://docs.tenzro.network/agent-kit/templates/timeseries-forecaster",
+  "docs_url": "https://docs.tenzro.xyz/agent-kit/templates/timeseries-forecaster",
   "metadata": {},
   "execution_spec": {
     "backend": "MultiVm",

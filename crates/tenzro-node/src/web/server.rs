@@ -149,8 +149,8 @@ impl WebServer {
         };
 
         // HTTP endpoints are served at root paths — the public hostname
-        // `api.tenzro.network` is itself the `/api` namespace, so doubling
-        // the prefix on routes would produce `api.tenzro.network/api/...`.
+        // `api.tenzro.xyz` is itself the `/api` namespace, so doubling
+        // the prefix on routes would produce `api.tenzro.xyz/api/...`.
         // `/metrics` stays at root to comply with the Prometheus scraper
         // convention.
         //

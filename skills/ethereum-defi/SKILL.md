@@ -23,7 +23,7 @@ Interact with the Ethereum blockchain for DeFi, token management, ENS resolution
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Ethereum MCP | `https://ethereum-mcp.tenzro.network/mcp` | Ethereum MCP Server (port 3004) |
+| Ethereum MCP | `https://ethereum-mcp.tenzro.xyz/mcp` | Ethereum MCP Server (port 3004) |
 
 For local development, use `http://localhost:3004/mcp`.
 

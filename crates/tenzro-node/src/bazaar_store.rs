@@ -1,4 +1,6 @@
-//! RocksDB-backed [`ResourceCatalogStore`] for the x402 Bazaar.
+//! RocksDB-backed [`ResourceCatalogStore`] for the x402 Bazaar, plus the
+//! node-side [`SellerReputationResolver`] bridging discovery to the
+//! provider-reputation ledger.
 //!
 //! Persists [`X402ResourceListing`] records under `CF_SETTLEMENTS` keyed by
 //! `bazaar:<listing_id>`, alongside the other payment-domain state (channels,
@@ -7,9 +9,11 @@
 
 use std::sync::Arc;
 
-use tenzro_payments::x402::{ResourceCatalogStore, X402ResourceListing};
+use tenzro_model::ProviderManager;
+use tenzro_payments::x402::{ResourceCatalogStore, SellerReputationResolver, X402ResourceListing};
 use tenzro_payments::{PaymentError, Result as PaymentResult};
 use tenzro_storage::{CF_SETTLEMENTS, KvStore};
+use tenzro_types::primitives::Address;
 
 /// Key prefix for Bazaar listings within `CF_SETTLEMENTS`.
 const BAZAAR_PREFIX: &str = "bazaar:";
@@ -33,6 +37,50 @@ impl NodeResourceCatalogStore {
     /// Wrap a shared [`KvStore`] (typically the node's `Arc<RocksDbStore>`).
     pub fn new(storage: Arc<dyn KvStore>) -> Self {
         Self { storage }
+    }
+}
+
+/// [`SellerReputationResolver`] over the node's [`ProviderManager`].
+///
+/// Joins a listing to the provider-reputation ledger by its `pay_to`
+/// settlement address: the same address a provider registered under is the
+/// address its x402 listings settle to, and the only score-up path on that
+/// ledger is a settled payment (`record_settled_success`). A pay-to address
+/// with no provider record resolves to `None` — unscored, not zero.
+pub struct ProviderReputationResolver {
+    provider_manager: Arc<ProviderManager>,
+}
+
+impl std::fmt::Debug for ProviderReputationResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderReputationResolver").finish()
+    }
+}
+
+impl ProviderReputationResolver {
+    /// Wrap the node's shared [`ProviderManager`].
+    pub fn new(provider_manager: Arc<ProviderManager>) -> Self {
+        Self { provider_manager }
+    }
+}
+
+/// Parse a hex pay-to address (with or without `0x`, 20-byte EVM-style or
+/// 32-byte native) into a left-zero-padded 32-byte [`Address`].
+fn parse_pay_to_address(pay_to: &str) -> Option<Address> {
+    let hex_str = pay_to.strip_prefix("0x").unwrap_or(pay_to);
+    let bytes = hex::decode(hex_str).ok()?;
+    if bytes.is_empty() || bytes.len() > 32 {
+        return None;
+    }
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(&bytes);
+    Some(Address(buf))
+}
+
+impl SellerReputationResolver for ProviderReputationResolver {
+    fn reputation(&self, _seller_did: &str, pay_to: &str) -> Option<u64> {
+        let address = parse_pay_to_address(pay_to)?;
+        self.provider_manager.get_reputation(&address)
     }
 }
 

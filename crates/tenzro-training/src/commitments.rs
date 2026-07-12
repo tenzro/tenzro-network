@@ -104,8 +104,12 @@ pub fn sync_round_signing_bytes(round: &SyncRound) -> Vec<u8> {
 /// The quantization is bound as its canonical display label
 /// (`none` / `int8/N` / `int4/N`). `submitted_at` is the two's-complement i64
 /// milliseconds, matching Python's `to_bytes(8, "big", signed=True)`.
+/// The activation commitment is bound as a presence byte (`0x01`/`0x00`)
+/// followed, when present, by its 32-byte
+/// [`commitment_hash`](tenzro_types::training::ActivationCommitment::commitment_hash) —
+/// so a trainer cannot swap the commitment after signing.
 pub fn outer_gradient_signing_bytes(grad: &OuterGradient) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(96 + grad.task_id.len() + grad.trainer_did.len());
+    let mut buf = Vec::with_capacity(128 + grad.task_id.len() + grad.trainer_did.len());
     buf.extend_from_slice(b"tenzro/train/outer-gradient");
     buf.extend_from_slice(grad.task_id.as_bytes());
     buf.extend_from_slice(&grad.round.to_be_bytes());
@@ -116,6 +120,13 @@ pub fn outer_gradient_signing_bytes(grad: &OuterGradient) -> Vec<u8> {
     buf.extend_from_slice(grad.quantization.to_string().as_bytes());
     buf.extend_from_slice(&grad.inner_step_count.to_be_bytes());
     buf.extend_from_slice(&grad.submitted_at.as_millis().to_be_bytes());
+    match &grad.commitment {
+        Some(commitment) => {
+            buf.push(1u8);
+            buf.extend_from_slice(&commitment.commitment_hash());
+        }
+        None => buf.push(0u8),
+    }
     buf
 }
 

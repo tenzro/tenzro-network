@@ -374,6 +374,27 @@ pub enum TransactionType {
         /// Amount to pay from the pool vault, in TNZO base units
         amount: u128,
     },
+    /// Settle an x402 payment on-chain, moving `amount` from `payer` to
+    /// `payee`. Dispatched by the node's `TnzoSettlementCallback` after the
+    /// x402 credential has been verified off-chain; the node's system key
+    /// signs the transaction, so this is a privileged consensus-mediated
+    /// settlement rather than a payer-signed transfer. The VM records a
+    /// `x402_settle:<payment_id>` marker so a replayed dispatch cannot
+    /// double-debit the payer.
+    ///
+    /// Authorization: `tx.from` is the node's system key; the settlement's
+    /// legitimacy derives from the verified x402 credential the callback holds,
+    /// not from a payer signature (the callback never holds the payer's key).
+    X402Settle {
+        /// Address funds move from.
+        payer: Address,
+        /// Address funds move to.
+        payee: Address,
+        /// Amount to settle, in TNZO base units.
+        amount: u128,
+        /// x402 payment identifier — the idempotency key.
+        payment_id: String,
+    },
     /// Register the signing wallet as a Candidate validator (Dynamic Validator
     /// Set, modern permissionless join).
     ///

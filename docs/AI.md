@@ -676,7 +676,7 @@ The Python trainer is a thin agent that:
 
 1. Authenticates with its TDIP DID + MPC wallet (via the Tenzro JSON-RPC).
 2. Subscribes to the `tenzro/training` gossip topic.
-3. On task assignment, resolves the dataset shard URI (`tenzro://blob/<hash>` natively through the local node's `tenzro_iroh_fetchBlob` RPC, with `ipfs://` / `ar://` / `http(s)://` as gateway-resolved alternatives and `file://` passthrough; remote fetches cache under `~/.cache/tenzro-trainer/shards`), runs H inner SGD steps with the appropriate inner optimizer, and emits its outer gradient as a safetensors blob.
+3. On task assignment, resolves the dataset shard URI (`tenzro://blob/<hash>` natively through the local node's `tenzro_iroh_fetchBlob` RPC, with `ipfs://` / `ar://` / `http(s)://` as gateway-resolved alternatives and `file://` passthrough; remote fetches cache under `~/.cache/tenzro-trainer/shards`), then runs the inner loop the task's `objective` selects: H supervised SGD steps for `Supervised`, or H GRPO steps for `RlPostTraining` (Language modality only — per step, sample a `group_size` rollout group from one shard prompt, score with the sponsor's `py:<module>:<callable>` reward, take one optimizer step on the clipped surrogate with a k3 KL penalty against the sampling-time policy). Either way it emits its outer gradient as a safetensors blob — the outer contract is objective-agnostic.
 4. Submits the safetensors blob + signature to the Rust syncer over JSON-RPC (`tenzro_training_submitOuterGradient`).
 5. Listens for round-completion events on `tenzro/training/syncer` and pulls updated fragments back from the syncer.
 

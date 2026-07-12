@@ -52,6 +52,14 @@ training loop for Decoupled DiLoCo, paired with the Rust protocol layer in
   submitted by all enrolled trainers.
   The Python trainer never sees other trainers' gradients — it only ever
   produces its own and submits the safetensors hash.
+- **Objectives:** `Supervised` (default H-step SGD) or `RlPostTraining` — a
+  GRPO inner loop for Language tasks. Per step the trainer samples a
+  `group_size` rollout group from one shard prompt (the shard is a plain-text
+  prompt list, one per line), scores completions with the sponsor-referenced
+  reward callable (`reward_ref = "py:<module.path>:<callable>"`), computes
+  group-relative advantages, and takes one optimizer step on the clipped
+  surrogate with a k3 KL penalty against the sampling-time policy. No value
+  model, no frozen reference copy; the outer-gradient contract is unchanged.
 - **Inner optimizer:** selectable per task via `architecture.metadata.inner_optimizer`
   (`muon` / `adamw` / `sgd`, default `adamw`). Muon orthogonalizes 2D weight
   updates with Newton-Schulz iteration and falls back to AdamW for 1D,
@@ -123,6 +131,7 @@ identity derivation, crash policy, and the `tenzro_getTrainerDaemonStatus` RPC.
 | `tenzro_trainer.rpc_bridge` | Thin JSON-RPC 2.0 client over `requests`. Handles `enrollTrainer`, `submitOuterGradient`, `finalizeRound`. |
 | `tenzro_trainer.gradient` | Outer-gradient packaging: per-fragment safetensors blobs + SHA-256 + signing helpers (Ed25519 via PyNaCl). |
 | `tenzro_trainer.inner_loop` | Generic H-step inner driver plus `OuterUpdateScheduler` (delayed outer-update application), partial-state load/apply for streaming shards, and state snapshots. |
+| `tenzro_trainer.rl` | GRPO RL post-training inner loop: `RolloutAdapter` protocol, `load_reward`, group-relative advantages, clipped surrogate + k3 KL loss, `run_rl_inner_loop` (same `(pre, post, report)` contract as the supervised driver). |
 | `tenzro_trainer.muon` | Muon inner optimizer — Newton-Schulz orthogonalization of 2D weight updates, AdamW fallback for 1D / embedding / head parameters. DTensor-aware: sharded gradients gather for Newton-Schulz, momentum stays sharded, the update distributes back. |
 | `tenzro_trainer.distributed` | torchrun detection (`DistContext`), FSDP2 sharding (`shard_model_fsdp2`), and DTensor helpers (`full_tensor`, `copy_into`, `add_into`) used by the inner loop and Muon. |
 | `tenzro_trainer.accel` | Attention-kernel selection (FlashAttention-2 / SDPA) and torchao FP8 conversion for the language adapter. |

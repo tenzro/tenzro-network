@@ -159,7 +159,7 @@ let receipt = canton.submit_with_mandate(SubmitWithMandateParams {
 ```ts
 import { TenzroClient, CantonAgentClient } from '@tenzro/sdk';
 
-const client = new TenzroClient({ rpcUrl: 'https://rpc.tenzro.network' });
+const client = new TenzroClient({ rpcUrl: 'https://rpc.tenzro.xyz' });
 const canton = new CantonAgentClient(client.rpc);
 
 const receipt = await canton.submitWithMandate({

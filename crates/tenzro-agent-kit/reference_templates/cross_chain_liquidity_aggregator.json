@@ -55,7 +55,7 @@
   "download_count": 0,
   "rating": 0,
   "content_hash": null,
-  "docs_url": "https://docs.tenzro.network/agent-kit/templates/cross-chain-liquidity-aggregator",
+  "docs_url": "https://docs.tenzro.xyz/agent-kit/templates/cross-chain-liquidity-aggregator",
   "metadata": {},
   "execution_spec": {
     "backend": {

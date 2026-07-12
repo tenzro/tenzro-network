@@ -1,7 +1,7 @@
 //! ML-DSA-65 (FIPS 204) wallet signing endpoints.
 //!
 //! Exposed at `/wallet/mldsa/*` on the public Web API (port 8080,
-//! `api.tenzro.network`). Used by Tenzro-aware wallets — through the
+//! `api.tenzro.xyz`). Used by Tenzro-aware wallets — through the
 //! Tenzro SDKs — to obtain post-quantum signatures over arbitrary
 //! preimage bytes.
 //!

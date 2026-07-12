@@ -293,7 +293,7 @@ async fn x402_pay_resource() -> Result<(), Box<dyn std::error::Error>> {
         "1000",
         "0xrecipient",
         "USDC",
-        "https://api.tenzro.network/paid/resource",
+        "https://api.tenzro.xyz/paid/resource",
         "Walkthrough resource",
         "application/json",
         300,

@@ -93,14 +93,14 @@ pub struct SecurityScheme {
 /// `a2a_addr` is the listen address (e.g. `0.0.0.0:3002`). The advertised URL
 /// prefers the `TENZRO_A2A_PUBLIC_URL` environment variable when set —
 /// otherwise it falls back to `http://<a2a_addr>/a2a`. Setting the env var to
-/// e.g. `https://a2a.tenzro.network` produces a card pointing at the public
+/// e.g. `https://a2a.tenzro.xyz` produces a card pointing at the public
 /// endpoint instead of the internal bind address.
 pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
     let url = match std::env::var("TENZRO_A2A_PUBLIC_URL") {
         Ok(public) if !public.is_empty() => {
             let trimmed = public.trim_end_matches('/');
-            // Allow either a bare host ("https://a2a.tenzro.network") or a full
-            // path ("https://a2a.tenzro.network/a2a"). Append /a2a only if the
+            // Allow either a bare host ("https://a2a.tenzro.xyz") or a full
+            // path ("https://a2a.tenzro.xyz/a2a"). Append /a2a only if the
             // caller didn't already supply a path component beyond `://`.
             if trimmed.split_once("://").map(|(_, rest)| rest.contains('/')).unwrap_or(false) {
                 trimmed.to_string()
@@ -1144,7 +1144,7 @@ pub struct SignedAgentCard {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub algorithm: Option<String>,
     /// Optional `iss` claim from the JWS protected header — the domain
-    /// owner DID that signed the card (`did:web:tenzro.network` for the
+    /// owner DID that signed the card (`did:web:tenzro.xyz` for the
     /// canonical Tenzro card).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
@@ -1255,19 +1255,19 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
         // Bare host: should append /a2a
-        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.network"); }
+        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.xyz"); }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
-        assert_eq!(card.url, "https://a2a.tenzro.network/a2a");
+        assert_eq!(card.url, "https://a2a.tenzro.xyz/a2a");
 
         // Trailing slash: should still work
-        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.network/"); }
+        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.xyz/"); }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
-        assert_eq!(card.url, "https://a2a.tenzro.network/a2a");
+        assert_eq!(card.url, "https://a2a.tenzro.xyz/a2a");
 
         // Full path: should NOT double-append
-        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.network/a2a"); }
+        unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", "https://a2a.tenzro.xyz/a2a"); }
         let card = build_agent_card("0.0.0.0:3002", "Validator");
-        assert_eq!(card.url, "https://a2a.tenzro.network/a2a");
+        assert_eq!(card.url, "https://a2a.tenzro.xyz/a2a");
 
         // Empty / unset: falls back to listen address
         unsafe { std::env::set_var("TENZRO_A2A_PUBLIC_URL", ""); }
@@ -1368,13 +1368,13 @@ mod tests {
             card.clone(),
             "eyJhbGciOiJFZERTQSJ9.eyJoYXNoIjoiMHhkZWFkYmVlZiJ9.fake-sig".to_string(),
             Some("EdDSA".to_string()),
-            Some("did:web:tenzro.network".to_string()),
+            Some("did:web:tenzro.xyz".to_string()),
         );
         let json = serde_json::to_string(&signed).unwrap();
         let parsed: SignedAgentCard = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.agent_card.name, card.name);
         assert_eq!(parsed.algorithm.as_deref(), Some("EdDSA"));
-        assert_eq!(parsed.issuer.as_deref(), Some("did:web:tenzro.network"));
+        assert_eq!(parsed.issuer.as_deref(), Some("did:web:tenzro.xyz"));
         assert!(parsed.signature.starts_with("eyJhbGciOiJFZERTQSJ9."));
     }
 }

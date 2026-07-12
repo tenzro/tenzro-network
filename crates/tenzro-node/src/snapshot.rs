@@ -713,7 +713,7 @@ fn decode_chunk_into(
 ///    the per-chunk SHA-256 against the manifest, decodes the records,
 ///    and atomically commits to the live KV store.
 ///
-/// `peer_url` is the JSON-RPC base URL (e.g. `https://rpc.tenzro.network`).
+/// `peer_url` is the JSON-RPC base URL (e.g. `https://rpc.tenzro.xyz`).
 /// `min_height` skips snapshots below this — pass `0` to accept the
 /// highest available.
 ///

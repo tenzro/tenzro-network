@@ -979,7 +979,7 @@ impl CantonConfig {
     /// Three profiles are supported:
     ///
     /// 1. **Tenzro-operated devnet** — `CANTON_DEVNET=true`. Forces
-    ///    `json.devnet.tenzro.network:443` over TLS with the Tenzro Auth0
+    ///    `json.devnet.tenzro.xyz:443` over TLS with the Tenzro Auth0
     ///    issuer. Client secret from `CANTON_DEVNET_CLIENT_SECRET`.
     ///
     /// 2. **Operator-run validator** (RPC providers running their own
@@ -1001,7 +1001,7 @@ impl CantonConfig {
 
         if devnet {
             return Self {
-                host: "json.devnet.tenzro.network".to_string(),
+                host: "json.devnet.tenzro.xyz".to_string(),
                 port: 443,
                 enabled: true,
                 devnet: true,
@@ -1246,14 +1246,14 @@ pub struct NodeConfig {
     /// service registrations so peers can dial this node from outside its
     /// local network. When `None`, constructed from `rpc_addr` (which may
     /// be a non-routable bind address like `0.0.0.0:8545`).
-    /// Example: `Some("https://rpc.tenzro.network".to_string())`.
+    /// Example: `Some("https://rpc.tenzro.xyz".to_string())`.
     #[serde(default)]
     pub external_rpc_addr: Option<String>,
 
     /// External (advertised) MCP endpoint URL. Used when gossiping model
     /// service registrations so peers can dial the MCP server from outside
     /// the local network. When `None`, constructed from `mcp_addr`.
-    /// Example: `Some("https://mcp.tenzro.network/mcp".to_string())`.
+    /// Example: `Some("https://mcp.tenzro.xyz/mcp".to_string())`.
     #[serde(default)]
     pub external_mcp_addr: Option<String>,
 
@@ -1273,7 +1273,7 @@ pub struct NodeConfig {
     /// direct `tenzro://blob/<hash>` URI fetches.
     ///
     /// The default (`TenzroIrohConfig::default()`) anchors discovery to the
-    /// Tenzro-operated Pkarr relay (`https://pkarr.tenzro.network`) with
+    /// Tenzro-operated Pkarr relay (`https://pkarr.tenzro.xyz`) with
     /// the n0 fallback disabled so discovery cannot leak off-network. The
     /// resolver binds **alongside** libp2p — it does not replace the
     /// libp2p control plane. Per the locked model statement (2026-05-17):
@@ -1835,7 +1835,7 @@ mod tests {
         // schema is happy with; only canton matters here.
         let mut config = NodeConfig::default_validator();
         config.canton = CantonConfig {
-            host: "json.devnet.tenzro.network".to_string(),
+            host: "json.devnet.tenzro.xyz".to_string(),
             port: 443,
             enabled: true,
             devnet: true,

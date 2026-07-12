@@ -19,7 +19,7 @@ from typing import Any, Optional
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-A2A_ENDPOINT = os.environ.get("TENZRO_A2A_URL", "https://a2a.tenzro.network")
+A2A_ENDPOINT = os.environ.get("TENZRO_A2A_URL", "https://a2a.tenzro.xyz")
 
 
 # --- Core A2A Client ---

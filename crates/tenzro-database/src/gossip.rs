@@ -86,6 +86,7 @@ mod tests {
             access_policy: AccessPolicy::OwnerOnly {
                 owner_did: "did:tenzro:human:abc".to_string(),
             },
+            pricing: crate::pricing::DatabasePricing::free(),
             confidential: None,
         }
     }

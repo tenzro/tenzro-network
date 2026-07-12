@@ -77,7 +77,7 @@ struct Cli {
     /// bootstrap set to DNS. Operators rotate by editing the zone, not
     /// by shipping a new wrapper script to every VM.
     ///
-    /// Example: `--bootstrap-dns boot.tenzro.network`
+    /// Example: `--bootstrap-dns boot.tenzro.xyz`
     #[arg(long, value_name = "NAME")]
     bootstrap_dns: Option<String>,
 
@@ -141,14 +141,14 @@ struct Cli {
     /// Used in gossiped model registrations so other nodes can dial this
     /// service from outside its local network (bypasses the non-routable
     /// bind address like `0.0.0.0:8545`).
-    /// Example: `--external-rpc-addr https://rpc.tenzro.network`
+    /// Example: `--external-rpc-addr https://rpc.tenzro.xyz`
     #[arg(long, value_name = "URL")]
     external_rpc_addr: Option<String>,
 
     /// External (publicly-routable) MCP endpoint URL advertised to peers.
     /// Used in gossiped model registrations so other nodes can dial the
     /// MCP server from outside its local network.
-    /// Example: `--external-mcp-addr https://mcp.tenzro.network/mcp`
+    /// Example: `--external-mcp-addr https://mcp.tenzro.xyz/mcp`
     #[arg(long, value_name = "URL")]
     external_mcp_addr: Option<String>,
 
@@ -180,7 +180,7 @@ struct Cli {
     /// state root at the snapshot height). Without an anchor the
     /// bootstrap refuses to apply chunks — a malicious peer could
     /// otherwise serve a forged manifest with any state.
-    /// Example: `--state-sync-from https://rpc.tenzro.network`
+    /// Example: `--state-sync-from https://rpc.tenzro.xyz`
     #[arg(long, value_name = "URL")]
     state_sync_from: Option<String>,
 
@@ -909,7 +909,7 @@ async fn main() -> Result<()> {
     // since it's a secret and intentionally not on the on-disk config.
     // Canton MCP endpoint resolution honors the same three profiles as
     // `Node::init_bridge`:
-    //  1. Devnet — fixed `json.devnet.tenzro.network` host, TLS, Auth0 bearer.
+    //  1. Devnet — fixed `json.devnet.tenzro.xyz` host, TLS, Auth0 bearer.
     //  2. Operator-run validator — operator's host:port (TLS per `canton.tls`),
     //     with EITHER operator OAuth2 (`canton.oauth`) OR static JWT
     //     (`canton.static_jwt`, set from `CANTON_JWT_TOKEN`).
@@ -925,8 +925,8 @@ async fn main() -> Result<()> {
             // (mcp/canton.rs request paths); a `/v2` suffix here would
             // produce `/v2/v2/...` → 404.
             (
-                "https://json.devnet.tenzro.network".to_string(),
-                "https://admin.devnet.tenzro.network".to_string(),
+                "https://json.devnet.tenzro.xyz".to_string(),
+                "https://admin.devnet.tenzro.xyz".to_string(),
                 provider,
                 None,
             )

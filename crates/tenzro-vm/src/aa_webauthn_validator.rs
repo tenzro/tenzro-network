@@ -177,7 +177,7 @@ impl HybridWebAuthnSignature {
 pub struct WebAuthnValidator {
     /// Module address (used as the registry key).
     address: [u8; 20],
-    /// Pinned origin (e.g. `https://keys.tenzro.network`). The WebAuthn
+    /// Pinned origin (e.g. `https://keys.tenzro.xyz`). The WebAuthn
     /// `clientDataJSON.origin` field must match exactly.
     expected_origin: String,
     /// Per-account credential set. The outer map keys on the smart-
@@ -507,7 +507,7 @@ mod tests {
     use tenzro_crypto::pq::MlDsaSigningKey;
     use tenzro_crypto::webauthn::webauthn_signed_hash;
 
-    const ORIGIN: &str = "https://keys.tenzro.network";
+    const ORIGIN: &str = "https://keys.tenzro.xyz";
 
     /// Build a self-consistent enrollment + assertion + ML-DSA sig over `op_hash`.
     /// Returns (credential_id, enrollment, hybrid_signature_bytes). The
@@ -903,7 +903,7 @@ mod tests {
         let store: Arc<dyn tenzro_storage::KvStore> =
             Arc::new(tenzro_storage::MemoryStore::new());
         let module_addr = [0x10u8; 20];
-        let origin = "https://wallet.tenzro.network".to_string();
+        let origin = "https://wallet.tenzro.xyz".to_string();
         let account_a = vec![0xA1u8; 20];
         let account_b = vec![0xB2u8; 20];
         let cred_a1 = vec![0xC1u8; 16];

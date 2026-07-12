@@ -70,14 +70,14 @@ pub enum OrchestratorError {
     #[error("invalid plan: {0}")]
     InvalidPlan(String),
     /// A step failed during execution.
-    #[error("step {index} ({kind}) failed: {source}")]
+    #[error("step {index} ({kind}) failed: {reason}")]
     StepFailed {
         /// Zero-based index of the failing step within the plan.
         index: usize,
         /// The step's capability kind label.
         kind: String,
         /// Underlying error text.
-        source: String,
+        reason: String,
     },
 }
 
@@ -635,7 +635,7 @@ impl Orchestrator {
         let mut all_results: Vec<StepResult> = Vec::new();
         let mut total_cost: u128 = 0;
         let mut iterations = 0u32;
-        let mut final_plan: Option<OrchestrationPlan> = None;
+        let final_plan: OrchestrationPlan;
 
         loop {
             iterations += 1;
@@ -680,15 +680,15 @@ impl Orchestrator {
                 }
             }
 
-            final_plan = Some(plan);
             if !needs_replan || iterations >= max_iterations {
+                final_plan = plan;
                 break;
             }
             debug!(iteration = iterations, "orchestrator: re-planning");
         }
 
         Ok(OrchestrationOutcome {
-            plan: final_plan.expect("loop runs at least once"),
+            plan: final_plan,
             steps: all_results,
             estimated_cost: total_cost,
             iterations,
@@ -707,7 +707,7 @@ impl Orchestrator {
         let map_fail = |e: OrchestratorError| OrchestratorError::StepFailed {
             index,
             kind: step.kind_label().to_string(),
-            source: e.to_string(),
+            reason: e.to_string(),
         };
 
         match step {

@@ -50,7 +50,7 @@ impl TenzroRpcChainProvider {
     /// Construct a provider pointing at the given JSON-RPC endpoint.
     ///
     /// `rpc_url` should include the scheme and (if non-default) port, e.g.
-    /// `https://rpc.tenzro.network` or `http://127.0.0.1:8545`.
+    /// `https://rpc.tenzro.xyz` or `http://127.0.0.1:8545`.
     pub fn new(rpc_url: impl Into<String>) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))

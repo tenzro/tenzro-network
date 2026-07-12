@@ -31,7 +31,7 @@ use tenzro_types::kill_switch::{KillSwitchAction, KillSwitchReceipt};
 use tenzro_vm::{MultiVmRuntime, StateAdapter, VmTransaction, VmType};
 use tenzro_types::block::Block;
 use tenzro_types::transaction::{SignedTransaction, TransactionType};
-use tenzro_types::primitives::{BlockHeight, Hash};
+use tenzro_types::primitives::{Address, BlockHeight, Hash};
 use tenzro_iroh::IrohResolver;
 
 use crate::error::{NodeError, Result};
@@ -1340,19 +1340,34 @@ impl EventLoop {
             // wildly skewed views by the time the rest catch up. Gating on
             // ≥ 2f+1 ensures view 0 begins with enough peers to actually
             // finalize a block on the first round. The threshold is
-            // computed from the active validator set at start time; for a
-            // single-node-bootstrap test path (n=1), `2f+1 = 1` and this
-            // gate degenerates to the prior behaviour.
-            let admitted_threshold = if let Some(ref consensus) = self.consensus {
-                let n = consensus.epoch_manager().current_validator_set().len();
+            // computed from the active validator set at start time.
+            //
+            // `connected_validator_count` counts admitted validator PEERS —
+            // it excludes the local peer. A single-node validator set (solo
+            // bootstrap: `--role validator` with no genesis file) therefore
+            // has no peer that could ever satisfy the gate; the local
+            // validator IS the quorum, so the gate is skipped entirely.
+            let validator_set_len = self
+                .consensus
+                .as_ref()
+                .map(|c| c.epoch_manager().current_validator_set().len());
+            let admitted_threshold = if let Some(n) = validator_set_len {
                 // 2f+1 where f = (n-1)/3. Equivalent to n - f.
                 let f = (n.saturating_sub(1)) / 3;
                 n.saturating_sub(f).max(1)
             } else {
                 1
             };
+            let solo_validator_set = validator_set_len == Some(1);
 
             'warmup: loop {
+                if solo_validator_set {
+                    info!(
+                        "Single-node validator set — local validator is the quorum; \
+                         skipping validator connectivity warm-up"
+                    );
+                    break 'warmup;
+                }
                 attempt = attempt.saturating_add(1);
                 tokio::select! {
                     biased;
@@ -5592,6 +5607,11 @@ impl EventLoop {
             tenzro_types::TransactionType::PauseAgent { .. }
             | tenzro_types::TransactionType::QuarantineAgent { .. }
             | tenzro_types::TransactionType::TerminateAgent { .. } => return Ok(()),
+            // x402 settlement is dispatched by the node's system key after the
+            // credential was verified off-chain; there is no payer DELEGATION
+            // scope to enforce here (the settling parties never signed this
+            // tx). Skip the delegation/spending-policy pre-check.
+            tenzro_types::TransactionType::X402Settle { .. } => return Ok(()),
             tenzro_types::TransactionType::TeeProviderRegister { .. }
             | tenzro_types::TransactionType::RegisterValidator { .. }
             | tenzro_types::TransactionType::UpdateValidatorMetadata { .. }
@@ -5999,6 +6019,7 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         SELECTOR_KILLSWITCH_TERMINATE,
         SELECTOR_POST_AGENT_BOND, SELECTOR_INCREASE_AGENT_BOND,
         SELECTOR_WITHDRAW_AGENT_BOND, SELECTOR_PAY_INSURANCE_CLAIM,
+        SELECTOR_X402_SETTLE,
         SELECTOR_VALIDATOR_REGISTER, SELECTOR_VALIDATOR_EXIT,
         SELECTOR_VALIDATOR_UPDATE_METADATA,
     };
@@ -6217,6 +6238,29 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             data.extend_from_slice(
                 &serde_json::to_vec(&payload)
                     .expect("PayInsuranceClaim payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        // Field names MUST match the VM-side `X402SettlePayload` in
+        // `tenzro-vm/src/native/mod.rs`.
+        TransactionType::X402Settle { payer, payee, amount, payment_id } => {
+            #[derive(serde::Serialize)]
+            struct X402SettlePayload<'a> {
+                payer: &'a tenzro_types::primitives::Address,
+                payee: &'a tenzro_types::primitives::Address,
+                amount: u128,
+                payment_id: &'a str,
+            }
+            let payload = X402SettlePayload {
+                payer,
+                payee,
+                amount: *amount,
+                payment_id,
+            };
+            let mut data = SELECTOR_X402_SETTLE.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("X402Settle payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }

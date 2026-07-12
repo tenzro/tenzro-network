@@ -156,7 +156,7 @@ mod tests {
             "yield-source".to_string(),
             "1.0.0".to_string(),
             "mcp".to_string(),
-            "https://tools.tenzro.network/yield".to_string(),
+            "https://tools.tenzro.xyz/yield".to_string(),
             "yield discovery tool".to_string(),
             "yield-source".to_string(),
         );

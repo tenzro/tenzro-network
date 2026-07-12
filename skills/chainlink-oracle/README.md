@@ -6,7 +6,7 @@ The most complete Chainlink MCP server available. **21 tools** covering the full
 
 ```bash
 # Testnet
-curl -X POST https://chainlink-mcp.tenzro.network/mcp \
+curl -X POST https://chainlink-mcp.tenzro.xyz/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"chainlink_get_price","arguments":{"feed_address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}}}'
 
@@ -22,7 +22,7 @@ curl -X POST http://localhost:3007/mcp \
 |-----------|-----|------|
 | Streamable HTTP | `POST /mcp` | 3007 |
 
-**Testnet:** `https://chainlink-mcp.tenzro.network/mcp`
+**Testnet:** `https://chainlink-mcp.tenzro.xyz/mcp`
 **Local:** `http://localhost:3007/mcp`
 
 ## Tools (20)
@@ -249,7 +249,7 @@ This skill is registered in the Tenzro Skills Registry (`CF_SKILLS`) at node sta
 | Skill ID | `chainlink-oracle` |
 | Category | `oracle` |
 | Tags | `chainlink, ccip, cross-chain, oracle, data-feeds` |
-| MCP backend | Chainlink MCP server on port 3007 (`https://chainlink-mcp.tenzro.network/mcp`) |
+| MCP backend | Chainlink MCP server on port 3007 (`https://chainlink-mcp.tenzro.xyz/mcp`) |
 
 Discover it from any Tenzro node via `tenzro_listSkills` / `tenzro_searchSkills` and invoke its tools through the MCP endpoint above.
 

@@ -519,7 +519,7 @@ mod tests {
             "code-executor".to_string(),
             "2.0.0".to_string(),
             "mcp".to_string(),
-            "https://tools.tenzro.network/code-executor/mcp".to_string(),
+            "https://tools.tenzro.xyz/code-executor/mcp".to_string(),
             "Executes code in sandboxed environments".to_string(),
             "code".to_string(),
         );

@@ -237,6 +237,144 @@ class LanguageAdapter:
         return loss
 
 
+@dataclass
+class LanguageRolloutAdapter:
+    """HF-backed :class:`tenzro_trainer.rl.RolloutAdapter` for GRPO post-training.
+
+    Wraps the same model/optimizer/tokenizer that :func:`build_adapter`
+    produces. Prompts come one-per-line from the shard; sampling is a manual
+    temperature-scaled loop so the per-token logprobs of the *actually drawn*
+    tokens are captured at sampling time (the anchor for the surrogate ratio
+    and the k3 KL penalty in :func:`tenzro_trainer.rl.grpo_loss`).
+    """
+
+    _model: "nn.Module"
+    _optimizer: "torch.optim.Optimizer"
+    _tokenizer: Any
+    max_prompt_len: int = 512
+    device: str = "cpu"
+
+    def model(self) -> "nn.Module":
+        return self._model
+
+    def optimizer(self) -> "torch.optim.Optimizer":
+        return self._optimizer
+
+    def shard_prompts(self, shard_uri: str) -> Iterable[str]:
+        path = resolve_shard(shard_uri)
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8", errors="replace")
+        prompts = [line.strip() for line in text.splitlines() if line.strip()]
+        if not prompts:
+            raise ValueError(f"prompt shard {path!r} has no non-empty lines")
+        return prompts
+
+    def _encode_prompt(self, prompt: str) -> "torch.Tensor":
+        ids = self._tokenizer(
+            prompt,
+            return_tensors="pt",
+            add_special_tokens=True,
+            truncation=True,
+            max_length=self.max_prompt_len,
+        ).input_ids
+        return ids.to(self.device)
+
+    def sample_rollouts(
+        self,
+        prompt: str,
+        group_size: int,
+        max_new_tokens: int,
+        temperature: float,
+    ) -> list:
+        if torch is None:
+            raise RuntimeError("PyTorch is required")
+        from tenzro_trainer.rl import Rollout
+
+        prompt_ids = self._encode_prompt(prompt)
+        eos_id = self._tokenizer.eos_token_id
+        rollouts: list[Rollout] = []
+        self._model.eval()
+        with torch.no_grad():
+            for _ in range(group_size):
+                ids = prompt_ids.clone()
+                token_ids: list[int] = []
+                logprobs: list["torch.Tensor"] = []
+                for _step in range(max_new_tokens):
+                    logits = self._forward_logits(ids)[0, -1, :]
+                    lp = torch.log_softmax(
+                        logits.float() / temperature, dim=-1
+                    )
+                    next_id = int(torch.multinomial(lp.exp(), 1).item())
+                    token_ids.append(next_id)
+                    logprobs.append(lp[next_id].detach())
+                    ids = torch.cat(
+                        [ids, torch.tensor([[next_id]], device=ids.device)],
+                        dim=1,
+                    )
+                    # Always keep at least one generated token so the
+                    # rollout has a defined loss even when the policy
+                    # opens with EOS.
+                    if eos_id is not None and next_id == eos_id:
+                        break
+                completion = self._tokenizer.decode(
+                    token_ids, skip_special_tokens=True
+                )
+                rollouts.append(
+                    Rollout(
+                        completion=completion,
+                        token_ids=token_ids,
+                        old_logprobs=torch.stack(logprobs),
+                    )
+                )
+        self._model.train()
+        return rollouts
+
+    def rollout_logprobs(
+        self, prompt: str, rollout: Any, temperature: float
+    ) -> "torch.Tensor":
+        if torch is None:
+            raise RuntimeError("PyTorch is required")
+        prompt_ids = self._encode_prompt(prompt)
+        completion_ids = torch.tensor(
+            [rollout.token_ids], device=prompt_ids.device, dtype=prompt_ids.dtype
+        )
+        full = torch.cat([prompt_ids, completion_ids], dim=1)
+        logits = self._forward_logits(full)
+        p = prompt_ids.shape[1]
+        t = completion_ids.shape[1]
+        # Position i predicts token i+1: completion tokens P..P+T-1 are
+        # predicted by positions P-1..P+T-2.
+        pred = logits[0, p - 1 : p - 1 + t, :]
+        lp = torch.log_softmax(pred.float() / temperature, dim=-1)
+        return lp.gather(1, completion_ids[0].unsqueeze(1)).squeeze(1)
+
+    def _forward_logits(self, input_ids: "torch.Tensor") -> "torch.Tensor":
+        out = self._model(input_ids=input_ids)
+        return out.logits if hasattr(out, "logits") else out[0]
+
+
+def build_rollout_adapter(
+    architecture: dict[str, Any],
+    hyperparams: dict[str, Any] | None = None,
+) -> LanguageRolloutAdapter:
+    """Construct the GRPO rollout adapter on top of :func:`build_adapter`.
+
+    Reuses the full loading pipeline (HF repo resolution, dtype, MoE, LoRA,
+    FSDP2, inner optimizer) and rewraps the pieces behind the
+    :class:`tenzro_trainer.rl.RolloutAdapter` protocol. Extra hyperparam:
+    ``max_prompt_len`` (default 512).
+    """
+    hp = hyperparams or {}
+    base = build_adapter(architecture, hyperparams)
+    return LanguageRolloutAdapter(
+        _model=base._model,
+        _optimizer=base._optimizer,
+        _tokenizer=base._tokenizer,
+        max_prompt_len=int(hp.get("max_prompt_len", 512)),
+        device=base.device,
+    )
+
+
 def build_adapter(
     architecture: dict[str, Any],
     hyperparams: dict[str, Any] | None = None,
@@ -436,7 +574,9 @@ def build_adapter(
 
 __all__ = [
     "LanguageAdapter",
+    "LanguageRolloutAdapter",
     "build_adapter",
+    "build_rollout_adapter",
     "is_moe_config",
     "moe_parameter_names",
     "DEFAULT_HF_REPO",
