@@ -103,6 +103,8 @@ Access control is shared with file storage — the same `AccessPolicy` and `Conf
 
 A read is gated by `permits_read(caller, has_cap)`; an administrative operation (rescale, drop, issuing a connection) by `permits_admin(caller, has_cap)`. The node adjudicates every query and every admin op fail-closed before any engine work runs.
 
+**DID proof.** A `caller_did` on its own is an assertion, not a proof. Every gated call accepts an optional `envelope` parameter — a hex-encoded signed DID envelope binding the caller's DID, the RPC method name, and a SHA-256 hash of the call's resolved parameters, with a nonce checked for replay. Identity-based access passes (the owner, an allowlisted DID) **require** the envelope: without it the gate denies with `caller DID not authenticated: signed envelope required`. Capability-based passes are their own proof — the AAP token is signed — so a capability caller needs no envelope. Public-policy reads are exempt. The envelope's parameter hash binds the *resolved* values (for rescale, the effective partition/replica counts after defaulting), so a replayed envelope cannot authorize a different operation.
+
 **Confidential seal.** A network-tier database holding sensitive data can carry a `ConfidentialSeal`: an encryption-at-rest envelope with one wrapped data key per authorized DID (`hpke-x25519-hkdf-sha256-aes-256-gcm`). The crate records the wrapped-key envelopes; the node/client layer does the crypto. This is opt-in on top of the always-on access policy, not a replacement for it — the layered model is: capability gate for every tier, encryption-at-rest for sensitive network data.
 
 ---
@@ -111,56 +113,74 @@ A read is gated by `permits_read(caller, has_cap)`; an administrative operation 
 
 A developer uses a Tenzro database the way they use a hosted one — they get a credential scoped to that database and dial queries with it.
 
-`tenzro_issueDatabaseConnection` mints the credential. The caller must be the owner (or hold the write-action capability). Params: `{database_id, caller_did, bearer_did?, write?, ttl_secs?, capability?}`. It returns an AAP capability token pinned to that single database (`allowed_resources: [database_id]`), a `mode` of `read_only` or `read_write`, the read/write actions, a TTL, and the `query_method` to call. `bearer_did` defaults to the caller — an owner can issue a read-only connection to another DID.
+`tenzro_issueDatabaseConnection` mints the credential. The caller must be the owner (or hold the write-action capability). Params: `{database_id, caller_did, bearer_did?, write?, ttl_secs?, capability?, envelope?}`. It returns an AAP capability token pinned to that single database (`allowed_resources: [database_id]`), a `mode` of `read_only` or `read_write`, the read/write actions, a TTL, and the `query_method` to call. `bearer_did` defaults to the caller — an owner can issue a read-only connection to another DID.
 
-`tenzro_databaseQuery` runs an engine-dialect query. Params: `{database_id, caller_did, body, partition_index?, write?, capability?}`. `body` is the engine's own query payload — `{sql, params}` for Postgres, a `{op, ...}` vector search for Qdrant or Lance, a `{op, ...}` full-text search for Tantivy, a `{command: [...]}` for Valkey. The node gates the call, then:
+`tenzro_databaseQuery` runs an engine-dialect query. Params: `{database_id, caller_did, body, partition_index?, write?, capability?, envelope?, payment_credential?}`. `body` is the engine's own query payload — `{sql, params}` for Postgres, a `{op, ...}` vector search for Qdrant or Lance, a `{op, ...}` full-text search for Tantivy, a `{command: [...]}` for Valkey. The node gates the call, then:
 
 - If this node holds the target partition, it dispatches `body` to the engine driver and returns the result.
 - If it does not, it returns the holder endpoints for that partition so the caller reaches one that does. There is no silent local execution against a partition this node does not hold.
 
 ---
 
-## 7. Elastic rescale
+## 7. Per-query pricing and usage metering
 
-`tenzro_rescaleDatabase` grows or shrinks a database along the continuum in place. It is administrative — the caller passes the owner DID (or a write-action capability). Params: `{database_id, caller_did, placement, partitions?, replicas?, capability?}`. It recomputes placement over the current cluster candidates and rewrites the partition rows; a network-tier result is re-gossiped so peers converge on the new shape.
+A database owner can charge non-owner callers per query. The descriptor carries a `pricing` object — `{asset_id, price_per_query}` where `price_per_query` is in the asset's base units (a decimal string in JSON, since u128 exceeds JSON's safe-integer range). The default is free (`price_per_query: 0`); the owner always queries free regardless of price.
+
+**402 flow.** A priced query from a non-owner without a `payment_credential` is rejected with JSON-RPC error `-32402` whose `data` carries an x402 payment challenge for the resource `tenzro://db/<database_id>/query`, priced at `price_per_query` and payable to the owner's wallet. The caller settles the challenge and retries the same query with `payment_credential` set; the serving node verifies the credential against the challenge (resource, amount, recipient) and settles it before the engine runs. Only the node that actually serves the partition bills — a routing response (holder endpoints) is never charged.
+
+**Metering.** Every served query is recorded in a per-database usage meter: query count, write count, request/response bytes, cumulative billed amount, and last-query timestamp. Counters persist in RocksDB (`CF_DATABASES / usage/<database_id>`) and survive restarts; dropping a database removes its counters. `tenzro_databaseUsage` reads them — administrative, gated on the admin action like rescale and drop. Params: `{database_id, caller_did, capability?, envelope?}`; returns `{database_id, pricing, usage}` where `usage` is null until the first query is served.
+
+---
+
+## 8. Elastic rescale
+
+`tenzro_rescaleDatabase` grows or shrinks a database along the continuum in place. It is administrative — the caller passes the owner DID (or a write-action capability). Params: `{database_id, caller_did, placement, partitions?, replicas?, capability?, envelope?}`. It recomputes placement over the current cluster candidates and rewrites the partition rows; a network-tier result is re-gossiped so peers converge on the new shape.
 
 A database created `local` with one partition can be rescaled to `lan_cluster` and then `network` with more partitions and replicas as demand grows — without recreating it or moving the developer's connection.
 
 ---
 
-## 8. Two-sided model
+## 9. Two-sided model
 
 Databases mirror the two-sided model of the rest of the network. A developer can run engines on their own machine or LAN cluster and serve data from there, or place a database across network holders and query it over the network — the same descriptor, the same connection credential, the same query method for both. One node's stake and one set of obligations back everything it holds across compute, file storage, and databases at once.
 
 ---
 
-## 9. RPC surface
+## 10. RPC surface
 
 | RPC | Purpose |
 |-----|---------|
 | `tenzro_listDatabaseEngines` | Return the engine catalog (data models, versions, images, licenses, cluster roles) |
-| `tenzro_createDatabase` | Create a database from a descriptor; returns the normalized descriptor and its partition placements |
+| `tenzro_createDatabase` | Create a database from a descriptor (optional `pricing`); returns the normalized descriptor and its partition placements |
 | `tenzro_getDatabase` | Read a database descriptor |
 | `tenzro_listDatabases` | List databases |
 | `tenzro_listDatabasePartitions` | List a database's partition placements |
 | `tenzro_getDatabasePartition` | Read one partition placement (holders) |
-| `tenzro_authorizeDatabaseRead` | Adjudicate whether a caller may read (gate check without a query) |
-| `tenzro_issueDatabaseConnection` | Mint a per-database connection credential (managed-DB auth) |
-| `tenzro_databaseQuery` | Run an engine-dialect query against a partition |
-| `tenzro_rescaleDatabase` | Grow/shrink placement along local → LAN → network in place |
-| `tenzro_dropDatabase` | Drop a database |
+| `tenzro_authorizeDatabaseRead` | Adjudicate whether a caller may read (gate check without a query; accepts `envelope`) |
+| `tenzro_issueDatabaseConnection` | Mint a per-database connection credential (managed-DB auth; accepts `envelope`) |
+| `tenzro_databaseQuery` | Run an engine-dialect query against a partition (accepts `envelope`, `payment_credential`) |
+| `tenzro_rescaleDatabase` | Grow/shrink placement along local → LAN → network in place (accepts `envelope`) |
+| `tenzro_dropDatabase` | Drop a database (admin-gated on `caller_did`; removes its usage counters) |
+| `tenzro_databaseUsage` | Read per-query pricing and cumulative usage counters (admin-gated on `caller_did`) |
 
-## 10. CLI
+## 11. CLI
 
 ```
 tenzro database engines
-tenzro database create --id <id> --engine <engine> --placement <local|lan_cluster|network> \
-  --partitions <n> --replicas <n> --owner-did <did> [--config <json>]
-tenzro database get --id <id>
+tenzro database create <id> --engine <engine> --owner-did <did> \
+  [--placement <local|lan_cluster|network>] [--partitions <n>] [--replicas <n>] \
+  [--engine-config <file.json>] [--access-policy <file.json>] [--confidential <file.json>] \
+  [--price-per-query <amount>] [--asset <asset>]
+tenzro database get <id>
 tenzro database list
-tenzro database partitions --id <id>
-tenzro database connect --id <id> --caller-did <did> [--write] [--ttl <secs>]
-tenzro database query --id <id> --caller-did <did> --body <json> [--capability <token>] [--write]
-tenzro database rescale --id <id> --caller-did <did> --placement <mode> [--partitions <n>] [--replicas <n>]
-tenzro database drop --id <id> --caller-did <did>
+tenzro database partitions <id>
+tenzro database connect <id> --caller-did <did> [--bearer-did <did>] [--write] \
+  [--ttl-secs <secs>] [--capability <jwt>] [--envelope <hex>]
+tenzro database query <id> --caller-did <did> --body <file.json> [--partition <n>] [--write] \
+  [--capability <jwt>] [--envelope <hex>] [--payment-credential <file.json>]
+tenzro database authorize <id> --caller-did <did> [--capability <jwt>] [--envelope <hex>]
+tenzro database rescale <id> --caller-did <did> --placement <mode> [--partitions <n>] \
+  [--replicas <n>] [--capability <jwt>] [--envelope <hex>]
+tenzro database usage <id> --caller-did <did> [--capability <jwt>] [--envelope <hex>]
+tenzro database drop <id> --caller-did <did> [--capability <jwt>] [--envelope <hex>]
 ```

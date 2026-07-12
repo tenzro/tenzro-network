@@ -3052,7 +3052,7 @@ impl CantonConfig {
     /// Canton.
     pub fn devnet() -> Self {
         Self {
-            participant_host: "json.devnet.tenzro.network".to_string(),
+            participant_host: "json.canton.example-operator.invalid".to_string(),
             json_api_port: 443,
             participant_port: 5001,
             admin_api_port: 5002,

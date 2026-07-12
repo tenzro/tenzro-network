@@ -23,7 +23,7 @@ use crate::rpc::RpcClient;
 /// an inference provider in the same command.
 #[derive(Debug, Parser)]
 pub struct JoinCmd {
-    /// RPC endpoint. Defaults to https://rpc.tenzro.network, or to the
+    /// RPC endpoint. Defaults to https://rpc.tenzro.xyz, or to the
     /// local node (http://127.0.0.1:8545) when --provider is set.
     #[arg(long)]
     pub rpc: Option<String>,
@@ -54,7 +54,7 @@ impl JoinCmd {
             if self.provider {
                 "http://127.0.0.1:8545".to_string()
             } else {
-                "https://rpc.tenzro.network".to_string()
+                "https://rpc.tenzro.xyz".to_string()
             }
         });
 

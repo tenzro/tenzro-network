@@ -32,6 +32,8 @@ pub enum DatabaseCommand {
     Connect(ConnectCmd),
     /// Run an engine-dialect query against a database partition
     Query(QueryCmd),
+    /// Show per-query pricing and cumulative usage counters for a database
+    Usage(UsageCmd),
 }
 
 impl DatabaseCommand {
@@ -47,6 +49,7 @@ impl DatabaseCommand {
             Self::Authorize(cmd) => cmd.execute().await,
             Self::Connect(cmd) => cmd.execute().await,
             Self::Query(cmd) => cmd.execute().await,
+            Self::Usage(cmd) => cmd.execute().await,
         }
     }
 }
@@ -131,6 +134,13 @@ pub struct CreateCmd {
     /// Path to a JSON file with a confidential seal (network-tier encryption-at-rest)
     #[arg(long)]
     confidential: Option<String>,
+    /// Price a non-owner caller pays per query, in the asset's base units
+    /// (decimal string; omit for a free database)
+    #[arg(long)]
+    price_per_query: Option<String>,
+    /// Asset the per-query price is denominated in
+    #[arg(long, default_value = "TNZO")]
+    asset: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -156,6 +166,12 @@ impl CreateCmd {
         }
         if let Some(path) = &self.confidential {
             params["confidential"] = read_json_file(path, "confidential")?;
+        }
+        if let Some(price) = &self.price_per_query {
+            params["pricing"] = serde_json::json!({
+                "asset_id": self.asset,
+                "price_per_query": price,
+            });
         }
 
         let spinner = output::create_spinner("Computing placement...");
@@ -287,6 +303,9 @@ pub struct RescaleCmd {
     /// Write-action AAP capability JWT (for CapabilityRequired policies)
     #[arg(long)]
     capability: Option<String>,
+    /// Hex-encoded signed DID envelope proving control of --caller-did
+    #[arg(long)]
+    envelope: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -309,6 +328,9 @@ impl RescaleCmd {
         }
         if let Some(cap) = &self.capability {
             params["capability"] = serde_json::json!(cap);
+        }
+        if let Some(env) = &self.envelope {
+            params["envelope"] = serde_json::json!(env);
         }
 
         let spinner = output::create_spinner("Recomputing placement...");
@@ -333,6 +355,15 @@ impl RescaleCmd {
 pub struct DropCmd {
     /// Database id
     database_id: String,
+    /// Owner DID (or a caller holding the write-action capability)
+    #[arg(long)]
+    caller_did: String,
+    /// Write-action AAP capability JWT (for CapabilityRequired policies)
+    #[arg(long)]
+    capability: Option<String>,
+    /// Hex-encoded signed DID envelope proving control of --caller-did
+    #[arg(long)]
+    envelope: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -341,10 +372,20 @@ pub struct DropCmd {
 impl DropCmd {
     pub async fn execute(self) -> Result<()> {
         output::print_header(&format!("Drop Database: {}", self.database_id));
+
+        let mut params = serde_json::json!({
+            "database_id": self.database_id,
+            "caller_did": self.caller_did,
+        });
+        if let Some(cap) = &self.capability {
+            params["capability"] = serde_json::json!(cap);
+        }
+        if let Some(env) = &self.envelope {
+            params["envelope"] = serde_json::json!(env);
+        }
+
         let rpc = rpc::RpcClient::new(&self.rpc);
-        let result: Result<serde_json::Value> = rpc
-            .call("tenzro_dropDatabase", serde_json::json!({ "database_id": self.database_id }))
-            .await;
+        let result: Result<serde_json::Value> = rpc.call("tenzro_dropDatabase", params).await;
         match result {
             Ok(value) => {
                 let dropped = value.get("dropped").and_then(|v| v.as_str()).unwrap_or("?");
@@ -366,6 +407,9 @@ pub struct AuthorizeCmd {
     /// AAP capability JWT (for CapabilityRequired policies)
     #[arg(long)]
     capability: Option<String>,
+    /// Hex-encoded signed DID envelope proving control of --caller-did
+    #[arg(long)]
+    envelope: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -381,6 +425,9 @@ impl AuthorizeCmd {
         });
         if let Some(cap) = &self.capability {
             params["capability"] = serde_json::json!(cap);
+        }
+        if let Some(env) = &self.envelope {
+            params["envelope"] = serde_json::json!(env);
         }
 
         let rpc = rpc::RpcClient::new(&self.rpc);
@@ -421,6 +468,9 @@ pub struct ConnectCmd {
     /// Write-action AAP capability JWT (for CapabilityRequired policies)
     #[arg(long)]
     capability: Option<String>,
+    /// Hex-encoded signed DID envelope proving control of --caller-did
+    #[arg(long)]
+    envelope: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -443,6 +493,9 @@ impl ConnectCmd {
         }
         if let Some(cap) = &self.capability {
             params["capability"] = serde_json::json!(cap);
+        }
+        if let Some(env) = &self.envelope {
+            params["envelope"] = serde_json::json!(env);
         }
 
         let spinner = output::create_spinner("Issuing connection credential...");
@@ -507,6 +560,13 @@ pub struct QueryCmd {
     /// AAP capability JWT (from `tenzro db connect`)
     #[arg(long)]
     capability: Option<String>,
+    /// Hex-encoded signed DID envelope proving control of --caller-did
+    #[arg(long)]
+    envelope: Option<String>,
+    /// Path to a JSON file with a payment credential answering a prior
+    /// 402 challenge (paid databases only)
+    #[arg(long)]
+    payment_credential: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -526,6 +586,12 @@ impl QueryCmd {
         });
         if let Some(cap) = &self.capability {
             params["capability"] = serde_json::json!(cap);
+        }
+        if let Some(env) = &self.envelope {
+            params["envelope"] = serde_json::json!(env);
+        }
+        if let Some(path) = &self.payment_credential {
+            params["payment_credential"] = read_json_file(path, "payment_credential")?;
         }
 
         let spinner = output::create_spinner("Running query...");
@@ -562,6 +628,74 @@ impl QueryCmd {
     }
 }
 
+#[derive(Debug, Parser)]
+pub struct UsageCmd {
+    /// Database id
+    database_id: String,
+    /// Owner DID (or a caller holding the write-action capability)
+    #[arg(long)]
+    caller_did: String,
+    /// Write-action AAP capability JWT (for CapabilityRequired policies)
+    #[arg(long)]
+    capability: Option<String>,
+    /// Hex-encoded signed DID envelope proving control of --caller-did
+    #[arg(long)]
+    envelope: Option<String>,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl UsageCmd {
+    pub async fn execute(self) -> Result<()> {
+        output::print_header(&format!("Database Usage: {}", self.database_id));
+
+        let mut params = serde_json::json!({
+            "database_id": self.database_id,
+            "caller_did": self.caller_did,
+        });
+        if let Some(cap) = &self.capability {
+            params["capability"] = serde_json::json!(cap);
+        }
+        if let Some(env) = &self.envelope {
+            params["envelope"] = serde_json::json!(env);
+        }
+
+        let rpc = rpc::RpcClient::new(&self.rpc);
+        let result: Result<serde_json::Value> = rpc.call("tenzro_databaseUsage", params).await;
+        match result {
+            Ok(value) => {
+                println!();
+                if let Some(pricing) = value.get("pricing") {
+                    let asset = pricing.get("asset_id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let price =
+                        pricing.get("price_per_query").and_then(|v| v.as_str()).unwrap_or("0");
+                    output::print_field("Price / Query", &format!("{} {}", price, asset));
+                }
+                match value.get("usage").filter(|u| !u.is_null()) {
+                    Some(usage) => {
+                        let g = |k: &str| {
+                            usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0).to_string()
+                        };
+                        output::print_field("Queries", &g("query_count"));
+                        output::print_field("Writes", &g("write_count"));
+                        output::print_field("Bytes In", &g("bytes_in"));
+                        output::print_field("Bytes Out", &g("bytes_out"));
+                        output::print_field(
+                            "Billed Total",
+                            usage.get("billed_total").and_then(|v| v.as_str()).unwrap_or("0"),
+                        );
+                        output::print_field("Last Query (ms)", &g("last_query_ms"));
+                    }
+                    None => output::print_info("No queries recorded yet."),
+                }
+            }
+            Err(e) => output::print_error(&format!("Failed to read usage: {}", e)),
+        }
+        Ok(())
+    }
+}
+
 fn read_json_file(path: &str, label: &str) -> Result<serde_json::Value> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("reading {} file '{}': {}", label, path, e))?;
@@ -586,6 +720,16 @@ fn print_database(db: Option<&serde_json::Value>) {
         let kind = policy.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
         let owner = policy.get("owner_did").and_then(|v| v.as_str()).unwrap_or("?");
         output::print_field("  Access", &format!("{} · owner {}", kind, owner));
+    }
+    if let Some(pricing) = db.get("pricing") {
+        let asset = pricing.get("asset_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let price = pricing.get("price_per_query").and_then(|v| v.as_str()).unwrap_or("0");
+        let label = if price == "0" {
+            "free".to_string()
+        } else {
+            format!("{} {} / query", price, asset)
+        };
+        output::print_field("  Pricing", &label);
     }
     if let Some(conf) = db.get("confidential") {
         if !conf.is_null() {

@@ -18,7 +18,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 MCP_ENDPOINT = os.environ.get(
-    "TENZRO_MCP_URL", "https://mcp.tenzro.network/mcp"
+    "TENZRO_MCP_URL", "https://mcp.tenzro.xyz/mcp"
 )
 
 

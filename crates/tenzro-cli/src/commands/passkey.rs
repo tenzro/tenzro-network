@@ -54,7 +54,7 @@ fn default_rpc_url(override_url: Option<&str>) -> String {
     override_url
         .map(|s| s.to_string())
         .or_else(|| std::env::var("TENZRO_RPC_URL").ok())
-        .unwrap_or_else(|| "https://rpc.tenzro.network".to_string())
+        .unwrap_or_else(|| "https://rpc.tenzro.xyz".to_string())
 }
 
 #[derive(Debug, Subcommand)]

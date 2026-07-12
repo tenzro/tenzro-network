@@ -1,7 +1,7 @@
 //! Per-IP rate limiting for the public JSON-RPC and Web API servers.
 //!
-//! Both servers face the open internet (`rpc.tenzro.network`,
-//! `api.tenzro.network`). The existing `ConcurrencyLimitLayer` +
+//! Both servers face the open internet (`rpc.tenzro.xyz`,
+//! `api.tenzro.xyz`). The existing `ConcurrencyLimitLayer` +
 //! `RequestBodyLimitLayer` bound aggregate load but let a single remote
 //! address consume the entire budget. This module adds a GCRA gate keyed
 //! on the client IP so one abusive source is throttled to its own budget

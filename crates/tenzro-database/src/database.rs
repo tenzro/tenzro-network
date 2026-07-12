@@ -22,6 +22,7 @@ use crate::access_control::{AccessPolicy, ConfidentialSeal};
 use crate::catalog::{engine_by_id, EngineKind, ShardingModel};
 use crate::error::{DatabaseError, Result};
 use crate::placement::{partition_key, select_tiered_holders, TieredCandidate};
+use crate::pricing::DatabasePricing;
 
 const DB_PREFIX: &[u8] = b"db/";
 const PARTITION_PREFIX: &[u8] = b"partition/";
@@ -74,6 +75,10 @@ pub struct DatabaseDescriptor {
     /// the local, LAN-cluster, and network tiers — a node layer adjudicates the
     /// caller's capability against it before touching the engine.
     pub access_policy: AccessPolicy,
+    /// What non-owner callers pay per query. The node layer gates
+    /// `tenzro_databaseQuery` on it via the payment gateway; the owner always
+    /// queries free.
+    pub pricing: DatabasePricing,
     /// Opt-in encryption-at-rest for the network tier: when set, holders store
     /// ciphertext and the data key is wrapped once per authorized DID. `None`
     /// for plaintext databases (all local/LAN databases and network databases
@@ -134,6 +139,13 @@ fn validate_descriptor(mut desc: DatabaseDescriptor) -> Result<DatabaseDescripto
     if desc.access_policy.owner_did().is_empty() {
         return Err(DatabaseError::InvalidRequest(
             "access_policy owner_did must not be empty".to_string(),
+        ));
+    }
+
+    // A priced database must name the asset the price settles in.
+    if desc.pricing.asset_id.is_empty() {
+        return Err(DatabaseError::InvalidRequest(
+            "pricing asset_id must not be empty".to_string(),
         ));
     }
 
@@ -527,6 +539,7 @@ mod tests {
             replicas,
             engine_config: serde_json::json!({}),
             access_policy: AccessPolicy::owner_only("did:tenzro:human:test-owner"),
+            pricing: DatabasePricing::free(),
             confidential: None,
         }
     }
@@ -678,6 +691,30 @@ mod tests {
         let d = reg2.get_database("db-p").unwrap();
         assert_eq!(d.partitions, 2);
         assert_eq!(reg2.list_partitions("db-p").len(), 2);
+    }
+
+    #[test]
+    fn empty_pricing_asset_rejected() {
+        let reg = DatabaseRegistry::new();
+        let mut d = desc("db-price", engine_ids::POSTGRES, PlacementMode::Local, 1, 1);
+        d.pricing = DatabasePricing { asset_id: String::new(), price_per_query: 5 };
+        let err = reg.create_database(d, &locals(1)).unwrap_err();
+        assert!(matches!(err, DatabaseError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn pricing_persists_and_hydrates() {
+        let storage: Arc<dyn KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        {
+            let reg = DatabaseRegistry::with_storage(storage.clone()).unwrap();
+            let mut d = desc("db-priced", engine_ids::POSTGRES, PlacementMode::Local, 1, 1);
+            d.pricing = DatabasePricing { asset_id: "TNZO".to_string(), price_per_query: 250 };
+            reg.create_database(d, &locals(1)).unwrap();
+        }
+        let reg2 = DatabaseRegistry::with_storage(storage).unwrap();
+        let got = reg2.get_database("db-priced").unwrap();
+        assert_eq!(got.pricing.price_per_query, 250);
+        assert!(!got.pricing.is_free());
     }
 
     #[test]

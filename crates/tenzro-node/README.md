@@ -286,7 +286,7 @@ The main Tenzro MCP server registers 414 tools (base + 29 multi-modal AI + 3 Age
 {
   "mcpServers": {
     "tenzro": {
-      "url": "https://mcp.tenzro.network/mcp"
+      "url": "https://mcp.tenzro.xyz/mcp"
     }
   }
 }

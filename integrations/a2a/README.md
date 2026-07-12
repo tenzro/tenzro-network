@@ -10,7 +10,7 @@ Connect AI agents to Tenzro Network using Google's [Agent-to-Agent (A2A)](https:
 
 The Tenzro A2A server is an installable Python package that lets any A2A-compatible agent interact with the blockchain — query balances, send transactions, manage identities, spawn sub-agents, trade on marketplaces, deploy contracts, and more. Install with `pip install tenzro-a2a-server` and run locally, or connect directly to the live testnet endpoint.
 
-**Live testnet:** `https://a2a.tenzro.network`
+**Live testnet:** `https://a2a.tenzro.xyz`
 **Local:** `http://localhost:3002`
 
 ## Installation
@@ -36,20 +36,20 @@ pip install .
 | A2A Stream | `POST /a2a/stream` | Server-Sent Events streaming |
 | Health | `GET /health` | Health check |
 
-> Note: the verification API at `api.tenzro.network` exposes `/verify/*`, `/health`, `/status`, and `/faucet` — no redundant `/api/` prefix (the subdomain already conveys it).
+> Note: the verification API at `api.tenzro.xyz` exposes `/verify/*`, `/health`, `/status`, and `/faucet` — no redundant `/api/` prefix (the subdomain already conveys it).
 
 ## Quick Start
 
 ### Discover capabilities
 
 ```bash
-curl https://a2a.tenzro.network/.well-known/agent.json
+curl https://a2a.tenzro.xyz/.well-known/agent.json
 ```
 
 ### Send a task
 
 ```bash
-curl -X POST https://a2a.tenzro.network/a2a \
+curl -X POST https://a2a.tenzro.xyz/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -67,7 +67,7 @@ curl -X POST https://a2a.tenzro.network/a2a \
 ### Stream a response (SSE)
 
 ```bash
-curl -X POST https://a2a.tenzro.network/a2a/stream \
+curl -X POST https://a2a.tenzro.xyz/a2a/stream \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -d '{
@@ -91,7 +91,7 @@ handler dispatches to `tenzro_getBlockRange` and reports the
 gaps:
 
 ```bash
-curl -X POST https://a2a.tenzro.network/a2a \
+curl -X POST https://a2a.tenzro.xyz/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -241,7 +241,7 @@ from langchain.tools import Tool
 import requests
 
 def tenzro_a2a(query: str) -> str:
-    response = requests.post("https://a2a.tenzro.network/a2a", json={
+    response = requests.post("https://a2a.tenzro.xyz/a2a", json={
         "jsonrpc": "2.0",
         "method": "tasks/send",
         "params": {
@@ -274,7 +274,7 @@ import requests
 @tool("Tenzro Blockchain")
 def tenzro_blockchain(query: str) -> str:
     """Interact with Tenzro Network — wallets, identities, AI inference, payments, agents, tokens, contracts, verification."""
-    response = requests.post("https://a2a.tenzro.network/a2a", json={
+    response = requests.post("https://a2a.tenzro.xyz/a2a", json={
         "jsonrpc": "2.0",
         "method": "tasks/send",
         "params": {
@@ -318,10 +318,10 @@ Your Agent                    Tenzro Node
 
 | Protocol | Best For | Endpoint |
 |----------|----------|----------|
-| **A2A** (this) | Natural language task delegation | `a2a.tenzro.network/a2a` |
-| **MCP** | Structured tool calls from Claude/Cursor | `mcp.tenzro.network/mcp` |
-| **JSON-RPC** | Direct EVM-compatible RPC | `rpc.tenzro.network` |
-| **Web API** | REST verification and status | `api.tenzro.network` |
+| **A2A** (this) | Natural language task delegation | `a2a.tenzro.xyz/a2a` |
+| **MCP** | Structured tool calls from Claude/Cursor | `mcp.tenzro.xyz/mcp` |
+| **JSON-RPC** | Direct EVM-compatible RPC | `rpc.tenzro.xyz` |
+| **Web API** | REST verification and status | `api.tenzro.xyz` |
 
 ## Running the Server
 
@@ -345,9 +345,9 @@ curl http://localhost:3002/.well-known/agent.json
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TENZRO_RPC_URL` | `https://rpc.tenzro.network` | Tenzro JSON-RPC endpoint |
-| `TENZRO_API_URL` | `https://api.tenzro.network` | Tenzro Web API endpoint |
-| `TENZRO_A2A_BASE_URL` | `https://a2a.tenzro.network` | Base URL for Agent Card |
+| `TENZRO_RPC_URL` | `https://rpc.tenzro.xyz` | Tenzro JSON-RPC endpoint |
+| `TENZRO_API_URL` | `https://api.tenzro.xyz` | Tenzro Web API endpoint |
+| `TENZRO_A2A_BASE_URL` | `https://a2a.tenzro.xyz` | Base URL for Agent Card |
 
 Command-line options:
 

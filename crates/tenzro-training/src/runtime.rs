@@ -32,8 +32,8 @@ use tenzro_storage::{KvStore, CF_TRAINING_RECEIPTS, CF_TRAINING_RUNS};
 use tenzro_types::primitives::{Hash, Timestamp};
 use tenzro_types::training::{
     AggregationRule, FragmentQuorumStatus, OuterGradient, PipelineAssignment,
-    SealedDatasetManifest, SyncRound, TrainingAttestation, TrainingReceipt, TrainingRun,
-    TrainingRunStatus, TrainingTaskSpec, TrainingTier,
+    SealedDatasetManifest, SyncRound, TrainingAttestation, TrainingModality, TrainingObjective,
+    TrainingReceipt, TrainingRun, TrainingRunStatus, TrainingTaskSpec, TrainingTier,
 };
 
 /// Tier × aggregation-rule policy.
@@ -79,6 +79,58 @@ pub fn validate_aggregation_for_tier(spec: &TrainingTaskSpec) -> Result<()> {
             required,
             actual: spec.tier,
         });
+    }
+    Ok(())
+}
+
+/// Reject a task spec whose training objective is malformed. RL post-training
+/// (GRPO-style) is language-only: rollout generation and per-token logprobs
+/// presuppose an autoregressive decoder. The hyperparameter ranges mirror what
+/// the Python reference trainer's RL inner loop can actually consume.
+pub fn validate_objective(spec: &TrainingTaskSpec) -> Result<()> {
+    let rl = match &spec.objective {
+        TrainingObjective::Supervised => return Ok(()),
+        TrainingObjective::RlPostTraining(rl) => rl,
+    };
+    if spec.architecture.modality != TrainingModality::Language {
+        return Err(TrainingError::InvalidTaskSpec(format!(
+            "RL post-training requires Language modality, got {:?}",
+            spec.architecture.modality
+        )));
+    }
+    if rl.group_size < 2 {
+        return Err(TrainingError::InvalidTaskSpec(format!(
+            "RL group_size must be >= 2 (group-relative advantages), got {}",
+            rl.group_size
+        )));
+    }
+    if !rl.kl_coeff.is_finite() || rl.kl_coeff < 0.0 {
+        return Err(TrainingError::InvalidTaskSpec(format!(
+            "RL kl_coeff must be finite and >= 0, got {}",
+            rl.kl_coeff
+        )));
+    }
+    if !rl.clip_epsilon.is_finite() || rl.clip_epsilon <= 0.0 || rl.clip_epsilon > 1.0 {
+        return Err(TrainingError::InvalidTaskSpec(format!(
+            "RL clip_epsilon must be finite in (0, 1], got {}",
+            rl.clip_epsilon
+        )));
+    }
+    if rl.max_new_tokens == 0 {
+        return Err(TrainingError::InvalidTaskSpec(
+            "RL max_new_tokens must be >= 1".to_string(),
+        ));
+    }
+    if !rl.temperature.is_finite() || rl.temperature <= 0.0 {
+        return Err(TrainingError::InvalidTaskSpec(format!(
+            "RL temperature must be finite and > 0, got {}",
+            rl.temperature
+        )));
+    }
+    if rl.reward_ref.is_empty() {
+        return Err(TrainingError::InvalidTaskSpec(
+            "RL reward_ref must reference a reward callable (py:module:callable)".to_string(),
+        ));
     }
     Ok(())
 }
@@ -293,6 +345,20 @@ impl SyncerState {
         {
             return Err(TrainingError::AttestationRequired(self.task_spec.tier));
         }
+        // Tier requirement: Open-tier submissions carry no attestation, so
+        // TOPLOC-class activation commitments are the verifiable-compute
+        // evidence instead — required at Open, structurally validated whenever
+        // present at any tier. The fuzzy re-execution check happens later, at
+        // challenge time ([`Self::challenge_activation_commitment`]).
+        if self.task_spec.tier == TrainingTier::Open && gradient.commitment.is_none() {
+            return Err(TrainingError::CommitmentRequired);
+        }
+        if let Some(commitment) = &gradient.commitment {
+            crate::activation::validate_activation_commitment(
+                commitment,
+                self.task_spec.inner_steps,
+            )?;
+        }
 
         // Signature binding (fail-closed): the submission must be signed by the
         // key it claims to submit under. The trainer's key is carried as
@@ -379,6 +445,62 @@ impl SyncerState {
             cb.slash_and_evict(&self.task_spec.task_id, trainer_did, reason)
                 .await;
         }
+    }
+
+    /// Open-tier fraud-proof path: a challenger has re-executed the trainer's
+    /// inner loop for `(round, fragment)` and rebuilt the activation
+    /// commitment from its own run (`recomputed`). Look up the trainer's
+    /// buffered gradient, fuzzy-compare its claimed commitment against the
+    /// recomputed one via
+    /// [`verify_activation_commitment`](crate::activation::verify_activation_commitment),
+    /// and — on failure — slash + evict the trainer with
+    /// [`EvictionReason::CommitmentMismatch`](crate::slashing::EvictionReason::CommitmentMismatch).
+    ///
+    /// Returns the full [`ActivationVerification`](crate::activation::ActivationVerification)
+    /// outcome so the caller (RPC handler, witness-committee member) can log
+    /// the per-band deltas for the audit trail. A gradient with no commitment
+    /// at all returns [`TrainingError::CommitmentRequired`] — accept-time
+    /// enforcement means this only happens for non-Open tiers, where the
+    /// challenge path is not the trust anchor.
+    pub async fn challenge_activation_commitment(
+        &self,
+        round: u32,
+        fragment: u32,
+        trainer_did: &str,
+        recomputed: &tenzro_types::training::ActivationCommitment,
+    ) -> Result<crate::activation::ActivationVerification> {
+        let claimed = {
+            let entry = self.buffers.get(&(round, fragment)).ok_or_else(|| {
+                TrainingError::GradientNotFound {
+                    round,
+                    fragment,
+                    trainer_did: trainer_did.to_string(),
+                }
+            })?;
+            let gradient = entry
+                .accepted
+                .iter()
+                .find(|g| g.trainer_did == trainer_did)
+                .ok_or_else(|| TrainingError::GradientNotFound {
+                    round,
+                    fragment,
+                    trainer_did: trainer_did.to_string(),
+                })?;
+            gradient
+                .commitment
+                .clone()
+                .ok_or(TrainingError::CommitmentRequired)?
+        };
+        let verification =
+            crate::activation::verify_activation_commitment(&claimed, recomputed);
+        if !verification.passed {
+            self.evict_trainer(
+                trainer_did,
+                crate::slashing::EvictionReason::CommitmentMismatch,
+            )
+            .await;
+        }
+        Ok(verification)
     }
 
     /// Post-aggregation eviction pass. `contributors` pairs each accepted
@@ -845,6 +967,7 @@ impl TrainingRuntime {
     /// immutable on a registered run.
     pub fn register_run(&self, state: Arc<SyncerState>) -> Result<()> {
         validate_aggregation_for_tier(&state.task_spec)?;
+        validate_objective(&state.task_spec)?;
         if state.task_spec.tier == TrainingTier::Confidential
             && crate::confidential::parse_tee_dataset_ref(&state.task_spec.dataset_ref).is_none()
         {
@@ -1020,6 +1143,23 @@ mod tests {
         ArchitectureSpec, GradientQuantization, PipelineConfig, SyncStrategy, TrainingModality,
     };
 
+    /// Structurally valid activation commitment for `spec`: top-k probes over
+    /// a synthetic 32-coordinate fragment delta plus a loss trajectory of
+    /// exactly `inner_steps` entries. Deterministic, so re-building for the
+    /// same spec yields the same commitment hash.
+    fn make_commitment(spec: &TrainingTaskSpec) -> tenzro_types::training::ActivationCommitment {
+        let delta: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.1).collect();
+        let k = tenzro_types::training::DEFAULT_PROBE_K;
+        let probes = crate::activation::top_k_delta_probes(&delta, k);
+        tenzro_types::training::ActivationCommitment {
+            k,
+            loss_trajectory: (0..spec.inner_steps)
+                .map(|s| 2.0 - s as f32 * 0.001)
+                .collect(),
+            probes,
+        }
+    }
+
     fn make_gradient(spec: &TrainingTaskSpec, trainer_did: &str, round: u32, fragment: u32) -> OuterGradient {
         use tenzro_crypto::signatures::Signer;
         // Deterministic per-DID Ed25519 key so repeated calls for the same
@@ -1048,6 +1188,9 @@ mod tests {
             submitted_at: Timestamp::now(),
             signature: tenzro_types::primitives::Signature::default(),
             attestation: None,
+            // Open-tier accept requires a commitment, and its hash is bound
+            // into the signing preimage — attach it before signing.
+            commitment: Some(make_commitment(spec)),
         };
         let msg = outer_gradient_signing_bytes(&gradient);
         let sig = signer.sign(&msg).unwrap();
@@ -1086,8 +1229,98 @@ mod tests {
             dataset_hash: Hash::zero(),
             min_throughput: None,
             created_at: Timestamp::now(),
+            objective: TrainingObjective::default(),
             metadata: HashMap::new(),
         }
+    }
+
+    fn dummy_rl_config() -> tenzro_types::training::RlConfig {
+        tenzro_types::training::RlConfig {
+            group_size: 4,
+            kl_coeff: 0.05,
+            clip_epsilon: 0.2,
+            max_new_tokens: 256,
+            temperature: 1.0,
+            reward_ref: "py:my_rewards.math:score_completion".into(),
+        }
+    }
+
+    #[test]
+    fn objective_supervised_always_valid() {
+        assert!(validate_objective(&dummy_task()).is_ok());
+    }
+
+    #[test]
+    fn objective_rl_requires_language_modality() {
+        let mut spec = dummy_task();
+        spec.objective = TrainingObjective::RlPostTraining(dummy_rl_config());
+        // dummy_task is Timeseries — rejected.
+        assert!(matches!(
+            validate_objective(&spec),
+            Err(TrainingError::InvalidTaskSpec(_))
+        ));
+        spec.architecture.modality = TrainingModality::Language;
+        assert!(validate_objective(&spec).is_ok());
+    }
+
+    #[test]
+    fn objective_rl_rejects_bad_hyperparameters() {
+        let mut spec = dummy_task();
+        spec.architecture.modality = TrainingModality::Language;
+
+        let mut rl = dummy_rl_config();
+        rl.group_size = 1;
+        spec.objective = TrainingObjective::RlPostTraining(rl);
+        assert!(validate_objective(&spec).is_err());
+
+        let mut rl = dummy_rl_config();
+        rl.kl_coeff = -0.1;
+        spec.objective = TrainingObjective::RlPostTraining(rl);
+        assert!(validate_objective(&spec).is_err());
+
+        let mut rl = dummy_rl_config();
+        rl.clip_epsilon = 0.0;
+        spec.objective = TrainingObjective::RlPostTraining(rl);
+        assert!(validate_objective(&spec).is_err());
+
+        let mut rl = dummy_rl_config();
+        rl.clip_epsilon = 1.5;
+        spec.objective = TrainingObjective::RlPostTraining(rl);
+        assert!(validate_objective(&spec).is_err());
+
+        let mut rl = dummy_rl_config();
+        rl.max_new_tokens = 0;
+        spec.objective = TrainingObjective::RlPostTraining(rl);
+        assert!(validate_objective(&spec).is_err());
+
+        let mut rl = dummy_rl_config();
+        rl.temperature = 0.0;
+        spec.objective = TrainingObjective::RlPostTraining(rl);
+        assert!(validate_objective(&spec).is_err());
+
+        let mut rl = dummy_rl_config();
+        rl.reward_ref = String::new();
+        spec.objective = TrainingObjective::RlPostTraining(rl);
+        assert!(validate_objective(&spec).is_err());
+    }
+
+    #[test]
+    fn register_run_rejects_invalid_rl_objective() {
+        let runtime = TrainingRuntime::new();
+        let mut spec = dummy_task();
+        let mut rl = dummy_rl_config();
+        rl.group_size = 1;
+        spec.architecture.modality = TrainingModality::Language;
+        spec.objective = TrainingObjective::RlPostTraining(rl);
+        let state = Arc::new(SyncerState::new(
+            spec,
+            "did:tenzro:machine:syncer".into(),
+            Address::new([9u8; 32]),
+        ));
+        assert!(matches!(
+            runtime.register_run(state),
+            Err(TrainingError::InvalidTaskSpec(_))
+        ));
     }
 
     #[test]
@@ -1692,6 +1925,114 @@ mod tests {
             state.decide_round(opened + 5_001),
             RoundDecision::NoQuorum { round: 0 }
         );
+    }
+
+    #[test]
+    fn open_tier_missing_commitment_rejected() {
+        // Open tier has no attestation to lean on — the activation commitment
+        // is the verifiable-compute evidence and its absence is fail-closed
+        // (and slashable, per `is_slashable_rejection`).
+        let state = training_state();
+        let spec = dummy_task();
+        let mut gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
+        gradient.commitment = None;
+        let err = state.accept_outer_gradient(gradient);
+        assert!(matches!(err, Err(TrainingError::CommitmentRequired)));
+        assert!(TrainingError::CommitmentRequired.is_slashable_rejection());
+    }
+
+    #[test]
+    fn structurally_invalid_commitment_rejected() {
+        // Truncated loss trajectory (fewer entries than the spec's
+        // `inner_steps`) fails structural validation before the signature
+        // check even runs.
+        let state = training_state();
+        let spec = dummy_task();
+        let mut gradient = make_gradient(&spec, "did:tenzro:machine:t1", 0, 0);
+        if let Some(commitment) = &mut gradient.commitment {
+            commitment.loss_trajectory.truncate(10);
+        }
+        let err = state.accept_outer_gradient(gradient);
+        assert!(matches!(
+            err,
+            Err(TrainingError::CommitmentInvalid { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn challenge_matching_commitment_passes() {
+        let state = training_state();
+        let spec = dummy_task();
+        state
+            .accept_outer_gradient(make_gradient(&spec, "did:tenzro:machine:t1", 0, 0))
+            .unwrap();
+        // Challenger re-executes and recomputes the identical commitment.
+        let recomputed = make_commitment(&spec);
+        let verification = state
+            .challenge_activation_commitment(0, 0, "did:tenzro:machine:t1", &recomputed)
+            .await
+            .unwrap();
+        assert!(verification.passed);
+        // Trainer stays enrolled; buffered gradient stays.
+        assert!(state
+            .run
+            .read()
+            .trainers
+            .iter()
+            .any(|d| d == "did:tenzro:machine:t1"));
+        assert_eq!(state.buffers.get(&(0, 0)).unwrap().accepted.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn challenge_mismatched_commitment_evicts() {
+        let state = training_state();
+        let spec = dummy_task();
+        state
+            .accept_outer_gradient(make_gradient(&spec, "did:tenzro:machine:t1", 0, 0))
+            .unwrap();
+        // Challenger's re-execution produced a wholly different trajectory and
+        // disjoint probes — the claimed commitment was fabricated.
+        let mut recomputed = make_commitment(&spec);
+        for loss in &mut recomputed.loss_trajectory {
+            *loss += 10.0;
+        }
+        for probe in &mut recomputed.probes {
+            probe.index += 1_000;
+        }
+        let verification = state
+            .challenge_activation_commitment(0, 0, "did:tenzro:machine:t1", &recomputed)
+            .await
+            .unwrap();
+        assert!(!verification.passed);
+        // Trainer evicted; its buffered gradient dropped.
+        assert!(!state
+            .run
+            .read()
+            .trainers
+            .iter()
+            .any(|d| d == "did:tenzro:machine:t1"));
+        assert!(state.buffers.get(&(0, 0)).unwrap().accepted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn challenge_unknown_gradient_errors() {
+        let state = training_state();
+        let spec = dummy_task();
+        let recomputed = make_commitment(&spec);
+        let err = state
+            .challenge_activation_commitment(3, 0, "did:tenzro:machine:t1", &recomputed)
+            .await;
+        assert!(matches!(
+            err,
+            Err(TrainingError::GradientNotFound { round: 3, .. })
+        ));
+        // A challenge miss is a lookup failure, not proof of poisoning.
+        assert!(!TrainingError::GradientNotFound {
+            round: 3,
+            fragment: 0,
+            trainer_did: "did:tenzro:machine:t1".into(),
+        }
+        .is_slashable_rejection());
     }
 
     #[test]

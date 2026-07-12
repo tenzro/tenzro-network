@@ -94,6 +94,19 @@ pub enum DaCommitteeRequest {
         /// 32-byte blob commitment.
         commitment: [u8; 32],
     },
+
+    /// Challenger asks this member to prove *current* possession of its sliver
+    /// for `commitment`. The member must reply
+    /// [`DaCommitteeResponse::PossessionProof`] carrying the sliver itself plus
+    /// a signature binding the challenger-chosen `nonce` — a cached Merkle path
+    /// alone proves nothing about possession, so the proof is the full sliver
+    /// re-verified against the commitment on the challenger side.
+    ChallengeSliver {
+        /// 32-byte blob commitment.
+        commitment: [u8; 32],
+        /// Challenger-chosen random nonce bound into the signed response.
+        nonce: [u8; 32],
+    },
 }
 
 /// Committee DA response envelope.
@@ -106,6 +119,11 @@ pub enum DaCommitteeResponse {
     /// Response to `FetchSliver`: `Some` bincode-encoded `redstuff::SliverPair`
     /// if the member holds it, `None` otherwise.
     Sliver(Option<Vec<u8>>),
+
+    /// Response to `ChallengeSliver`: `Some` proof if the member holds the
+    /// sliver, `None` if it does not (an honest "not held" answer — the
+    /// challenger records the failure against the member's availability score).
+    PossessionProof(Option<WirePossessionProof>),
 
     /// Server-side error for any request variant. The requester treats this the
     /// same as a missing attestation / missing sliver and moves on.
@@ -125,6 +143,26 @@ pub struct WireMemberAttestation {
     pub address: Address,
     /// Ed25519 signature over the node-layer canonical attestation message.
     pub signature: Signature,
+}
+
+/// One committee member's nonce-bound proof that it currently holds its
+/// sliver for a challenged commitment.
+///
+/// Structurally identical to the node-layer `PossessionProof`; the adapter
+/// maps between the two. The `sliver` bytes are the bincode-encoded
+/// `redstuff::SliverPair` — the challenger re-runs full sliver verification
+/// against the blob commitment, so a member cannot pass with stale metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WirePossessionProof {
+    /// Committee index of the responding member.
+    pub index: u64,
+    /// The member's on-chain address (bound into the signed message).
+    pub address: Address,
+    /// Ed25519 signature over the node-layer canonical challenge message
+    /// (commitment ‖ nonce ‖ address under the challenge domain tag).
+    pub signature: Signature,
+    /// bincode-encoded `redstuff::SliverPair` (opaque to the network layer).
+    pub sliver: Vec<u8>,
 }
 
 /// Errors a serving member reports back to the requester.
@@ -194,6 +232,10 @@ mod tests {
             DaCommitteeRequest::FetchSliver {
                 commitment: [42u8; 32],
             },
+            DaCommitteeRequest::ChallengeSliver {
+                commitment: [42u8; 32],
+                nonce: [13u8; 32],
+            },
         ];
         for req in cases {
             let bytes = bincode::serialize(&req).expect("encode");
@@ -208,6 +250,16 @@ mod tests {
             DaCommitteeResponse::Attestation(sample_attestation()),
             DaCommitteeResponse::Sliver(Some(vec![5u8; 96])),
             DaCommitteeResponse::Sliver(None),
+            {
+                let att = sample_attestation();
+                DaCommitteeResponse::PossessionProof(Some(WirePossessionProof {
+                    index: 2,
+                    address: att.address,
+                    signature: att.signature,
+                    sliver: vec![8u8; 64],
+                }))
+            },
+            DaCommitteeResponse::PossessionProof(None),
             DaCommitteeResponse::Error(DaCommitteeError::ServerBusy {
                 limit: MAX_INBOUND_STREAMS_PER_PEER,
             }),

@@ -340,6 +340,12 @@ pub(crate) async fn handle_x402_protocol_info(
                 "http": "GET /discovery/resources",
                 "listing_domain_tag": tenzro_payments::x402::BAZAAR_LISTING_DOMAIN,
                 "binding": ["seller_did", "resource"],
+                "reputation": {
+                    "join": "listing.pay_to -> provider_reputation_ledger",
+                    "score_up_path": "settled_payment_only",
+                    "sort": "reputation_desc_then_updated_at_desc_unscored_last",
+                    "filter": "minReputation_floor_excludes_unscored",
+                },
             },
             "signed_offer": {
                 "rpc": [
@@ -458,10 +464,14 @@ pub(crate) async fn handle_x402_register_resource(
 
 /// `tenzro_x402DiscoverResources` — a buyer queries the Bazaar catalog for
 /// listings matching a filter. All set fields are ANDed; unset fields match
-/// everything. Results are freshest-first and capped by `limit` when non-zero.
+/// everything. Each result carries `seller_reputation` joined from the
+/// provider ledger (0-1000; absent when the seller is unscored). Results
+/// sort by reputation descending, then freshness, and are capped by `limit`
+/// when non-zero.
 ///
 /// Params (object): optional `scheme`, `network`, `asset`, `sellerDid`,
-/// `tags` (array), `limit` (number).
+/// `tags` (array), `minReputation` (number — unscored sellers fail the
+/// floor), `limit` (number).
 pub(crate) async fn handle_x402_discover_resources(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -481,6 +491,7 @@ pub(crate) async fn handle_x402_discover_resources(
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default(),
+        min_reputation: p.get("minReputation").and_then(Value::as_u64),
         limit: p.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize,
     };
 

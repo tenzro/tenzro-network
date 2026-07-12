@@ -132,6 +132,7 @@ mod tests {
             access_policy: crate::access_control::AccessPolicy::owner_only(
                 "did:tenzro:human:test-owner",
             ),
+            pricing: crate::pricing::DatabasePricing::free(),
             confidential: None,
         }
     }

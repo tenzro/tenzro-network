@@ -6,7 +6,7 @@
 //!
 //! **Operator-only, per node.** Every Tenzro node operator holds
 //! their own admin token for *their own node's* state. Tenzro Labs
-//! holds the token for `rpc.tenzro.network`; a validator operator
+//! holds the token for `rpc.tenzro.xyz`; a validator operator
 //! holds the token for that validator's RPC; a self-hosted operator
 //! holds the token for their local node. Calls without the matching
 //! token are rejected `-32001`. There is no global "Tenzro Labs

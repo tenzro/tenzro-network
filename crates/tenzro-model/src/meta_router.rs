@@ -444,7 +444,7 @@ impl MetaRouter {
             gate.check(did, best.est_cost).map_err(|e| {
                 ModelError::RoutingError(format!(
                     "per-DID budget gate rejected {}: {e}",
-                    best.model_id
+                    best.model.model_id
                 ))
             })?;
         }

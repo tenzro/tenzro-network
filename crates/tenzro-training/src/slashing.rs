@@ -40,6 +40,12 @@ pub enum EvictionReason {
     /// A buffered contribution's cosine similarity to the round aggregate fell
     /// below the agreement floor.
     AgreementBelowFloor,
+    /// A challenger re-executed the trainer's inner loop and the claimed
+    /// activation commitment failed the fuzzy comparison against the
+    /// recomputed one (loss trajectory or delta probes outside tolerance) —
+    /// the Open-tier fraud-proof path in
+    /// [`verify_activation_commitment`](crate::activation::verify_activation_commitment).
+    CommitmentMismatch,
 }
 
 impl EvictionReason {
@@ -49,6 +55,7 @@ impl EvictionReason {
             EvictionReason::AcceptRejected => "train:accept_rejected",
             EvictionReason::NormBudgetExceeded => "train:norm_budget_exceeded",
             EvictionReason::AgreementBelowFloor => "train:agreement_below_floor",
+            EvictionReason::CommitmentMismatch => "train:commitment_mismatch",
         }
     }
 }

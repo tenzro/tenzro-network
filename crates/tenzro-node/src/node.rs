@@ -891,21 +891,108 @@ impl tenzro_network::BanStore for NodeBanStore {
     }
 }
 
-/// Bridges the payment gateway's `SettlementCallback` to the TNZO token layer and
-/// settlement engine, so that protocol-level settlements (MPP, x402, Visa TAP, etc.)
-/// are reflected on-chain via `TnzoToken::transfer()` and logged through the
-/// `SettlementEngine`.
+/// Gas limit stamped on the system-signed `X402Settle` tx. The privileged VM
+/// handler consumes `GAS_X402_SETTLE` (40k); this leaves headroom for the
+/// intrinsic/nonce bookkeeping without over-reserving.
+const GAS_X402_SETTLE_TX_LIMIT: u64 = 100_000;
+
+/// Gas price for the settle tx. The system address carries no registered DID, so
+/// admission lands it in the Open lane, whose fee floor is
+/// `mempool_min_gas_price (1 gwei) × open_floor_mult (4.0)` = 4 gwei. The fee is
+/// paid back to the treasury from the system account, so it nets to a
+/// book-keeping no-op for the operator — same rationale as the faucet.
+const X402_SETTLE_GAS_PRICE: u64 = 4_000_000_000;
+
+/// Bridges the payment gateway's `SettlementCallback` to the settlement layer.
+///
+/// For TNZO-denominated x402/MPP/Visa-TAP settlements, the payer→payee balance
+/// move is executed **consensus-mediated** — the callback builds a system-key
+/// signed `TransactionType::X402Settle` and submits it through `HotStuff2Engine`,
+/// so the transfer lands in a finalized block and executes through
+/// `MultiVmRuntime` (privileged `SELECTOR_X402_SETTLE`, payer→payee authorized
+/// by on-chain state + a `payment_id` replay guard). The returned string is the
+/// real in-block tx hash — settlement is final after the block that carries it.
+///
+/// The `SettlementEngine` record is audit-only; it never holds balance authority.
+///
+/// Non-TNZO assets (external chains via Coinbase CDP / EIP-3009 / Permit2) are
+/// left to their own settlement paths and only recorded here.
 pub struct TnzoSettlementCallback {
-    token: Arc<TnzoToken>,
+    /// HotStuff-2 handle for admitting the signed settlement tx.
+    consensus: Arc<HotStuff2Engine>,
+    /// Composite (Ed25519 + ML-DSA-65) signer for the system/validator key.
+    hybrid_signer: Arc<dyn tenzro_crypto::composite::HybridSigner>,
+    /// System address paying gas and authoring the privileged settle tx.
+    system_addr: Address,
+    /// Read-through to VM execution state for the system-address nonce floor.
+    storage: Arc<dyn tenzro_storage::KvStore>,
+    /// Genesis chain id stamped into the signed tx.
+    chain_id: u64,
+    /// Monotonic in-memory nonce counter, floored by the VM-state nonce so
+    /// concurrent settlements within the same unfinalized window get distinct
+    /// slots. Mirrors the faucet's `wallet_service.next_nonce` discipline.
+    next_nonce: Arc<parking_lot::Mutex<u64>>,
+    /// Gossip fan-out for the admitted tx. Populated after the event loop
+    /// starts (`init_event_loop` runs later than `init_payments`, so this is
+    /// injected out-of-band via [`Self::event_sender_slot`]). Absent it, the tx
+    /// is still admitted to the local mempool but not gossiped.
+    event_sender: Arc<parking_lot::Mutex<Option<mpsc::Sender<NodeEvent>>>>,
+    /// Audit-only settlement receipt store (never balance authority).
     settlement_engine: Arc<SettlementEngine>,
+    /// Provider-reputation ledger. A successful settle is the ONLY score-up
+    /// path (+1, ceiling 1000) — the anti-self-deal invariant that makes
+    /// Bazaar reputation ranking meaningful. `None` on nodes without the
+    /// AI-infrastructure subsystem; the record is then skipped.
+    provider_manager: Option<Arc<tenzro_model::ProviderManager>>,
 }
 
 impl TnzoSettlementCallback {
-    pub fn new(token: Arc<TnzoToken>, settlement_engine: Arc<SettlementEngine>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        consensus: Arc<HotStuff2Engine>,
+        hybrid_signer: Arc<dyn tenzro_crypto::composite::HybridSigner>,
+        system_addr: Address,
+        storage: Arc<dyn tenzro_storage::KvStore>,
+        chain_id: u64,
+        settlement_engine: Arc<SettlementEngine>,
+        provider_manager: Option<Arc<tenzro_model::ProviderManager>>,
+    ) -> Self {
         Self {
-            token,
+            consensus,
+            hybrid_signer,
+            system_addr,
+            storage,
+            chain_id,
+            next_nonce: Arc::new(parking_lot::Mutex::new(0)),
+            event_sender: Arc::new(parking_lot::Mutex::new(None)),
             settlement_engine,
+            provider_manager,
         }
+    }
+
+    /// Shared handle for injecting the event-loop sender once the loop has
+    /// started. `init_payments` builds the callback before `init_event_loop`
+    /// exists, so `start()` clones this slot and fills it after the sender is
+    /// available.
+    pub fn event_sender_slot(&self) -> Arc<parking_lot::Mutex<Option<mpsc::Sender<NodeEvent>>>> {
+        self.event_sender.clone()
+    }
+
+    /// Reserve the next nonce for the system address. Takes the VM-state nonce
+    /// (the value `MultiVmRuntime` validates against) as the floor and returns
+    /// `max(vm_state_nonce, in_memory_counter)`, advancing the counter. The
+    /// VM-state read is authoritative across restarts; the in-memory counter
+    /// distinguishes concurrent same-window settlements.
+    fn reserve_nonce(&self) -> u64 {
+        let chain_nonce = {
+            let state = tenzro_vm::StateAdapter::with_storage(self.storage.clone());
+            use tenzro_vm::traits::VmState as _;
+            state.get_nonce(self.system_addr.as_bytes())
+        };
+        let mut guard = self.next_nonce.lock();
+        let reserved = (*guard).max(chain_nonce);
+        *guard = reserved + 1;
+        reserved
     }
 }
 
@@ -919,23 +1006,87 @@ impl tenzro_payments::gateway::SettlementCallback for TnzoSettlementCallback {
         asset: &str,
         receipt_id: &str,
     ) -> std::result::Result<String, tenzro_payments::PaymentError> {
+        use tenzro_types::primitives::{ChainId, Nonce, Signature};
+        use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
+
         // Convert byte slices to 32-byte Address
         let payer_addr = bytes_to_address(payer);
         let payee_addr = bytes_to_address(payee);
 
-        // Only settle TNZO natively; other assets are recorded but not transferred
-        if asset == "TNZO" || asset == "tnzo" {
-            self.token
-                .transfer(&payer_addr, &payee_addr, amount)
+        // TNZO settlements move balance consensus-mediated: a system-key signed
+        // `X402Settle` tx that executes through MultiVmRuntime in a finalized
+        // block. The returned string is the real in-block tx hash. Non-TNZO
+        // assets fall through to audit-only recording (their own settlement
+        // path already moved value on the foreign chain).
+        let onchain_tx_hash = if asset == "TNZO" || asset == "tnzo" {
+            let nonce = self.reserve_nonce();
+            let tx = Transaction::new(
+                ChainId::from(self.chain_id),
+                self.system_addr,
+                payee_addr,
+                Nonce::from(nonce),
+                TransactionType::X402Settle {
+                    payer: payer_addr,
+                    payee: payee_addr,
+                    amount,
+                    payment_id: receipt_id.to_string(),
+                },
+                GAS_X402_SETTLE_TX_LIMIT,
+                X402_SETTLE_GAS_PRICE,
+                self.hybrid_signer.public_key().pq.clone(),
+            );
+            let tx_hash = tx.hash();
+
+            let composite = self.hybrid_signer.sign(tx_hash.as_bytes()).map_err(|e| {
+                tenzro_payments::PaymentError::SettlementError(format!(
+                    "x402 settle signing failed: {}",
+                    e
+                ))
+            })?;
+            let classical_pubkey = self.hybrid_signer.public_key().classical.as_bytes().to_vec();
+            let signed_tx = SignedTransaction::new(
+                tx,
+                Signature::new(composite.classical, classical_pubkey),
+                composite.pq,
+            );
+            let in_block_hash = signed_tx.clone().hash();
+            let hash_str = format!("{}", in_block_hash);
+
+            // Admit synchronously so fee-floor / rate-limit rejections surface
+            // here, then fan the tx out for gossip via LocallyAdmittedTransaction.
+            self.consensus
+                .submit_transaction(signed_tx.clone())
                 .map_err(|e| {
                     tenzro_payments::PaymentError::SettlementError(format!(
-                        "TNZO transfer failed: {}",
+                        "x402 settle rejected by consensus mempool: {}",
                         e
                     ))
                 })?;
-        }
 
-        // Record in the settlement engine for auditing
+            let sender = self.event_sender.lock().clone();
+            if let Some(sender) = sender {
+                if let Err(e) = sender
+                    .send(NodeEvent::LocallyAdmittedTransaction(signed_tx))
+                    .await
+                {
+                    warn!(
+                        "x402 settle admitted but gossip enqueue failed (tx {}): {}",
+                        hash_str, e
+                    );
+                }
+            }
+
+            info!(
+                "x402 TNZO settlement admitted consensus-mediated: payment_id={}, tx={}, amount={}",
+                receipt_id, hash_str, amount
+            );
+            Some(hash_str)
+        } else {
+            None
+        };
+
+        // Record in the settlement engine for auditing only — never balance
+        // authority. A recording failure does not undo the on-chain settle.
         use tenzro_types::settlement::{
             ProofType, ServiceProof, ServiceType, SettlementRequest,
         };
@@ -952,24 +1103,19 @@ impl tenzro_payments::gateway::SettlementCallback for TnzoSettlementCallback {
             proof,
         );
 
-        match self.settlement_engine.settle(request).await {
-            Ok(receipt) => {
-                info!(
-                    "On-chain settlement recorded: receipt_id={}, settlement_receipt={}",
-                    receipt_id, receipt.receipt_id
-                );
-                Ok(receipt.receipt_id)
-            }
-            Err(e) => {
-                // The TNZO transfer already succeeded; log the settlement-engine
-                // recording failure but still return success with a synthetic ref
-                warn!(
-                    "Settlement engine recording failed (TNZO transfer succeeded): {}",
-                    e
-                );
-                Ok(format!("transfer-only:{}", receipt_id))
-            }
+        if let Err(e) = self.settlement_engine.settle(request).await {
+            warn!("Settlement engine audit-record failed for {}: {}", receipt_id, e);
         }
+
+        // Settled payment → provider reputation. This is the only score-up
+        // path on the ledger; no-op for payees without a provider record.
+        if let Some(pm) = &self.provider_manager {
+            pm.record_settled_success(&payee_addr, amount);
+        }
+
+        // Prefer the real in-block tx hash for TNZO; for external assets the
+        // receipt id is the settlement reference.
+        Ok(onchain_tx_hash.unwrap_or_else(|| receipt_id.to_string()))
     }
 }
 
@@ -1313,14 +1459,21 @@ pub struct TenzroNode {
     /// committee members. `None` on non-validator roles.
     da_peer_registry: Option<Arc<crate::da_committee_surface::AddressPeerRegistry>>,
 
-    /// The committee-resident Red Stuff DA backend, held so the node retains a
-    /// `DaBackend` handle for the committee store. `None` on non-validator
-    /// roles or when committee-DA init fails.
-    da_committee_backend: Option<Arc<dyn tenzro_storage::da::DaBackend>>,
+    /// The committee-resident Red Stuff DA backend, held concretely so the
+    /// possession-challenge RPC surface (`tenzro_daChallenge*`) can reach the
+    /// custody store and committee snapshot; coerced to `Arc<dyn DaBackend>`
+    /// where a trait object is needed. `None` on non-validator roles or when
+    /// committee-DA init fails.
+    da_committee_backend: Option<Arc<crate::da_committee::DaCommitteeBackend>>,
 
     /// JoinHandle for the committee-DA inbound serving loop. Kept alive for the
     /// node's lifetime; dropped on stop.
     da_committee_server_handle: Option<tokio::task::JoinHandle<()>>,
+
+    /// Background possession-challenge driver: periodically audits a random
+    /// committee member's custody of a random held blob and scores the result
+    /// into the member's rolling availability score. Aborted on stop.
+    da_possession_challenger: Option<crate::da_committee::PossessionChallenger>,
 
     /// Node Ed25519 signer for outbound model + provider gossip
     /// announcements. Byte-shared with the validator identity that derives
@@ -1729,6 +1882,12 @@ pub struct TenzroNode {
     payment_gateway: Option<Arc<TenzroPaymentGateway>>,
     x402_server: Option<Arc<X402PaymentServer>>,
 
+    /// Deferred event-loop sender slot for the consensus-mediated x402
+    /// settlement callback. `init_payments` builds the callback before the
+    /// event loop exists; `start()` fills this slot after `init_event_loop`
+    /// so admitted settle txs also gossip. `None` when no callback was wired.
+    x402_settle_event_slot: Option<Arc<parking_lot::Mutex<Option<mpsc::Sender<NodeEvent>>>>>,
+
     /// x402 Bazaar resource catalog — sellers register discoverable paid
     /// resources; buyers query matching listings. RocksDB-backed via
     /// `CF_SETTLEMENTS / bazaar:*`.
@@ -1743,6 +1902,11 @@ pub struct TenzroNode {
     /// registry above tracks placement; this holds the concrete drivers the
     /// query path dispatches to. Empty until a driver backend is registered.
     db_engine_registry: Arc<crate::db_engine_registry::EngineRegistry>,
+
+    /// Per-database usage counters for the managed-database query path —
+    /// queries served, bytes moved, total billed. RocksDB-backed via
+    /// `CF_DATABASES / usage/*` once storage is up; in-memory before that.
+    db_usage_meter: Arc<tenzro_database::DatabaseUsageMeter>,
 
     /// Spec-2 per-DID admission controller. Wired into the consensus
     /// mempool at startup (`set_admission`); also held here so RPC
@@ -2103,6 +2267,7 @@ impl TenzroNode {
             da_peer_registry: None,
             da_committee_backend: None,
             da_committee_server_handle: None,
+            da_possession_challenger: None,
             announce_signer: None,
             spt_ceiling_cache: None,
             vm_runtime: None,
@@ -2185,8 +2350,10 @@ impl TenzroNode {
             identity_registry: None,
             payment_gateway: None,
             x402_server: None,
+            x402_settle_event_slot: None,
             database_registry: None,
             db_engine_registry: Arc::new(crate::db_engine_registry::EngineRegistry::new()),
+            db_usage_meter: Arc::new(tenzro_database::DatabaseUsageMeter::new()),
             bazaar_catalog: None,
             admission: None,
             agent_kit: None,
@@ -2811,6 +2978,16 @@ impl TenzroNode {
             self.health_monitor.mark_unhealthy("event_loop", e.to_string());
         })?;
 
+        // Now that the event loop is running, hand its sender to the
+        // consensus-mediated x402 settlement callback so admitted settle txs
+        // also gossip. `init_payments` built the callback before this point.
+        if let (Some(slot), Some(sender)) =
+            (&self.x402_settle_event_slot, self.event_loop_tx.clone())
+        {
+            *slot.lock() = Some(sender);
+            info!("x402 settlement callback wired to event-loop gossip sender");
+        }
+
         // 15. Clean up stale model services from previous session
         self.cleanup_expired_model_services();
 
@@ -2856,6 +3033,9 @@ impl TenzroNode {
         // Stop in reverse order
         // Note: In a full implementation, each subsystem would have a proper shutdown method
 
+        if let Some(mut challenger) = self.da_possession_challenger.take() {
+            challenger.stop();
+        }
         if let Some(handle) = self.da_committee_server_handle.take() {
             handle.abort();
         }
@@ -2868,6 +3048,7 @@ impl TenzroNode {
         self.bazaar_catalog = None;
         self.database_registry = None;
         self.db_engine_registry = Arc::new(crate::db_engine_registry::EngineRegistry::new());
+        self.db_usage_meter = Arc::new(tenzro_database::DatabaseUsageMeter::new());
         self.admission = None;
         self.identity_registry = None;
         self.agent_runtime = None;
@@ -4486,10 +4667,21 @@ impl TenzroNode {
         // each own their signing identity from the same bytes.
         let server_keypair = KeyPair::from_bytes(KeyType::Ed25519, &keypair.to_bytes())
             .map_err(|e| NodeError::Other(format!("committee-DA server keypair: {e}")))?;
-        let backend = DaCommitteeBackend::new(keypair, committee.clone(), surface, store.clone())
-            .map_err(|e| NodeError::Other(format!("committee-DA backend: {e}")))?
-            .arc();
-        self.da_committee_backend = Some(backend);
+        let backend = Arc::new(
+            DaCommitteeBackend::new(keypair, committee.clone(), surface, store.clone())
+                .map_err(|e| NodeError::Other(format!("committee-DA backend: {e}")))?,
+        );
+        self.da_committee_backend = Some(backend.clone());
+
+        // Background possession auditor (Task #92): every interval, challenge
+        // one random attester of one random held certificate to prove current
+        // custody of its own sliver. 10 minutes keeps challenge traffic to a
+        // single sliver round-trip per tick while still surfacing a member
+        // that dropped its slivers within a handful of ticks.
+        self.da_possession_challenger = Some(crate::da_committee::spawn_possession_challenger(
+            backend,
+            std::time::Duration::from_secs(600),
+        ));
 
         // Inbound serving loop.
         let server = DaCommitteeServer::new(net_dyn, committee, store, server_keypair)
@@ -4931,7 +5123,7 @@ impl TenzroNode {
         // control plane (gossipsub, kademlia, consensus dispatch); iroh
         // is the bulk-transfer data plane.
         // Iroh data plane is always bound. The default Pkarr relay
-        // (`https://pkarr.tenzro.network`) is operator-deployed; on a
+        // (`https://pkarr.tenzro.xyz`) is operator-deployed; on a
         // dev/laptop node without DNS access the bind still succeeds because
         // PkarrPublisher tolerates a transient relay outage and the local
         // endpoint stays usable for direct dials.
@@ -5489,7 +5681,7 @@ impl TenzroNode {
                         "solana-defi".to_string(), "solana".to_string(), "defi".to_string(),
                         "jupiter".to_string(), "swap".to_string(),
                     ];
-                    s.endpoint = Some("https://solana-mcp.tenzro.network/mcp".to_string());
+                    s.endpoint = Some("https://solana-mcp.tenzro.xyz/mcp".to_string());
                     s
                 },
                 {
@@ -5503,7 +5695,7 @@ impl TenzroNode {
                         "ens".to_string(), "erc8004".to_string(),
                         "margin-call".to_string(), "liquidation".to_string(),
                     ];
-                    s.endpoint = Some("https://ethereum-mcp.tenzro.network/mcp".to_string());
+                    s.endpoint = Some("https://ethereum-mcp.tenzro.xyz/mcp".to_string());
                     s
                 },
                 {
@@ -5519,7 +5711,7 @@ impl TenzroNode {
                         "rwa".to_string(), "nav".to_string(), "treasury".to_string(),
                         "fixed-income".to_string(), "rfq".to_string(),
                     ];
-                    s.endpoint = Some("https://canton-mcp.tenzro.network/mcp".to_string());
+                    s.endpoint = Some("https://canton-mcp.tenzro.xyz/mcp".to_string());
                     s
                 },
                 {
@@ -5533,7 +5725,7 @@ impl TenzroNode {
                         "cross-chain".to_string(), "bridge".to_string(),
                         "oft".to_string(), "messaging".to_string(),
                     ];
-                    s.endpoint = Some("https://layerzero-mcp.tenzro.network/mcp".to_string());
+                    s.endpoint = Some("https://layerzero-mcp.tenzro.xyz/mcp".to_string());
                     s
                 },
                 {
@@ -5546,7 +5738,7 @@ impl TenzroNode {
                         "chainlink-oracle".to_string(), "chainlink".to_string(), "ccip".to_string(),
                         "oracle".to_string(), "data-feeds".to_string(), "proof-of-reserve".to_string(),
                     ];
-                    s.endpoint = Some("https://chainlink-mcp.tenzro.network/mcp".to_string());
+                    s.endpoint = Some("https://chainlink-mcp.tenzro.xyz/mcp".to_string());
                     s
                 },
                 {
@@ -5588,7 +5780,7 @@ impl TenzroNode {
                         "ai".to_string(), "identity".to_string(), "payments".to_string(),
                         "inference".to_string(),
                     ];
-                    s.endpoint = Some("https://mcp.tenzro.network/mcp".to_string());
+                    s.endpoint = Some("https://mcp.tenzro.xyz/mcp".to_string());
                     s
                 },
                 {
@@ -5663,7 +5855,7 @@ impl TenzroNode {
                 {
                     let mut t = ToolDefinition::new(
                         "tenzro-mcp-server".to_string(), "1.0.0".to_string(),
-                        "mcp".to_string(), "https://mcp.tenzro.network/mcp".to_string(),
+                        "mcp".to_string(), "https://mcp.tenzro.xyz/mcp".to_string(),
                         "Tenzro Network MCP server with 24 tools for wallet, identity, payments, models, bridge, staking".to_string(),
                         "blockchain".to_string(),
                     );
@@ -5711,7 +5903,7 @@ impl TenzroNode {
                 {
                     let mut t = ToolDefinition::new(
                         "tenzro-a2a-server".to_string(), "1.0.0".to_string(),
-                        "api".to_string(), "https://a2a.tenzro.network".to_string(),
+                        "api".to_string(), "https://a2a.tenzro.xyz".to_string(),
                         "Agent-to-Agent protocol server for inter-agent communication (Google A2A spec)".to_string(),
                         "communication".to_string(),
                     );
@@ -7648,7 +7840,9 @@ impl TenzroNode {
 
         // x402 Bazaar resource catalog — RocksDB-backed when storage is up,
         // hydrating any previously-registered listings on boot; in-memory
-        // otherwise (storage-less test/dev node).
+        // otherwise (storage-less test/dev node). Discovery joins seller
+        // reputation from the provider ledger (init_ai_infrastructure runs
+        // before init_payments, so the manager is available here).
         let catalog = if let Some(storage) = &self.storage {
             let store = Arc::new(crate::bazaar_store::NodeResourceCatalogStore::new(
                 storage.clone() as Arc<dyn KvStore>,
@@ -7656,17 +7850,25 @@ impl TenzroNode {
             match tenzro_payments::x402::ResourceCatalog::with_store(store) {
                 Ok(c) => {
                     info!("x402 Bazaar catalog hydrated: {} listings", c.len());
-                    Arc::new(c)
+                    c
                 }
                 Err(e) => {
                     warn!("x402 Bazaar catalog hydration failed ({e}); starting empty");
-                    Arc::new(tenzro_payments::x402::ResourceCatalog::new())
+                    tenzro_payments::x402::ResourceCatalog::new()
                 }
             }
         } else {
-            Arc::new(tenzro_payments::x402::ResourceCatalog::new())
+            tenzro_payments::x402::ResourceCatalog::new()
         };
-        self.bazaar_catalog = Some(catalog);
+        let catalog = if let Some(pm) = &self.provider_manager {
+            info!("x402 Bazaar discovery joined to provider reputation ledger");
+            catalog.with_reputation_resolver(Arc::new(
+                crate::bazaar_store::ProviderReputationResolver::new(pm.clone()),
+            ))
+        } else {
+            catalog
+        };
+        self.bazaar_catalog = Some(Arc::new(catalog));
 
         // Distributed database registry — RocksDB-backed when storage is up,
         // hydrating every database this node serves on boot; in-memory
@@ -7687,6 +7889,22 @@ impl TenzroNode {
             Arc::new(tenzro_database::DatabaseRegistry::new())
         };
         self.database_registry = Some(database_registry);
+
+        // Usage meter alongside the registry — durable per-database counters
+        // (queries, bytes, billed totals) under `CF_DATABASES / usage/*`.
+        self.db_usage_meter = if let Some(storage) = &self.storage {
+            match tenzro_database::DatabaseUsageMeter::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(meter) => Arc::new(meter),
+                Err(e) => {
+                    warn!("Database usage meter hydration failed ({e}); starting in-memory");
+                    Arc::new(tenzro_database::DatabaseUsageMeter::new())
+                }
+            }
+        } else {
+            Arc::new(tenzro_database::DatabaseUsageMeter::new())
+        };
 
         // Engine backends: link the concrete drivers the operator wired up in
         // `[databases]` config (external Postgres/Qdrant/Valkey by URL, embedded
@@ -7722,7 +7940,7 @@ impl TenzroNode {
                 let did_resolver = Arc::new(TenzroAgentRegistry::new(identity_registry.clone()));
                 let agent_registry = Arc::new(DidResolverAgentRegistry::did_only(did_resolver));
                 let visa_tap_server = VisaTapServer::new(
-                    "api.tenzro.network".to_string(),
+                    "api.tenzro.xyz".to_string(),
                     "0x0000000000000000000000000000000000000001".to_string(),
                     agent_registry,
                 )
@@ -7753,15 +7971,47 @@ impl TenzroNode {
 
         info!("Registered payment protocols: {:?}", gateway.supported_protocols());
 
-        // Wire on-chain settlement callback (TNZO token transfer + settlement engine recording)
-        let gateway = if let (Some(token), Some(settlement)) =
-            (self.token.clone(), self.settlement.clone())
-        {
-            let callback = Arc::new(TnzoSettlementCallback::new(token, settlement));
-            info!("Payment gateway wired to on-chain settlement (TNZO token + SettlementEngine)");
+        // Wire on-chain settlement callback: TNZO settlements move balance
+        // consensus-mediated via a system-key signed `X402Settle` tx that lands
+        // in a finalized block, with the SettlementEngine kept audit-only. The
+        // consensus-mediated path requires the consensus engine, the composite
+        // (Ed25519 + ML-DSA-65) signer, the system address, and storage — all
+        // set during `init_consensus`, which runs before `init_payments`.
+        let gateway = if let (
+            Some(consensus),
+            Some(hybrid_signer),
+            Some(system_addr),
+            Some(storage),
+            Some(settlement),
+        ) = (
+            self.consensus.clone(),
+            self.validator_hybrid_signer.clone(),
+            self.local_validator_address,
+            self.storage.clone(),
+            self.settlement.clone(),
+        ) {
+            let chain_id = self
+                .config
+                .genesis
+                .as_ref()
+                .map(|g| g.chain_id)
+                .unwrap_or(1337);
+            let callback = Arc::new(TnzoSettlementCallback::new(
+                consensus,
+                hybrid_signer,
+                system_addr,
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                chain_id,
+                settlement,
+                self.provider_manager.clone(),
+            ));
+            // Stash the deferred event-sender slot so `start()` can populate it
+            // after the event loop starts (enables gossip of admitted settle txs).
+            self.x402_settle_event_slot = Some(callback.event_sender_slot());
+            info!("Payment gateway wired to consensus-mediated TNZO settlement (X402Settle)");
             gateway.with_settlement_callback(callback)
         } else {
-            warn!("Payment gateway initialized without on-chain settlement — token or settlement engine not available");
+            warn!("Payment gateway initialized without on-chain settlement — consensus, signer, system address, storage, or settlement engine not available");
             gateway
         };
 
@@ -7907,7 +8157,7 @@ impl TenzroNode {
             self.account_factory = Some(account_factory.clone());
 
             let webauthn_origin = std::env::var("TENZRO_WEBAUTHN_ORIGIN")
-                .unwrap_or_else(|_| "https://wallet.tenzro.network".to_string());
+                .unwrap_or_else(|_| "https://wallet.tenzro.xyz".to_string());
             let webauthn_module_addr = {
                 let mut a = [0u8; 20];
                 a[18] = 0x10; a[19] = 0x20;
@@ -9765,6 +10015,12 @@ impl TenzroNode {
         &self.db_engine_registry
     }
 
+    /// Returns the managed-database usage meter (always present; durable once
+    /// storage is up).
+    pub fn db_usage_meter(&self) -> &Arc<tenzro_database::DatabaseUsageMeter> {
+        &self.db_usage_meter
+    }
+
     /// Returns the model registry if initialized
     pub fn model_registry(&self) -> Option<&Arc<ModelRegistry>> {
         self.model_registry.as_ref()
@@ -9808,6 +10064,14 @@ impl TenzroNode {
     /// router with the node's RPC dispatcher).
     pub fn inference_router_arc(&self) -> Option<Arc<InferenceRouter>> {
         self.inference_router.clone()
+    }
+
+    /// Returns the committee-resident Red Stuff DA backend if this node is a
+    /// validator with committee-DA wired. Read by the `tenzro_daChallenge`,
+    /// `tenzro_daListChallenges`, `tenzro_daAvailability`, `tenzro_daCommittee`,
+    /// and `tenzro_daListBlobs` RPC handlers.
+    pub fn da_committee(&self) -> Option<&Arc<crate::da_committee::DaCommitteeBackend>> {
+        self.da_committee_backend.as_ref()
     }
 
     /// Returns the meta-router (intent → model) if initialized. Read by the

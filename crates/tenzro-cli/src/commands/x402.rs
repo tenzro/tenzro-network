@@ -255,6 +255,10 @@ pub struct X402DiscoverResourcesCmd {
     #[arg(long)]
     tags: Option<String>,
 
+    /// Minimum seller reputation (unscored sellers are excluded when set).
+    #[arg(long)]
+    min_reputation: Option<u64>,
+
     /// Maximum listings to return.
     #[arg(long)]
     limit: Option<usize>,
@@ -287,6 +291,9 @@ impl X402DiscoverResourcesCmd {
                 .filter(|t| !t.is_empty())
                 .collect();
             params.insert("tags".into(), serde_json::json!(list));
+        }
+        if let Some(mr) = self.min_reputation {
+            params.insert("minReputation".into(), serde_json::json!(mr));
         }
         if let Some(l) = self.limit {
             params.insert("limit".into(), serde_json::json!(l));

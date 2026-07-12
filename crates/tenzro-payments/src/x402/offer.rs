@@ -321,7 +321,7 @@ mod tests {
             "1000",
             "0xrecipient",
             "USDC",
-            "https://api.tenzro.network/paid/resource",
+            "https://api.tenzro.xyz/paid/resource",
             "Test resource",
             "application/json",
             300,

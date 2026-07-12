@@ -161,9 +161,10 @@ fn cell_to_json(row: &Row, idx: usize, ty: &Type) -> serde_json::Value {
         Type::FLOAT4 => opt_f64(row.try_get::<_, Option<f32>>(idx).ok().flatten().map(|v| v as f64)),
         Type::FLOAT8 => opt_f64(row.try_get::<_, Option<f64>>(idx).ok().flatten()),
         Type::JSON | Type::JSONB => row
-            .try_get::<_, Option<serde_json::Value>>(idx)
+            .try_get::<_, Option<JsonCell>>(idx)
             .ok()
             .flatten()
+            .map(|j| j.0)
             .unwrap_or(Value::Null),
         _ => row
             .try_get::<_, Option<String>>(idx)
@@ -171,6 +172,33 @@ fn cell_to_json(row: &Row, idx: usize, ty: &Type) -> serde_json::Value {
             .flatten()
             .map(Value::String)
             .unwrap_or(Value::Null),
+    }
+}
+
+/// Decodes Postgres `json` / `jsonb` wire payloads into a `serde_json::Value`.
+/// The jsonb binary format is a 1-byte version tag (currently `1`) followed by
+/// the JSON text; `json` is the text alone.
+struct JsonCell(serde_json::Value);
+
+impl<'a> tokio_postgres::types::FromSql<'a> for JsonCell {
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let text = if *ty == Type::JSONB {
+            let (&version, rest) = raw.split_first().ok_or("empty jsonb payload")?;
+            if version != 1 {
+                return Err(format!("unsupported jsonb version {version}").into());
+            }
+            rest
+        } else {
+            raw
+        };
+        Ok(JsonCell(serde_json::from_slice(text)?))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(*ty, Type::JSON | Type::JSONB)
     }
 }
 

@@ -497,7 +497,7 @@ pub struct ToolResult {
 pub struct McpClient {
     /// HTTP client for making requests
     http_client: reqwest::Client,
-    /// MCP server endpoint URL (e.g., "https://mcp.tenzro.network/mcp")
+    /// MCP server endpoint URL (e.g., "https://mcp.tenzro.xyz/mcp")
     endpoint: String,
     /// Session ID assigned by the server during initialization
     session_id: Option<String>,

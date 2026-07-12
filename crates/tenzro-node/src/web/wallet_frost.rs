@@ -1,7 +1,7 @@
 //! FROST (RFC 9591) round-coordination wallet endpoints.
 //!
 //! Exposed at `/wallet/frost/{ed25519,secp256k1}/*` on the public Web
-//! API (port 8080, `api.tenzro.network`). Used by Tenzro-aware wallets
+//! API (port 8080, `api.tenzro.xyz`). Used by Tenzro-aware wallets
 //! — through the Tenzro SDKs — to coordinate a 2-of-2 threshold
 //! Schnorr signature where one share lives on the wallet device
 //! (typically passkey-bound) and the other share lives on this node

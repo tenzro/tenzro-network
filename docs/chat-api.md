@@ -59,7 +59,7 @@ For browser-based flows, the node exposes OAuth 2.1 discovery at `GET /.well-kno
 
 ```http
 POST / HTTP/1.1
-Host: rpc.tenzro.network
+Host: rpc.tenzro.xyz
 Content-Type: application/json
 Authorization: DPoP <bearer-jwt>
 DPoP: <jws-compact-dpop-proof>
@@ -822,7 +822,7 @@ Differential pricing for rich vs. simple is not implemented in this spec. If the
 ## Out of scope
 
 - **Logprobs.** No consumer is asking for them; can be added without a breaking change.
-- **Provider attestation in chat responses.** The verification API (`api.tenzro.network/verify/inference`) already attests inference results. Inlining attestations into every chat response is a separate workstream (would require TEE-served models and on-the-fly attestation generation).
+- **Provider attestation in chat responses.** The verification API (`api.tenzro.xyz/verify/inference`) already attests inference results. Inlining attestations into every chat response is a separate workstream (would require TEE-served models and on-the-fly attestation generation).
 - **Function-calling other than `tools`.** OpenAI's older `functions` API is not supported. Callers using `functions` must migrate to `tools`.
 - **Embeddings.** A separate RPC (`tenzro_embed`) covers them.
 

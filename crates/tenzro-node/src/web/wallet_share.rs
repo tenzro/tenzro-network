@@ -1,7 +1,7 @@
 //! Passkey share-unwrap endpoints.
 //!
 //! Exposed at `/wallet/share/*` on the public Web API (port 8080,
-//! `api.tenzro.network`). Used by Tenzro-aware wallets — through the
+//! `api.tenzro.xyz`). Used by Tenzro-aware wallets — through the
 //! Tenzro SDKs — to retrieve the wrapped half of a 2-of-2 FROST share
 //! that lives on the node, gated by a WebAuthn passkey assertion.
 //!
@@ -701,7 +701,7 @@ mod tests {
 
         // Build a valid clientDataJSON.
         let cd = format!(
-            r#"{{"type":"webauthn.get","challenge":"{}","origin":"https://wallet.tenzro.network"}}"#,
+            r#"{{"type":"webauthn.get","challenge":"{}","origin":"https://wallet.tenzro.xyz"}}"#,
             nonce_b64
         );
         let cd_bytes = cd.as_bytes().to_vec();

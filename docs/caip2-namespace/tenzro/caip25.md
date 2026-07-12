@@ -26,7 +26,7 @@ appear under one [CAIP-217] scope object whose `methods` array spans
 `eth_*`, `tenzro_*`, and a constrained subset of `solana_*` methods.
 
 This is consistent with how the Tenzro browser extension and SDK
-(`network.tenzro.wallet`) authorize sessions today: one scope per chain,
+(`xyz.tenzro.wallet`) authorize sessions today: one scope per chain,
 multiple method families within the scope, and the dApp routes calls by
 method-name prefix. See "Routing rules" below for the normative routing
 that consumers of a Tenzro CAIP-25 session MUST follow.
@@ -50,7 +50,7 @@ objects per chain — the Tenzro scope for Tenzro-routed methods, and a
 separate `eip155:N` scope for direct Ethereum interactions.
 
 The Tenzro injected provider (`window.tenzro`, EIP-6963 `rdns =
-network.tenzro.wallet`) speaks [EIP-1193] for its EVM façade and
+xyz.tenzro.wallet`) speaks [EIP-1193] for its EVM façade and
 exposes `tenzro_*` and a constrained `solana_*` subset over the same
 session. Hosts MAY also expose a parallel `window.solana` Wallet
 Standard surface bound to the same underlying account; in that case

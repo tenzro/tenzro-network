@@ -30,7 +30,7 @@ pub struct StorageCapability {
 ///
 /// Allow-lists are matched against the destination host (DNS name or
 /// IP). An empty list means "no outbound network." Wildcard matching
-/// is `prefix:*` (e.g. `api.tenzro.network`, `*.tenzro.network`).
+/// is `prefix:*` (e.g. `api.tenzro.xyz`, `*.tenzro.xyz`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkCapability {
     /// Hosts the component may open outbound TCP connections to.

@@ -36,7 +36,7 @@ all of them in lockstep.
 | Address width            | 32 bytes (hex `0x` + 64 chars OR 44-char base58btc)                   |
 | Native asset (slip44)    | `tenzro` (pre-registration; SLIP-44 PR pending)                       |
 | Token / NFT IDs          | 32-byte SHA-256 of `creator || nonce`                                 |
-| Wallet `rdns` (EIP-6963) | `network.tenzro.wallet`                                               |
+| Wallet `rdns` (EIP-6963) | `xyz.tenzro.wallet`                                               |
 
 ## Upstreaming workflow
 

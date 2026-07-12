@@ -82,61 +82,68 @@ pub const REPLAY_CACHE_CAPACITY: usize = 65_536;
 /// independent `verify_envelope` callers without threading state through
 /// every handler. The mutex is held only across O(1) hashmap ops —
 /// signature verification happens before acquiring it.
+#[derive(Default)]
 struct ReplayCache {
     seen: HashMap<(String, String), i64>,
     order: VecDeque<(String, String)>,
 }
 
-fn replay_cache() -> &'static Mutex<ReplayCache> {
-    static CACHE: OnceLock<Mutex<ReplayCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(ReplayCache {
-        seen: HashMap::new(),
-        order: VecDeque::new(),
-    }))
+impl ReplayCache {
+    /// Atomically check that `(sender_did, nonce_hex)` is unseen within the
+    /// replay window AND record it. Returns `true` on first occurrence
+    /// (proceed), `false` if the nonce was already in the cache (reject as
+    /// replay). Lazily expires stale entries and enforces FIFO capacity
+    /// bounds in the same pass.
+    fn check_and_record(&mut self, sender_did: &str, nonce_hex: &str, now_ms: i64) -> bool {
+        let key = (sender_did.to_string(), nonce_hex.to_lowercase());
+
+        // Expire stale entries from the front of the order queue. We only
+        // need to walk until we hit a still-valid entry; everything behind it
+        // is younger.
+        while let Some(front) = self.order.front().cloned() {
+            match self.seen.get(&front).copied() {
+                Some(ts) if now_ms.saturating_sub(ts) > REPLAY_TTL_MS => {
+                    self.order.pop_front();
+                    self.seen.remove(&front);
+                }
+                _ => break,
+            }
+        }
+
+        if self.seen.contains_key(&key) {
+            return false;
+        }
+
+        // FIFO eviction if at capacity.
+        if self.order.len() >= REPLAY_CACHE_CAPACITY {
+            if let Some(victim) = self.order.pop_front() {
+                self.seen.remove(&victim);
+            }
+        }
+
+        self.seen.insert(key.clone(), now_ms);
+        self.order.push_back(key);
+        true
+    }
 }
 
-/// Atomically check that `(sender_did, nonce_hex)` is unseen within the
-/// replay window AND record it. Returns `true` on first occurrence (proceed),
-/// `false` if the nonce was already in the cache (reject as replay).
-/// Lazily expires stale entries and enforces FIFO capacity bounds inside
-/// the same critical section.
-fn check_and_record_nonce(sender_did: &str, nonce_hex: &str, now_ms: i64) -> bool {
-    let key = (sender_did.to_string(), nonce_hex.to_lowercase());
-    let mut cache = match replay_cache().lock() {
-        Ok(g) => g,
+fn replay_cache() -> &'static Mutex<ReplayCache> {
+    static CACHE: OnceLock<Mutex<ReplayCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ReplayCache::default()))
+}
+
+/// Records `(sender_did, nonce)` in the node-wide replay cache, returning
+/// `false` when the pair was already seen inside the TTL window. Shared by the
+/// A2A mutation surface and the managed-database DID-envelope auth path so one
+/// cache covers every envelope-authenticated entry point.
+pub fn check_and_record_nonce(sender_did: &str, nonce_hex: &str, now_ms: i64) -> bool {
+    match replay_cache().lock() {
+        Ok(mut cache) => cache.check_and_record(sender_did, nonce_hex, now_ms),
         // Poisoned mutex: a previous thread panicked while holding it.
         // Fail-closed — reject the envelope rather than silently weakening
         // replay protection. The operator sees panic logs separately.
-        Err(_) => return false,
-    };
-
-    // Expire stale entries from the front of the order queue. We only
-    // need to walk until we hit a still-valid entry; everything behind it
-    // is younger.
-    while let Some(front) = cache.order.front().cloned() {
-        match cache.seen.get(&front).copied() {
-            Some(ts) if now_ms.saturating_sub(ts) > REPLAY_TTL_MS => {
-                cache.order.pop_front();
-                cache.seen.remove(&front);
-            }
-            _ => break,
-        }
+        Err(_) => false,
     }
-
-    if cache.seen.contains_key(&key) {
-        return false;
-    }
-
-    // FIFO eviction if at capacity.
-    if cache.order.len() >= REPLAY_CACHE_CAPACITY {
-        if let Some(victim) = cache.order.pop_front() {
-            cache.seen.remove(&victim);
-        }
-    }
-
-    cache.seen.insert(key.clone(), now_ms);
-    cache.order.push_back(key);
-    true
 }
 
 /// Outcome of envelope verification. The error variants are intentionally
@@ -363,32 +370,38 @@ mod tests {
         let _ = metadata;
     }
 
+    // Both tests below use a local `ReplayCache` instance instead of the
+    // process-global one: tests run in parallel, and the TTL test's sweep
+    // with a future timestamp would evict the other test's entries.
+
     #[test]
     fn replay_cache_first_admit_then_reject() {
+        let mut cache = ReplayCache::default();
         let now = chrono::Utc::now().timestamp_millis();
         let did = "did:tenzro:test:replay-1";
         let nonce = "deadbeefcafef00d";
 
         // First insertion admits.
-        assert!(check_and_record_nonce(did, nonce, now));
+        assert!(cache.check_and_record(did, nonce, now));
         // Immediate replay rejects.
-        assert!(!check_and_record_nonce(did, nonce, now));
+        assert!(!cache.check_and_record(did, nonce, now));
         // A different nonce from the same DID is fine.
-        assert!(check_and_record_nonce(did, "1234567890abcdef", now));
+        assert!(cache.check_and_record(did, "1234567890abcdef", now));
         // Case-insensitive: uppercase nonce_hex still treated as replay.
-        assert!(!check_and_record_nonce(did, "DEADBEEFCAFEF00D", now));
+        assert!(!cache.check_and_record(did, "DEADBEEFCAFEF00D", now));
     }
 
     #[test]
     fn replay_cache_expires_after_ttl() {
+        let mut cache = ReplayCache::default();
         let did = "did:tenzro:test:replay-2";
         let nonce = "aaaaaaaabbbbbbbb";
         let t0 = chrono::Utc::now().timestamp_millis();
 
-        assert!(check_and_record_nonce(did, nonce, t0));
+        assert!(cache.check_and_record(did, nonce, t0));
         // Same nonce just after TTL expiry is accepted because the lazy
         // sweep retires the stale entry before checking.
         let t1 = t0 + REPLAY_TTL_MS + 1;
-        assert!(check_and_record_nonce(did, nonce, t1));
+        assert!(cache.check_and_record(did, nonce, t1));
     }
 }

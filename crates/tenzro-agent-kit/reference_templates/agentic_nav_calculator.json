@@ -52,7 +52,7 @@
   "download_count": 0,
   "rating": 0,
   "content_hash": null,
-  "docs_url": "https://docs.tenzro.network/agent-kit/templates/agentic-nav-calculator",
+  "docs_url": "https://docs.tenzro.xyz/agent-kit/templates/agentic-nav-calculator",
   "metadata": {},
   "execution_spec": {
     "backend": "MultiVm",

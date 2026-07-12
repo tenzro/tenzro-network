@@ -25,7 +25,7 @@ The most complete Chainlink MCP server available. 20 tools covering the full Cha
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Chainlink MCP | `https://chainlink-mcp.tenzro.network/mcp` | Chainlink MCP Server (port 3007) |
+| Chainlink MCP | `https://chainlink-mcp.tenzro.xyz/mcp` | Chainlink MCP Server (port 3007) |
 
 For local development, use `http://localhost:3007/mcp`.
 

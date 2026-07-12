@@ -2,7 +2,7 @@
 //!
 //! Canton 3.x Ledger API (both gRPC and JSON) authenticates via JWT bearer
 //! tokens issued by an external IdP. The Tenzro-operated Canton devnet
-//! (`https://json.devnet.tenzro.network`) issues tokens via Auth0 using
+//! (`https://json.canton.example-operator.invalid`) issues tokens via Auth0 using
 //! the OAuth2 `client_credentials` grant.
 //!
 //! This module owns the token lifecycle: it exchanges a client_id /

@@ -22,7 +22,7 @@ Interact with the Canton Network for enterprise DAML smart contracts, party mana
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Canton MCP | `https://canton-mcp.tenzro.network/mcp` | Canton MCP Server (port 3005) |
+| Canton MCP | `https://canton-mcp.tenzro.xyz/mcp` | Canton MCP Server (port 3005) |
 
 For local development, use `http://localhost:3005/mcp`.
 

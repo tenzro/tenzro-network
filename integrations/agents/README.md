@@ -81,7 +81,7 @@ from tenzro_agents import TenzroClient, checkout_mandate, payment_mandate, cart_
 
 sk = nacl.signing.SigningKey.generate()
 client = TenzroClient(
-    "https://rpc.tenzro.network",
+    "https://rpc.tenzro.xyz",
     signing_key=sk,
     did="did:tenzro:machine:acme-procurement-bot-7a1b",
 )

@@ -6,9 +6,9 @@
 //! iroh-blobs, in addition to the existing HTTPS surfaces:
 //!
 //! - `tenzro/a2a` — A2A protocol JSON-RPC 2.0 (peer-to-peer agent
-//!   messaging — mirrors `POST /a2a` on `a2a.tenzro.network`)
+//!   messaging — mirrors `POST /a2a` on `a2a.tenzro.xyz`)
 //! - `tenzro/mcp`  — MCP Streamable HTTP JSON-RPC 2.0 (tool invocation —
-//!   mirrors `POST /mcp` on `mcp.tenzro.network`)
+//!   mirrors `POST /mcp` on `mcp.tenzro.xyz`)
 //!
 //! # Why not `irpc`?
 //!

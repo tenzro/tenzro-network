@@ -283,7 +283,7 @@ class TenzroClient:
         client: Optional[httpx.Client] = None,
     ) -> None:
         self.rpc_url = rpc_url or os.environ.get(
-            "TENZRO_RPC_URL", "https://rpc.tenzro.network"
+            "TENZRO_RPC_URL", "https://rpc.tenzro.xyz"
         )
         self.signing_key = signing_key
         self.did = did

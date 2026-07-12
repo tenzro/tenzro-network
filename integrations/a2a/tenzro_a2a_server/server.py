@@ -47,7 +47,7 @@ task_manager = TaskManager()
 # exact-erc7710).
 payment_verifier = UnimplementedSchemeVerifier()
 
-BASE_URL = os.environ.get("TENZRO_A2A_BASE_URL", "https://a2a.tenzro.network")
+BASE_URL = os.environ.get("TENZRO_A2A_BASE_URL", "https://a2a.tenzro.xyz")
 
 
 # ---------------------------------------------------------------------------

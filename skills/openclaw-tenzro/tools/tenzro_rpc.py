@@ -241,21 +241,21 @@ except ImportError:
 # Default endpoints — override with environment variables
 import os
 
-RPC_URL = os.environ.get("TENZRO_RPC_URL", "https://rpc.tenzro.network")
-API_URL = os.environ.get("TENZRO_API_URL", "https://api.tenzro.network")
+RPC_URL = os.environ.get("TENZRO_RPC_URL", "https://rpc.tenzro.xyz")
+API_URL = os.environ.get("TENZRO_API_URL", "https://api.tenzro.xyz")
 RPC_TIMEOUT = int(os.environ.get("TENZRO_RPC_TIMEOUT", "120"))
 
 # Ecosystem MCP server endpoints
 SOLANA_MCP_URL = os.environ.get(
-    "SOLANA_MCP_URL", "https://solana-mcp.tenzro.network/mcp")
+    "SOLANA_MCP_URL", "https://solana-mcp.tenzro.xyz/mcp")
 ETHEREUM_MCP_URL = os.environ.get(
-    "ETHEREUM_MCP_URL", "https://ethereum-mcp.tenzro.network/mcp")
+    "ETHEREUM_MCP_URL", "https://ethereum-mcp.tenzro.xyz/mcp")
 LAYERZERO_MCP_URL = os.environ.get(
-    "LAYERZERO_MCP_URL", "https://layerzero-mcp.tenzro.network/mcp")
+    "LAYERZERO_MCP_URL", "https://layerzero-mcp.tenzro.xyz/mcp")
 CHAINLINK_MCP_URL = os.environ.get(
-    "CHAINLINK_MCP_URL", "https://chainlink-mcp.tenzro.network/mcp")
+    "CHAINLINK_MCP_URL", "https://chainlink-mcp.tenzro.xyz/mcp")
 CANTON_MCP_URL = os.environ.get(
-    "CANTON_MCP_URL", "https://canton-mcp.tenzro.network/mcp")
+    "CANTON_MCP_URL", "https://canton-mcp.tenzro.xyz/mcp")
 
 _request_id = 0
 
@@ -4080,7 +4080,7 @@ def net_listening() -> dict:
 # ══════════════════════════════════════════════════════════════════
 
 
-# ── Solana (via solana-mcp.tenzro.network) ────────────────────────
+# ── Solana (via solana-mcp.tenzro.xyz) ────────────────────────
 
 
 def solana_swap(input_mint: str, output_mint: str, amount: int,
@@ -4228,7 +4228,7 @@ def solana_resolve_domain(domain: str) -> dict:
     })
 
 
-# ── Ethereum (via ethereum-mcp.tenzro.network) ───────────────────
+# ── Ethereum (via ethereum-mcp.tenzro.xyz) ───────────────────
 
 
 def eth_get_price_chainlink(feed_address: str = None) -> dict:
@@ -4398,7 +4398,7 @@ def eth_get_attestation(schema_id: str, attester: str = None) -> dict:
     return _mcp_tool_call(ETHEREUM_MCP_URL, "eth_get_attestation", params)
 
 
-# ── LayerZero (via layerzero-mcp.tenzro.network) ─────────────────
+# ── LayerZero (via layerzero-mcp.tenzro.xyz) ─────────────────
 
 
 def lz_quote_fee(src_eid: int, dst_eid: int, message: str,
@@ -4591,7 +4591,7 @@ def lz_stargate_send(src_chain: str, dst_chain: str, token: str,
     })
 
 
-# ── Chainlink (via chainlink-mcp.tenzro.network) ─────────────────
+# ── Chainlink (via chainlink-mcp.tenzro.xyz) ─────────────────
 
 
 def chainlink_get_price(pair: str = "ETH/USD") -> dict:
@@ -4712,7 +4712,7 @@ def por_list_feeds() -> dict:
     return _mcp_tool_call(CHAINLINK_MCP_URL, "por_list_feeds", {})
 
 
-# ── Canton (via canton-mcp.tenzro.network) ────────────────────────
+# ── Canton (via canton-mcp.tenzro.xyz) ────────────────────────
 
 
 def canton_submit_command(command_type: str, template_id: str,

@@ -12,7 +12,7 @@
  *   # No extra dependencies needed — uses native fetch
  */
 
-const A2A_ENDPOINT = process.env.TENZRO_A2A_URL ?? "https://a2a.tenzro.network";
+const A2A_ENDPOINT = process.env.TENZRO_A2A_URL ?? "https://a2a.tenzro.xyz";
 
 interface A2aPart {
   type: string;

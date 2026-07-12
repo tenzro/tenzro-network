@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-A2A="${TENZRO_A2A_URL:-https://a2a.tenzro.network}"
+A2A="${TENZRO_A2A_URL:-https://a2a.tenzro.xyz}"
 
 echo "=== Tenzro A2A cURL Examples ==="
 echo "Endpoint: $A2A"

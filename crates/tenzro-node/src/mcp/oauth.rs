@@ -146,7 +146,7 @@ pub struct OAuthState {
 
 impl OAuthState {
     pub fn new(node: Arc<TenzroNode>, web_state: Arc<WebState>) -> Self {
-        let config = OAuthConfig::new("https://mcp.tenzro.network".to_string());
+        let config = OAuthConfig::new("https://mcp.tenzro.xyz".to_string());
         Self {
             sessions: DashMap::new(),
             session_tokens: DashMap::new(),

@@ -148,7 +148,7 @@ The transition document will be published for public comment for at least 30 day
 
 Upon formation, the Foundation:
 
-1. Assumes ownership of the `tenzro` GitHub organization, `tenzro.network` and `tenzro.com` domains, and the Tenzro trademark.
+1. Assumes ownership of the `tenzro` GitHub organization, `tenzro.xyz` and `tenzro.com` domains, and the Tenzro trademark.
 2. Receives the Foundation treasury allocation per §5 / §6 from the genesis distribution.
 3. Appoints initial Council, Technical Committee, and Treasury Committee members per §4.
 4. Publishes its founding documents (articles of incorporation, bylaws, conflicts policy) on-chain or via permanent storage with on-chain hash anchoring.
@@ -683,11 +683,11 @@ The Foundation (during pre-formation: Tenzro Labs) operates the public testnet. 
 
 | Service | Endpoint |
 |---------|----------|
-| JSON-RPC | `rpc.tenzro.network` |
-| Web API | `api.tenzro.network` |
-| Faucet | `api.tenzro.network/faucet` |
-| MCP Server | `mcp.tenzro.network` |
-| A2A Server | `a2a.tenzro.network` |
+| JSON-RPC | `rpc.tenzro.xyz` |
+| Web API | `api.tenzro.xyz` |
+| Faucet | `api.tenzro.xyz/faucet` |
+| MCP Server | `mcp.tenzro.xyz` |
+| A2A Server | `a2a.tenzro.xyz` |
 | P2P | port 9000 (TCP + QUIC) |
 
 Infrastructure layout (cloud, registry, fleet topology) is operator-specific; the Foundation's deployment is one of many possible. For the IaC-agnostic operator guide, see [`deploy/validator-deployment.md`](../deploy/validator-deployment.md).

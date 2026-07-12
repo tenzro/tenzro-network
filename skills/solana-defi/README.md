@@ -8,7 +8,7 @@ Solana ecosystem skill for the Tenzro Network. Backed by the Tenzro Solana MCP s
 |---|---|
 | Server | Tenzro Solana MCP server |
 | Port | 3003 |
-| Testnet endpoint | `https://solana-mcp.tenzro.network/mcp` |
+| Testnet endpoint | `https://solana-mcp.tenzro.xyz/mcp` |
 | Local endpoint | `http://localhost:3003/mcp` |
 | Transport | Streamable HTTP |
 
@@ -33,7 +33,7 @@ Discover it from any Tenzro node via `tenzro_listSkills` / `tenzro_searchSkills`
 ## Quick Start
 
 ```bash
-curl -X POST https://solana-mcp.tenzro.network/mcp \
+curl -X POST https://solana-mcp.tenzro.xyz/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"solana_get_slot","arguments":{}}}'

@@ -195,7 +195,7 @@ The system is implemented as a Rust workspace of 26 crates plus SDKs, organized 
 | Workflow | `tenzro-workflow` | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
 | Sandboxed skills | `tenzro-wasm` | WASI 0.2 component host for language-agnostic agent skills and MCP tools. Capability-based sandbox, deterministic fuel metering, content-addressed component identity, execution receipts |
 | Bridge | `tenzro-bridge` | LayerZero V2, Chainlink CCIP + CCT, deBridge DLN, Li.Fi, Wormhole NTT (with Guardian quorum verifier), Canton, **Hyperlane V3** (sovereign Tenzro-ISM), **Axelar GMP** (Cosmos / Move / Stellar reach), **Babylon Bitcoin staking** (finality-providers protocol) |
-| Node | `tenzro-node` | Full node binary, RPC server (490+ methods across 26+ namespaces), MCP (414 tools), A2A (42 skills), web API |
+| Node | `tenzro-node` | Full node binary, RPC server (490+ methods across 26+ namespaces), MCP (457 tools), A2A (42 skills), web API |
 | CLI | `tenzro-cli` | Command-line interface (63 command modules) |
 | SDK | `tenzro-sdk` | Rust SDK with builder-pattern configuration |
 | TypeScript SDK | `tenzro-ts-sdk` | TypeScript SDK for browser and Node.js integration |
@@ -206,7 +206,7 @@ Participants in the Tenzro Network operate nodes in one of several roles. Nodes 
 
 - **Validator.** Participates in HotStuff-2 consensus, proposes and votes on blocks, earns block rewards and priority fees (gas paid in TNZO). Each validator also runs a Canton participant node natively, connecting to one or more Canton synchronizers for Daml smart contract execution. **Three-tier model** detailed in §3.5: Tier 1 (resource-only, no stake required), Tier 2 (staked, ≥ 10,000 TNZO), Tier 3 (RPC provider, ≥ 100,000 TNZO and implies Tier 2). Validators secure the Ledger.
 
-- **RPC Provider.** A Tier 3 validator role. Serves public JSON-RPC + REST verification API. Sanctioned to mint scoped tenant API keys (`tenzro_createApiKey`), broker access to operator-held upstream credentials (Canton participants, AI provider keys, data feed subscriptions), and route cross-chain mint/burn flows. Requires ≥ 100,000 TNZO bonded (implies the Tier 2 minimum). Tenzro Labs operates the first RPC Provider at `rpc.tenzro.network`.
+- **RPC Provider.** A Tier 3 validator role. Serves public JSON-RPC + REST verification API. Sanctioned to mint scoped tenant API keys (`tenzro_createApiKey`), broker access to operator-held upstream credentials (Canton participants, AI provider keys, data feed subscriptions), and route cross-chain mint/burn flows. Requires ≥ 100,000 TNZO bonded (implies the Tier 2 minimum). Tenzro Labs operates the first RPC Provider at `rpc.tenzro.xyz`.
 
 - **Model Provider.** Serves AI models for inference requests. **Open entry, no stake required**; optional bond unlocks higher reward multiplier (1.1× per TOKENOMICS §9). Earns per-inference fees (paid in TNZO) settled through micropayment channels. The Network takes a 0.5% commission on provider earnings, which flows to the treasury. Model providers provide **intelligence** to the Network.
 
@@ -218,7 +218,7 @@ Participants in the Tenzro Network operate nodes in one of several roles. Nodes 
 
 - **Light Client.** Verifies block headers and proofs without storing full state. Suitable for end-user devices.
 
-- **Bootstrap Node.** Initial peer discovery endpoint for new nodes joining the network. Any node can serve this role; in practice the Tenzro Labs validator-0 serves as the canonical bootstrap seed, advertised via DNS (`bootstrap.tenzro.network`) and pkarr-relay.
+- **Bootstrap Node.** Initial peer discovery endpoint for new nodes joining the network. Any node can serve this role; in practice the Tenzro Labs validator-0 serves as the canonical bootstrap seed, advertised via DNS (`bootstrap.tenzro.xyz`) and pkarr-relay.
 
 - **Archive Node.** Stores complete historical state for analytics and indexing.
 
@@ -248,7 +248,7 @@ Transaction submission goes through `tenzro_signAndSendTransaction` (server-side
 | `POST /faucet` | Request testnet TNZO tokens |
 
 **MCP Server** (default `0.0.0.0:3001`):
-Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 414 tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
+Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 457 tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -325,7 +325,7 @@ Validator participation follows a three-tier model. All three tiers run the same
 
 Tier transitions are upgrades-only forward (1→2→3 by bonding more stake) or downgrades on stake withdrawal (3→2 below 100k while staying above 10k; 2→1 below 10k; 1→exit). All transitions take effect at the next epoch boundary. The TEE 1.5× multiplier on the leader-election draw applies to all three tiers.
 
-Tenzro Labs operates the first Tier 3 RPC provider as validator-0 — the genesis seed bootstrap peer plus public RPC at `rpc.tenzro.network`. Tenzro Labs is the first Tier 3, not architecturally privileged; any other operator that bonds 100k can register their own Tier 3 endpoint, mint their own tenant API keys, and front their own upstream credential vault with the same protocol guarantees.
+Tenzro Labs operates the first Tier 3 RPC provider as validator-0 — the genesis seed bootstrap peer plus public RPC at `rpc.tenzro.xyz`. Tenzro Labs is the first Tier 3, not architecturally privileged; any other operator that bonds 100k can register their own Tier 3 endpoint, mint their own tenant API keys, and front their own upstream credential vault with the same protocol guarantees.
 
 ### 3.5 Reputation-Weighted Proposer Election
 
@@ -391,7 +391,7 @@ The Tenzro Ledger's execution layer supports three virtual machines through a un
 
 - **EVM (Ethereum Virtual Machine).** Full EVM-compatible execution for Solidity and Vyper smart contracts.
 - **SVM (Solana Virtual Machine).** Solana-compatible execution for programs written in Rust targeting the BPF instruction set.
-- **Daml (Digital Asset Modeling Language).** Enterprise smart contract execution powered by Canton Network. Each Tenzro validator runs a Canton participant node natively, connecting to one or more Canton synchronizers (the Canton 3.5+ term for what were previously called "domains"). Self-hosted participants expose the Ledger API on gRPC (port 5001 — `CommandService.SubmitAndWait`, `StateService.GetActiveContracts`, `UpdateService.GetUpdates`) and the Admin API on gRPC (port 5002 — `PackageService.UploadDar`). The Tenzro-operated DevNet (`json.devnet.tenzro.network`) instead exposes the equivalent Canton 3.5+ JSON Ledger API v2 (`POST /v2/commands/submit-and-wait-for-transaction`, `POST /v2/state/active-contracts`, `POST /v2/packages`) gated by Auth0 client-credentials, so external builders can reach Canton without operating their own participant. Canton handles Daml contract lifecycle, sub-transaction privacy (parties only see events for contracts where they are stakeholders), and multi-synchronizer coordination through the Global Synchronizer. From the developer's perspective, Daml transactions are initiated through the same multi-VM interface as EVM and SVM calls.
+- **Daml (Digital Asset Modeling Language).** Enterprise smart contract execution powered by Canton Network. Each Tenzro validator runs a Canton participant node natively, connecting to one or more Canton synchronizers (the Canton 3.5+ term for what were previously called "domains"). Self-hosted participants expose the Ledger API on gRPC (port 5001 — `CommandService.SubmitAndWait`, `StateService.GetActiveContracts`, `UpdateService.GetUpdates`) and the Admin API on gRPC (port 5002 — `PackageService.UploadDar`). The Tenzro-operated DevNet (`json.canton.example-operator.invalid`) instead exposes the equivalent Canton 3.5+ JSON Ledger API v2 (`POST /v2/commands/submit-and-wait-for-transaction`, `POST /v2/state/active-contracts`, `POST /v2/packages`) gated by Auth0 client-credentials, so external builders can reach Canton without operating their own participant. Canton handles Daml contract lifecycle, sub-transaction privacy (parties only see events for contracts where they are stakeholders), and multi-synchronizer coordination through the Global Synchronizer. From the developer's perspective, Daml transactions are initiated through the same multi-VM interface as EVM and SVM calls.
 
 #### 4.1.1 Why three VMs — and why this is not redundant
 
@@ -979,6 +979,46 @@ MicropaymentChannel {
 
 The `BatchProcessor` enables atomic multi-settlement operations: either all settlements in a batch succeed, or all are rolled back. This is essential for multi-party transactions where partial settlement would be inconsistent.
 
+### 9.6 Native-TNZO On-Chain Settlement
+
+When an HTTP 402 payment (x402 or MPP) settles in native TNZO, the balance move
+is a **consensus-mediated on-chain transaction**, not an entry in the in-memory
+settlement ledger. `PaymentGateway::verify_and_settle` invokes a settlement
+callback that builds a system-key-signed `X402Settle` typed transaction (a
+privileged Native-VM selector), admits it to the consensus mempool, and returns
+the real in-block transaction hash once it lands in a finalized block.
+
+**Native-VM dispatch:**
+
+| Selector       | Operation   | Gas    |
+|----------------|-------------|--------|
+| `0x01000024`   | X402Settle  | 40,000 |
+
+The `X402Settle` payload carries `{ payer, payee, amount, payment_id }`. On block
+dispatch the Native VM:
+
+1. Charges gas from the system signer (`tx.from`).
+2. Rejects the transaction if the `payment_id` marker already exists — a
+   per-`payment_id` replay guard persisted under the system address in
+   `CF_ACCOUNTS`, so a duplicated settlement callback cannot double-move balance.
+3. Debits the payer (requires on-chain balance ≥ amount) and credits the payee,
+   writing both through to `CF_ACCOUNTS` — the same backing store read by
+   `eth_getBalance` and `token.balance_of`.
+4. Sets the replay marker and increments the system signer's nonce.
+
+**Authorization invariants (enforced by the VM):**
+- The balance move is authorized by on-chain state and the system-key signature,
+  never by a payee signature. The VM never trusts a beneficiary field to skip the
+  payer-balance check.
+- `payer ≠ payee`, `amount > 0`, and `1 ≤ payment_id length ≤ 128` are checked
+  before any state change.
+
+The receipt's `settlement_tx` field is the real in-block transaction hash. The
+in-memory `SettlementEngine` remains receipt- and audit-only for native-TNZO
+payments — it is never the balance authority. Payments whose asset settles on an
+external chain follow the unchanged facilitator path (§13.6) and do not use this
+selector.
+
 ---
 
 ## 10. AI Model Marketplace
@@ -1249,7 +1289,7 @@ Each Tenzro node runs a Model Context Protocol (MCP) server (default port 3001) 
 - Capabilities: Tools
 - Server name: `tenzro`
 
-**Available tools (331)** spanning wallet & ledger, network & blocks, identity & delegation (including right-to-erasure via `forget_identity`), payments (AP2 sign + verify, ERC-8004 v0.6+ Trustless Agents Registry, MPP, x402, Stripe SPT, Visa TAP, Mastercard Agent Pay), AI models & inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
+**Available tools (457)** spanning wallet & ledger, network & blocks, identity & delegation (including right-to-erasure via `forget_identity`), payments (AP2 sign + verify, ERC-8004 v0.6+ Trustless Agents Registry, MPP, x402, Stripe SPT, Visa TAP, Mastercard Agent Pay), AI models & inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -1529,7 +1569,7 @@ x402 provides stateless HTTP 402 payments:
 **Discovery (Bazaar).** A resource server advertises its priced endpoints so agents can find them without out-of-band configuration:
 
 - `tenzro_x402RegisterResource { resource, scheme, price, asset, ... }` publishes a priced resource into the local Bazaar index.
-- `tenzro_x402DiscoverResources { filter }` returns matching resources with their scheme and price.
+- `tenzro_x402DiscoverResources { filter }` returns matching resources with their scheme and price. Each result carries `seller_reputation`, joined from the provider-reputation ledger by the listing's `pay_to` settlement address — the only score-up path on that ledger is a settled payment, so a seller cannot inflate its own ranking by re-listing. Results sort highest-reputation-first (unscored sellers last), freshest-first within the same score. An optional `minReputation` floor excludes listings below it (unscored sellers fail any floor).
 - `tenzro_x402DeregisterResource { resource }` withdraws it.
 
 **Idempotency and signed offers.** Each challenge carries a payment identifier and an offer signed by the resource server:
@@ -1537,6 +1577,12 @@ x402 provides stateless HTTP 402 payments:
 - `tenzro_x402PaymentId {}` mints a unique payment identifier; a client replaying the same identifier gets the first result, not a second charge.
 - `tenzro_x402VerifyOffer { offer, signature }` verifies that a quoted price/scheme was actually issued by the resource server before the client authorizes payment.
 - `tenzro_x402ProtocolInfo {}` reports the supported schemes and extensions.
+
+**Settlement.** When the payment asset is native TNZO, settlement moves balance
+on-chain through the consensus-mediated `X402Settle` path described in §9.6 — the
+receipt's `settlement_tx` is the real in-block transaction hash. Payments in an
+external-chain asset settle through the facilitator (`X402Facilitator`) against
+that chain.
 
 ### 13.7 Stripe SPT (SharedPaymentToken)
 
@@ -2052,21 +2098,21 @@ The SDK exposes two parallel surfaces. **Both are first-class.** The high-level 
 ```ts
 import { createPasskeyWallet, signWithPasskey } from "@tenzro/sdk";
 
-const wallet = await createPasskeyWallet({ rpId: "keys.tenzro.network" });
+const wallet = await createPasskeyWallet({ rpId: "keys.tenzro.xyz" });
 const sig = await signWithPasskey(wallet, userOp);
 ```
 
 ```rust
 use tenzro_sdk::passkey::{PasskeyWallet, PasskeyConfig};
 
-let wallet = PasskeyWallet::create(PasskeyConfig::production("keys.tenzro.network")).await?;
+let wallet = PasskeyWallet::create(PasskeyConfig::production("keys.tenzro.xyz")).await?;
 let sig = wallet.sign_user_op(user_op).await?;
 ```
 
 UX behavior the SDK enforces by default:
 
 1. Calls `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()`. If `false`, the SDK **must** request a cross-platform authenticator (`authenticatorAttachment: "cross-platform"`, `userVerification: "required"`) and render a QR for the FIDO hybrid transport (caBLE). It never silently falls back to a software key.
-2. The WebAuthn ceremony is hosted on `keys.tenzro.network` so the resulting credential's RP ID is a stable registrable domain that survives URL redesigns and works across every Tenzro frontend.
+2. The WebAuthn ceremony is hosted on `keys.tenzro.xyz` so the resulting credential's RP ID is a stable registrable domain that survives URL redesigns and works across every Tenzro frontend.
 3. The resulting P-256 public key is registered as the account's `WebAuthnValidator` module on first use (one transaction, gas-sponsored by the TNZO paymaster via ERC-7702).
 4. Signing always raises a biometric prompt on the device that holds the passkey — Touch ID, Face ID, Windows Hello, Android biometric.
 
@@ -2444,6 +2490,21 @@ A training run has the following lifecycle (`TrainingRunStatus` transitions in p
    5. The Rust syncer builds a `SyncRound` containing per-fragment `FragmentQuorumStatus` and the round's `state_root`, signs it, broadcasts on `tenzro/training/syncer`, and persists the new state root in `CF_TRAINING_RUNS`.
 5. **Finalize.** When `current_round == max_rounds`, the syncer assembles a `TrainingReceipt` (capturing the verbatim task spec, all per-round state roots, the final model hash, per-trainer contribution counts and reward shares, the syncer's TEE attestation chain, and the run's Merkle `run_root`) and writes it to `CF_TRAINING_RECEIPTS` (→ `Completed`). The receipt is mintable as an NFT via the standard NFT factory at precompile `0x1006`.
 
+#### 20.4.1 Training Objectives: Supervised and RL Post-Training (GRPO)
+
+`TrainingTaskSpec.objective` selects what the inner loop optimizes. It is a serde externally-tagged enum:
+
+- `"Supervised"` (default) — the H-step SGD loop over labeled shard batches described above.
+- `{"RlPostTraining": {group_size, kl_coeff, clip_epsilon, max_new_tokens, temperature, reward_ref}}` — a GRPO (Group Relative Policy Optimization) inner loop, the pattern used by prime-rl and TRL's `GRPOTrainer`: no value model, no frozen reference copy.
+
+Per RL inner step the trainer takes one prompt from its shard, samples `group_size` completions from the current policy at `temperature`, scores each with the sponsor-referenced reward callable, and computes group-relative advantages `(r − mean) / (std + ε)`. The loss per rollout is the clipped surrogate `min(ratio·A, clamp(ratio, 1−ε_clip, 1+ε_clip)·A)` averaged over tokens, plus a k3 KL penalty `exp(old − new) − (old − new) − 1` against the sampling-time policy (drift within the inner window is penalized without holding a second model in memory). A uniform-reward group yields zero advantages — no learning signal from that prompt, which is correct GRPO behavior.
+
+`reward_ref` names the reward callable as `py:<module.path>:<callable>`, e.g. `py:my_rewards.math:score_completion`, with signature `(prompt: str, completion: str) -> float`. The Python trainer resolves it via `tenzro_trainer.rl.load_reward` at run start and fails fast if it does not resolve to a callable.
+
+Admission is protocol-side: `tenzro_training_postTask` runs `validate_objective` (`crates/tenzro-training/src/runtime.rs`), which requires `Language` modality for `RlPostTraining` and rejects `group_size < 2`, non-finite or negative `kl_coeff`, `clip_epsilon` outside `(0, 1]`, `max_new_tokens == 0`, non-positive `temperature`, and an empty `reward_ref`.
+
+The outer-gradient contract is unchanged: the RL loop returns the same `Δθ = θ⁽ᴴ⁾ − θ⁽⁰⁾` delta, so fragment partitioning, quantization, Open-tier activation commitments, and submission work verbatim. `loss_trajectory` carries the per-step GRPO losses (the loss half of the activation commitment) and `samples_processed` counts rollouts.
+
 ### 20.5 On-Chain Commitments
 
 Every round seals a 32-byte `state_root` on-chain. Every run seals a 32-byte `run_root`. Both are domain-prefixed SHA-256 commitments deterministic across implementations:
@@ -2530,15 +2591,19 @@ integrations/trainer/
 │   ├── types.py                          # Wire-format mirrors of tenzro_types::training
 │   ├── rpc_bridge.py                     # JSON-RPC 2.0 client (requests)
 │   ├── gradient.py                       # Outer-gradient packaging + Ed25519 signing
-│   ├── inner_loop.py                     # Generic H-step SGD driver
+│   ├── inner_loop.py                     # Generic H-step SGD driver (Supervised)
+│   ├── rl.py                             # GRPO RL post-training inner loop
 │   ├── adapters/
 │   │   ├── timeseries.py                 # Phase 1 lead modality (TimesFM-class)
-│   │   ├── language.py                   # Decoder-only LM stub (Llama-class hook)
-│   │   └── vision.py                     # ViT/ConvNeXt stub
+│   │   ├── language.py                   # Decoder-only LM adapter (Qwen 3 default,
+│   │   │                                 #   catalog LM swappable) + rollout adapter
+│   │   │                                 #   for RL post-training
+│   │   └── vision.py                     # ViT adapter (timm)
 │   └── cli.py                            # tenzro-trainer enroll | run | submit | finalize
 └── tests/
-    ├── test_types_roundtrip.py           # JSON wire format pinned
+    ├── test_types_roundtrip.py           # JSON wire format pinned (incl. objective)
     ├── test_fragment_partition.py        # Fragment partition algorithm pinned
+    ├── test_rl_inner_loop.py             # GRPO loss/advantages/loop on a bandit policy
     └── test_signing.py                   # Ed25519 signature + canonical preimage pinned
 ```
 
@@ -2586,7 +2651,7 @@ The Python `OuterGradient.to_json()` produces the *exact* JSON shape the Rust sy
 - Connect payment protocols to live settlement rails (Stripe MPP, Coinbase x402, Tempo network)
 
 ### Phase 3: Agent & Protocol Integration
-- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 414 tools
+- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 457 tools
 - ~~Implement A2A protocol server~~ — **DONE**: JSON-RPC 2.0 on port 3002, Agent Card discovery, SSE streaming, 42 skills
 - ~~Implement ecosystem MCP servers~~ — **DONE**: Solana (3003), Ethereum (3004), Canton (3005), LayerZero (3006), Chainlink (3007), Li.Fi (3008)
 - ~~Implement challenge store for payment protocols~~ — **DONE**: persistent challenge lookup for MPP and x402
@@ -2596,7 +2661,7 @@ The Python `OuterGradient.to_json()` produces the *exact* JSON shape the Rust sy
 - ~~Implement liquid staking (stTNZO)~~ — **DONE**: rebasing exchange rate, multi-validator delegation, 10% protocol fee
 
 ### Phase 4: Testnet Deployment
-- ~~Deploy public testnet~~ — **DONE**: Tenzro Labs operates the initial public RPC and ecosystem endpoints on tenzro.network with PQ-hybrid TLS at the edge while the validator set decentralizes
+- ~~Deploy public testnet~~ — **DONE**: Tenzro Labs operates the initial public RPC and ecosystem endpoints on tenzro.xyz with PQ-hybrid TLS at the edge while the validator set decentralizes
 - ~~Configure Caddy with auto-TLS for all subdomains~~ — **DONE**: Let's Encrypt certificates for 5 endpoints
 - ~~Verify all endpoints live~~ — **DONE**: RPC, API, Faucet, MCP, A2A all operational
 - Audit Plonky3 AIR constraint completeness against soundness analysis
@@ -2665,16 +2730,16 @@ The network defines 120+ message types and 40+ RPC methods across 13 protobuf se
 
 ## Appendix D: Live Testnet Endpoints
 
-Tenzro Labs operates the initial public endpoints on `tenzro.network` with PQ-hybrid TLS at the edge while the validator set decentralizes:
+Tenzro Labs operates the initial public endpoints on `tenzro.xyz` with PQ-hybrid TLS at the edge while the validator set decentralizes:
 
 | Service | URL | Port | Protocol |
 |---------|-----|------|----------|
-| JSON-RPC | `https://rpc.tenzro.network` | 8545 | Ethereum-compatible JSON-RPC |
-| Web API | `https://api.tenzro.network` | 8080 | REST (verify, status, faucet) |
-| Faucet | `https://api.tenzro.network/faucet` | 8080 | POST with `{"address": "0x..."}` |
-| MCP | `https://mcp.tenzro.network/mcp` | 3001 | Streamable HTTP (MCP protocol) |
-| A2A | `https://a2a.tenzro.network` | 3002 | JSON-RPC 2.0 + SSE |
-| Agent Card | `https://a2a.tenzro.network/.well-known/agent.json` | 3002 | GET (A2A discovery) |
+| JSON-RPC | `https://rpc.tenzro.xyz` | 8545 | Ethereum-compatible JSON-RPC |
+| Web API | `https://api.tenzro.xyz` | 8080 | REST (verify, status, faucet) |
+| Faucet | `https://api.tenzro.xyz/faucet` | 8080 | POST with `{"address": "0x..."}` |
+| MCP | `https://mcp.tenzro.xyz/mcp` | 3001 | Streamable HTTP (MCP protocol) |
+| A2A | `https://a2a.tenzro.xyz` | 3002 | JSON-RPC 2.0 + SSE |
+| Agent Card | `https://a2a.tenzro.xyz/.well-known/agent.json` | 3002 | GET (A2A discovery) |
 
 **Testnet configuration:**
 - Chain ID: 1337

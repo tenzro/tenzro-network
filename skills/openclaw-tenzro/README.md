@@ -10,7 +10,7 @@ The official [OpenClaw](https://github.com/anthropics/openclaw) skill for intera
 
 TenzroClaw gives AI agents direct access to the Tenzro blockchain and the ecosystem MCP servers (Solana, Ethereum, Canton, LayerZero, Chainlink, Li.Fi, plus external deBridge and 1inch) through a single Python script. Agents can create wallets, send transactions, manage identities, trade on marketplaces, deploy contracts, bridge tokens, swap on Jupiter, read Chainlink price feeds, run multi-modal AI inference, post AgentBonds, and more.
 
-**Live testnet:** `https://rpc.tenzro.network`
+**Live testnet:** `https://rpc.tenzro.xyz`
 
 ## Quick Start
 
@@ -61,17 +61,17 @@ pip install requests
 
 ```bash
 # Tenzro endpoints
-export TENZRO_RPC_URL=https://rpc.tenzro.network
-export TENZRO_API_URL=https://api.tenzro.network
+export TENZRO_RPC_URL=https://rpc.tenzro.xyz
+export TENZRO_API_URL=https://api.tenzro.xyz
 export TENZRO_RPC_TIMEOUT=120
 
 # Ecosystem MCP endpoints (optional — defaults to live testnet)
-export SOLANA_MCP_URL=https://solana-mcp.tenzro.network/mcp
-export ETHEREUM_MCP_URL=https://ethereum-mcp.tenzro.network/mcp
-export LAYERZERO_MCP_URL=https://layerzero-mcp.tenzro.network/mcp
-export CHAINLINK_MCP_URL=https://chainlink-mcp.tenzro.network/mcp
-export CANTON_MCP_URL=https://canton-mcp.tenzro.network/mcp
-export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
+export SOLANA_MCP_URL=https://solana-mcp.tenzro.xyz/mcp
+export ETHEREUM_MCP_URL=https://ethereum-mcp.tenzro.xyz/mcp
+export LAYERZERO_MCP_URL=https://layerzero-mcp.tenzro.xyz/mcp
+export CHAINLINK_MCP_URL=https://chainlink-mcp.tenzro.xyz/mcp
+export CANTON_MCP_URL=https://canton-mcp.tenzro.xyz/mcp
+export LIFI_MCP_URL=https://lifi-mcp.tenzro.xyz/mcp
 ```
 
 ## Capabilities
@@ -149,7 +149,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.network/mcp
 
 **Chainlink (21 tools):** `ccip_get_fee`, `ccip_send_message`, `ccip_track_message`, `ccip_get_supported_chains`, `ccip_get_supported_tokens`, `ccip_get_lanes`, `ccip_get_token_pool`, `ccip_get_rate_limits`, `chainlink_get_price`, `chainlink_list_feeds`, `ds_get_report`, `ds_list_feeds`, `vrf_request_random`, `vrf_get_subscription`, `por_get_reserve`, `por_list_feeds`, `chainlink_check_upkeep`, `chainlink_get_upkeep_info`, `chainlink_estimate_functions_cost`, `chainlink_get_subscription`
 
-**Canton (Canton 3.5+ JSON Ledger API)** — MCP-routed: `canton_submit_command`, `canton_list_contracts`, `canton_get_events`, `canton_get_transaction`, `canton_allocate_party`, `canton_list_parties`, `canton_grant_user_rights`, `canton_list_user_rights`, `canton_get_my_analytics`, `canton_list_api_key_analytics`, `canton_list_domains_ext`, `canton_get_health`, `canton_get_balance_ext`, `canton_transfer`, `canton_create_asset`, `canton_dvp_settle`, `canton_upload_dar`, `canton_get_fee_schedule`, `canton_reconnect_synchronizer`. **JSON-RPC wrappers** (route through `rpc.tenzro.network`, require a `canton`-scoped API key): `canton_health`, `canton_version`, `canton_list_packages`, `canton_get_my_user`, `canton_coin_balance`, `canton_connected_synchronizers`, `canton_upload_dar_rpc`, `canton_fee_schedule_rpc`, `canton_get_transaction_rpc`, `canton_allocate_party_rpc`, `canton_grant_user_rights`, `canton_list_user_rights`, `canton_get_my_analytics`, `canton_list_api_key_analytics`.
+**Canton (Canton 3.5+ JSON Ledger API)** — MCP-routed: `canton_submit_command`, `canton_list_contracts`, `canton_get_events`, `canton_get_transaction`, `canton_allocate_party`, `canton_list_parties`, `canton_grant_user_rights`, `canton_list_user_rights`, `canton_get_my_analytics`, `canton_list_api_key_analytics`, `canton_list_domains_ext`, `canton_get_health`, `canton_get_balance_ext`, `canton_transfer`, `canton_create_asset`, `canton_dvp_settle`, `canton_upload_dar`, `canton_get_fee_schedule`, `canton_reconnect_synchronizer`. **JSON-RPC wrappers** (route through `rpc.tenzro.xyz`, require a `canton`-scoped API key): `canton_health`, `canton_version`, `canton_list_packages`, `canton_get_my_user`, `canton_coin_balance`, `canton_connected_synchronizers`, `canton_upload_dar_rpc`, `canton_fee_schedule_rpc`, `canton_get_transaction_rpc`, `canton_allocate_party_rpc`, `canton_grant_user_rights`, `canton_list_user_rights`, `canton_get_my_analytics`, `canton_list_api_key_analytics`.
 
 **Li.Fi (9 tools):** `lifi_get_quote`, `lifi_get_routes`, `lifi_get_status`, `lifi_get_chains`, `lifi_get_tokens`, `lifi_get_connections`, `lifi_get_tools`, `lifi_get_token_balance`, `lifi_execute_route`
 
@@ -200,14 +200,14 @@ Your Agent
     v
 tenzro_rpc.py
     |
-    |-- JSON-RPC POST ---------> rpc.tenzro.network    (Tenzro blockchain)
-    |-- HTTP POST/GET ---------> api.tenzro.network    (verification, faucet)
-    |-- MCP Streamable HTTP ---> solana-mcp.tenzro.network   (Solana)
-    |                         -> ethereum-mcp.tenzro.network (Ethereum)
-    |                         -> canton-mcp.tenzro.network   (Canton)
-    |                         -> layerzero-mcp.tenzro.network (LayerZero)
-    |                         -> chainlink-mcp.tenzro.network (Chainlink)
-    |                         -> lifi-mcp.tenzro.network     (Li.Fi)
+    |-- JSON-RPC POST ---------> rpc.tenzro.xyz    (Tenzro blockchain)
+    |-- HTTP POST/GET ---------> api.tenzro.xyz    (verification, faucet)
+    |-- MCP Streamable HTTP ---> solana-mcp.tenzro.xyz   (Solana)
+    |                         -> ethereum-mcp.tenzro.xyz (Ethereum)
+    |                         -> canton-mcp.tenzro.xyz   (Canton)
+    |                         -> layerzero-mcp.tenzro.xyz (LayerZero)
+    |                         -> chainlink-mcp.tenzro.xyz (Chainlink)
+    |                         -> lifi-mcp.tenzro.xyz     (Li.Fi)
     |
     v
 Tenzro Network (decentralized) + External Chains
@@ -220,8 +220,8 @@ Tenzro Network (decentralized) + External Chains
 | Tenzro Network | [tenzro.com](https://tenzro.com) |
 | MCP Server | [github.com/tenzro/tenzro-mcp-server](https://github.com/tenzro/tenzro-mcp-server) |
 | A2A Server | [github.com/tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) |
-| JSON-RPC | `https://rpc.tenzro.network` |
-| Web API | `https://api.tenzro.network` |
+| JSON-RPC | `https://rpc.tenzro.xyz` |
+| Web API | `https://api.tenzro.xyz` |
 
 ## Contact
 

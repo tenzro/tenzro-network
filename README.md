@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-51%20suites%2C%200%20failures-brightgreen)]()
 [![Website](https://img.shields.io/badge/Website-tenzro.com-green)](https://tenzro.com)
-[![Testnet](https://img.shields.io/badge/Testnet-Live-blue)](https://rpc.tenzro.network)
+[![Testnet](https://img.shields.io/badge/Testnet-Live-blue)](https://rpc.tenzro.xyz)
 
 ## What is Tenzro?
 
@@ -363,20 +363,20 @@ The workflow runtime is its own state machine. It runs alongside (not inside) th
 
 | Service | URL |
 |---------|-----|
-| JSON-RPC | https://rpc.tenzro.network |
-| Web API | https://api.tenzro.network |
-| MCP Server | https://mcp.tenzro.network/mcp |
-| A2A Server | https://a2a.tenzro.network |
-| Faucet | https://api.tenzro.network/faucet |
-| Solana MCP | https://solana-mcp.tenzro.network/mcp |
-| Ethereum MCP | https://ethereum-mcp.tenzro.network/mcp |
-| Canton MCP | https://canton-mcp.tenzro.network/mcp |
-| LayerZero MCP | https://layerzero-mcp.tenzro.network/mcp |
-| Chainlink MCP | https://chainlink-mcp.tenzro.network/mcp |
-| LI.FI MCP | https://lifi-mcp.tenzro.network/mcp |
+| JSON-RPC | https://rpc.tenzro.xyz |
+| Web API | https://api.tenzro.xyz |
+| MCP Server | https://mcp.tenzro.xyz/mcp |
+| A2A Server | https://a2a.tenzro.xyz |
+| Faucet | https://api.tenzro.xyz/faucet |
+| Solana MCP | https://solana-mcp.tenzro.xyz/mcp |
+| Ethereum MCP | https://ethereum-mcp.tenzro.xyz/mcp |
+| Canton MCP | https://canton-mcp.tenzro.xyz/mcp |
+| LayerZero MCP | https://layerzero-mcp.tenzro.xyz/mcp |
+| Chainlink MCP | https://chainlink-mcp.tenzro.xyz/mcp |
+| LI.FI MCP | https://lifi-mcp.tenzro.xyz/mcp |
 | Documentation | https://tenzro.com/docs |
 
-**Infrastructure**: Tenzro Labs operates the initial public RPC, Web API, MCP, A2A, and ecosystem MCP endpoints on `tenzro.network` with PQ-hybrid X25519MLKEM768 TLS at the edge while the validator set decentralizes. The repository is the reference implementation — anyone can run a node and join.
+**Infrastructure**: The public endpoints on `tenzro.xyz` are operated by Tenzro Labs, the first reference RPC provider on the network. The RPC provider role is open — any operator that meets the validator bond can register their own endpoint and serve the same protocol surface. TLS at the edge is PQ-hybrid X25519MLKEM768. The repository is the reference implementation — anyone can run a node and join.
 
 **Genesis**: 1,000,000,000 TNZO total supply. Faucet: 100 TNZO per request, 24h cooldown.
 

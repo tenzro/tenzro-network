@@ -29,10 +29,12 @@ from typing import Any
 
 from tenzro_trainer.gradient import (
     TrainerKey,
+    build_activation_commitment,
     build_round_gradients,
     clip_outer_delta,
     compute_outer_delta,
     deserialize_fragment_delta,
+    flatten_fragment_values,
     partition_state_dict,
     serialize_fragment,
 )
@@ -43,7 +45,12 @@ from tenzro_trainer.inner_loop import (
 )
 from tenzro_trainer.distributed import DistContext
 from tenzro_trainer.rpc_bridge import RpcClient, RpcError, pretty
-from tenzro_trainer.types import OuterGradient, PipelineAssignment, TrainingTaskSpec
+from tenzro_trainer.types import (
+    OuterGradient,
+    PipelineAssignment,
+    TrainingTaskSpec,
+    TrainingTier,
+)
 
 log = logging.getLogger("tenzro-trainer")
 
@@ -215,7 +222,28 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # 4. Build adapter. Task-spec metadata rides through as hyperparams so
     # `inner_optimizer` / `learning_rate` / etc. are wire-selectable.
-    adapter = _build_adapter_for_modality(modality, arch_json, spec.metadata)
+    # RL post-training (`objective: RlPostTraining`) swaps the supervised
+    # inner loop for the GRPO loop; everything downstream of the
+    # (pre_state, post_state, report) triple is identical.
+    reward_fn = None
+    if spec.objective is not None:
+        if modality != "Language":
+            log.error(
+                "RlPostTraining requires Language modality, task declares %s",
+                modality,
+            )
+            return 1
+        from tenzro_trainer.adapters.language import build_rollout_adapter
+        from tenzro_trainer.rl import load_reward
+
+        try:
+            reward_fn = load_reward(spec.objective.reward_ref)
+        except (ValueError, ImportError) as e:
+            log.error("reward_ref did not resolve: %s", e)
+            return 1
+        adapter = build_rollout_adapter(arch_json, spec.metadata)
+    else:
+        adapter = _build_adapter_for_modality(modality, arch_json, spec.metadata)
     model = adapter.model()
     scheduler = OuterUpdateScheduler(delayed=spec.delayed_apply)
     log.info(
@@ -253,9 +281,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         set_round = getattr(adapter, "set_round", None)
         if callable(set_round):
             set_round(round_index)
-        pre_state, post_state, report = run_inner_loop(
-            adapter, args.shard_uri, inner_steps
-        )
+        if spec.objective is not None:
+            from tenzro_trainer.rl import run_rl_inner_loop
+
+            pre_state, post_state, report = run_rl_inner_loop(
+                adapter, args.shard_uri, inner_steps, spec.objective, reward_fn
+            )
+        else:
+            pre_state, post_state, report = run_inner_loop(
+                adapter, args.shard_uri, inner_steps
+            )
         log.info(
             "inner loop done: avg_loss=%.4f final_loss=%.4f",
             report.avg_loss,
@@ -292,6 +327,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             serialize_fragment(f, delta_fragments[f], spec.quantization)
             for f in active
         ]
+        # Open tier: per-fragment TOPLOC-class activation commitments (loss
+        # trajectory + top-k delta probes) — the syncer's accept gate is
+        # fail-closed on these. Verified/Confidential carry TEE attestations
+        # instead.
+        commitments = None
+        if spec.tier == TrainingTier.OPEN:
+            commitments = {
+                f: build_activation_commitment(
+                    loss_trajectory=report.loss_trajectory,
+                    flat_delta=flatten_fragment_values(delta_fragments[f]),
+                )
+                for f in active
+            }
         gradients = build_round_gradients(
             task_id=args.task_id,
             round_index=round_index,
@@ -301,6 +349,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             quantization=spec.quantization,
             inner_step_count=(round_index + 1) * inner_steps,
             key=key,
+            commitments=commitments,
         )
         if ctx.is_primary:
             for g in gradients:

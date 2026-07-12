@@ -89,7 +89,7 @@ pub fn webauthn_signed_hash(authenticator_data: &[u8], client_data_json: &[u8]) 
 /// WebAuthn spec).
 ///
 /// `expected_origin` is the exact `Origin` the relying party expects (e.g.
-/// `https://keys.tenzro.network`); it must match the `origin` field inside
+/// `https://keys.tenzro.xyz`); it must match the `origin` field inside
 /// `clientDataJSON`. Wildcard origins are not supported by the spec and
 /// not accepted here.
 ///
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn signed_hash_matches_payload_then_sha256() {
         let auth_data = vec![0xAAu8; 37];
-        let cdj = br#"{"type":"webauthn.get","challenge":"abc","origin":"https://keys.tenzro.network"}"#.to_vec();
+        let cdj = br#"{"type":"webauthn.get","challenge":"abc","origin":"https://keys.tenzro.xyz"}"#.to_vec();
         let payload = webauthn_signed_payload(&auth_data, &cdj);
         let direct_hash: [u8; 32] = Sha256::digest(&payload).into();
         let helper_hash = webauthn_signed_hash(&auth_data, &cdj);
@@ -375,7 +375,7 @@ mod tests {
         let kp = P256KeyPair::generate();
         let signer = P256Signer::from_keypair(&kp);
 
-        let cdj = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTAx","origin":"https://keys.tenzro.network","crossOrigin":false}"#.to_vec();
+        let cdj = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTAx","origin":"https://keys.tenzro.xyz","crossOrigin":false}"#.to_vec();
 
         // authenticatorData: 32 bytes rpIdHash + 1 byte flags (UP set) +
         // 4 bytes signCount.
@@ -397,7 +397,7 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.network",
+            "https://keys.tenzro.xyz",
             WebAuthnCeremonyType::Get,
         )
         .unwrap();
@@ -425,7 +425,7 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.network",
+            "https://keys.tenzro.xyz",
             WebAuthnCeremonyType::Get,
         );
         assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
@@ -435,7 +435,7 @@ mod tests {
     fn verify_assertion_rejects_challenge_mismatch() {
         let kp = P256KeyPair::generate();
         let signer = P256Signer::from_keypair(&kp);
-        let cdj = br#"{"type":"webauthn.get","challenge":"d3JvbmctY2hhbGxlbmdl","origin":"https://keys.tenzro.network"}"#.to_vec();
+        let cdj = br#"{"type":"webauthn.get","challenge":"d3JvbmctY2hhbGxlbmdl","origin":"https://keys.tenzro.xyz"}"#.to_vec();
         let mut auth_data = vec![0u8; 32];
         auth_data.push(AUTH_DATA_FLAG_UP);
         auth_data.extend_from_slice(&0u32.to_be_bytes());
@@ -453,7 +453,7 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.network",
+            "https://keys.tenzro.xyz",
             WebAuthnCeremonyType::Get,
         );
         assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
@@ -463,7 +463,7 @@ mod tests {
     fn verify_assertion_rejects_missing_user_present_flag() {
         let kp = P256KeyPair::generate();
         let signer = P256Signer::from_keypair(&kp);
-        let cdj = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTAx","origin":"https://keys.tenzro.network"}"#.to_vec();
+        let cdj = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLTAx","origin":"https://keys.tenzro.xyz"}"#.to_vec();
         let mut auth_data = vec![0u8; 32];
         auth_data.push(0); // UP flag NOT set
         auth_data.extend_from_slice(&0u32.to_be_bytes());
@@ -481,7 +481,7 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.network",
+            "https://keys.tenzro.xyz",
             WebAuthnCeremonyType::Get,
         );
         assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));
@@ -492,7 +492,7 @@ mod tests {
         let kp = P256KeyPair::generate();
         let signer = P256Signer::from_keypair(&kp);
         // type says webauthn.create but caller expects webauthn.get
-        let cdj = br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTAx","origin":"https://keys.tenzro.network"}"#.to_vec();
+        let cdj = br#"{"type":"webauthn.create","challenge":"Y2hhbGxlbmdlLTAx","origin":"https://keys.tenzro.xyz"}"#.to_vec();
         let mut auth_data = vec![0u8; 32];
         auth_data.push(AUTH_DATA_FLAG_UP);
         auth_data.extend_from_slice(&0u32.to_be_bytes());
@@ -510,7 +510,7 @@ mod tests {
             &assertion,
             &kp.public_key_bytes(),
             "Y2hhbGxlbmdlLTAx",
-            "https://keys.tenzro.network",
+            "https://keys.tenzro.xyz",
             WebAuthnCeremonyType::Get,
         );
         assert!(matches!(res, Err(CryptoError::InvalidSignature(_))));

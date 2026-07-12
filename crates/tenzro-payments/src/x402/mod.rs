@@ -30,8 +30,8 @@ pub use scheme::{
     UPTO_SCHEME,
 };
 pub use bazaar::{
-    ResourceCatalog, ResourceCatalogStore, ResourceQuery, X402ResourceListing,
-    BAZAAR_LISTING_DOMAIN,
+    DiscoveredListing, ResourceCatalog, ResourceCatalogStore, ResourceQuery,
+    SellerReputationResolver, X402ResourceListing, BAZAAR_LISTING_DOMAIN,
 };
 pub use offer::{
     compute_offer_commitment, derive_payment_id, is_payment_id, IdempotencyLedger,

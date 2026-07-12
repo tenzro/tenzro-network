@@ -1118,6 +1118,7 @@ mod tests {
             trust_profile: TrustProfile::default(),
             worker_roles: Vec::new(),
             hardware: HardwareCapabilities::default(),
+            capacity: tenzro_types::AdvertisedCapacity::default(),
             geography: None,
             cluster_profile: None,
             pubkey: Vec::new(),

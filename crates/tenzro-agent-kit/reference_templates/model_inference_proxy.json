@@ -38,7 +38,7 @@
   "download_count": 0,
   "rating": 0,
   "content_hash": null,
-  "docs_url": "https://docs.tenzro.network/agent-kit/templates/model-inference-proxy",
+  "docs_url": "https://docs.tenzro.xyz/agent-kit/templates/model-inference-proxy",
   "metadata": {},
   "execution_spec": {
     "backend": {

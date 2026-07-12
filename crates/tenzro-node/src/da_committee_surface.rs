@@ -49,15 +49,16 @@ use tenzro_crypto::keys::{KeyPair, PublicKey};
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 use tenzro_network::da_committee_relay::{
     DaCommitteeError as WireError, DaCommitteeRequest, DaCommitteeResponse, WireMemberAttestation,
+    WirePossessionProof,
 };
 use tenzro_network::NetworkService;
 use tenzro_storage::redstuff::{CommitteeShape, SliverPair};
 use tenzro_types::primitives::{Address, Hash};
 
 use crate::da_committee::{
-    attestation_message, committee_address, committee_address_from_pubkey, CommitteeMember,
-    CommitteeView, DaCommitteeError, DaCommitteeStore, DaCommitteeSurface, MemberAttestation,
-    StoredSliver,
+    attestation_message, challenge_message, committee_address, committee_address_from_pubkey,
+    CommitteeMember, CommitteeView, DaCommitteeError, DaCommitteeStore, DaCommitteeSurface,
+    MemberAttestation, PossessionProof, StoredSliver,
 };
 
 type Result<T> = std::result::Result<T, DaCommitteeError>;
@@ -230,9 +231,10 @@ impl DaCommitteeSurface for NetworkDaCommitteeSurface {
         match response {
             DaCommitteeResponse::Attestation(wire) => Ok(wire_to_attestation(wire)),
             DaCommitteeResponse::Error(e) => Err(wire_error(e)),
-            DaCommitteeResponse::Sliver(_) => Err(DaCommitteeError::Transport(
-                "member answered StoreSliver with a Sliver response".into(),
-            )),
+            other => Err(DaCommitteeError::Transport(format!(
+                "member answered StoreSliver with an unexpected {} response",
+                response_kind(&other)
+            ))),
         }
     }
 
@@ -254,9 +256,39 @@ impl DaCommitteeSurface for NetworkDaCommitteeSurface {
             DaCommitteeResponse::Sliver(None) => Ok(None),
             DaCommitteeResponse::Sliver(Some(bytes)) => Ok(Some(decode_sliver(&bytes)?)),
             DaCommitteeResponse::Error(e) => Err(wire_error(e)),
-            DaCommitteeResponse::Attestation(_) => Err(DaCommitteeError::Transport(
-                "member answered FetchSliver with an Attestation response".into(),
-            )),
+            other => Err(DaCommitteeError::Transport(format!(
+                "member answered FetchSliver with an unexpected {} response",
+                response_kind(&other)
+            ))),
+        }
+    }
+
+    async fn challenge_sliver(
+        &self,
+        to_index: usize,
+        commitment: &Hash,
+        nonce: &[u8; 32],
+    ) -> Result<Option<PossessionProof>> {
+        let peer = self.resolve_peer(to_index)?;
+        let request = DaCommitteeRequest::ChallengeSliver {
+            commitment: commitment.0,
+            nonce: *nonce,
+        };
+        let response = self
+            .network
+            .da_committee_request(peer, request)
+            .await
+            .map_err(|e| DaCommitteeError::Transport(e.to_string()))?;
+        match response {
+            DaCommitteeResponse::PossessionProof(None) => Ok(None),
+            DaCommitteeResponse::PossessionProof(Some(wire)) => {
+                Ok(Some(wire_to_possession_proof(wire)?))
+            }
+            DaCommitteeResponse::Error(e) => Err(wire_error(e)),
+            other => Err(DaCommitteeError::Transport(format!(
+                "member answered ChallengeSliver with an unexpected {} response",
+                response_kind(&other)
+            ))),
         }
     }
 }
@@ -360,6 +392,9 @@ impl DaCommitteeServer {
                 sliver,
             } => self.handle_store(commitment, shape_blob, blob_len, symbol_len, sliver),
             DaCommitteeRequest::FetchSliver { commitment } => self.handle_fetch(commitment),
+            DaCommitteeRequest::ChallengeSliver { commitment, nonce } => {
+                self.handle_challenge(commitment, nonce)
+            }
         }
     }
 
@@ -432,6 +467,38 @@ impl DaCommitteeServer {
             None => DaCommitteeResponse::Sliver(None),
         }
     }
+
+    /// Answer a possession challenge: return the held sliver plus a signature
+    /// binding the challenger's nonce, or an honest `None` when the sliver is
+    /// not held. The challenger re-verifies the sliver against the commitment
+    /// on its side, so there is nothing to be gained by answering with stale
+    /// or borrowed data.
+    fn handle_challenge(&self, commitment: [u8; 32], nonce: [u8; 32]) -> DaCommitteeResponse {
+        let commitment = Hash::new(commitment);
+        let Some(stored) = self.store.get_sliver(&commitment) else {
+            return DaCommitteeResponse::PossessionProof(None);
+        };
+        let Some(index) = self.local_index.index() else {
+            return DaCommitteeResponse::Error(WireError::Storage(
+                "local node is not in the current committee".into(),
+            ));
+        };
+        let sliver_bytes = match encode_sliver(&stored.sliver) {
+            Ok(bytes) => bytes,
+            Err(e) => return DaCommitteeResponse::Error(WireError::Storage(e.to_string())),
+        };
+        let msg = challenge_message(&commitment, &nonce, &self.local_address);
+        let signature = match self.signer.sign(&msg) {
+            Ok(sig) => sig,
+            Err(e) => return DaCommitteeResponse::Error(WireError::Storage(e.to_string())),
+        };
+        DaCommitteeResponse::PossessionProof(Some(WirePossessionProof {
+            index: index as u64,
+            address: self.local_address,
+            signature,
+            sliver: sliver_bytes,
+        }))
+    }
 }
 
 /// Build the address-registry seed for the local node so a self-directed
@@ -463,6 +530,26 @@ fn wire_to_attestation(wire: WireMemberAttestation) -> MemberAttestation {
         index: wire.index as usize,
         address: wire.address,
         signature: wire.signature,
+    }
+}
+
+fn wire_to_possession_proof(wire: WirePossessionProof) -> Result<PossessionProof> {
+    Ok(PossessionProof {
+        index: wire.index as usize,
+        address: wire.address,
+        signature: wire.signature,
+        sliver: decode_sliver(&wire.sliver)?,
+    })
+}
+
+/// Human-readable variant name for a mismatched response, used in transport
+/// error messages.
+fn response_kind(response: &DaCommitteeResponse) -> &'static str {
+    match response {
+        DaCommitteeResponse::Attestation(_) => "Attestation",
+        DaCommitteeResponse::Sliver(_) => "Sliver",
+        DaCommitteeResponse::PossessionProof(_) => "PossessionProof",
+        DaCommitteeResponse::Error(_) => "Error",
     }
 }
 

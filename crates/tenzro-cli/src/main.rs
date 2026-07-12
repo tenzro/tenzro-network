@@ -27,7 +27,7 @@ use commands::{
     AuthCommand,
     X402Command, ReputationCommand, ApprovalCommand, DisputeCommand, InteropCommand, CapitalCommand, ProvenanceCommand,
     BondCommand, InsuranceCommand, CapabilityCommand,
-    ValidatorCommand, MemoryCommand, IrohCommand,
+    ValidatorCommand, MemoryCommand, DaCommand, IrohCommand,
     AdaptiveBurnCommand, SeedAgentCommand, Erc7683Command, Erc7579Command, PqHybridCommand,
     AdminCommand,
     TreasuryCommand,
@@ -316,6 +316,10 @@ enum Command {
     /// Agent memory tier: grant, recall (vector / text / hybrid RRF k=60), archive, list
     #[command(subcommand)]
     Memory(MemoryCommand),
+
+    /// Committee data availability: challenge, challenges, availability, committee, blobs
+    #[command(subcommand)]
+    Da(DaCommand),
 
     /// Iroh content-addressed transport: info, endpoint-id, alpns, publish, fetch
     #[command(subcommand)]
@@ -651,6 +655,7 @@ async fn main() -> Result<()> {
         Command::Capability(cmd) => cmd.execute().await?,
         Command::Validator(cmd) => cmd.execute().await?,
         Command::Memory(cmd) => cmd.execute().await?,
+        Command::Da(cmd) => cmd.execute().await?,
         Command::Iroh(cmd) => cmd.execute().await?,
         Command::AdaptiveBurn(cmd) => cmd.execute().await?,
         Command::SeedAgent(cmd) => cmd.execute().await?,

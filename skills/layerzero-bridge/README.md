@@ -6,7 +6,7 @@ The most complete LayerZero V2 MCP server available. **21 tools** covering every
 
 ```bash
 # Testnet
-curl -X POST https://layerzero-mcp.tenzro.network/mcp \
+curl -X POST https://layerzero-mcp.tenzro.xyz/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lz_list_chains","arguments":{}}}'
 
@@ -22,7 +22,7 @@ curl -X POST http://localhost:3006/mcp \
 |-----------|-----|------|
 | Streamable HTTP | `POST /mcp` | 3006 |
 
-**Testnet:** `https://layerzero-mcp.tenzro.network/mcp`
+**Testnet:** `https://layerzero-mcp.tenzro.xyz/mcp`
 **Local:** `http://localhost:3006/mcp`
 
 ## Tools (20)
@@ -193,7 +193,7 @@ This skill is registered in the Tenzro Skills Registry (`CF_SKILLS`) at node sta
 | Skill ID | `layerzero-bridge` |
 | Category | `bridge` |
 | Tags | `layerzero, cross-chain, bridge, omnichain, oft` |
-| MCP backend | LayerZero MCP server on port 3006 (`https://layerzero-mcp.tenzro.network/mcp`) |
+| MCP backend | LayerZero MCP server on port 3006 (`https://layerzero-mcp.tenzro.xyz/mcp`) |
 
 Discover it from any Tenzro node via `tenzro_listSkills` / `tenzro_searchSkills` and invoke its tools through the MCP endpoint above.
 

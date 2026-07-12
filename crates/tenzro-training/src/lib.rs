@@ -43,6 +43,7 @@
 //!     [`validate_aggregation_for_tier`] rejects them at task-registration
 //!     time with [`TrainingError::AggregationRuleTierMismatch`].
 
+pub mod activation;
 pub mod aggregation;
 pub mod commitments;
 pub mod committee;
@@ -55,6 +56,11 @@ pub mod quantization;
 pub mod runtime;
 pub mod slashing;
 
+pub use activation::{
+    top_k_delta_probes, validate_activation_commitment, verify_activation_commitment,
+    ActivationVerification, MAX_MEAN_LOSS_REL_DELTA, MAX_MEAN_PROBE_REL_DELTA,
+    MIN_PROBE_INDEX_OVERLAP,
+};
 pub use aggregation::{
     aggregator_for, clip_gradients, clip_to_l2_norm, l2_norm, Aggregator,
     CoordinateMedianAggregator, KrumAggregator, MeanAggregator, TrimmedMeanAggregator,
@@ -84,8 +90,8 @@ pub use payload_store::{
 };
 pub use quantization::{dequantize, encoded_len, quantize};
 pub use runtime::{
-    min_tier_for_rule, validate_aggregation_for_tier, FragmentBuffer, RoundDecision, SyncerState,
-    TrainingRuntime,
+    min_tier_for_rule, validate_aggregation_for_tier, validate_objective, FragmentBuffer,
+    RoundDecision, SyncerState, TrainingRuntime,
 };
 pub use slashing::{eviction_decisions, EvictionReason, TrainerSlashingCallback};
 
@@ -93,8 +99,10 @@ pub use slashing::{eviction_decisions, EvictionReason, TrainerSlashingCallback};
 // downstream crates can `use tenzro_training::TrainingTaskSpec` instead of
 // `use tenzro_types::training::TrainingTaskSpec`.
 pub use tenzro_types::training::{
-    AggregationRule, ArchitectureSpec, FragmentQuorumStatus, GradientQuantization, OuterGradient,
-    PipelineAssignment, PipelineConfig, SealedDatasetManifest, SealedShardEnvelope, SyncRound,
-    SyncStrategy, TrainingAttestation, TrainingModality, TrainingReceipt, TrainingRun,
-    TrainingRunStatus, TrainingTaskSpec, TrainingTier,
+    ActivationCommitment, AggregationRule, ArchitectureSpec, DeltaProbe, FragmentQuorumStatus,
+    GradientQuantization, OuterGradient, PipelineAssignment, PipelineConfig, RlConfig,
+    SealedDatasetManifest, SealedShardEnvelope, SyncRound, SyncStrategy, TrainingAttestation,
+    TrainingModality, TrainingObjective, TrainingReceipt, TrainingRun, TrainingRunStatus,
+    TrainingTaskSpec, TrainingTier, ACTIVATION_COMMITMENT_DOMAIN_TAG, DEFAULT_PROBE_K,
+    MAX_PROBE_K,
 };

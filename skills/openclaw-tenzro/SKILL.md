@@ -43,11 +43,11 @@ You can interact with the Tenzro blockchain network using its JSON-RPC, Web API,
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| JSON-RPC | `https://rpc.tenzro.network` | EVM-compatible JSON-RPC (port 8545) |
-| Web API | `https://api.tenzro.network` | REST verification and status API (port 8080) |
-| Faucet | `https://api.tenzro.network/faucet` | Testnet TNZO token faucet |
-| MCP | `https://mcp.tenzro.network/mcp` | Model Context Protocol server (port 3001) |
-| A2A | `https://a2a.tenzro.network` | Agent-to-Agent protocol (port 3002) |
+| JSON-RPC | `https://rpc.tenzro.xyz` | EVM-compatible JSON-RPC (port 8545) |
+| Web API | `https://api.tenzro.xyz` | REST verification and status API (port 8080) |
+| Faucet | `https://api.tenzro.xyz/faucet` | Testnet TNZO token faucet |
+| MCP | `https://mcp.tenzro.xyz/mcp` | Model Context Protocol server (port 3001) |
+| A2A | `https://a2a.tenzro.xyz` | Agent-to-Agent protocol (port 3002) |
 
 For local development, replace the hostnames with `localhost` and use the ports shown above.
 
@@ -108,7 +108,7 @@ private key in user custody — the keystore holds shares, the node never
 sees a full key.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -142,7 +142,7 @@ human-friendly base58 alias (informational).
 ### Check Balance
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -171,7 +171,7 @@ Also available via EVM-compatible method:
 ### Send Transaction
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -200,7 +200,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Get Block Height
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tenzro_blockNumber","params":{},"id":1}'
 ```
@@ -208,7 +208,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Get Block by Number
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tenzro_getBlock","params":{"height":0},"id":1}'
 ```
@@ -218,7 +218,7 @@ Use `"params":["latest"]` for the most recent block.
 ### Get Chain ID
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_chainId","params":{},"id":1}'
 ```
@@ -228,7 +228,7 @@ Default chain ID is `0x539` (1337).
 ### Get Node Info
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tenzro_nodeInfo","params":{},"id":1}'
 ```
@@ -236,7 +236,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Get Token Supply
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tenzro_totalSupply","params":{},"id":1}'
 ```
@@ -244,7 +244,7 @@ curl -X POST https://rpc.tenzro.network \
 ### List Registered Models
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tenzro_listModels","params":{"category":"text"},"id":1}'
 ```
@@ -267,7 +267,7 @@ Tenzro uses decentralized identifiers (DIDs) for both humans and machines.
 #### Human
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -287,7 +287,7 @@ curl -X POST https://rpc.tenzro.network \
 Requires the controller's DID and a list of capabilities. An optional `delegation_scope` constrains spending and operations the machine may perform on the controller's behalf.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -315,7 +315,7 @@ The DID is issued with prefix `did:tenzro:machine:<controller-uuid>:<uuid>`. Amo
 Self-sovereign machine identity with no human owner. Capabilities required.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -350,7 +350,7 @@ For all three types, optionally pass `"public_key": "<hex>"` + `"key_type": "ed2
 ### Resolve Identity
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -381,7 +381,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Resolve DID Document (W3C Standard)
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -397,7 +397,7 @@ Join the Tenzro Network as a full participant — zero-install. Auto-provisions 
 MPC wallet, and all 10 network capabilities in a single RPC call.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -419,7 +419,7 @@ curl -X POST https://rpc.tenzro.network \
     "identity": { "did": "did:tenzro:human:<uuid>", "display_name": "Alice", "identity_type": "human", "status": "active" },
     "wallet": { "address": "0x<hex>", "wallet_type": "mpc", "balance": "0" },
     "capabilities": { "inference": true, "payments": true, "agent_collaboration": true, "mcp_tools": true, "task_execution": true, "chain_query": true, "smart_contracts": true, "tee_services": true, "bridge": true, "governance": true },
-    "network": { "rpc": "https://rpc.tenzro.network", "mcp": "https://mcp.tenzro.network/mcp", "a2a": "https://a2a.tenzro.network" },
+    "network": { "rpc": "https://rpc.tenzro.xyz", "mcp": "https://mcp.tenzro.xyz/mcp", "a2a": "https://a2a.tenzro.xyz" },
     "is_micro_node": true,
     "chain_id": 1337
   }
@@ -441,7 +441,7 @@ print(result["wallet"]["address"])  # 0x<hex>
 Attach a human-readable username to a DID. Usernames are unique across the network.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -476,7 +476,7 @@ print(result["username"])  # "alice"
 Look up a DID by its username.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -511,7 +511,7 @@ print(result["did"])  # did:tenzro:human:<uuid>
 Define spending limits, allowed operations, payment protocols, and chains for a machine identity.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -559,7 +559,7 @@ Tenzro supports three payment protocols:
 ### Create Payment Challenge
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -595,7 +595,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Verify Payment
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -628,7 +628,7 @@ curl -X POST https://rpc.tenzro.network \
 
 ### List Payment Protocols
 
-> **Note:** This is available as an MCP tool (`list_payment_protocols`) on the MCP server at `https://mcp.tenzro.network/mcp`, not as a JSON-RPC method.
+> **Note:** This is available as an MCP tool (`list_payment_protocols`) on the MCP server at `https://mcp.tenzro.xyz/mcp`, not as a JSON-RPC method.
 
 Supported protocols: **MPP** (session-based streaming), **x402** (stateless one-shot), **native** (direct TNZO transfer).
 
@@ -639,7 +639,7 @@ Supported protocols: **MPP** (session-based streaming), **x402** (stateless one-
 ### List Models
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -679,7 +679,7 @@ Load levels: `idle` (0%), `available` (1-50%), `busy` (51-80%), `near_capacity` 
 Send a chat completion request to a served AI model on the network.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -725,7 +725,7 @@ Use `tenzro_listModels` or `tenzro_listModelEndpoints` to discover available mod
 ### List Model Endpoints
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -771,7 +771,7 @@ Tenzro uses a decentralized provider registry — nodes that serve AI models or 
 ### List Network Providers
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -784,7 +784,7 @@ curl -X POST https://rpc.tenzro.network \
 Optionally filter by provider type:
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -836,7 +836,7 @@ for p in providers:
 Bridge tokens between Tenzro, Ethereum, Solana, and Base via LayerZero, Chainlink CCIP, or deBridge.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -871,13 +871,13 @@ curl -X POST https://rpc.tenzro.network \
 
 ### Get Bridge Routes
 
-> **Note:** This is available as an MCP tool (`get_bridge_routes`) on the MCP server at `https://mcp.tenzro.network/mcp`, not as a JSON-RPC method.
+> **Note:** This is available as an MCP tool (`get_bridge_routes`) on the MCP server at `https://mcp.tenzro.xyz/mcp`, not as a JSON-RPC method.
 
 Returns available bridge routes between two chains, including estimated fees, time, and which adapter handles the route.
 
 ### List Bridge Adapters
 
-> **Note:** This is available as an MCP tool (`list_bridge_adapters`) on the MCP server at `https://mcp.tenzro.network/mcp`, not as a JSON-RPC method.
+> **Note:** This is available as an MCP tool (`list_bridge_adapters`) on the MCP server at `https://mcp.tenzro.xyz/mcp`, not as a JSON-RPC method.
 
 Returns all registered bridge adapters: LayerZero, Chainlink CCIP, deBridge, Canton.
 
@@ -892,7 +892,7 @@ Tenzro has a unified token registry spanning all VMs (EVM, SVM, DAML). Tokens cr
 Create an ERC-20 token via the factory and register it in the unified token registry.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -941,7 +941,7 @@ print(result["token_id"], result["evm_address"])
 Look up a token by symbol, EVM address, or token ID.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -987,7 +987,7 @@ result = get_token_info(symbol="MYT")
 List registered tokens in the unified registry, optionally filtered by VM type.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1032,7 +1032,7 @@ result = list_tokens(vm_type="evm")  # EVM tokens only
 Get TNZO balance across all VMs with decimal conversion for each VM representation.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1071,7 +1071,7 @@ print(result["native"]["display"])  # "100.000000 TNZO"
 Transfer tokens atomically between VMs using the Sei V2 pointer model. No bridge risk.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1116,7 +1116,7 @@ result = cross_vm_transfer("TNZO", "1000000000000000000", "evm", "svm", "0xfrom"
 Deploy smart contract bytecode to EVM, SVM, or DAML via the MultiVmRuntime.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1162,7 +1162,7 @@ print(result["address"])  # deployed contract address
 ### Node Status
 
 ```bash
-curl https://api.tenzro.network/status
+curl https://api.tenzro.xyz/status
 ```
 
 **Response:**
@@ -1180,7 +1180,7 @@ curl https://api.tenzro.network/status
 ### Health Check
 
 ```bash
-curl https://api.tenzro.network/health
+curl https://api.tenzro.xyz/health
 ```
 
 ### Request Testnet Tokens
@@ -1188,7 +1188,7 @@ curl https://api.tenzro.network/health
 Request 100 TNZO from the faucet (rate-limited to one request per address every 24 hours).
 
 ```bash
-curl -X POST https://api.tenzro.network/faucet \
+curl -X POST https://api.tenzro.xyz/faucet \
   -H "Content-Type: application/json" \
   -d '{"address": "0x<your_address>"}'
 ```
@@ -1206,7 +1206,7 @@ curl -X POST https://api.tenzro.network/faucet \
 ### Verify ZK Proof
 
 ```bash
-curl -X POST https://api.tenzro.network/verify/zk-proof \
+curl -X POST https://api.tenzro.xyz/verify/zk-proof \
   -H "Content-Type: application/json" \
   -d '{
     "proof_bytes": "<hex>",
@@ -1220,7 +1220,7 @@ Tenzro uses Plonky3 STARKs over the KoalaBear field as its sole ZK proof system.
 ### Verify TEE Attestation
 
 ```bash
-curl -X POST https://api.tenzro.network/verify/tee-attestation \
+curl -X POST https://api.tenzro.xyz/verify/tee-attestation \
   -H "Content-Type: application/json" \
   -d '{
     "vendor": "intel_tdx",
@@ -1233,7 +1233,7 @@ Supported vendors: `intel_tdx`, `amd_sev_snp`, `aws_nitro`.
 ### Verify Transaction Signature
 
 ```bash
-curl -X POST https://api.tenzro.network/verify/transaction \
+curl -X POST https://api.tenzro.xyz/verify/transaction \
   -H "Content-Type: application/json" \
   -d '{
     "tx_hash": "<hex>",
@@ -1245,7 +1245,7 @@ curl -X POST https://api.tenzro.network/verify/transaction \
 ### Verify Settlement Receipt
 
 ```bash
-curl -X POST https://api.tenzro.network/verify/settlement \
+curl -X POST https://api.tenzro.xyz/verify/settlement \
   -H "Content-Type: application/json" \
   -d '{
     "receipt_id": "<id>",
@@ -1259,7 +1259,7 @@ curl -X POST https://api.tenzro.network/verify/settlement \
 ### Verify Inference Result
 
 ```bash
-curl -X POST https://api.tenzro.network/verify/inference \
+curl -X POST https://api.tenzro.xyz/verify/inference \
   -H "Content-Type: application/json" \
   -d '{
     "model_id": "<model>",
@@ -1278,7 +1278,7 @@ The decentralized AI task marketplace lets agents and users post tasks for fulfi
 ### Post a Task
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1313,7 +1313,7 @@ curl -X POST https://rpc.tenzro.network \
 ### List Tasks
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1332,7 +1332,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Get Task
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1345,7 +1345,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Cancel Task
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1360,7 +1360,7 @@ curl -X POST https://rpc.tenzro.network \
 Providers submit quotes to fulfill a task.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1386,7 +1386,7 @@ The decentralized agent marketplace lets providers publish reusable AI agent tem
 ### List Agent Templates
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1405,7 +1405,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Register an Agent Template
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1431,7 +1431,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Get Agent Template
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1446,7 +1446,7 @@ curl -X POST https://rpc.tenzro.network \
 Instantiate a new agent from a marketplace template.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1485,7 +1485,7 @@ print(result["agent_id"])
 Rate an agent template (1-5 stars) with an optional text review.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1523,7 +1523,7 @@ result = rate_agent_template("t-1", 5, "Excellent code reviewer")
 Search agent templates by free-text query.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1562,7 +1562,7 @@ results = search_agent_templates("code review")
 Get usage statistics for an agent template.
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1603,7 +1603,7 @@ Tenzro agents can autonomously spawn child agents, form swarms, and run agentic 
 ### Register an Agent
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1638,7 +1638,7 @@ curl -X POST https://rpc.tenzro.network \
 Spawn a sub-agent under a parent (max 50 children per parent):
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1668,7 +1668,7 @@ curl -X POST https://rpc.tenzro.network \
 The agent calls an LLM with built-in tools (`spawn_agent`, `delegate_task`, `collect_results`, `complete`) and executes them iteratively until the task is complete or the step limit is reached:
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1697,7 +1697,7 @@ curl -X POST https://rpc.tenzro.network \
 Create a pool of coordinated agents under an orchestrator:
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1730,7 +1730,7 @@ curl -X POST https://rpc.tenzro.network \
 ### Get Swarm Status
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -1761,7 +1761,7 @@ Swarm lifecycle statuses: `idle`, `working`, `completed`. Member statuses: `Idle
 ### Terminate a Swarm
 
 ```bash
-curl -X POST https://rpc.tenzro.network \
+curl -X POST https://rpc.tenzro.xyz \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -2094,4 +2094,4 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_syncing`, `eth_accounts`
 - `net_peerCount`, `net_version`, `net_listening`
 
-Connect to MCP at `https://mcp.tenzro.network/mcp` using Streamable HTTP transport.
+Connect to MCP at `https://mcp.tenzro.xyz/mcp` using Streamable HTTP transport.

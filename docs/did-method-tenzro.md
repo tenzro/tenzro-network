@@ -178,7 +178,7 @@ methods table in `methods.md`:
 **Production Readiness:**
 - Full implementation in `crates/tenzro-identity` (Rust)
 - 85 passing unit and integration tests covering DID parsing, credential verification, trust chain traversal, delegation enforcement, cascading revocation
-- Live testnet deployment at `https://api.tenzro.network` with JSON-RPC interface
+- Live testnet deployment at `https://api.tenzro.xyz` with JSON-RPC interface
 - Reference SDKs: Rust (`tenzro-sdk`) and TypeScript (`tenzro-ts-sdk`)
 
 **Next step for repository owner**: Fork `https://github.com/w3c/did-extensions`,

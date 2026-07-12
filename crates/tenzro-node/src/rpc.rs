@@ -248,7 +248,7 @@ pub(crate) struct AuthContext {
     /// to verify the DPoP proof's `htm` claim.
     pub(crate) http_method: String,
     /// HTTP request URI without query string (e.g.
-    /// `"http://rpc.tenzro.network/"`). Required to verify the DPoP
+    /// `"http://rpc.tenzro.xyz/"`). Required to verify the DPoP
     /// proof's `htu` claim.
     pub(crate) http_uri: String,
 }
@@ -1261,6 +1261,14 @@ async fn dispatch_request(
         "tenzro_getEscrow" => handle_get_escrow(node, request.params).await,
         "tenzro_listEscrowsByPayer" => handle_list_escrows_by_payer(node, request.params).await,
         "tenzro_listEscrowsByPayee" => handle_list_escrows_by_payee(node, request.params).await,
+        // Committee-DA possession challenges + availability scoring (Task #92).
+        // Validators audit each other's sliver custody with nonce-bound signed
+        // proofs; every resolution feeds the target's rolling availability score.
+        "tenzro_daChallenge" => handle_da_challenge(node, request.params).await,
+        "tenzro_daListChallenges" => handle_da_list_challenges(node, request.params).await,
+        "tenzro_daAvailability" => handle_da_availability(node, request.params).await,
+        "tenzro_daCommittee" => handle_da_committee(node).await,
+        "tenzro_daListBlobs" => handle_da_list_blobs(node).await,
         // Prepaid streaming-service balances. A renter pre-funds the streaming
         // settlement path by locking on-chain TNZO into the prepaid ledger;
         // storage/compute runtimes then stream per epoch out of that balance.
@@ -1823,6 +1831,7 @@ async fn dispatch_request(
         "tenzro_issueDatabaseConnection" => {
             handle_issue_database_connection(node, request.params).await
         }
+        "tenzro_databaseUsage" => handle_database_usage(node, request.params).await,
         "tenzro_downloadModel" => handle_download_model(node, request.params).await,
         "tenzro_getDownloadProgress" => handle_get_download_progress(node, request.params).await,
         "tenzro_cancelDownload" => handle_cancel_download(node, request.params).await,
@@ -1897,6 +1906,7 @@ async fn dispatch_request(
         "tenzro_training_submitOuterGradient" => handle_training_submit_outer_gradient(node, request.params).await,
         "tenzro_training_finalizeRound" => handle_training_finalize_round(node, request.params).await,
         "tenzro_training_decideRound" => handle_training_decide_round(node, request.params).await,
+        "tenzro_training_challengeCommitment" => handle_training_challenge_commitment(node, request.params).await,
         "tenzro_training_installSealedManifest" => handle_training_install_sealed_manifest(node, request.params).await,
         "tenzro_training_getSealedManifest" => handle_training_get_sealed_manifest(node, request.params).await,
         "tenzro_deleteModel" | "tenzro_deleteModelMcp" => handle_delete_model(node, request.params).await,
@@ -6464,6 +6474,231 @@ async fn handle_list_escrows_by_payee(
         "count": escrows.len(),
         "truncated": escrows.len() > LIST_RESPONSE_CAP,
         "escrows": escrows.iter().take(LIST_RESPONSE_CAP).map(escrow_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+// ---- Committee-DA possession challenges + availability (Task #92) -----------
+//
+// Validators audit each other's Red Stuff sliver custody: a challenge sends a
+// fresh random nonce, the target answers with its full sliver plus a signature
+// over the nonce-bound challenge message, and the challenger re-verifies the
+// sliver against the blob commitment. Every resolution is persisted and folded
+// into the target's rolling availability score.
+
+fn require_da_committee(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<&Arc<crate::da_committee::DaCommitteeBackend>, JsonRpcError> {
+    node.da_committee().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Committee-DA backend not initialized (validator role with consensus required)"
+            .to_string(),
+        data: None,
+    })
+}
+
+fn parse_commitment(commitment_str: &str) -> std::result::Result<Hash, JsonRpcError> {
+    let bare = commitment_str.strip_prefix("0x").unwrap_or(commitment_str);
+    let bytes = hex::decode(bare).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid commitment hex: {}", e),
+        data: None,
+    })?;
+    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| JsonRpcError {
+        code: -32602,
+        message: format!("Commitment must be 32 bytes, got {}", bytes.len()),
+        data: None,
+    })?;
+    Ok(Hash::new(arr))
+}
+
+fn challenge_outcome_str(outcome: crate::da_committee::ChallengeOutcome) -> &'static str {
+    match outcome {
+        crate::da_committee::ChallengeOutcome::Passed => "passed",
+        crate::da_committee::ChallengeOutcome::FailedNoResponse => "failed_no_response",
+        crate::da_committee::ChallengeOutcome::FailedNotHeld => "failed_not_held",
+        crate::da_committee::ChallengeOutcome::FailedBadProof => "failed_bad_proof",
+    }
+}
+
+fn challenge_record_to_json(record: &crate::da_committee::ChallengeRecord) -> Value {
+    serde_json::json!({
+        "id": format!("0x{}", hex::encode(record.id.as_bytes())),
+        "commitment": format!("0x{}", hex::encode(record.commitment.as_bytes())),
+        "target_index": record.target_index,
+        "target_address": format!("0x{}", hex::encode(record.target_address.as_bytes())),
+        "nonce": format!("0x{}", hex::encode(record.nonce)),
+        "issued_at_ms": record.issued_at_ms,
+        "resolved_at_ms": record.resolved_at_ms,
+        "outcome": challenge_outcome_str(record.outcome),
+    })
+}
+
+fn availability_score_to_json(score: &crate::da_committee::AvailabilityScore) -> Value {
+    serde_json::json!({
+        "address": format!("0x{}", hex::encode(score.address.as_bytes())),
+        "score": score.score,
+        "max_score": crate::da_committee::AVAILABILITY_SCORE_MAX,
+        "passes": score.passes,
+        "failures": score.failures,
+        "last_outcome": challenge_outcome_str(score.last_outcome),
+        "last_challenge_ms": score.last_challenge_ms,
+    })
+}
+
+/// `tenzro_daChallenge` — issue a possession challenge against committee member
+/// `target_index` for `commitment`. Returns the resolved challenge record.
+async fn handle_da_challenge(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let commitment_str = params
+        .get("commitment")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing commitment".to_string(),
+            data: None,
+        })?;
+    let commitment = parse_commitment(commitment_str)?;
+    let target_index = params
+        .get("target_index")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing target_index".to_string(),
+            data: None,
+        })? as usize;
+
+    let backend = require_da_committee(node)?;
+    let record = backend
+        .challenge_possession(&commitment, target_index)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Possession challenge failed to issue: {}", e),
+            data: None,
+        })?;
+    Ok(challenge_record_to_json(&record))
+}
+
+/// `tenzro_daListChallenges` — resolved possession-challenge records, most
+/// recently resolved first. Optional `limit` (default 100).
+async fn handle_da_list_challenges(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let limit = params
+        .as_ref()
+        .and_then(|p| p.get("limit"))
+        .and_then(|v| v.as_u64())
+        .map(|l| l as usize)
+        .unwrap_or(100)
+        .min(LIST_RESPONSE_CAP);
+
+    let backend = require_da_committee(node)?;
+    let records = backend.custody_store().list_challenges(limit);
+    Ok(serde_json::json!({
+        "count": records.len(),
+        "challenges": records.iter().map(challenge_record_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_daAvailability` — rolling availability scores. With an `address`
+/// param, the single member's score (error if never challenged); without,
+/// every scored member, lowest score first.
+async fn handle_da_availability(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let backend = require_da_committee(node)?;
+    let store = backend.custody_store();
+
+    if let Some(addr_str) = params.as_ref().and_then(|p| p.get("address")).and_then(|v| v.as_str()) {
+        let address = parse_address(addr_str)?;
+        let score = store.get_availability(&address).ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "No availability score for that address (never challenged)".to_string(),
+            data: None,
+        })?;
+        return Ok(availability_score_to_json(&score));
+    }
+
+    let scores = store.list_availability();
+    Ok(serde_json::json!({
+        "count": scores.len(),
+        "scores": scores.iter().map(availability_score_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_daCommittee` — the current DA committee snapshot: every member's
+/// index and address, whether it is this node, and its availability score when
+/// it has been challenged.
+async fn handle_da_committee(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let backend = require_da_committee(node)?;
+    let store = backend.custody_store();
+    let local = backend.local_address();
+
+    let members: Vec<Value> = backend
+        .committee_members()
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "index": m.index,
+                "address": format!("0x{}", hex::encode(m.address.as_bytes())),
+                "is_local": m.address == local,
+                "availability": store.get_availability(&m.address).map(|s| availability_score_to_json(&s)),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "local_address": format!("0x{}", hex::encode(local.as_bytes())),
+        "count": members.len(),
+        "members": members,
+    }))
+}
+
+/// `tenzro_daListBlobs` — every blob commitment this node knows about: whether
+/// it holds a sliver for it, and the availability certificate when this node
+/// was the writer (attesting indices, quorum time, blob length).
+async fn handle_da_list_blobs(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let backend = require_da_committee(node)?;
+    let store = backend.custody_store();
+
+    let blobs: Vec<Value> = store
+        .known_commitments()
+        .iter()
+        .take(LIST_RESPONSE_CAP)
+        .map(|commitment| {
+            let sliver = store.get_sliver(commitment);
+            let cert = store.get_cert(commitment);
+            serde_json::json!({
+                "commitment": format!("0x{}", hex::encode(commitment.as_bytes())),
+                "held_sliver_index": sliver.as_ref().map(|s| s.sliver.node_index),
+                "blob_len": sliver.as_ref().map(|s| s.blob_len)
+                    .or_else(|| cert.as_ref().map(|c| c.blob_len)),
+                "certificate": cert.as_ref().map(|c| serde_json::json!({
+                    "attesting_indices": c.attestations.iter().map(|a| a.index).collect::<Vec<_>>(),
+                    "quorum": c.shape.quorum(),
+                    "certified_at_ms": c.certified_at_ms,
+                    "root": format!("0x{}", hex::encode(c.root().as_bytes())),
+                })),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "count": blobs.len(),
+        "blobs": blobs,
     }))
 }
 
@@ -17262,9 +17497,9 @@ async fn handle_join_as_micro_node(
         "participant_type": participant_type_str,
         "role": "micro_node",
         "network": {
-            "rpc": "https://rpc.tenzro.network",
-            "mcp": "https://mcp.tenzro.network/mcp",
-            "a2a": "https://a2a.tenzro.network",
+            "rpc": "https://rpc.tenzro.xyz",
+            "mcp": "https://mcp.tenzro.xyz/mcp",
+            "a2a": "https://a2a.tenzro.xyz",
         }
     }))
 }
@@ -18736,6 +18971,10 @@ fn database_descriptor_json(desc: &tenzro_database::DatabaseDescriptor) -> Value
         "engine_config": desc.engine_config,
         "access_policy": desc.access_policy,
         "owner_did": desc.access_policy.owner_did(),
+        "pricing": {
+            "asset_id": desc.pricing.asset_id,
+            "price_per_query": desc.pricing.price_per_query.to_string(),
+        },
         "confidential": confidential,
     })
 }
@@ -18906,6 +19145,30 @@ async fn handle_create_database(
     let replicas = params.get("replicas").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
     let engine_config = params.get("engine_config").cloned().unwrap_or(Value::Object(Default::default()));
 
+    // Typed validation: when the caller tags the config with "engine", it must
+    // parse as the modelled EngineConfig for that engine and target the same
+    // engine id the request declares. Untagged configs pass through opaque so
+    // engine-specific fields the model doesn't cover remain expressible.
+    if engine_config.get("engine").is_some() {
+        let cfg = serde_json::from_value::<tenzro_database::EngineConfig>(engine_config.clone())
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("Invalid 'engine_config': {e}"),
+                data: None,
+            })?;
+        if cfg.engine_id() != engine_id {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "'engine_config' targets engine '{}' but 'engine_id' is '{}'",
+                    cfg.engine_id(),
+                    engine_id
+                ),
+                data: None,
+            });
+        }
+    }
+
     // Access policy: the caller either supplies a full `access_policy` object or
     // just an `owner_did` (which defaults to an owner-only policy). Every
     // database must be owned — an unowned database has no admin authority.
@@ -18945,6 +19208,41 @@ async fn handle_create_database(
         ),
     };
 
+    // Optional per-query pricing. `price_per_query` accepts a JSON number or a
+    // decimal string (u128 can exceed JSON's safe-integer range). Default: free.
+    let pricing = match params.get("pricing") {
+        Some(Value::Null) | None => tenzro_database::DatabasePricing::free(),
+        Some(p) => {
+            let asset_id = p
+                .get("asset_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("TNZO")
+                .to_string();
+            let price_per_query = match p.get("price_per_query") {
+                Some(Value::Null) | None => 0u128,
+                Some(Value::Number(n)) => n.as_u64().map(u128::from).ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "'pricing.price_per_query' must be a non-negative integer".to_string(),
+                    data: None,
+                })?,
+                Some(Value::String(s)) => s.parse::<u128>().map_err(|_| JsonRpcError {
+                    code: -32602,
+                    message: "'pricing.price_per_query' string must parse as u128".to_string(),
+                    data: None,
+                })?,
+                Some(_) => {
+                    return Err(JsonRpcError {
+                        code: -32602,
+                        message: "'pricing.price_per_query' must be a number or decimal string"
+                            .to_string(),
+                        data: None,
+                    })
+                }
+            };
+            tenzro_database::DatabasePricing { asset_id, price_per_query }
+        }
+    };
+
     let desc = tenzro_database::DatabaseDescriptor {
         database_id,
         engine_id,
@@ -18953,6 +19251,7 @@ async fn handle_create_database(
         replicas,
         engine_config,
         access_policy,
+        pricing,
         confidential,
     };
 
@@ -19109,26 +19408,63 @@ async fn handle_list_database_partitions(
 }
 
 /// `tenzro_dropDatabase` — remove a database and all its partition placements.
+/// Owner/admin-gated: `caller_did` must pass the database's admin action, with
+/// DID-identity passes requiring a signed envelope (canonical preimage = the
+/// database id).
 async fn handle_drop_database(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let database_id = params
-        .as_ref()
-        .and_then(|p| p.get("database_id"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let database_id = params.get("database_id").and_then(|v| v.as_str()).ok_or_else(|| {
+        JsonRpcError {
             code: -32602,
             message: "Missing 'database_id' parameter".to_string(),
             data: None,
-        })?;
+        }
+    })?;
+    let caller_did = params.get("caller_did").and_then(|v| v.as_str()).ok_or_else(|| {
+        JsonRpcError {
+            code: -32602,
+            message: "Missing 'caller_did' parameter".to_string(),
+            data: None,
+        }
+    })?;
+    let capability = params.get("capability").and_then(|v| v.as_str());
+
     let registry = database_registry_or_err(node)?;
+    let desc = registry.get_database(database_id).map_err(db_error_to_rpc)?;
+
+    let caller_authenticated = authenticate_db_caller(
+        node,
+        &params,
+        "tenzro_dropDatabase",
+        caller_did,
+        database_id.as_bytes(),
+    )
+    .await?;
+    let decision =
+        adjudicate_db_access(node, &desc, caller_did, capability, true, caller_authenticated);
+    if !decision.authorized {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!("access denied: {}", decision.reason),
+            data: Some(serde_json::json!({ "database_id": database_id })),
+        });
+    }
+
     // Tear down the engine backing for every locally-held partition before the
     // descriptor is gone (stop_local_partitions reads placement from it).
-    if let Ok(desc) = registry.get_database(database_id) {
-        stop_local_partitions(node, &desc).await;
-    }
+    stop_local_partitions(node, &desc).await;
     registry.drop_database(database_id).map_err(db_error_to_rpc)?;
+    // Drop the usage counters with the database — no orphaned billing rows.
+    if let Err(e) = node.db_usage_meter().remove(database_id) {
+        warn!(database_id, error = %e, "failed to remove usage counters for dropped database");
+    }
     Ok(serde_json::json!({ "dropped": database_id }))
 }
 
@@ -19155,6 +19491,7 @@ fn adjudicate_db_access(
     caller_did: &str,
     capability: Option<&str>,
     want_admin: bool,
+    caller_authenticated: bool,
 ) -> DbAuthDecision {
     let policy = &desc.access_policy;
 
@@ -19218,6 +19555,20 @@ fn adjudicate_db_access(
     } else {
         policy.permits_read(caller_did, has_capability)
     };
+
+    // A pass earned from the caller's DID identity (owner match, allowlist
+    // membership) is only as strong as the DID assertion behind it. Unless the
+    // caller proved the DID with a signed envelope, or the pass came from a
+    // validated capability token (its own proof), refuse it. Public-policy
+    // reads are exempt — they grant nothing identity-based.
+    let public_read = !want_admin && matches!(policy, tenzro_types::AccessPolicy::Public { .. });
+    if authorized && !caller_authenticated && !has_capability && !public_read {
+        return DbAuthDecision {
+            authorized: false,
+            reason: "caller DID not authenticated: signed envelope required".to_string(),
+        };
+    }
+
     let reason = if authorized {
         "authorized".to_string()
     } else if needed_action.is_some() && capability.is_none() {
@@ -19263,7 +19614,18 @@ async fn handle_authorize_database_read(
     let registry = database_registry_or_err(node)?;
     let desc = registry.get_database(database_id).map_err(db_error_to_rpc)?;
 
-    let decision = adjudicate_db_access(node, &desc, caller_did, capability, false);
+    let canonical = format!("{database_id}:{}", capability.unwrap_or(""));
+    let caller_authenticated = authenticate_db_caller(
+        node,
+        &params,
+        "tenzro_authorizeDatabaseRead",
+        caller_did,
+        canonical.as_bytes(),
+    )
+    .await?;
+
+    let decision =
+        adjudicate_db_access(node, &desc, caller_did, capability, false, caller_authenticated);
     Ok(serde_json::json!({
         "database_id": database_id,
         "caller_did": caller_did,
@@ -19319,8 +19681,28 @@ async fn handle_database_query(
     let registry = database_registry_or_err(node)?;
     let desc = registry.get_database(database_id).map_err(db_error_to_rpc)?;
 
+    let body_bytes = serde_json::to_vec(&body).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("unserializable 'body' parameter: {e}"),
+        data: None,
+    })?;
+    let body_sha256_hex = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&body_bytes))
+    };
+    let canonical = format!("{database_id}:{partition_index}:{want_admin}:{body_sha256_hex}");
+    let caller_authenticated = authenticate_db_caller(
+        node,
+        &params,
+        "tenzro_databaseQuery",
+        caller_did,
+        canonical.as_bytes(),
+    )
+    .await?;
+
     // Gate first — fail-closed before any engine work.
-    let decision = adjudicate_db_access(node, &desc, caller_did, capability, want_admin);
+    let decision =
+        adjudicate_db_access(node, &desc, caller_did, capability, want_admin, caller_authenticated);
     if !decision.authorized {
         return Err(JsonRpcError {
             code: -32001,
@@ -19351,6 +19733,15 @@ async fn handle_database_query(
         }));
     }
 
+    // Per-query billing — only the node that serves the query bills it. The
+    // owner always queries free; a zero price makes the database free for
+    // every authorized caller.
+    let mut billed: u128 = 0;
+    if !desc.pricing.is_free() && caller_did != desc.access_policy.owner_did() {
+        billed =
+            settle_database_query_payment(node, &params, database_id, &desc, caller_did).await?;
+    }
+
     let request = tenzro_database::QueryRequest {
         database_id: database_id.to_string(),
         partition_index,
@@ -19362,6 +19753,19 @@ async fn handle_database_query(
         .await
         .map_err(db_error_to_rpc)?;
 
+    let bytes_out = serde_json::to_vec(&response.body).map(|b| b.len() as u64).unwrap_or(0);
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    if let Err(e) = node.db_usage_meter().record_query(
+        database_id,
+        want_admin,
+        body_bytes.len() as u64,
+        bytes_out,
+        billed,
+        now_ms,
+    ) {
+        warn!(database_id, error = %e, "database usage metering failed for served query");
+    }
+
     Ok(serde_json::json!({
         "database_id": database_id,
         "partition_index": partition_index,
@@ -19371,12 +19775,226 @@ async fn handle_database_query(
     }))
 }
 
+/// Runs the payment-gateway 402 flow for one billed `tenzro_databaseQuery`.
+///
+/// Without a `payment_credential` param this returns `-32402` carrying a fresh
+/// x402 challenge (resource `tenzro://db/<database_id>/query`, priced per the
+/// database's [`tenzro_database::DatabasePricing`], recipient = the owner
+/// identity's wallet address). With a credential it pre-checks the referenced
+/// challenge against this database's resource / price / recipient and settles
+/// through the gateway, returning the settled amount for the usage meter.
+async fn settle_database_query_payment(
+    node: &Arc<TenzroNode>,
+    params: &Value,
+    database_id: &str,
+    desc: &tenzro_database::DatabaseDescriptor,
+    caller_did: &str,
+) -> std::result::Result<u128, JsonRpcError> {
+    use tenzro_payments::traits::PaymentGateway;
+
+    let gateway = node.payment_gateway().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "database is priced but payment gateway not initialized".to_string(),
+        data: None,
+    })?;
+    let price = desc.pricing.price_per_query;
+    let asset = desc.pricing.asset_id.as_str();
+    let resource = format!("tenzro://db/{database_id}/query");
+
+    let Some(cred_value) = params.get("payment_credential") else {
+        // No credential — mint a challenge and hand it back as the 402 payload.
+        let owner_did = desc.access_policy.owner_did();
+        let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Identity registry not initialized".to_string(),
+            data: None,
+        })?;
+        let owner = registry.resolve(owner_did).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("cannot resolve database owner {owner_did:?} for billing: {e}"),
+            data: None,
+        })?;
+        let recipient = format!("0x{}", hex::encode(owner.wallet_address.as_bytes()));
+        let challenge = gateway
+            .create_challenge("x402", &resource, price, asset, &recipient)
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("failed to create payment challenge: {e}"),
+                data: None,
+            })?;
+        return Err(JsonRpcError {
+            code: -32402,
+            message: format!(
+                "payment required: {price} {asset} per query against {database_id}"
+            ),
+            data: Some(serde_json::json!({
+                "database_id": database_id,
+                "resource": resource,
+                "challenge": challenge,
+            })),
+        });
+    };
+
+    let credential: tenzro_payments::types::PaymentCredential =
+        serde_json::from_value(cred_value.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid 'payment_credential': {e}"),
+            data: None,
+        })?;
+
+    // Pre-check the referenced challenge before settlement: it must be for
+    // this database's query resource, priced at least at the per-query rate,
+    // and payable to the owner's wallet.
+    let challenge =
+        gateway.challenge_store().get(&credential.challenge_id).map_err(|e| JsonRpcError {
+            code: -32001,
+            message: format!("payment challenge lookup failed: {e}"),
+            data: None,
+        })?;
+    if challenge.resource != resource {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!(
+                "payment challenge is for resource {:?}, not {resource:?}",
+                challenge.resource
+            ),
+            data: None,
+        });
+    }
+    if challenge.amount < price {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!(
+                "payment challenge amount {} is below the per-query price {price}",
+                challenge.amount
+            ),
+            data: None,
+        });
+    }
+    let owner_did = desc.access_policy.owner_did();
+    if let Some(registry) = node.identity_registry() {
+        if let Ok(owner) = registry.resolve(owner_did) {
+            let recipient = format!("0x{}", hex::encode(owner.wallet_address.as_bytes()));
+            if challenge.recipient != recipient {
+                return Err(JsonRpcError {
+                    code: -32001,
+                    message: format!(
+                        "payment challenge recipient {:?} is not the database owner's wallet",
+                        challenge.recipient
+                    ),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    let receipt = gateway.verify_and_settle(&credential).await.map_err(|e| JsonRpcError {
+        code: -32001,
+        message: format!("payment settlement failed for caller {caller_did:?}: {e}"),
+        data: None,
+    })?;
+    Ok(receipt.amount)
+}
+
 /// This node's database holder endpoint — the `self#<peer>` shape that
 /// placement records for a partition served locally.
 async fn database_self_endpoint(node: &Arc<TenzroNode>) -> Option<String> {
     let net = node.network()?;
     let self_peer = net.local_peer_id().await.ok()?;
     Some(format!("self#{self_peer}"))
+}
+
+/// Authenticates the asserted `caller_did` on a managed-database RPC via an
+/// optional signed Tenzro DID envelope (`envelope` param, the hex header value
+/// produced by `TenzroDidEnvelope::to_header_value`).
+///
+/// Returns `Ok(false)` when no envelope is supplied — the caller DID is then
+/// asserted, not proven, and [`adjudicate_db_access`] refuses to grant any
+/// DID-identity-based privilege on it. A supplied envelope must bind
+/// `did == caller_did`, `method == method_tag`, and
+/// `params_hash == SHA-256(canonical)`, verify against the identity registry
+/// (`did:web` resolves over HTTPS via the shared web-layer resolver), and pass
+/// the node-wide nonce replay cache. Fail-closed: any mismatch or verification
+/// failure is an error, never a silent downgrade to unauthenticated.
+async fn authenticate_db_caller(
+    node: &Arc<TenzroNode>,
+    params: &Value,
+    method_tag: &str,
+    caller_did: &str,
+    canonical: &[u8],
+) -> std::result::Result<bool, JsonRpcError> {
+    let Some(hv) = params.get("envelope").and_then(|v| v.as_str()) else {
+        return Ok(false);
+    };
+    let env = tenzro_identity::envelope::TenzroDidEnvelope::from_header_value(hv)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("malformed envelope: {e}"),
+            data: None,
+        })?;
+    if env.did != caller_did {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!(
+                "envelope DID {:?} does not match caller_did {:?}",
+                env.did, caller_did
+            ),
+            data: None,
+        });
+    }
+    if env.method != method_tag {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!(
+                "envelope method {:?} does not match RPC method {:?}",
+                env.method, method_tag
+            ),
+            data: None,
+        });
+    }
+    if env.params_hash != tenzro_identity::envelope::params_hash(canonical) {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: "envelope params_hash does not bind these request params".to_string(),
+            data: None,
+        });
+    }
+    if env.did.starts_with("did:web:") {
+        let resp = crate::web::handlers::verify_did_web_envelope(&env).await;
+        if !resp.valid {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: format!("envelope verification failed: {}", resp.details),
+                data: None,
+            });
+        }
+    } else {
+        let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Identity registry not initialized".to_string(),
+            data: None,
+        })?;
+        tenzro_identity::envelope::verify_envelope(&env, &**registry).map_err(|e| {
+            JsonRpcError {
+                code: -32001,
+                message: format!("envelope verification failed: {e}"),
+                data: None,
+            }
+        })?;
+    }
+    // Replay defense: the same node-wide cache covers every
+    // envelope-authenticated entry point (A2A mutations + managed databases).
+    let nonce_hex = hex::encode(env.nonce);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if !crate::a2a::did_envelope::check_and_record_nonce(&env.did, &nonce_hex, now_ms) {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: "envelope nonce replayed".to_string(),
+            data: None,
+        });
+    }
+    Ok(true)
 }
 
 /// Brings up the engine backing for every partition of `desc` this node holds.
@@ -19495,8 +20113,26 @@ async fn handle_rescale_database(
     let registry = database_registry_or_err(node)?;
     let desc = registry.get_database(database_id).map_err(db_error_to_rpc)?;
 
+    // Resolve the effective counts before the gate — the envelope's canonical
+    // preimage binds the resolved values, not the raw (possibly-absent) params.
+    let partitions =
+        params.get("partitions").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(desc.partitions);
+    let replicas =
+        params.get("replicas").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(desc.replicas);
+
+    let canonical = format!("{database_id}:{placement_str}:{partitions}:{replicas}");
+    let caller_authenticated = authenticate_db_caller(
+        node,
+        &params,
+        "tenzro_rescaleDatabase",
+        caller_did,
+        canonical.as_bytes(),
+    )
+    .await?;
+
     // Rescale is administrative — gate on the write action.
-    let decision = adjudicate_db_access(node, &desc, caller_did, capability, true);
+    let decision =
+        adjudicate_db_access(node, &desc, caller_did, capability, true, caller_authenticated);
     if !decision.authorized {
         return Err(JsonRpcError {
             code: -32001,
@@ -19504,12 +20140,6 @@ async fn handle_rescale_database(
             data: Some(serde_json::json!({ "database_id": database_id })),
         });
     }
-
-    // Default to the database's current counts when not overridden.
-    let partitions =
-        params.get("partitions").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(desc.partitions);
-    let replicas =
-        params.get("replicas").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(desc.replicas);
 
     let candidates = database_candidates(node).await;
     let normalized = registry
@@ -19584,9 +20214,20 @@ async fn handle_issue_database_connection(
     let registry = database_registry_or_err(node)?;
     let desc = registry.get_database(database_id).map_err(db_error_to_rpc)?;
 
+    let canonical = format!("{database_id}:{bearer_did}:{want_write}");
+    let caller_authenticated = authenticate_db_caller(
+        node,
+        &params,
+        "tenzro_issueDatabaseConnection",
+        caller_did,
+        canonical.as_bytes(),
+    )
+    .await?;
+
     // Issuing a connection is administrative — only the owner (or a caller with
     // the write-action capability) may hand out credentials to a database.
-    let decision = adjudicate_db_access(node, &desc, caller_did, capability, true);
+    let decision =
+        adjudicate_db_access(node, &desc, caller_did, capability, true, caller_authenticated);
     if !decision.authorized {
         return Err(JsonRpcError {
             code: -32001,
@@ -19662,6 +20303,77 @@ async fn handle_issue_database_connection(
         // The developer dials this method with the returned capability +
         // bearer_did to run engine-dialect queries against the database.
         "query_method": "tenzro_databaseQuery",
+    }))
+}
+
+/// `tenzro_databaseUsage` — the cumulative usage counters a holder maintains
+/// for one database: query/write counts, bytes in/out, total billed, last
+/// query time. Owner/admin-gated (same write-action gate as drop/rescale) and
+/// envelope-authenticated (canonical preimage = the database id) — usage is
+/// billing data, not public metadata.
+///
+/// Params: `{database_id, caller_did, capability?, envelope?}`.
+async fn handle_database_usage(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let database_id = params.get("database_id").and_then(|v| v.as_str()).ok_or_else(|| {
+        JsonRpcError {
+            code: -32602,
+            message: "Missing 'database_id' parameter".to_string(),
+            data: None,
+        }
+    })?;
+    let caller_did = params.get("caller_did").and_then(|v| v.as_str()).ok_or_else(|| {
+        JsonRpcError {
+            code: -32602,
+            message: "Missing 'caller_did' parameter".to_string(),
+            data: None,
+        }
+    })?;
+    let capability = params.get("capability").and_then(|v| v.as_str());
+
+    let registry = database_registry_or_err(node)?;
+    let desc = registry.get_database(database_id).map_err(db_error_to_rpc)?;
+
+    let caller_authenticated = authenticate_db_caller(
+        node,
+        &params,
+        "tenzro_databaseUsage",
+        caller_did,
+        database_id.as_bytes(),
+    )
+    .await?;
+    let decision =
+        adjudicate_db_access(node, &desc, caller_did, capability, true, caller_authenticated);
+    if !decision.authorized {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!("access denied: {}", decision.reason),
+            data: Some(serde_json::json!({ "database_id": database_id })),
+        });
+    }
+
+    let stats = node.db_usage_meter().get(database_id);
+    Ok(serde_json::json!({
+        "database_id": database_id,
+        "pricing": {
+            "asset_id": desc.pricing.asset_id,
+            "price_per_query": desc.pricing.price_per_query.to_string(),
+        },
+        "usage": stats.map(|s| serde_json::json!({
+            "query_count": s.query_count,
+            "write_count": s.write_count,
+            "bytes_in": s.bytes_in,
+            "bytes_out": s.bytes_out,
+            "billed_total": s.billed_total.to_string(),
+            "last_query_ms": s.last_query_ms,
+        })),
     }))
 }
 
@@ -22422,9 +23134,11 @@ fn parse_route_intent(
     let in_tok = params.get("est_input_tokens").and_then(|v| v.as_u64());
     let out_tok = params.get("est_output_tokens").and_then(|v| v.as_u64());
     if in_tok.is_some() || out_tok.is_some() {
+        let cur_in = intent.est_input_tokens;
+        let cur_out = intent.est_output_tokens;
         intent = intent.with_tokens(
-            in_tok.unwrap_or(intent.est_input_tokens),
-            out_tok.unwrap_or(intent.est_output_tokens),
+            in_tok.unwrap_or(cur_in),
+            out_tok.unwrap_or(cur_out),
         );
     }
 
@@ -43458,6 +44172,7 @@ fn tx_type_selector(tx_type: &TransactionType) -> [u8; 4] {
         TransactionType::IncreaseAgentBond { .. } => "IncreaseAgentBond",
         TransactionType::WithdrawAgentBond { .. } => "WithdrawAgentBond",
         TransactionType::PayInsuranceClaim { .. } => "PayInsuranceClaim",
+        TransactionType::X402Settle { .. } => "X402Settle",
         TransactionType::RegisterValidator { .. } => "RegisterValidator",
         TransactionType::UpdateValidatorMetadata { .. } => "UpdateValidatorMetadata",
         TransactionType::ExitValidator => "ExitValidator",
@@ -43716,6 +44431,10 @@ fn enforce_typed_tx_spend_ceilings(
         tenzro_types::TransactionType::PauseAgent { .. }
         | tenzro_types::TransactionType::QuarantineAgent { .. }
         | tenzro_types::TransactionType::TerminateAgent { .. } => return Ok(()),
+        // x402 settlement is signed by the node's system key; the settling
+        // parties never signed this tx, so there is no payer delegation scope
+        // to enforce (authorization is the off-chain-verified x402 credential).
+        tenzro_types::TransactionType::X402Settle { .. } => return Ok(()),
         tenzro_types::TransactionType::TeeProviderRegister { .. }
         | tenzro_types::TransactionType::RegisterValidator { .. }
         | tenzro_types::TransactionType::UpdateValidatorMetadata { .. }
@@ -46406,6 +47125,9 @@ fn training_err(e: tenzro_training::TrainingError) -> JsonRpcError {
         | TE::PipelineStageMismatch { .. }
         | TE::QuantizationMismatch { .. }
         | TE::QuantizedPayloadMalformed(_)
+        | TE::CommitmentRequired
+        | TE::CommitmentInvalid { .. }
+        | TE::GradientNotFound { .. }
         | TE::InvalidSignature { .. } => -32602,
         TE::AttestationRequired(_) | TE::QuorumNotMet { .. } => -32011,
         TE::ConflictingFinalize { .. } => -32010,
@@ -46838,6 +47560,78 @@ async fn handle_training_decide_round(
             "round": round,
         }),
     };
+    Ok(value)
+}
+
+/// `tenzro_training_challengeCommitment`: fuzzy-compare a buffered gradient's
+/// claimed TOPLOC-class activation commitment against one the challenger
+/// recomputed by re-executing the trainer's inner loop from the same
+/// checkpoint and shard. A failed comparison evicts the trainer
+/// (`train:commitment_mismatch`) and drops their buffered gradient — this is
+/// the Open-tier fraud-proof path where no TEE attestation exists.
+///
+/// Params: `{ task_id, round, fragment, trainer_did, recomputed: ActivationCommitment }`
+async fn handle_training_challenge_commitment(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let task_id = p
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("task_id"))?
+        .to_string();
+    let round = p
+        .get("round")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing_param("round"))? as u32;
+    let fragment = p
+        .get("fragment")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing_param("fragment"))? as u32;
+    let trainer_did = p
+        .get("trainer_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("trainer_did"))?
+        .to_string();
+    let recomputed_value = p
+        .get("recomputed")
+        .ok_or_else(|| missing_param("recomputed"))?;
+    let recomputed: tenzro_types::training::ActivationCommitment =
+        serde_json::from_value(recomputed_value.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid recomputed commitment: {}", e),
+            data: None,
+        })?;
+    let state = node
+        .training_runtime
+        .syncers
+        .get(&task_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("training run '{}' not found", task_id),
+            data: None,
+        })?
+        .clone();
+    let verification = state
+        .challenge_activation_commitment(round, fragment, &trainer_did, &recomputed)
+        .await
+        .map_err(training_err)?;
+    // A failed challenge evicts the trainer, mutating the run — persist it.
+    if !verification.passed {
+        node.training_runtime
+            .persist_run(&state)
+            .map_err(training_err)?;
+    }
+    let evicted = !verification.passed;
+    let mut value = serde_json::to_value(&verification).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize verification: {}", e),
+        data: None,
+    })?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("evicted".into(), serde_json::json!(evicted));
+    }
     Ok(value)
 }
 
