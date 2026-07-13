@@ -67,6 +67,7 @@ pub mod aa_tee_bound_validator;
 pub mod aa_bootstrap_paymaster;
 pub mod erc7579;
 pub mod erc7943;
+pub mod corporate_actions;
 pub mod eip7702;
 pub mod permit2;
 pub mod secure_mint;
@@ -145,6 +146,12 @@ pub use erc7579::{
     SELECTOR_UNINSTALL_MODULE as ERC7579_SELECTOR_UNINSTALL_MODULE,
     SELECTOR_VALIDATE_USER_OP as ERC7579_SELECTOR_VALIDATE_USER_OP,
 };
+
+pub use corporate_actions::{
+    CorporateAction, CorporateActionEngine, CorporateActionError, CorporateActionRecord,
+    CORPORATE_ACTION_DOMAIN,
+};
+pub use erc7943::{KycGateRegistry, KycTierResolver};
 
 pub use stable_rate_oracle::{
     ChainlinkRateOracle, CrossRateFeed, GovernanceSetRateOracle, RateBacking, RateRow,

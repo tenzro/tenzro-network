@@ -301,8 +301,9 @@ log_level = "info"
 
 [network]
 listen_addr = "/ip4/0.0.0.0/tcp/9000,/ip4/0.0.0.0/udp/9000/quic-v1"
-# Bootstrap peers: omit to use the public testnet seeds; override with your own multiaddrs
-# for a private deployment.
+# Bootstrap peers: omit to resolve the network bootstrap name boot.tenzro.xyz
+# (SRV _tenzro-boot._tcp + TXT _tenzro-id._tcp records) automatically; set
+# explicit multiaddrs here or via --boot-nodes for a private deployment.
 
 [rpc]
 addr = "0.0.0.0:8545"
@@ -488,7 +489,8 @@ tenzro --rpc-url https://rpc.tenzro.xyz faucet
 ### 9.10 libp2p peer discovery: "no peers connected" for > 60 s
 
 - Ensure outbound UDP + TCP on port 9000 is not blocked by firewall.
-- Pass explicit boot nodes via `--boot-nodes` or config file.
+- Verify bootstrap DNS resolves: `dig SRV _tenzro-boot._tcp.boot.tenzro.xyz` — the node uses this by default when no boot nodes are configured.
+- Or pass explicit boot nodes via `--boot-nodes` or config file.
 - Check logs: `RUST_LOG=libp2p=debug,tenzro_network=debug ./target/release/tenzro-node ...`
 
 ### 9.11 macOS: "killed: 9" on first run of downloaded binary

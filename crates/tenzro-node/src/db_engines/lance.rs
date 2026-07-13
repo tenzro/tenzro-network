@@ -294,6 +294,7 @@ fn default_limit() -> usize {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use tenzro_database::WriteConsistency;
 
     #[tokio::test]
     async fn add_search_count_roundtrip() {
@@ -310,6 +311,7 @@ mod tests {
         let add = QueryRequest {
             database_id: "kb".into(),
             partition_index: 0,
+            consistency: WriteConsistency::default(),
             body: serde_json::json!({
                 "op": "add",
                 "rows": [
@@ -324,6 +326,7 @@ mod tests {
         let search = QueryRequest {
             database_id: "kb".into(),
             partition_index: 0,
+            consistency: WriteConsistency::default(),
             body: serde_json::json!({ "op": "search", "vector": [1.0, 0.0, 0.0], "limit": 1 }),
         };
         let r = engine.query(&search).await.unwrap();
@@ -334,6 +337,7 @@ mod tests {
         let count = QueryRequest {
             database_id: "kb".into(),
             partition_index: 0,
+            consistency: WriteConsistency::default(),
             body: serde_json::json!({ "op": "count" }),
         };
         let r = engine.query(&count).await.unwrap();
@@ -354,6 +358,7 @@ mod tests {
         let search = QueryRequest {
             database_id: "empty".into(),
             partition_index: 0,
+            consistency: WriteConsistency::default(),
             body: serde_json::json!({ "op": "search", "vector": [1.0, 0.0] }),
         };
         let r = engine.query(&search).await.unwrap();

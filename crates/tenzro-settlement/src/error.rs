@@ -75,6 +75,37 @@ pub enum SettlementError {
     #[error("Invalid signature: {0}")]
     InvalidSignature(String),
 
+    /// Saga not found
+    #[error("Saga not found: {0}")]
+    SagaNotFound(String),
+
+    /// Saga state transition not permitted by the state machine
+    #[error("Illegal saga transition from {from} to {to} for saga {saga_id}")]
+    IllegalSagaTransition {
+        /// Saga identifier
+        saga_id: String,
+        /// Current state
+        from: String,
+        /// Attempted next state
+        to: String,
+    },
+
+    /// Saga expired before completion
+    #[error("Saga expired: {0}")]
+    SagaExpired(String),
+
+    /// Saga orchestration error
+    #[error("Saga error: {0}")]
+    SagaError(String),
+
+    /// Netting batch not found
+    #[error("Netting batch not found: {0}")]
+    NettingBatchNotFound(String),
+
+    /// Netting computation error
+    #[error("Netting error: {0}")]
+    NettingError(String),
+
     /// Arithmetic overflow
     #[error("Arithmetic overflow: {0}")]
     ArithmeticOverflow(String),

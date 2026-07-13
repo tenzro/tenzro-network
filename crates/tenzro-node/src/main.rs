@@ -1392,7 +1392,22 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     // /ip*/.../p2p/<PEER_ID> multiaddrs. Append (not overwrite) to the
     // existing boot_nodes list so operators can combine static + dynamic
     // discovery during a transition window.
-    if let Some(name) = &cli.bootstrap_dns {
+    //
+    // When the operator supplies neither --boot-nodes nor --bootstrap-dns and
+    // the config file carries no boot nodes, fall back to the network
+    // bootstrap name so a fresh install joins the network with zero flags.
+    let bootstrap_dns_name = cli.bootstrap_dns.clone().or_else(|| {
+        if config.network.boot_nodes.is_empty() {
+            info!(
+                "No boot nodes configured; using default bootstrap DNS name tenzro.xyz \
+                 (override with --boot-nodes or --bootstrap-dns)"
+            );
+            Some("tenzro.xyz".to_string())
+        } else {
+            None
+        }
+    });
+    if let Some(name) = &bootstrap_dns_name {
         match tenzro_node::bootstrap_dns::resolve_bootstrap_dns(name).await {
             Ok(resolved) => {
                 if resolved.is_empty() {

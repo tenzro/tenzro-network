@@ -3541,8 +3541,12 @@ async def handle_database(text: str, metadata: dict = None) -> str:
             "engine_id": md["engine_id"],
             "placement": md.get("placement", "local"),
             "partitions": md.get("partitions", 1),
-            "replicas": md.get("replicas", 1),
         }
+        if md.get("min_replication") is not None or md.get("max_replication") is not None:
+            params["replication"] = {
+                "min_replication": md.get("min_replication", 2),
+                "max_replication": md.get("max_replication", 4),
+            }
         if md.get("owner_did"):
             params["owner_did"] = md["owner_did"]
         if md.get("access_policy"):
@@ -3579,6 +3583,8 @@ async def handle_database(text: str, metadata: dict = None) -> str:
         }
         if md.get("capability"):
             params["capability"] = md["capability"]
+        if md.get("consistency"):
+            params["consistency"] = md["consistency"]
         result = await rpc_call("tenzro_databaseQuery", params)
         return f"Database query:\n{json.dumps(result, indent=2)}"
 
@@ -3597,8 +3603,11 @@ async def handle_database(text: str, metadata: dict = None) -> str:
         }
         if md.get("partitions") is not None:
             params["partitions"] = md["partitions"]
-        if md.get("replicas") is not None:
-            params["replicas"] = md["replicas"]
+        if md.get("min_replication") is not None and md.get("max_replication") is not None:
+            params["replication"] = {
+                "min_replication": md["min_replication"],
+                "max_replication": md["max_replication"],
+            }
         if md.get("capability"):
             params["capability"] = md["capability"]
         result = await rpc_call("tenzro_rescaleDatabase", params)
@@ -3632,17 +3641,17 @@ async def handle_database(text: str, metadata: dict = None) -> str:
         "  - 'List database engines'\n"
         "  - 'List databases'\n"
         "  - 'Create database' (metadata: database_id, engine_id, owner_did|access_policy, "
-        "placement?, partitions?, replicas?, engine_config?, confidential?)\n"
+        "placement?, partitions?, min_replication?, max_replication?, engine_config?, confidential?)\n"
         "  - 'Get database' (metadata: database_id)\n"
         "  - 'List database partitions' (metadata: database_id)\n"
         "  - 'Get database partition' (metadata: database_id, partition_index)\n"
         "  - 'Issue database connection' (metadata: database_id, caller_did, bearer_did?, "
         "write?, ttl_secs?, capability?)\n"
         "  - 'Database query' (metadata: database_id, caller_did, body, partition_index?, "
-        "write?, capability?)\n"
+        "write?, consistency?, capability?)\n"
         "  - 'Authorize database read' (metadata: database_id, caller_did, capability?)\n"
         "  - 'Rescale database' (metadata: database_id, caller_did, placement, "
-        "partitions?, replicas?, capability?)\n"
+        "partitions?, min_replication?, max_replication?, capability?)\n"
         "  - 'Drop database' (metadata: database_id)"
     )
 

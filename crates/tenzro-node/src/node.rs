@@ -1308,6 +1308,13 @@ pub const DEFAULT_COMPUTE_RATE_PER_EPOCH: u128 = 1_000_000_000_000;
 /// settlement latency against the per-epoch pricing granularity.
 pub const BILLING_EPOCH_INTERVAL_SECS: u64 = 3_600;
 
+/// Interval between DvP saga expiry sweeps. Each tick compensates and expires
+/// every Open/Executing saga past its deadline so a stalled counterparty can
+/// not pin escrowed funds indefinitely. Five minutes bounds the worst-case
+/// delay between a saga's deadline and its refund without polling escrow state
+/// too aggressively.
+pub const SAGA_EXPIRY_SWEEP_INTERVAL_SECS: u64 = 300;
+
 /// Rendezvous (HRW) replica set size for shard self-selection. This is the
 /// top-`R` cut a storage-serving node applies when deciding which shards of an
 /// announced object it should hold. It matches the default erasure scheme's
@@ -1469,6 +1476,11 @@ pub struct TenzroNode {
     /// JoinHandle for the committee-DA inbound serving loop. Kept alive for the
     /// node's lifetime; dropped on stop.
     da_committee_server_handle: Option<tokio::task::JoinHandle<()>>,
+
+    /// JoinHandle for the database replicated-write inbound serving loop
+    /// (`/tenzro/db/replicate`). Applies writes fanned out by remote holders to
+    /// this node's copy of a partition. Kept alive for the node's lifetime.
+    db_replicate_server_handle: Option<tokio::task::JoinHandle<()>>,
 
     /// Background possession-challenge driver: periodically audits a random
     /// committee member's custody of a random held blob and scores the result
@@ -1882,6 +1894,21 @@ pub struct TenzroNode {
     payment_gateway: Option<Arc<TenzroPaymentGateway>>,
     x402_server: Option<Arc<X402PaymentServer>>,
 
+    /// Shared x402 facilitator, exposed as the verify/settle facilitator on
+    /// the web API. Built in `init_payments` from the node's supported chains
+    /// and settlement engine, and stored here so the web server can mount the
+    /// `/facilitator/x402/*` routes for external resource servers that
+    /// forward payloads for verification.
+    x402_facilitator: Option<Arc<tenzro_payments::x402::X402Facilitator>>,
+
+    /// Shared Visa TAP RFC 9421 verifier, exposed as the recognition
+    /// facilitator on the web API. Built in `init_payments` alongside the
+    /// gateway-registered [`VisaTapServer`] and stored here so the web server
+    /// can mount the `/facilitator/visa-tap/*` recognition routes. `None`
+    /// when the `visa-tap` feature is disabled or no identity registry exists.
+    #[cfg(feature = "visa-tap")]
+    visa_tap_verifier: Option<Arc<tenzro_payments::visa_tap::TapVerifier>>,
+
     /// Deferred event-loop sender slot for the consensus-mediated x402
     /// settlement callback. `init_payments` builds the callback before the
     /// event loop exists; `start()` fills this slot after `init_event_loop`
@@ -1907,6 +1934,11 @@ pub struct TenzroNode {
     /// queries served, bytes moved, total billed. RocksDB-backed via
     /// `CF_DATABASES / usage/*` once storage is up; in-memory before that.
     db_usage_meter: Arc<tenzro_database::DatabaseUsageMeter>,
+
+    /// Static-site registry — published site manifests mapping URL paths to
+    /// iroh blob hashes, served at `/sites/{site_id}`. RocksDB-backed via
+    /// `CF_METADATA / site:*` once storage is up; in-memory before that.
+    site_registry: Arc<crate::sites::SiteRegistry>,
 
     /// Spec-2 per-DID admission controller. Wired into the consensus
     /// mempool at startup (`set_admission`); also held here so RPC
@@ -1990,6 +2022,30 @@ pub struct TenzroNode {
     /// Tokens without a registered policy are unaffected. See
     /// [`tenzro_vm::secure_mint::SecureMintRegistry`].
     secure_mint_registry: Arc<tenzro_vm::secure_mint::SecureMintRegistry>,
+
+    /// Chainlink Proof-of-Reserve pull adapter. Reads per-asset PoR
+    /// aggregators and projects live readings into the reserve-attestation
+    /// shape `tenzro_submitReserveAttestation` consumes — the automatic
+    /// backing feed for tokenized-equity 1:1 mint (xStocks-class). Feeds are
+    /// registered per tokenized asset; the adapter never signs (signing stays
+    /// with the attestor identity at the RPC boundary).
+    chainlink_por_adapter: Arc<tenzro_bridge::ChainlinkPorAdapter>,
+
+    /// Corporate-action engine for tokenized equities: records splits,
+    /// dividends, and other actions that adjust per-share ratios or emit
+    /// distribution obligations against a tokenized-equity asset.
+    corporate_action_engine: Arc<tenzro_vm::corporate_actions::CorporateActionEngine>,
+
+    /// DvP saga orchestrator. Bundles multiple settlement legs (native /
+    /// escrow / channel / external) into an all-or-compensate unit driven
+    /// through the node-layer [`NodeLegExecutor`]. Persists to
+    /// `CF_SETTLEMENTS` under `saga:` / `saga_creator:` prefixes.
+    saga_orchestrator: Arc<tenzro_settlement::SagaOrchestrator>,
+
+    /// Multilateral netting engine. Compresses gross bilateral obligations
+    /// into a minimal deterministic instruction set per asset. Persists to
+    /// `CF_SETTLEMENTS` under `netting:` prefix.
+    netting_manager: Arc<tenzro_settlement::NettingManager>,
 
     /// Stable-asset registry. Holds per-issuer stable-unit policies
     /// (reserve source, controller config, allowed rails, settlement
@@ -2254,6 +2310,7 @@ impl TenzroNode {
         // poisoning the network-tip estimate consumed by `eth_syncing`.
         let chain_id = config.genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
         let peer_status = tenzro_network::PeerStatusTracker::new(chain_id);
+        let moe_disk_dir = config.data_dir.join("moe_experts");
 
         Ok(Self {
             config,
@@ -2267,6 +2324,7 @@ impl TenzroNode {
             da_peer_registry: None,
             da_committee_backend: None,
             da_committee_server_handle: None,
+            db_replicate_server_handle: None,
             da_possession_challenger: None,
             announce_signer: None,
             spt_ceiling_cache: None,
@@ -2342,7 +2400,9 @@ impl TenzroNode {
             audio_runtime: Arc::new(AudioRuntime::new()),
             video_runtime: Arc::new(VideoRuntime::new()),
             training_runtime: Arc::new(tenzro_training::TrainingRuntime::new()),
-            moe_runtime: Arc::new(tenzro_model::MoeExpertRuntime::new()),
+            moe_runtime: Arc::new(tenzro_model::MoeExpertRuntime::with_config(
+                tenzro_model::ResidencyConfig::auto().with_disk_dir(moe_disk_dir),
+            )),
             iroh_resolver: None,
             iroh_a2a_dispatcher: None,
             iroh_mcp_handler: None,
@@ -2350,10 +2410,14 @@ impl TenzroNode {
             identity_registry: None,
             payment_gateway: None,
             x402_server: None,
+            x402_facilitator: None,
+            #[cfg(feature = "visa-tap")]
+            visa_tap_verifier: None,
             x402_settle_event_slot: None,
             database_registry: None,
             db_engine_registry: Arc::new(crate::db_engine_registry::EngineRegistry::new()),
             db_usage_meter: Arc::new(tenzro_database::DatabaseUsageMeter::new()),
+            site_registry: Arc::new(crate::sites::SiteRegistry::new()),
             bazaar_catalog: None,
             admission: None,
             agent_kit: None,
@@ -2380,6 +2444,12 @@ impl TenzroNode {
             eip7702_delegation_registry: Arc::new(tenzro_vm::eip7702::DelegationRegistry::new()),
             permit2_nonce_bitmap: Arc::new(tenzro_vm::permit2::Permit2NonceBitmap::new()),
             secure_mint_registry: Arc::new(tenzro_vm::secure_mint::SecureMintRegistry::new()),
+            chainlink_por_adapter: Arc::new(tenzro_bridge::ChainlinkPorAdapter::new(String::new())),
+            corporate_action_engine: Arc::new(tenzro_vm::corporate_actions::CorporateActionEngine::new(
+                Arc::new(tenzro_vm::secure_mint::SecureMintRegistry::new()),
+            )),
+            saga_orchestrator: Arc::new(tenzro_settlement::SagaOrchestrator::new()),
+            netting_manager: Arc::new(tenzro_settlement::NettingManager::new()),
             stable_asset_registry: Arc::new(tenzro_vm::stable_asset_registry::StableAssetRegistry::new()),
             stable_rate_oracle: Arc::new(tenzro_vm::stable_rate_oracle::GovernanceSetRateOracle::new()),
             urwa_registry: Arc::new(tenzro_vm::erc7943::UrwaRegistry::new()),
@@ -2757,6 +2827,40 @@ impl TenzroNode {
             }
         }
 
+        // 7b-ter. Wire the database replicated-write inbound server
+        // (`/tenzro/db/replicate`). A node that holds a partition applies writes
+        // fanned out to it by the serving holder to its own copy of the
+        // partition and replies with the engine's response body. Runs on any
+        // role with a network handle + a database registry — a ModelProvider or
+        // dedicated database node can hold a partition without being a
+        // validator. Fail-closed inside the handler: it applies only when this
+        // node and the origin peer are both recognized holders.
+        if let (Some(network), Some(db_registry)) =
+            (self.network.clone(), self.database_registry.clone())
+        {
+            match network.local_peer_id().await {
+                Ok(local_peer) => {
+                    let net_dyn: Arc<dyn tenzro_network::NetworkService> = network;
+                    let server = crate::db_holder_dispatch::DbReplicateServer::new(
+                        net_dyn,
+                        self.db_engine_registry.clone(),
+                        db_registry,
+                        local_peer,
+                    );
+                    match server.spawn().await {
+                        Ok(handle) => {
+                            self.db_replicate_server_handle = Some(handle);
+                            info!("Database replicated-write inbound server wired");
+                        }
+                        Err(e) => warn!("Database-replicate server spawn failed (continuing): {}", e),
+                    }
+                }
+                Err(e) => {
+                    warn!("Database-replicate server skipped — local peer id unavailable: {}", e)
+                }
+            }
+        }
+
         // 7c. Spawn the SeedAgent provisioning daemon (Agent-Swarm Spec 10
         // Task #42). Drives per-month treasury draws against every Active
         // SeedAgent and auto-pauses agents under disabled / past-sunset
@@ -3039,16 +3143,21 @@ impl TenzroNode {
         if let Some(handle) = self.da_committee_server_handle.take() {
             handle.abort();
         }
+        if let Some(handle) = self.db_replicate_server_handle.take() {
+            handle.abort();
+        }
         self.da_committee_backend = None;
         self.da_peer_registry = None;
 
         self.bridge_router = None;
         self.payment_gateway = None;
         self.x402_server = None;
+        self.x402_facilitator = None;
         self.bazaar_catalog = None;
         self.database_registry = None;
         self.db_engine_registry = Arc::new(crate::db_engine_registry::EngineRegistry::new());
         self.db_usage_meter = Arc::new(tenzro_database::DatabaseUsageMeter::new());
+        self.site_registry = Arc::new(crate::sites::SiteRegistry::new());
         self.admission = None;
         self.identity_registry = None;
         self.agent_runtime = None;
@@ -3322,6 +3431,35 @@ impl TenzroNode {
                 store.clone() as Arc<dyn tenzro_storage::KvStore>,
             ),
         );
+        // Corporate-action engine shares the storage-backed Secure-Mint
+        // registry (splits mutate the reserve policy, dividends record only)
+        // and persists its own action chain + equity profiles to CF_TOKENS.
+        self.corporate_action_engine = Arc::new(
+            tenzro_vm::corporate_actions::CorporateActionEngine::with_storage(
+                self.secure_mint_registry.clone(),
+                store.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ),
+        );
+        // DvP saga orchestrator + netting engine: write-through to
+        // CF_SETTLEMENTS and rehydrate open/computed records on boot.
+        self.saga_orchestrator = Arc::new(
+            tenzro_settlement::SagaOrchestrator::with_storage(
+                store.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ),
+        );
+        self.netting_manager = Arc::new(
+            tenzro_settlement::NettingManager::with_storage(
+                store.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ),
+        );
+        // Chainlink Proof-of-Reserve pull adapter. The aggregator lives on an
+        // external chain (e.g. eip155:1), so the operator supplies the RPC
+        // endpoint via `TENZRO_POR_RPC_URL`; feeds are registered per
+        // tokenized asset over `tenzro_registerPorFeed`. Empty URL leaves the
+        // adapter constructed but unable to read until configured.
+        let por_rpc_url = std::env::var("TENZRO_POR_RPC_URL").unwrap_or_default();
+        self.chainlink_por_adapter =
+            Arc::new(tenzro_bridge::ChainlinkPorAdapter::new(por_rpc_url));
         self.stable_asset_registry = Arc::new(
             tenzro_vm::stable_asset_registry::StableAssetRegistry::with_storage(
                 store.clone() as Arc<dyn tenzro_storage::KvStore>,
@@ -5420,6 +5558,56 @@ impl TenzroNode {
                 interval_secs = BILLING_EPOCH_INTERVAL_SECS,
                 "Provider billing epoch loop spawned"
             );
+        }
+
+        // DvP saga expiry sweep. Compensates and expires every Open/Executing
+        // saga past its deadline; without this driver a stalled counterparty
+        // could pin an escrow's funds indefinitely. Compensation refunds
+        // already-completed legs, so it mutates escrow balances — validator
+        // role + leader gate, matching the SeedAgent daemon precedent, so one
+        // validator per tick drives the sweep. Convergence on other replicas
+        // is automatic: the orchestrator write-through to CF_SETTLEMENTS makes
+        // the expired state visible on the next hydrate, and `expire_sweep` is
+        // idempotent under the orchestrator's in-flight guard.
+        if self.config.roles.is_validator() {
+            if let Some(escrow_manager) = self.escrow_manager.clone() {
+                let saga_orchestrator = self.saga_orchestrator.clone();
+                let consensus = self.consensus.clone();
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                        SAGA_EXPIRY_SWEEP_INTERVAL_SECS,
+                    ));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    // Skip the immediate first tick — nothing is expired at boot.
+                    ticker.tick().await;
+                    let executor =
+                        crate::saga_executor::NodeLegExecutor::new(escrow_manager);
+                    loop {
+                        ticker.tick().await;
+                        // Leader gate: only the elected leader for the next 32
+                        // views drives the sweep. The conservative `Err` path
+                        // in `is_leader_in_next_views` returns `true` when
+                        // consensus has stalled or this node is outside the
+                        // set, but the in-flight guard still serialises the
+                        // compensation so double-refund is impossible.
+                        let is_authority = consensus
+                            .as_ref()
+                            .map(|c| c.is_leader_in_next_views(32))
+                            .unwrap_or(true);
+                        if !is_authority {
+                            continue;
+                        }
+                        let expired = saga_orchestrator.expire_sweep(&executor).await;
+                        if expired > 0 {
+                            info!(expired, "DvP saga expiry sweep compensated expired sagas");
+                        }
+                    }
+                });
+                info!(
+                    interval_secs = SAGA_EXPIRY_SWEEP_INTERVAL_SECS,
+                    "DvP saga expiry sweep spawned (validator role, leader-gated)"
+                );
+            }
         }
 
         // Phase B agent memory tier: Lance vector + Tantivy BM25 + DA archive,
@@ -7838,6 +8026,20 @@ impl TenzroNode {
         gateway.register_protocol(x402_server.clone());
         self.x402_server = Some(x402_server);
 
+        // x402 facilitator (verify/settle role) — mounted on the web API so
+        // external resource servers can forward payloads for verification and
+        // settlement. Same supported-chain set as the payment server; the
+        // node's settlement engine executes the Tenzro-native settle path.
+        let mut facilitator = tenzro_payments::x402::X402Facilitator::new(vec![
+            "tenzro".to_string(),
+            "base".to_string(),
+            "ethereum".to_string(),
+        ]);
+        if let Some(engine) = &self.settlement {
+            facilitator = facilitator.with_settlement_engine(engine.clone());
+        }
+        self.x402_facilitator = Some(Arc::new(facilitator));
+
         // x402 Bazaar resource catalog — RocksDB-backed when storage is up,
         // hydrating any previously-registered listings on boot; in-memory
         // otherwise (storage-less test/dev node). Discovery joins seller
@@ -7923,6 +8125,23 @@ impl TenzroNode {
         }
         self.db_engine_registry = Arc::new(engine_registry);
 
+        // Static-site registry — durable site manifests under `CF_METADATA /
+        // site:*`, hydrated on boot.
+        self.site_registry = if let Some(storage) = &self.storage {
+            match crate::sites::SiteRegistry::with_storage(
+                storage.clone() as Arc<dyn KvStore>,
+                crate::sites::SitesConfig::default(),
+            ) {
+                Ok(registry) => Arc::new(registry),
+                Err(e) => {
+                    warn!("Site registry hydration failed ({e}); starting in-memory");
+                    Arc::new(crate::sites::SiteRegistry::new())
+                }
+            }
+        } else {
+            Arc::new(crate::sites::SiteRegistry::new())
+        };
+
         // Register Visa TAP server (RFC 9421 HTTP Message Signatures).
         //
         // The TAP verifier requires an `AgentRegistryClient` to resolve
@@ -7934,7 +8153,7 @@ impl TenzroNode {
         #[cfg(feature = "visa-tap")]
         {
             use tenzro_payments::rfc9421::TenzroAgentRegistry;
-            use tenzro_payments::visa_tap::{DidResolverAgentRegistry, VisaTapServer};
+            use tenzro_payments::visa_tap::{DidResolverAgentRegistry, TapVerifier, VisaTapServer};
 
             if let Some(ref identity_registry) = self.identity_registry {
                 let did_resolver = Arc::new(TenzroAgentRegistry::new(identity_registry.clone()));
@@ -7942,31 +8161,56 @@ impl TenzroNode {
                 let visa_tap_server = VisaTapServer::new(
                     "api.tenzro.xyz".to_string(),
                     "0x0000000000000000000000000000000000000001".to_string(),
-                    agent_registry,
+                    agent_registry.clone(),
                 )
                 .with_default_asset("TNZO".to_string())
                 .with_default_chain("tenzro".to_string())
                 .with_challenge_store(challenge_store.clone());
                 gateway.register_protocol(Arc::new(visa_tap_server));
+
+                // Standalone recognition verifier over the same agent
+                // registry, exposed as the HTTP facilitator on the web API.
+                // `@authority` binding is enforced against the same domain
+                // the gateway server advertises.
+                let verifier =
+                    TapVerifier::new(agent_registry).with_domain("api.tenzro.xyz".to_string());
+                self.visa_tap_verifier = Some(Arc::new(verifier));
+
                 info!("Registered Visa TAP payment protocol (DID-resolver agent registry)");
             } else {
                 warn!("Skipping Visa TAP protocol registration — identity registry not available");
             }
         }
 
-        // Register Mastercard Agent Pay server (KYA + agentic tokens)
+        // Register Mastercard Agent Pay server (KYA + agentic tokens).
+        //
+        // KYA verification resolves the payer's TDIP identity, and agent
+        // signature checks resolve `keyid` DIDs through the same
+        // DID-resolver agent registry the Visa TAP path uses. Both require
+        // the identity registry, so registration is gated on its presence.
         #[cfg(feature = "mastercard-agent-pay")]
         {
             use tenzro_payments::mastercard::MastercardAgentPayServer;
-            let mastercard_server = MastercardAgentPayServer::new(
-                "0x0000000000000000000000000000000000000001",
-                "tenzro-network",
-            )
-            .with_default_asset("TNZO")
-            .with_default_chain("tenzro")
-            .with_challenge_store(challenge_store.clone());
-            gateway.register_protocol(Arc::new(mastercard_server));
-            info!("Registered Mastercard Agent Pay payment protocol");
+            use tenzro_payments::rfc9421::TenzroAgentRegistry;
+            use tenzro_payments::visa_tap::DidResolverAgentRegistry;
+
+            if let Some(ref identity_registry) = self.identity_registry {
+                let did_resolver = Arc::new(TenzroAgentRegistry::new(identity_registry.clone()));
+                let agent_registry = Arc::new(DidResolverAgentRegistry::did_only(did_resolver));
+                let mastercard_server = MastercardAgentPayServer::new(
+                    "0x0000000000000000000000000000000000000001",
+                    "tenzro-network",
+                    agent_registry,
+                    identity_registry.clone(),
+                )
+                .with_default_asset("TNZO")
+                .with_default_chain("tenzro")
+                .with_challenge_store(challenge_store.clone());
+                gateway.register_protocol(Arc::new(mastercard_server));
+                info!("Registered Mastercard Agent Pay payment protocol (DID-resolver agent registry)");
+            } else {
+                warn!("Skipping Mastercard Agent Pay protocol registration — identity registry not available");
+            }
         }
 
         info!("Registered payment protocols: {:?}", gateway.supported_protocols());
@@ -9994,9 +10238,27 @@ impl TenzroNode {
         self.payment_gateway.as_ref()
     }
 
+    /// Returns the shared Visa TAP recognition verifier if initialized. The
+    /// web server mounts the facilitator recognition routes over this.
+    #[cfg(feature = "visa-tap")]
+    pub fn visa_tap_verifier(
+        &self,
+    ) -> Option<&Arc<tenzro_payments::visa_tap::TapVerifier>> {
+        self.visa_tap_verifier.as_ref()
+    }
+
     /// Returns the registered x402 payment server (with its scheme registry) if initialized.
     pub fn x402_server(&self) -> Option<&Arc<X402PaymentServer>> {
         self.x402_server.as_ref()
+    }
+
+    /// Returns the x402 facilitator (verify/settle role) if the payment
+    /// gateway is up. The web server mounts the `/facilitator/x402/*` routes
+    /// over this so external resource servers can forward payment payloads.
+    pub fn x402_facilitator(
+        &self,
+    ) -> Option<&Arc<tenzro_payments::x402::X402Facilitator>> {
+        self.x402_facilitator.as_ref()
     }
 
     /// Returns the x402 Bazaar resource catalog if the payment gateway is up.
@@ -10019,6 +10281,12 @@ impl TenzroNode {
     /// storage is up).
     pub fn db_usage_meter(&self) -> &Arc<tenzro_database::DatabaseUsageMeter> {
         &self.db_usage_meter
+    }
+
+    /// Returns the static-site registry (always present; durable once storage
+    /// is up).
+    pub fn site_registry(&self) -> &Arc<crate::sites::SiteRegistry> {
+        &self.site_registry
     }
 
     /// Returns the model registry if initialized
@@ -10297,6 +10565,24 @@ impl TenzroNode {
         &self,
     ) -> Arc<tenzro_vm::secure_mint::SecureMintRegistry> {
         self.secure_mint_registry.clone()
+    }
+
+    pub fn chainlink_por_adapter(&self) -> Arc<tenzro_bridge::ChainlinkPorAdapter> {
+        self.chainlink_por_adapter.clone()
+    }
+
+    pub fn corporate_action_engine(
+        &self,
+    ) -> Arc<tenzro_vm::corporate_actions::CorporateActionEngine> {
+        self.corporate_action_engine.clone()
+    }
+
+    pub fn saga_orchestrator(&self) -> Arc<tenzro_settlement::SagaOrchestrator> {
+        self.saga_orchestrator.clone()
+    }
+
+    pub fn netting_manager(&self) -> Arc<tenzro_settlement::NettingManager> {
+        self.netting_manager.clone()
     }
 
     /// Spawn the stable-unit controller driver loop. Every `period_secs` it

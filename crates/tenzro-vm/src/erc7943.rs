@@ -47,6 +47,7 @@
 //! matching the wider compliance-mutation policy.
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -70,6 +71,141 @@ pub const PRECOMPILE_URWA_FORCED_TRANSFER: [u8; 20] = [
 pub const PRECOMPILE_URWA_KILL_SWITCH: [u8; 20] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x1c,
 ];
+
+/// Resolves an EVM address to a KYC tier (0 = Unverified .. 3 = Full).
+/// Implemented by the node layer over the TDIP identity registry.
+/// Object-safe and synchronous so the EVM transfer path can consult it
+/// without an async seam.
+pub trait KycTierResolver: Send + Sync {
+    fn tier_of(&self, address: &[u8; 20]) -> Option<u8>;
+}
+
+/// Per-token minimum-KYC-tier requirement plus the resolver that maps
+/// addresses to tiers. Fail-closed: if a token has a requirement and
+/// the resolver is missing, or an address does not resolve, the
+/// transfer is rejected.
+///
+/// Persistence: requirements write through to `CF_TOKENS / kyc_gate:{token_id}`
+/// and hydrate on construction. The resolver is runtime wiring only.
+pub struct KycGateRegistry {
+    requirements: DashMap<[u8; 32], u8>,
+    resolver: RwLock<Option<Arc<dyn KycTierResolver>>>,
+    storage: Option<Arc<dyn tenzro_storage::KvStore>>,
+}
+
+impl Default for KycGateRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KycGateRegistry {
+    pub fn new() -> Self {
+        Self {
+            requirements: DashMap::new(),
+            resolver: RwLock::new(None),
+            storage: None,
+        }
+    }
+
+    pub fn with_storage(storage: Arc<dyn tenzro_storage::KvStore>) -> Self {
+        let s = Self {
+            requirements: DashMap::new(),
+            resolver: RwLock::new(None),
+            storage: Some(storage),
+        };
+        s.hydrate();
+        s
+    }
+
+    pub fn set_resolver(&self, resolver: Arc<dyn KycTierResolver>) {
+        *self.resolver.write() = Some(resolver);
+    }
+
+    fn gate_key(token_id: &[u8; 32]) -> Vec<u8> {
+        let mut k = b"kyc_gate:".to_vec();
+        k.extend_from_slice(token_id);
+        k
+    }
+
+    fn hydrate(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_TOKENS, b"kyc_gate:") {
+            for (key, value) in entries {
+                // key = "kyc_gate:" || token_id(32)
+                if key.len() != 9 + 32 {
+                    continue;
+                }
+                let mut tid = [0u8; 32];
+                tid.copy_from_slice(&key[9..41]);
+                if let Ok(tier) = serde_json::from_slice::<u8>(&value) {
+                    self.requirements.insert(tid, tier);
+                }
+            }
+        }
+    }
+
+    pub fn set_requirement(&self, token_id: [u8; 32], required_tier: u8) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = serde_json::to_vec(&required_tier) {
+                let _ = storage.put(
+                    tenzro_storage::CF_TOKENS,
+                    &Self::gate_key(&token_id),
+                    &bytes,
+                );
+            }
+        }
+        self.requirements.insert(token_id, required_tier);
+    }
+
+    pub fn clear_requirement(&self, token_id: &[u8; 32]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.delete(tenzro_storage::CF_TOKENS, &Self::gate_key(token_id));
+        }
+        self.requirements.remove(token_id);
+    }
+
+    pub fn requirement(&self, token_id: &[u8; 32]) -> Option<u8> {
+        self.requirements.get(token_id).map(|e| *e.value())
+    }
+
+    /// Enforce the tier requirement for one participant. `role` labels
+    /// the rejection message ("sender" / "recipient"). No requirement
+    /// for the token means no gate; a requirement with a missing
+    /// resolver or unresolvable address rejects.
+    pub fn check_participant(
+        &self,
+        token_id: &[u8; 32],
+        address: &[u8; 20],
+        role: &str,
+    ) -> Result<(), String> {
+        let Some(required) = self.requirement(token_id) else {
+            return Ok(());
+        };
+        let resolver = self.resolver.read().clone();
+        let Some(resolver) = resolver else {
+            return Err(format!(
+                "uRWA KYC: tier {} required but no resolver is configured ({})",
+                required, role
+            ));
+        };
+        match resolver.tier_of(address) {
+            Some(tier) if tier >= required => Ok(()),
+            Some(tier) => Err(format!(
+                "uRWA KYC: {} tier {} below required tier {}",
+                role, tier, required
+            )),
+            None => Err(format!(
+                "uRWA KYC: {} 0x{} has no resolvable identity (tier {} required)",
+                role,
+                hex::encode(address),
+                required
+            )),
+        }
+    }
+}
 
 /// Per-account frozen-tokens entry. `amount` is in the token's
 /// smallest unit; `reason_hex` is optional context (court-order id,
@@ -117,6 +253,8 @@ pub struct UrwaRegistry {
     pub frozen: DashMap<([u8; 32], [u8; 20]), FrozenAmount>,
     /// Per-token kill-switch.
     pub kill_switch: DashMap<[u8; 32], KillSwitchState>,
+    /// Optional per-token KYC tier gate consulted on every transfer.
+    kyc_gate: Option<Arc<KycGateRegistry>>,
     storage: Option<Arc<dyn tenzro_storage::KvStore>>,
 }
 
@@ -131,6 +269,7 @@ impl UrwaRegistry {
         Self {
             frozen: DashMap::new(),
             kill_switch: DashMap::new(),
+            kyc_gate: None,
             storage: None,
         }
     }
@@ -139,10 +278,20 @@ impl UrwaRegistry {
         let s = Self {
             frozen: DashMap::new(),
             kill_switch: DashMap::new(),
+            kyc_gate: None,
             storage: Some(storage),
         };
         s.hydrate();
         s
+    }
+
+    pub fn with_kyc_gate(mut self, gate: Arc<KycGateRegistry>) -> Self {
+        self.kyc_gate = Some(gate);
+        self
+    }
+
+    pub fn kyc_gate(&self) -> Option<&Arc<KycGateRegistry>> {
+        self.kyc_gate.as_ref()
     }
 
     fn freeze_key(token_id: &[u8; 32], account: &[u8; 20]) -> Vec<u8> {
@@ -241,12 +390,15 @@ impl UrwaRegistry {
     }
 
     /// Hook the EVM transfer path must invoke: returns `Ok(())` if
-    /// the transfer is permitted (kill-switch off AND remaining
-    /// non-frozen balance covers `amount`), `Err(reason)` otherwise.
+    /// the transfer is permitted (kill-switch off, remaining
+    /// non-frozen balance covers `amount`, and both sender and
+    /// recipient satisfy the token's KYC tier requirement),
+    /// `Err(reason)` otherwise.
     pub fn check_transfer(
         &self,
         token_id: &[u8; 32],
         from: &[u8; 20],
+        to: &[u8; 20],
         from_balance: u128,
         amount: u128,
     ) -> Result<(), String> {
@@ -265,6 +417,25 @@ impl UrwaRegistry {
                 "uRWA: insufficient transferable balance (balance={} frozen={} requested={})",
                 from_balance, frozen, amount
             ));
+        }
+        if let Some(ref gate) = self.kyc_gate {
+            gate.check_participant(token_id, from, "sender")?;
+            gate.check_participant(token_id, to, "recipient")?;
+        }
+        Ok(())
+    }
+
+    /// Hook for the forced-transfer precompile (`0x101b`). The
+    /// compliance role bypasses the sender-side KYC check (the sender
+    /// may be a sanctioned or defunct party being seized from) but the
+    /// recipient must still satisfy the token's tier requirement.
+    pub fn check_forced_transfer(
+        &self,
+        token_id: &[u8; 32],
+        to: &[u8; 20],
+    ) -> Result<(), String> {
+        if let Some(ref gate) = self.kyc_gate {
+            gate.check_participant(token_id, to, "recipient")?;
         }
         Ok(())
     }
@@ -304,21 +475,38 @@ impl UrwaRegistry {
 mod tests {
     use super::*;
 
+    struct StaticTierResolver {
+        tiers: std::collections::HashMap<[u8; 20], u8>,
+    }
+
+    impl KycTierResolver for StaticTierResolver {
+        fn tier_of(&self, address: &[u8; 20]) -> Option<u8> {
+            self.tiers.get(address).copied()
+        }
+    }
+
+    fn resolver_with(entries: &[([u8; 20], u8)]) -> Arc<dyn KycTierResolver> {
+        Arc::new(StaticTierResolver {
+            tiers: entries.iter().copied().collect(),
+        })
+    }
+
     #[test]
     fn frozen_amount_blocks_partial_transfer() {
         let reg = UrwaRegistry::new();
         let token = [1u8; 32];
         let alice = [0xaa; 20];
+        let bob = [0xbb; 20];
 
         // No freeze: full balance available.
-        assert!(reg.check_transfer(&token, &alice, 1000, 500).is_ok());
+        assert!(reg.check_transfer(&token, &alice, &bob, 1000, 500).is_ok());
 
         // Freeze 800 of 1000. Transferable = 200.
         reg.set_frozen_tokens(token, alice, 800, Some("KYC pending".into()), 1_000);
         assert_eq!(reg.get_frozen_tokens(&token, &alice), 800);
 
-        assert!(reg.check_transfer(&token, &alice, 1000, 200).is_ok());
-        assert!(reg.check_transfer(&token, &alice, 1000, 201).is_err());
+        assert!(reg.check_transfer(&token, &alice, &bob, 1000, 200).is_ok());
+        assert!(reg.check_transfer(&token, &alice, &bob, 1000, 201).is_err());
     }
 
     #[test]
@@ -326,9 +514,10 @@ mod tests {
         let reg = UrwaRegistry::new();
         let token = [2u8; 32];
         let alice = [0xaa; 20];
+        let bob = [0xbb; 20];
 
         assert!(!reg.is_kill_switched(&token));
-        assert!(reg.check_transfer(&token, &alice, 1000, 100).is_ok());
+        assert!(reg.check_transfer(&token, &alice, &bob, 1000, 100).is_ok());
 
         reg.trigger_kill_switch(
             token,
@@ -338,12 +527,112 @@ mod tests {
         );
         assert!(reg.is_kill_switched(&token));
 
-        let err = reg.check_transfer(&token, &alice, 1000, 1).unwrap_err();
+        let err = reg.check_transfer(&token, &alice, &bob, 1000, 1).unwrap_err();
         assert!(err.contains("kill-switch active"));
 
         reg.clear_kill_switch(&token);
         assert!(!reg.is_kill_switched(&token));
-        assert!(reg.check_transfer(&token, &alice, 1000, 1).is_ok());
+        assert!(reg.check_transfer(&token, &alice, &bob, 1000, 1).is_ok());
+    }
+
+    #[test]
+    fn kyc_gate_allows_when_both_meet_tier() {
+        let token = [3u8; 32];
+        let alice = [0xaa; 20];
+        let bob = [0xbb; 20];
+
+        let gate = Arc::new(KycGateRegistry::new());
+        gate.set_requirement(token, 2);
+        gate.set_resolver(resolver_with(&[(alice, 2), (bob, 3)]));
+
+        let reg = UrwaRegistry::new().with_kyc_gate(gate);
+        assert!(reg.check_transfer(&token, &alice, &bob, 1000, 100).is_ok());
+    }
+
+    #[test]
+    fn kyc_gate_rejects_recipient_below_tier() {
+        let token = [4u8; 32];
+        let alice = [0xaa; 20];
+        let bob = [0xbb; 20];
+
+        let gate = Arc::new(KycGateRegistry::new());
+        gate.set_requirement(token, 2);
+        gate.set_resolver(resolver_with(&[(alice, 3), (bob, 1)]));
+
+        let reg = UrwaRegistry::new().with_kyc_gate(gate);
+        let err = reg.check_transfer(&token, &alice, &bob, 1000, 100).unwrap_err();
+        assert!(err.contains("recipient tier 1 below required tier 2"));
+    }
+
+    #[test]
+    fn kyc_gate_missing_resolver_fails_closed() {
+        let token = [5u8; 32];
+        let alice = [0xaa; 20];
+        let bob = [0xbb; 20];
+
+        let gate = Arc::new(KycGateRegistry::new());
+        gate.set_requirement(token, 1);
+        // No resolver installed.
+
+        let reg = UrwaRegistry::new().with_kyc_gate(gate);
+        let err = reg.check_transfer(&token, &alice, &bob, 1000, 100).unwrap_err();
+        assert!(err.contains("no resolver is configured"));
+    }
+
+    #[test]
+    fn kyc_gate_unresolvable_address_fails_closed() {
+        let token = [6u8; 32];
+        let alice = [0xaa; 20];
+        let stranger = [0xcc; 20];
+
+        let gate = Arc::new(KycGateRegistry::new());
+        gate.set_requirement(token, 1);
+        gate.set_resolver(resolver_with(&[(alice, 3)]));
+
+        let reg = UrwaRegistry::new().with_kyc_gate(gate);
+        let err = reg
+            .check_transfer(&token, &alice, &stranger, 1000, 100)
+            .unwrap_err();
+        assert!(err.contains("no resolvable identity"));
+    }
+
+    #[test]
+    fn kyc_gate_no_requirement_passes() {
+        let gate = Arc::new(KycGateRegistry::new());
+        // Requirement set only for a different token; no resolver at all.
+        gate.set_requirement([9u8; 32], 3);
+
+        let token = [7u8; 32];
+        let reg = UrwaRegistry::new().with_kyc_gate(gate);
+        assert!(reg
+            .check_transfer(&token, &[0xaa; 20], &[0xbb; 20], 1000, 100)
+            .is_ok());
+    }
+
+    #[test]
+    fn forced_transfer_skips_sender_but_gates_recipient() {
+        let token = [8u8; 32];
+        let seized = [0xdd; 20]; // no identity at all
+        let custodian = [0xee; 20];
+        let unverified = [0xef; 20];
+
+        let gate = Arc::new(KycGateRegistry::new());
+        gate.set_requirement(token, 2);
+        gate.set_resolver(resolver_with(&[(custodian, 3), (unverified, 0)]));
+
+        let reg = UrwaRegistry::new().with_kyc_gate(gate);
+
+        // Normal transfer from the seized address would fail (sender unresolvable).
+        assert!(reg
+            .check_transfer(&token, &seized, &custodian, 1000, 100)
+            .is_err());
+
+        // Forced transfer to a qualifying custodian passes.
+        assert!(reg.check_forced_transfer(&token, &custodian).is_ok());
+
+        // Forced transfer still cannot land on an under-tier recipient.
+        let err = reg.check_forced_transfer(&token, &unverified).unwrap_err();
+        assert!(err.contains("recipient tier 0 below required tier 2"));
     }
 
     #[test]

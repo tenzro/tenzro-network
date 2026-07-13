@@ -28,6 +28,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
 bs58 = { workspace = true }
+quick-xml = { workspace = true }
 
 # Chain-derivation layer (stellar/xrpl/EVM address encoding + additive HD
 # derivation). Versions reuse the workspace pins.

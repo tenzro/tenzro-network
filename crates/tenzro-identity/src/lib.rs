@@ -71,6 +71,7 @@ pub mod erc8004_daml;
 pub mod erc8004_svm;
 pub mod error;
 pub mod identity;
+pub mod iso20022;
 pub mod ivms101;
 pub mod keri;
 pub mod kya;
@@ -110,6 +111,10 @@ pub use error::{IdentityError, Result};
 pub use identity::{
     validate_username, IdentityData, IdentityStatus, KeyPurpose, PublicKeyInfo, RevocationEntry,
     ServiceEndpoint, TenzroIdentity,
+};
+pub use iso20022::{
+    DecimalAmount, Iso20022Error, Ivms101Mapping, Pacs008Document, TransferDetails,
+    PACS008_NAMESPACE,
 };
 pub use kya::{
     compute_kya_level, is_kya_service_type, AuthenticatorBinding, KyaLevel, KyaRecord,

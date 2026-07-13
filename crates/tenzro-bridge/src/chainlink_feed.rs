@@ -32,7 +32,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// 4-byte function selectors for the AggregatorV3Interface ABI.
@@ -385,13 +384,13 @@ fn pow10(n: u32) -> u128 {
     r
 }
 
-fn u128_from_be_32(b: &[u8]) -> u128 {
+pub(crate) fn u128_from_be_32(b: &[u8]) -> u128 {
     let mut arr = [0u8; 16];
     arr.copy_from_slice(&b[16..32]);
     u128::from_be_bytes(arr)
 }
 
-fn u64_from_be_32(b: &[u8]) -> u64 {
+pub(crate) fn u64_from_be_32(b: &[u8]) -> u64 {
     let mut arr = [0u8; 8];
     arr.copy_from_slice(&b[24..32]);
     u64::from_be_bytes(arr)
@@ -568,10 +567,4 @@ mod tests {
         assert_eq!(FEED_BTC_USD_MAINNET.to_lowercase(), "0xf4030086522a5beea4988f8ca5b36dbc97bee88c");
         assert_eq!(FEED_LINK_USD_MAINNET.to_lowercase(), "0x2c1d072e956affc0d435cb7ac38ef18d24d9127c");
     }
-}
-
-// Bridge `Arc` used by the registration-side public API.
-#[allow(dead_code)]
-pub(crate) fn _arc_marker() -> Arc<()> {
-    Arc::new(())
 }

@@ -110,48 +110,6 @@ impl Default for NetworkConfig {
 }
 
 impl NetworkConfig {
-    /// Creates a testnet configuration
-    pub fn testnet() -> Self {
-        Self {
-            boot_nodes: vec![
-                "/dns4/testnet-boot-1.tenzro.xyz/tcp/9000".parse().unwrap(),
-                "/dns4/testnet-boot-2.tenzro.xyz/tcp/9000".parse().unwrap(),
-            ],
-            gossip_topics: vec![
-                "tenzro/testnet/blocks/1.0.0".to_string(),
-                "tenzro/testnet/transactions/1.0.0".to_string(),
-                "tenzro/testnet/consensus/1.0.0".to_string(),
-                "tenzro/testnet/attestations/1.0.0".to_string(),
-                "tenzro/testnet/models/1.0.0".to_string(),
-                "tenzro/testnet/inference/1.0.0".to_string(),
-            ],
-            enable_mdns: false,
-            ..Default::default()
-        }
-    }
-
-    /// Creates a mainnet configuration
-    pub fn mainnet() -> Self {
-        Self {
-            boot_nodes: vec![
-                "/dns4/mainnet-boot-1.tenzro.xyz/tcp/9000".parse().unwrap(),
-                "/dns4/mainnet-boot-2.tenzro.xyz/tcp/9000".parse().unwrap(),
-                "/dns4/mainnet-boot-3.tenzro.xyz/tcp/9000".parse().unwrap(),
-            ],
-            gossip_topics: vec![
-                "tenzro/mainnet/blocks/1.0.0".to_string(),
-                "tenzro/mainnet/transactions/1.0.0".to_string(),
-                "tenzro/mainnet/consensus/1.0.0".to_string(),
-                "tenzro/mainnet/attestations/1.0.0".to_string(),
-                "tenzro/mainnet/models/1.0.0".to_string(),
-                "tenzro/mainnet/inference/1.0.0".to_string(),
-            ],
-            enable_relay: false,
-            enable_mdns: false,
-            ..Default::default()
-        }
-    }
-
     /// Creates a local development configuration
     pub fn local() -> Self {
         Self {

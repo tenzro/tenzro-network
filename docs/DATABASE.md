@@ -18,7 +18,7 @@ This document describes the descriptor, the three placement tiers, the engine ca
 
 Four properties shape the surface:
 
-1. **Engine-agnostic protocol layer.** `tenzro-database` models a database as a `DatabaseDescriptor` — an engine id, a placement, a partition/replica count, an opaque per-engine config, an access policy, and an optional confidential seal. It computes placement and gates access; it does not run queries. The node layer holds the `EngineRegistry` that maps an engine id to a driver and dispatches `tenzro_databaseQuery` to it.
+1. **Engine-agnostic protocol layer.** `tenzro-database` models a database as a `DatabaseDescriptor` — an engine id, a placement, a partition count, a replication policy, an opaque per-engine config, an access policy, and an optional confidential seal. It computes placement and gates access; it does not run queries. The node layer holds the `EngineRegistry` that maps an engine id to a driver and dispatches `tenzro_databaseQuery` to it.
 
 2. **Elastic from local to global.** The same descriptor scales along one continuum — `Local` (this machine), `LanCluster` (a discovered local segment), `Network` (holders across the network). A developer starts a database on their own machine and rescales it outward in place without recreating it.
 
@@ -45,6 +45,8 @@ The node layer holds the engine drivers, the `EngineRegistry`, query dispatch, c
 | `network` | Holders across the network | Partitions/replicas placed across network candidates; descriptor gossiped on `tenzro/databases` |
 
 Local and LAN databases have no network holders to announce and are not gossiped. A network database's descriptor is broadcast so peers converge on the same shape without polling; the consumer applies it idempotently as metadata (no placement recompute on the receiving side).
+
+**Replication policy.** Each partition is placed onto between `min_replication` and `max_replication` holders (default 2–4). The bounds are a policy, not a fixed count: placement targets `max_replication` when enough candidates exist, a write that cannot reach `min_replication` acknowledgements fails, and repair never grows a partition past `max_replication`. The create and rescale requests carry the policy as a `replication: {min_replication, max_replication}` object; omitted on create, the default applies — omitted on rescale, the database's current policy is kept.
 
 ---
 
@@ -103,7 +105,7 @@ Access control is shared with file storage — the same `AccessPolicy` and `Conf
 
 A read is gated by `permits_read(caller, has_cap)`; an administrative operation (rescale, drop, issuing a connection) by `permits_admin(caller, has_cap)`. The node adjudicates every query and every admin op fail-closed before any engine work runs.
 
-**DID proof.** A `caller_did` on its own is an assertion, not a proof. Every gated call accepts an optional `envelope` parameter — a hex-encoded signed DID envelope binding the caller's DID, the RPC method name, and a SHA-256 hash of the call's resolved parameters, with a nonce checked for replay. Identity-based access passes (the owner, an allowlisted DID) **require** the envelope: without it the gate denies with `caller DID not authenticated: signed envelope required`. Capability-based passes are their own proof — the AAP token is signed — so a capability caller needs no envelope. Public-policy reads are exempt. The envelope's parameter hash binds the *resolved* values (for rescale, the effective partition/replica counts after defaulting), so a replayed envelope cannot authorize a different operation.
+**DID proof.** A `caller_did` on its own is an assertion, not a proof. Every gated call accepts an optional `envelope` parameter — a hex-encoded signed DID envelope binding the caller's DID, the RPC method name, and a SHA-256 hash of the call's resolved parameters, with a nonce checked for replay. Identity-based access passes (the owner, an allowlisted DID) **require** the envelope: without it the gate denies with `caller DID not authenticated: signed envelope required`. Capability-based passes are their own proof — the AAP token is signed — so a capability caller needs no envelope. Public-policy reads are exempt. The envelope's parameter hash binds the *resolved* values (for rescale, the effective partition count and min/max replication bounds after defaulting), so a replayed envelope cannot authorize a different operation.
 
 **Confidential seal.** A network-tier database holding sensitive data can carry a `ConfidentialSeal`: an encryption-at-rest envelope with one wrapped data key per authorized DID (`hpke-x25519-hkdf-sha256-aes-256-gcm`). The crate records the wrapped-key envelopes; the node/client layer does the crypto. This is opt-in on top of the always-on access policy, not a replacement for it — the layered model is: capability gate for every tier, encryption-at-rest for sensitive network data.
 
@@ -115,7 +117,7 @@ A developer uses a Tenzro database the way they use a hosted one — they get a 
 
 `tenzro_issueDatabaseConnection` mints the credential. The caller must be the owner (or hold the write-action capability). Params: `{database_id, caller_did, bearer_did?, write?, ttl_secs?, capability?, envelope?}`. It returns an AAP capability token pinned to that single database (`allowed_resources: [database_id]`), a `mode` of `read_only` or `read_write`, the read/write actions, a TTL, and the `query_method` to call. `bearer_did` defaults to the caller — an owner can issue a read-only connection to another DID.
 
-`tenzro_databaseQuery` runs an engine-dialect query. Params: `{database_id, caller_did, body, partition_index?, write?, capability?, envelope?, payment_credential?}`. `body` is the engine's own query payload — `{sql, params}` for Postgres, a `{op, ...}` vector search for Qdrant or Lance, a `{op, ...}` full-text search for Tantivy, a `{command: [...]}` for Valkey. The node gates the call, then:
+`tenzro_databaseQuery` runs an engine-dialect query. Params: `{database_id, caller_did, body, partition_index?, write?, consistency?, capability?, envelope?, payment_credential?}`. `consistency` is the write acknowledgement level — `quorum` (default: a majority of the partition's holders acknowledge) or `all` (every holder acknowledges); it is ignored on the read path. `body` is the engine's own query payload — `{sql, params}` for Postgres, a `{op, ...}` vector search for Qdrant or Lance, a `{op, ...}` full-text search for Tantivy, a `{command: [...]}` for Valkey. The node gates the call, then:
 
 - If this node holds the target partition, it dispatches `body` to the engine driver and returns the result.
 - If it does not, it returns the holder endpoints for that partition so the caller reaches one that does. There is no silent local execution against a partition this node does not hold.
@@ -134,9 +136,9 @@ A database owner can charge non-owner callers per query. The descriptor carries 
 
 ## 8. Elastic rescale
 
-`tenzro_rescaleDatabase` grows or shrinks a database along the continuum in place. It is administrative — the caller passes the owner DID (or a write-action capability). Params: `{database_id, caller_did, placement, partitions?, replicas?, capability?, envelope?}`. It recomputes placement over the current cluster candidates and rewrites the partition rows; a network-tier result is re-gossiped so peers converge on the new shape.
+`tenzro_rescaleDatabase` grows or shrinks a database along the continuum in place. It is administrative — the caller passes the owner DID (or a write-action capability). Params: `{database_id, caller_did, placement, partitions?, replication?, capability?, envelope?}` — `replication` is the `{min_replication, max_replication}` policy object, kept at the database's current policy when omitted. It recomputes placement over the current cluster candidates and rewrites the partition rows; a network-tier result is re-gossiped so peers converge on the new shape.
 
-A database created `local` with one partition can be rescaled to `lan_cluster` and then `network` with more partitions and replicas as demand grows — without recreating it or moving the developer's connection.
+A database created `local` with one partition can be rescaled to `lan_cluster` and then `network` with more partitions and a wider replication policy as demand grows — without recreating it or moving the developer's connection.
 
 ---
 
@@ -168,7 +170,8 @@ Databases mirror the two-sided model of the rest of the network. A developer can
 ```
 tenzro database engines
 tenzro database create <id> --engine <engine> --owner-did <did> \
-  [--placement <local|lan_cluster|network>] [--partitions <n>] [--replicas <n>] \
+  [--placement <local|lan_cluster|network>] [--partitions <n>] \
+  [--min-replication <n>] [--max-replication <n>] \
   [--engine-config <file.json>] [--access-policy <file.json>] [--confidential <file.json>] \
   [--price-per-query <amount>] [--asset <asset>]
 tenzro database get <id>
@@ -177,10 +180,11 @@ tenzro database partitions <id>
 tenzro database connect <id> --caller-did <did> [--bearer-did <did>] [--write] \
   [--ttl-secs <secs>] [--capability <jwt>] [--envelope <hex>]
 tenzro database query <id> --caller-did <did> --body <file.json> [--partition <n>] [--write] \
-  [--capability <jwt>] [--envelope <hex>] [--payment-credential <file.json>]
+  [--consistency <quorum|all>] [--capability <jwt>] [--envelope <hex>] \
+  [--payment-credential <file.json>]
 tenzro database authorize <id> --caller-did <did> [--capability <jwt>] [--envelope <hex>]
 tenzro database rescale <id> --caller-did <did> --placement <mode> [--partitions <n>] \
-  [--replicas <n>] [--capability <jwt>] [--envelope <hex>]
+  [--min-replication <n> --max-replication <n>] [--capability <jwt>] [--envelope <hex>]
 tenzro database usage <id> --caller-did <did> [--capability <jwt>] [--envelope <hex>]
 tenzro database drop <id> --caller-did <did> [--capability <jwt>] [--envelope <hex>]
 ```

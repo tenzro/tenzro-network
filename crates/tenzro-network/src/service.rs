@@ -12,6 +12,10 @@ use crate::{
         DaCommitteeError, DaCommitteeRequest, DaCommitteeResponse,
         MAX_INBOUND_STREAMS_PER_PEER as DA_COMMITTEE_MAX_INBOUND_STREAMS_PER_PEER,
     },
+    db_replicate_proto::{
+        DbReplicateError, DbReplicateRequest, DbReplicateResponse,
+        MAX_INBOUND_STREAMS_PER_PEER as DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER,
+    },
     error::{NetworkError, Result},
     gossip::{MessageDeduplicator, MessageValidation, validate_gossip_message},
     message::{ConsensusMessage, NetworkMessage, MessagePayload},
@@ -73,6 +77,30 @@ fn dial_opts_new_port(addr: Multiaddr) -> DialOpts {
             .address(addr)
             .allocate_new_port()
             .build(),
+    }
+}
+
+/// Promote Kademlia from Client to Server mode once sustained direct
+/// reachability is confirmed. No-op if already in Server mode. Called from
+/// AutoNAT-client success + DCUtR-success handlers where reachability
+/// confidence advances.
+///
+/// Rationale (per libp2p `kad::Mode` docs + go-libp2p auto-mode): a NAT'd
+/// node in Server mode hands out records other peers can't validate via
+/// dial-back and pollutes k-buckets. Start in Client and promote once the
+/// reachability tracker reports `Direct` at full confidence.
+fn maybe_promote_kad_to_server(state: &mut EventLoopState) {
+    if state.reachability.tier() == crate::reachability::ReachabilityTier::Direct {
+        // libp2p exposes no getter for the current mode; setting Server is
+        // idempotent — a repeat call is a no-op inside kad::Behaviour.
+        state
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .set_mode(Some(libp2p::kad::Mode::Server));
+        tracing::info!(
+            "Kademlia promoted to Server mode — sustained direct reachability confirmed"
+        );
     }
 }
 
@@ -402,6 +430,22 @@ pub struct InboundDaCommittee {
     pub request: DaCommitteeRequest,
 }
 
+/// An inbound database replicated-write request (`ApplyWrite`) received from a
+/// peer holder of the same partition.
+///
+/// The serving holder's replication handler MUST eventually call
+/// [`NetworkService::send_db_replicate_response`] with the matching
+/// `request_id`, supplying the engine's response body (for a successful apply)
+/// or an error. Dropping the value without responding leaves the requester's
+/// request to time out, which it treats the same as a failed holder for write
+/// consistency.
+#[derive(Debug)]
+pub struct InboundDbReplicate {
+    pub peer: PeerId,
+    pub request_id: InboundRequestId,
+    pub request: DbReplicateRequest,
+}
+
 /// Network service trait
 #[async_trait]
 pub trait NetworkService: Send + Sync {
@@ -616,6 +660,40 @@ pub trait NetworkService: Send + Sync {
     async fn subscribe_da_committee_requests(
         &self,
     ) -> Result<mpsc::UnboundedReceiver<InboundDaCommittee>>;
+
+    /// Sends one database replicated-write request (`ApplyWrite`) to a peer
+    /// holder of the same partition and awaits its reply.
+    ///
+    /// Reply-carrying like the committee-DA protocol: the caller needs the
+    /// peer's `Applied` acknowledgment (or an error) to count it toward the
+    /// write's consistency requirement. The event loop parks the caller's reply
+    /// channel keyed by the `OutboundRequestId` and fulfils it when the peer's
+    /// `Message::Response` arrives. The holder is addressed by `PeerId`
+    /// directly — the node-layer adapter resolves the holder endpoint id
+    /// (`host#peer`) → `PeerId` before calling this.
+    async fn db_replicate_request(
+        &self,
+        peer: PeerId,
+        request: DbReplicateRequest,
+    ) -> Result<DbReplicateResponse>;
+
+    /// Answers an inbound database replicated-write request identified by
+    /// `request_id`. Called by a holder's replication handler after it applies
+    /// the write against its local engine. If the parked channel has been
+    /// dropped the call returns `Err(NetworkError::ChannelSend)`.
+    async fn send_db_replicate_response(
+        &self,
+        request_id: InboundRequestId,
+        response: DbReplicateResponse,
+    ) -> Result<()>;
+
+    /// Subscribes to inbound database replicated-write requests. Only one
+    /// subscriber is supported at a time — calling twice replaces the previous
+    /// channel. Used by a holder's replication handler to receive `ApplyWrite`
+    /// requests fanned out by serving holders.
+    async fn subscribe_db_replicate_requests(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<InboundDbReplicate>>;
 }
 
 /// Commands sent to the network service
@@ -806,6 +884,28 @@ enum NetworkCommand {
     /// calling twice replaces the previous channel.
     SubscribeDaCommitteeRequests {
         response: oneshot::Sender<Result<mpsc::UnboundedReceiver<InboundDaCommittee>>>,
+    },
+    /// Sends one database replicated-write request to `peer`. The `response`
+    /// oneshot is parked in `pending_db_replicate_requests` keyed by the
+    /// returned `OutboundRequestId` and fulfilled asynchronously when the
+    /// peer's `Message::Response` arrives (or an `OutboundFailure` maps to an
+    /// error).
+    DbReplicateRequest {
+        peer: PeerId,
+        request: DbReplicateRequest,
+        response: oneshot::Sender<Result<DbReplicateResponse>>,
+    },
+    /// Answers an inbound database replicated-write request parked under
+    /// `request_id`.
+    SendDbReplicateResponse {
+        request_id: InboundRequestId,
+        response_payload: DbReplicateResponse,
+        response: oneshot::Sender<Result<()>>,
+    },
+    /// Subscribes to inbound database replicated-write requests. One subscriber
+    /// per node — calling twice replaces the previous channel.
+    SubscribeDbReplicateRequests {
+        response: oneshot::Sender<Result<mpsc::UnboundedReceiver<InboundDbReplicate>>>,
     },
     Shutdown {
         response: oneshot::Sender<Result<()>>,
@@ -1488,6 +1588,42 @@ impl NetworkService for TenzroNetworkService {
         self.send_command(|response| NetworkCommand::SubscribeDaCommitteeRequests { response })
             .await
     }
+
+    async fn db_replicate_request(
+        &self,
+        peer: PeerId,
+        request: DbReplicateRequest,
+    ) -> Result<DbReplicateResponse> {
+        // The `response` oneshot is not fulfilled at dispatch — the event loop
+        // parks it keyed by the `OutboundRequestId` and completes it when the
+        // peer replies. `send_command` awaits exactly that completion.
+        self.send_command(move |response| NetworkCommand::DbReplicateRequest {
+            peer,
+            request,
+            response,
+        })
+        .await
+    }
+
+    async fn send_db_replicate_response(
+        &self,
+        request_id: InboundRequestId,
+        response: DbReplicateResponse,
+    ) -> Result<()> {
+        self.send_command(move |resp| NetworkCommand::SendDbReplicateResponse {
+            request_id,
+            response_payload: response,
+            response: resp,
+        })
+        .await
+    }
+
+    async fn subscribe_db_replicate_requests(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<InboundDbReplicate>> {
+        self.send_command(|response| NetworkCommand::SubscribeDbReplicateRequests { response })
+            .await
+    }
 }
 
 /// Event loop state
@@ -1613,6 +1749,30 @@ struct EventLoopState {
     /// rejected with `DaCommitteeError::ServerBusy`. Decremented on
     /// `ResponseSent` / `InboundFailure`.
     da_committee_inbound_inflight: HashMap<PeerId, usize>,
+    /// Pending outbound database replicated-write reply channels keyed by
+    /// `OutboundRequestId`. Parked when a `DbReplicateRequest` command is
+    /// dispatched; fulfilled with the peer's `DbReplicateResponse` on
+    /// `Message::Response`, or with a transport error on `OutboundFailure`.
+    pending_db_replicate_requests:
+        HashMap<OutboundRequestId, oneshot::Sender<Result<DbReplicateResponse>>>,
+    /// Pending inbound database replicated-write response channels keyed by
+    /// `InboundRequestId`. Parked until the holder's replication handler
+    /// answers via `SendDbReplicateResponse`.
+    pending_inbound_db_replicate:
+        HashMap<InboundRequestId, ResponseChannel<DbReplicateResponse>>,
+    /// Subscriber channel for inbound database replicated-write requests. `None`
+    /// until a holder's replication handler attaches via
+    /// `SubscribeDbReplicateRequests`. Requests arriving while this is `None`
+    /// are answered with `DbReplicateError::NoHandler`.
+    db_replicate_request_subscriber: Option<mpsc::UnboundedSender<InboundDbReplicate>>,
+    /// Latched once `SubscribeDbReplicateRequests` runs — separates the
+    /// bootstrap-pre-attach debug case from the dropped-channel warn case.
+    db_replicate_request_subscriber_ever_attached: bool,
+    /// Per-peer count of currently-in-flight inbound database replicated-write
+    /// streams. Enforces `DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER`; overflow
+    /// is rejected with `DbReplicateError::ServerBusy`. Decremented on
+    /// `ResponseSent` / `InboundFailure`.
+    db_replicate_inbound_inflight: HashMap<PeerId, usize>,
     /// Tally of `observed_addr` reports received via Identify, keyed by the
     /// reported external multiaddr → set of distinct peer IDs that have
     /// reported it. Once a candidate accumulates reports from at least
@@ -1633,6 +1793,16 @@ struct EventLoopState {
     /// to avoid double-promotion when more `observed_addr` reports arrive
     /// from additional peers after confirmation.
     advertised_external_addrs: HashSet<Multiaddr>,
+    /// Peers on which this node has already attempted a Circuit-Relay v2
+    /// reservation (`Swarm::listen_on(<relay>/p2p-circuit)`). Prevents
+    /// double-reservation as the identify handler fires repeatedly for the
+    /// same relay peer on every gossip round. The set is drained when the
+    /// reservation is lost (the RelayClient event handler removes the entry
+    /// on `Event::ReservationReqDenied` / connection close so the next
+    /// identify tick can retry). Also gated by `reachability.tier()` — a
+    /// node with `Direct` reachability skips relay reservation entirely:
+    /// relay is a fallback for the NAT'd lane only.
+    attempted_relay_reservations: HashSet<PeerId>,
     /// Operator-configured bootstrap multiaddrs, retained for periodic
     /// re-dial. Whenever a configured bootstrap peer is not currently
     /// connected, the cleanup tick re-issues `Swarm::dial(addr)` from this
@@ -1929,8 +2099,14 @@ async fn run_event_loop(
         da_committee_request_subscriber: None,
         da_committee_request_subscriber_ever_attached: false,
         da_committee_inbound_inflight: HashMap::new(),
+        pending_db_replicate_requests: HashMap::new(),
+        pending_inbound_db_replicate: HashMap::new(),
+        db_replicate_request_subscriber: None,
+        db_replicate_request_subscriber_ever_attached: false,
+        db_replicate_inbound_inflight: HashMap::new(),
         observed_addrs: HashMap::new(),
         advertised_external_addrs: preconfigured_external,
+        attempted_relay_reservations: HashSet::new(),
         bootstrap_backoff: bootstrap_peers
             .iter()
             .map(|(_, addr)| addr.clone())
@@ -3132,6 +3308,169 @@ fn handle_da_committee_event(
     }
 }
 
+/// Drives the database replicated-write request-response overlay.
+///
+/// Inbound (`ApplyWrite`) requests are subject to a per-peer inflight cap
+/// (`DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER`, reject overflow with
+/// `ServerBusy` — do not queue), then parked and handed to the attached
+/// replication handler; the handler answers later via `SendDbReplicateResponse`.
+/// When no handler is attached the request is answered with `NoHandler`.
+///
+/// Outbound replies are correlated per-request: a `Message::Response` fulfils
+/// the `oneshot` the caller is awaiting (parked under its `OutboundRequestId`),
+/// and an `OutboundFailure` fulfils it with a transport error.
+fn handle_db_replicate_event(
+    state: &mut EventLoopState,
+    event: request_response::Event<DbReplicateRequest, DbReplicateResponse>,
+) {
+    use request_response::{Event as RrEvent, Message};
+    match event {
+        RrEvent::Message {
+            peer,
+            message: Message::Request {
+                request_id,
+                request,
+                channel,
+            },
+            ..
+        } => {
+            let inflight = state
+                .db_replicate_inbound_inflight
+                .entry(peer)
+                .or_insert(0);
+            if *inflight >= DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER {
+                tracing::warn!(
+                    %peer,
+                    limit = DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER,
+                    "db-replicate: rejecting overflow inbound stream"
+                );
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .db_replicate
+                    .send_response(
+                        channel,
+                        DbReplicateResponse::Error(DbReplicateError::ServerBusy {
+                            limit: DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER,
+                        }),
+                    );
+                return;
+            }
+
+            let Some(tx) = state.db_replicate_request_subscriber.as_ref() else {
+                if state.db_replicate_request_subscriber_ever_attached {
+                    tracing::warn!(
+                        %peer,
+                        "db-replicate: handler was dropped — replying NoHandler"
+                    );
+                } else {
+                    tracing::debug!(
+                        %peer,
+                        "db-replicate: inbound before holder handler attached \
+                         — replying NoHandler"
+                    );
+                }
+                let _ = state
+                    .swarm
+                    .behaviour_mut()
+                    .db_replicate
+                    .send_response(
+                        channel,
+                        DbReplicateResponse::Error(DbReplicateError::NoHandler),
+                    );
+                return;
+            };
+
+            state
+                .pending_inbound_db_replicate
+                .insert(request_id, channel);
+
+            let inbound = InboundDbReplicate {
+                peer,
+                request_id,
+                request,
+            };
+            if tx.send(inbound).is_err() {
+                tracing::warn!(
+                    %peer,
+                    "db-replicate: request handler dropped — replying NoHandler"
+                );
+                state.db_replicate_request_subscriber = None;
+                if let Some(channel) = state.pending_inbound_db_replicate.remove(&request_id) {
+                    let _ = state
+                        .swarm
+                        .behaviour_mut()
+                        .db_replicate
+                        .send_response(
+                            channel,
+                            DbReplicateResponse::Error(DbReplicateError::NoHandler),
+                        );
+                }
+                return;
+            }
+
+            *inflight += 1;
+        }
+        RrEvent::Message {
+            peer,
+            message: Message::Response {
+                request_id,
+                response,
+            },
+            ..
+        } => {
+            match state.pending_db_replicate_requests.remove(&request_id) {
+                Some(reply) => {
+                    let _ = reply.send(Ok(response));
+                }
+                None => {
+                    tracing::warn!(
+                        %peer,
+                        %request_id,
+                        "db-replicate: response for unknown outbound request"
+                    );
+                }
+            }
+        }
+        RrEvent::OutboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::warn!(%peer, %request_id, %error, "db-replicate outbound failure");
+            if let Some(reply) = state.pending_db_replicate_requests.remove(&request_id) {
+                let _ = reply.send(Err(NetworkError::PeerNotFound(format!(
+                    "db-replicate outbound failure to {}: {}",
+                    peer, error
+                ))));
+            }
+        }
+        RrEvent::InboundFailure {
+            peer,
+            request_id,
+            error,
+            ..
+        } => {
+            tracing::debug!(%peer, %request_id, %error, "db-replicate inbound failure");
+            state.pending_inbound_db_replicate.remove(&request_id);
+            if let Some(count) = state.db_replicate_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+        RrEvent::ResponseSent { peer, request_id, .. } => {
+            tracing::trace!(%peer, %request_id, "db-replicate response flushed to wire");
+            if let Some(count) = state.db_replicate_inbound_inflight.get_mut(&peer)
+                && *count > 0
+            {
+                *count -= 1;
+            }
+        }
+    }
+}
+
 /// Handles swarm events
 async fn handle_swarm_event(
     state: &mut EventLoopState,
@@ -3255,6 +3594,99 @@ async fn handle_swarm_event(
                 state
                     .peer_manager
                     .update_protocol_version(&peer_id, info.protocol_version);
+
+                // Circuit-Relay v2 reservation on peers that advertise HOP.
+                //
+                // The DCUtR + relay-client + AutoNAT-client behaviours are all
+                // constructed on any node with `enable_hole_punching: true`
+                // (default), but until this point NOTHING ever *triggered*
+                // an actual reservation. libp2p 0.21's relay-client uses
+                // `Swarm::listen_on(<relay-addr>/p2p-circuit)` as the
+                // reservation-request mechanism (see `priv_client/transport.rs`
+                // docs: "listen via remote relay node"). Without this call,
+                // a NAT'd edge node ends up with all the traversal machinery
+                // wired but never books a reservation slot, so peers can't
+                // reach it and DCUtR has no relayed connection to upgrade.
+                //
+                // Gating:
+                //   * Only attempt if OUR reachability tier is NOT `Direct`.
+                //     A publicly-reachable node has no need for a relay; using
+                //     one would burn a slot on the relay-server side that a
+                //     NAT'd peer could use.
+                //   * Only attempt if the peer advertises the HOP protocol
+                //     (`/libp2p/circuit/relay/0.2.0/hop`) — i.e. it's actually
+                //     running the relay-*server* half.
+                //   * Idempotent per peer: `attempted_relay_reservations`
+                //     tracks who we've already tried. Cleared on relay-lost.
+                //   * Only attempt with a globally-routable peer address —
+                //     reserving on a LAN peer produces a useless circuit that
+                //     is unreachable from the WAN.
+                {
+                    use crate::reachability::ReachabilityTier;
+                    let our_tier = state.reachability.tier();
+                    let peer_speaks_hop = info
+                        .protocols
+                        .iter()
+                        .any(|p| *p == libp2p::relay::HOP_PROTOCOL_NAME);
+                    let already_attempted =
+                        state.attempted_relay_reservations.contains(&peer_id);
+                    if our_tier != ReachabilityTier::Direct
+                        && peer_speaks_hop
+                        && !already_attempted
+                    {
+                        // Pick a globally-routable listen address for the relay
+                        // multiaddr. Prefer an address the peer itself is
+                        // listening on; if none is routable, we can't reach it
+                        // via WAN anyway.
+                        let relay_addr = info
+                            .listen_addrs
+                            .iter()
+                            .find(|addr| is_globally_routable(addr))
+                            .cloned();
+                        if let Some(base_addr) = relay_addr {
+                            // Compose `/dns-or-ip/tcp/port/p2p/<relay>/p2p-circuit`.
+                            // The relay-client transport wraps `listen_on` on
+                            // any multiaddr ending in `/p2p-circuit` into a
+                            // HOP reservation request to the relay peer.
+                            let mut circuit_addr = base_addr.clone();
+                            // Ensure the /p2p/<peer_id> component is present —
+                            // relay-client needs it to know which peer to
+                            // reserve on.
+                            let has_p2p = circuit_addr.iter().any(|p| {
+                                matches!(p, libp2p::multiaddr::Protocol::P2p(_))
+                            });
+                            if !has_p2p {
+                                circuit_addr = circuit_addr
+                                    .with(libp2p::multiaddr::Protocol::P2p(peer_id));
+                            }
+                            circuit_addr =
+                                circuit_addr.with(libp2p::multiaddr::Protocol::P2pCircuit);
+
+                            match state.swarm.listen_on(circuit_addr.clone()) {
+                                Ok(listener_id) => {
+                                    tracing::info!(
+                                        %peer_id,
+                                        our_tier = %our_tier.as_str(),
+                                        ?listener_id,
+                                        circuit = %circuit_addr,
+                                        "Requesting Circuit-Relay v2 reservation \
+                                         (NAT-traversal fallback)"
+                                    );
+                                    state
+                                        .attempted_relay_reservations
+                                        .insert(peer_id);
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        %peer_id,
+                                        error = %e,
+                                        "Relay reservation listen_on failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Add only globally routable addresses to Kademlia DHT, then
                 // dial the discovered peer to actually form a mesh connection.
@@ -3462,6 +3894,9 @@ async fn handle_swarm_event(
             TenzroBehaviourEvent::DaCommittee(rr_event) => {
                 handle_da_committee_event(state, rr_event);
             }
+            TenzroBehaviourEvent::DbReplicate(rr_event) => {
+                handle_db_replicate_event(state, rr_event);
+            }
             TenzroBehaviourEvent::AutonatClient(autonat::v2::client::Event {
                 tested_addr,
                 bytes_sent,
@@ -3483,6 +3918,7 @@ async fn handle_swarm_event(
                         state
                             .reachability
                             .record(crate::reachability::ReachabilityEvent::DirectConfirmed);
+                        maybe_promote_kad_to_server(state);
                     }
                     Err(e) => {
                         tracing::debug!(
@@ -3562,6 +3998,7 @@ async fn handle_swarm_event(
                     state
                         .reachability
                         .record(crate::reachability::ReachabilityEvent::DirectConfirmed);
+                    maybe_promote_kad_to_server(state);
                 }
                 Err(e) => tracing::debug!(
                     %remote_peer_id,
@@ -4201,6 +4638,45 @@ async fn handle_command(state: &mut EventLoopState, command: NetworkCommand) {
             let (tx, rx) = mpsc::unbounded_channel();
             state.da_committee_request_subscriber = Some(tx);
             state.da_committee_request_subscriber_ever_attached = true;
+            let _ = response.send(Ok(rx));
+        }
+        NetworkCommand::DbReplicateRequest { peer, request, response } => {
+            // Dispatch and park the caller's reply channel keyed by the
+            // outbound request id. The event handler fulfils it when the peer
+            // replies (or the request fails). No `response.send()` here — the
+            // caller is awaiting the peer's actual `DbReplicateResponse`.
+            let request_id = state
+                .swarm
+                .behaviour_mut()
+                .db_replicate
+                .send_request(&peer, request);
+            state
+                .pending_db_replicate_requests
+                .insert(request_id, response);
+        }
+        NetworkCommand::SendDbReplicateResponse {
+            request_id,
+            response_payload,
+            response,
+        } => {
+            let result = match state.pending_inbound_db_replicate.remove(&request_id) {
+                Some(channel) => state
+                    .swarm
+                    .behaviour_mut()
+                    .db_replicate
+                    .send_response(channel, response_payload)
+                    .map_err(|_| NetworkError::ChannelSend),
+                None => Err(NetworkError::PeerNotFound(format!(
+                    "no parked inbound db-replicate request for id {}",
+                    request_id
+                ))),
+            };
+            let _ = response.send(result);
+        }
+        NetworkCommand::SubscribeDbReplicateRequests { response } => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            state.db_replicate_request_subscriber = Some(tx);
+            state.db_replicate_request_subscriber_ever_attached = true;
             let _ = response.send(Ok(rx));
         }
         NetworkCommand::Shutdown { response } => {

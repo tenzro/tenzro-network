@@ -100,7 +100,7 @@ tenzro-auth = { path = "crates/tenzro-auth", version = "0.1.0" }
 tenzro-workflow = { path = "crates/tenzro-workflow", version = "0.1.0" }
 tenzro-node = { path = "crates/tenzro-node", version = "0.1.0" }
 tenzro-cli = { path = "crates/tenzro-cli", version = "0.1.0" }
-tenzro-sdk = { path = "sdk/tenzro-sdk", version = "0.4.13" }
+tenzro-sdk = { path = "sdk/tenzro-sdk", version = "0.4.20" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -113,6 +113,7 @@ serde_json = "1"
 bincode = "1"
 prost = "0.13"
 prost-types = "0.13"
+quick-xml = { version = "0.38", features = ["serialize"] }
 
 # Error handling
 thiserror = "2"

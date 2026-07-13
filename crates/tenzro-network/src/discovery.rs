@@ -7,8 +7,18 @@ use libp2p::{
 use std::time::{Duration, Instant};
 use tenzro_types::network::NetworkRole;
 
-/// Creates a Kademlia DHT behaviour for peer discovery
-pub fn create_kademlia(local_peer_id: PeerId) -> Kademlia<MemoryStore> {
+/// Creates a Kademlia DHT behaviour for peer discovery.
+///
+/// `initial_mode` selects Client vs Server. Per libp2p `kad::Mode` docs and
+/// go-libp2p's dual-mode-since-2023 pattern, a NAT'd node should start in
+/// **Client** and only promote to **Server** once its own reachability
+/// tracker reports sustained `Direct`. A Server-mode node behind NAT hands
+/// out records that other peers can't validate by dialing back, and
+/// pollutes routing tables with unreachable entries. The event loop
+/// promotes to Server at runtime via `Behaviour::set_mode` when
+/// `reachability.tier() == Direct` is sustained (see
+/// `service.rs::run_event_loop`, kad-mode-promotion tick).
+pub fn create_kademlia(local_peer_id: PeerId, initial_mode: Mode) -> Kademlia<MemoryStore> {
     let mut config = KademliaConfig::new(libp2p::StreamProtocol::new("/tenzro/kad"));
 
     // A+++ 2026 hardening:
@@ -28,8 +38,7 @@ pub fn create_kademlia(local_peer_id: PeerId) -> Kademlia<MemoryStore> {
     let store = MemoryStore::new(local_peer_id);
     let mut kademlia = Kademlia::with_config(local_peer_id, store, config);
 
-    // Set server mode to enable incoming queries
-    kademlia.set_mode(Some(Mode::Server));
+    kademlia.set_mode(Some(initial_mode));
 
     kademlia
 }
@@ -169,12 +178,25 @@ impl BootstrapConfig {
         }
     }
 
-    /// Creates a testnet bootstrap config
+    /// Creates a testnet bootstrap config.
+    ///
+    /// Ships BOTH DNS entries and raw IP fallbacks so a DNS outage cannot
+    /// partition new joiners. The DNS entries currently resolve to the same
+    /// IP, so the fallback list also carries every fleet validator's public
+    /// IP — any single one being reachable is enough to enter the network and
+    /// learn the rest via Kademlia.
     pub fn testnet() -> Self {
         Self {
             boot_nodes: vec![
+                // DNS entries (governance-controlled; convenient but censorable).
                 "/dns4/testnet-boot-1.tenzro.xyz/tcp/9000".parse().unwrap(),
                 "/dns4/testnet-boot-2.tenzro.xyz/tcp/9000".parse().unwrap(),
+                // Fleet-IP fallbacks. Rotated on each Terraform IP change;
+                // keep in sync with the validator outputs in deploy/terraform.
+                "/ip4/35.184.63.8/tcp/9000".parse().unwrap(),      // v0 us-central1-a
+                "/ip4/35.232.48.224/tcp/9000".parse().unwrap(),    // v1 us-central1-b
+                "/ip4/34.77.150.103/tcp/9000".parse().unwrap(),    // v4 europe-west1-b
+                "/ip4/34.126.119.53/tcp/9000".parse().unwrap(),    // v7 asia-southeast1-a
             ],
             ..Default::default()
         }
@@ -307,7 +329,7 @@ mod tests {
     #[test]
     fn test_kademlia_creation() {
         let peer_id = PeerId::random();
-        let kad = create_kademlia(peer_id);
+        let kad = create_kademlia(peer_id, Mode::Server);
         // Just verify it was created successfully
         drop(kad);
     }
@@ -406,7 +428,7 @@ mod tests {
     #[test]
     fn test_connect_to_bootstrap_nodes() {
         let peer_id = PeerId::random();
-        let mut kad = create_kademlia(peer_id);
+        let mut kad = create_kademlia(peer_id, Mode::Server);
 
         // Create a boot node multiaddr with peer ID
         let boot_peer = PeerId::random();
@@ -424,7 +446,7 @@ mod tests {
     #[test]
     fn test_connect_to_bootstrap_nodes_empty() {
         let peer_id = PeerId::random();
-        let mut kad = create_kademlia(peer_id);
+        let mut kad = create_kademlia(peer_id, Mode::Server);
 
         let config = BootstrapConfig::default();
         let addrs = connect_to_bootstrap_nodes(&mut kad, &config);

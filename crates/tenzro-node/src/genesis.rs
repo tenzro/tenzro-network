@@ -758,12 +758,17 @@ fn parse_hex_address(hex_str: &str) -> Result<Address> {
 
 /// Compute the genesis state root from the configuration.
 ///
-/// This is a simplified implementation that hashes all account data plus the
-/// ERC-8004 predeploy bundle commitment. In production, this would use a
-/// proper Merkle Patricia Trie. Binding `predeploys_commitment` here means
-/// any drift in `erc8004-predeploys.json` (bytecode, slot values, the set
-/// of addresses) produces a different genesis root, so a peer with a
-/// stale bundle will fail header verification.
+/// The genesis root is a deterministic SHA-256 commitment over the genesis
+/// configuration (chain id, funded accounts, faucet parameters) plus the
+/// ERC-8004 predeploy bundle commitment — intentionally NOT a Merkle
+/// Patricia Trie root. Genesis state is injected into the state trie
+/// separately at boot; this value only needs to be identical across every
+/// validator loading the same configuration, and it is baked into the live
+/// genesis, so its preimage layout must never change. Binding
+/// `predeploys_commitment` here means any drift in
+/// `erc8004-predeploys.json` (bytecode, slot values, the set of addresses)
+/// produces a different genesis root, so a peer with a stale bundle will
+/// fail header verification.
 fn compute_genesis_state_root(genesis: &GenesisConfig, predeploys_commitment: &Hash) -> Hash {
     use sha2::{Digest, Sha256};
 

@@ -7531,6 +7531,49 @@ def moe_catalog_shape(model_id: str) -> dict:
     return _rpc("tenzro_moeCatalogShape", {"model_id": model_id})
 
 
+def moe_prepare_experts(model_id: str, layer: int, experts: list = None,
+                        include_gate: bool = True, quant=None) -> dict:
+    """Slice a checkpoint into per-expert blobs and publish them for holders.
+
+    ``quant`` is a preset string (``q4_k_m`` / ``q8_0`` / ``q4_k`` / ``q6_k``)
+    or a per-projection object like ``{"gate": "q4_k", "up": "q4_k",
+    "down": "q6_k"}``; omit for dense f32 blobs. Omit ``experts`` (or pass an
+    empty list) to prepare every expert in the layer. Returns a ``job_id`` to
+    poll with :func:`moe_prepare_status`.
+    """
+    params = {"model_id": model_id, "layer": layer, "include_gate": include_gate}
+    if experts:
+        params["experts"] = experts
+    if quant is not None:
+        params["quant"] = quant
+    return _rpc("tenzro_moePrepareExperts", params)
+
+
+def moe_prepare_status(job_id: str) -> dict:
+    """Poll an expert-preparation job for its state and prepared blob URIs."""
+    return _rpc("tenzro_moePrepareStatus", {"job_id": job_id})
+
+
+def moe_expert_status() -> dict:
+    """Resident experts / gates with residency tier, footprint, and GPU flag."""
+    return _rpc("tenzro_moeExpertStatus", [])
+
+
+def moe_forward(model_id: str, layer: int, d_model: int, hidden: list) -> dict:
+    """Run one distributed MoE layer forward.
+
+    Gate-routes ``hidden`` (row-major ``[num_tokens, d_model]`` f32) locally,
+    fans the selected experts out to holders, and combines the gate-weighted
+    outputs.
+    """
+    return _rpc("tenzro_moeForward", {
+        "model_id": model_id,
+        "layer": layer,
+        "d_model": d_model,
+        "hidden": hidden,
+    })
+
+
 # ── Local Discovery & Cluster ─────────────────────────────────────
 
 
@@ -8905,6 +8948,22 @@ COMMANDS = {
     ),
     "moe_replication_policy": lambda args: moe_replication_policy(),
     "moe_catalog_shape": lambda args: moe_catalog_shape(args[0]),
+    "moe_prepare_experts": lambda args: moe_prepare_experts(
+        args[0],
+        int(args[1]),
+        json.loads(args[2]) if len(args) > 2 and args[2] else None,
+        args[3].lower() in ("1", "true", "yes") if len(args) > 3 else True,
+        (json.loads(args[4]) if args[4].strip().startswith("{") else args[4])
+        if len(args) > 4 and args[4] else None,
+    ),
+    "moe_prepare_status": lambda args: moe_prepare_status(args[0]),
+    "moe_expert_status": lambda args: moe_expert_status(),
+    "moe_forward": lambda args: moe_forward(
+        args[0],
+        int(args[1]),
+        int(args[2]),
+        json.loads(args[3]) if len(args) > 3 else [],
+    ),
     # ── Local Discovery & Cluster ──
     "local_peers": lambda args: local_peers(),
     "node_reachability": lambda args: node_reachability(),

@@ -32,6 +32,7 @@ const SELECTOR_AVALANCHE: u64 = 6433500567565415381;
 /// Well-known Chainlink data feed addresses (Ethereum mainnet).
 const FEED_ETH_USD: &str = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419";
 const FEED_BTC_USD: &str = "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c";
+const FEED_LINK_ETH: &str = "0xDC530D9457755926550b59e8ECcdaE7624181557";
 
 /// Chainlink CCIP REST API base URL.
 const CCIP_API_BASE: &str = "https://docs.chain.link/api/ccip/v1";
@@ -60,6 +61,8 @@ const LATEST_ROUND_DATA_SELECTOR: &str = "feaf968c"; // AggregatorV3Interface.la
 const GET_EXECUTION_STATE_SELECTOR: &str = "142b48a9"; // OffRamp.getExecutionState(uint64)
 const CHECK_UPKEEP_SELECTOR: &str = "6e04ff0d"; // AutomationCompatibleInterface.checkUpkeep(bytes)
 const GET_UPKEEP_SELECTOR: &str = "c7c3a19a"; // Registry.getUpkeep(uint256)
+const TYPE_AND_VERSION_SELECTOR: &str = "181f5a77"; // ITypeAndVersion.typeAndVersion()
+const GET_SUPPORTED_CHAINS_SELECTOR: &str = "c4bffe2b"; // TokenPool.getSupportedChains()
 
 // ─── Tool parameter structs ───
 
@@ -1427,10 +1430,32 @@ impl ChainlinkMcpServer {
         let gas_cost_wei = total_gas as u128 * gas_price;
         let gas_cost_eth = gas_cost_wei as f64 / 1e18;
 
-        // Fetch ETH/LINK price to convert (use Chainlink feed if on Ethereum)
-        // For simplicity, use a reasonable estimate. The actual implementation
-        // would call the Functions Router.estimateCost() method.
-        let link_eth_rate = 0.003; // approximate LINK/ETH (1 LINK ~ 0.003 ETH)
+        // Convert ETH gas cost to LINK using the live Chainlink LINK/ETH feed
+        // on Ethereum mainnet (18 decimals: answer = ETH per 1 LINK).
+        let eth_chain = resolve_chain("ethereum")?;
+        let calldata = hex::decode(LATEST_ROUND_DATA_SELECTOR).unwrap();
+        let result = eth_call(&self.http_client, &eth_chain.rpc_url, FEED_LINK_ETH, &calldata).await?;
+        if result.len() < 160 {
+            return Err(err_internal(format!(
+                "LINK/ETH feed returned short response: {} bytes",
+                result.len()
+            )));
+        }
+        // answer is int256 at word 1; reject negative (sign bit) or zero rates.
+        if result[32] & 0x80 != 0 {
+            return Err(err_internal(
+                "LINK/ETH feed returned a negative rate".to_string(),
+            ));
+        }
+        let mut answer_bytes = [0u8; 16];
+        answer_bytes.copy_from_slice(&result[48..64]);
+        let answer = u128::from_be_bytes(answer_bytes);
+        if answer == 0 {
+            return Err(err_internal(
+                "LINK/ETH feed returned a zero rate".to_string(),
+            ));
+        }
+        let link_eth_rate = answer as f64 / 1e18;
         let gas_cost_link = gas_cost_eth / link_eth_rate;
 
         // DON fee (typically 0.2-2.0 LINK depending on the plan)
@@ -1452,11 +1477,12 @@ impl ChainlinkMcpServer {
             "gas_price_gwei": format!("{:.1}", gas_price as f64 / 1e9),
             "gas_cost_eth": format!("{:.8}", gas_cost_eth),
             "gas_cost_link": format!("{:.6}", gas_cost_link),
+            "link_eth_rate": format!("{:.8}", link_eth_rate),
             "don_fee_link": format!("{:.1}", don_fee_link),
             "premium_percent": format!("{:.0}%", premium_pct),
             "premium_link": format!("{:.6}", premium),
             "estimated_total_cost_link": format!("{:.6}", total_cost),
-            "note": "This is an estimate. Actual cost depends on real-time LINK/ETH price, network conditions, and the Functions Router's cost calculation. For precise costs, use the Functions Router estimateCost() method on-chain.",
+            "note": "ETH-to-LINK conversion uses the live Chainlink LINK/ETH feed on Ethereum mainnet. Actual cost depends on network conditions and the Functions Router's cost calculation; for exact costs, use the Functions Router estimateCost() method on-chain.",
         }))
     }
 
@@ -1810,9 +1836,60 @@ impl ChainlinkMcpServer {
             "unknown".to_string()
         };
 
-        // Get pool type: getPoolType() -> string (or may not exist on all pools)
-        // Try isSupportedToken(address) as a fallback indicator
-        // For now, return the basic info
+        // Pool type via typeAndVersion() -> string (every CCIP pool implements
+        // ITypeAndVersion, e.g. "BurnMintTokenPool 1.6.0", "LockReleaseTokenPool 1.6.0",
+        // "USDCTokenPool 1.6.0").
+        let tv_selector = hex::decode(TYPE_AND_VERSION_SELECTOR).unwrap();
+        let tv_result = eth_call(&self.http_client, &chain.rpc_url, &params.pool_address, &tv_selector).await;
+        let type_and_version = match tv_result {
+            Ok(r) if r.len() >= 64 => {
+                let mut len_bytes = [0u8; 8];
+                len_bytes.copy_from_slice(&r[56..64]);
+                let len = u64::from_be_bytes(len_bytes) as usize;
+                if r.len() >= 64 + len {
+                    String::from_utf8_lossy(&r[64..64 + len]).to_string()
+                } else {
+                    "unknown".to_string()
+                }
+            }
+            _ => "unknown".to_string(),
+        };
+        let pool_type = if type_and_version.contains("BurnMint") {
+            "Burn/Mint"
+        } else if type_and_version.contains("LockRelease") {
+            "Lock/Release"
+        } else if type_and_version.contains("USDC") {
+            "USDC (CCTP)"
+        } else {
+            "unknown"
+        };
+
+        // Supported remote chains via getSupportedChains() -> uint64[]
+        let sc_selector = hex::decode(GET_SUPPORTED_CHAINS_SELECTOR).unwrap();
+        let sc_result = eth_call(&self.http_client, &chain.rpc_url, &params.pool_address, &sc_selector).await;
+        let supported_chains: Vec<serde_json::Value> = match sc_result {
+            Ok(r) if r.len() >= 64 => {
+                let mut count_bytes = [0u8; 8];
+                count_bytes.copy_from_slice(&r[56..64]);
+                let count = u64::from_be_bytes(count_bytes) as usize;
+                (0..count)
+                    .filter_map(|i| {
+                        let start = 64 + i * 32;
+                        if r.len() < start + 32 {
+                            return None;
+                        }
+                        let mut sel_bytes = [0u8; 8];
+                        sel_bytes.copy_from_slice(&r[start + 24..start + 32]);
+                        let selector = u64::from_be_bytes(sel_bytes);
+                        Some(serde_json::json!({
+                            "chain_selector": selector.to_string(),
+                            "chain_name": chain_selector_name(selector),
+                        }))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
 
         // Get owner: owner() -> address
         // selector: 0x8da5cb5b
@@ -1827,6 +1904,9 @@ impl ChainlinkMcpServer {
             "pool_address": params.pool_address,
             "chain": chain.chain_name,
             "token_address": token_address,
+            "type_and_version": type_and_version,
+            "pool_type": pool_type,
+            "supported_chains": supported_chains,
             "owner": owner,
             "note": "CCIP Token Pools manage cross-chain token supply. Lock/Release pools lock tokens on the source chain and release on destination. Burn/Mint pools burn on source and mint on destination. Use ccip_get_rate_limits to query per-lane rate limiter config.",
         }))

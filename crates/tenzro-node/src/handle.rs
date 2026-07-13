@@ -22,12 +22,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{broadcast, watch, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::event_loop::NodeEvent;
 use crate::node::{NodeStatus, TenzroNode};
+use crate::RpcServer;
 use crate::{NodeConfig, Result};
 
 /// How often the background status poller refreshes the watch channel.
@@ -162,9 +163,122 @@ async fn spawn_in_background_inner(
     let initial_status = node.status().await;
     let (status_tx, status_rx) = watch::channel(initial_status);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    // Broadcast channel dedicated to the side services (RPC). Mirrors the
+    // binary's `broadcast::channel::<()>(1)`; the background task fires it
+    // alongside `NodeEvent::Shutdown` so the RPC server drains gracefully.
+    let (rpc_shutdown_tx, _) = broadcast::channel::<()>(1);
+    let rpc_shutdown_tx_for_task = rpc_shutdown_tx.clone();
+
+    // Phase D (Stripe SPT) — mirror `main.rs`: when a Stripe key is
+    // configured, register the SPT ceiling-resolver cache on the node
+    // (mutable, pre-Arc) so the RPC payment gate below and the node's own
+    // revocation-invalidate path share the same cache state. No-op when
+    // unset, which is the default for the embedded (Studio) case.
+    let spt_ceiling_cache: Option<
+        std::sync::Arc<crate::spt_ceiling_bridge::SptCeilingResolverAdapter>,
+    > = node
+        .config()
+        .payments
+        .stripe_api_key
+        .as_ref()
+        .filter(|k| !k.trim().is_empty())
+        .map(|api_key| {
+            let mut stripe = tenzro_payments::mpp::StripeClient::new(api_key.clone());
+            if let Some(api_base) = node
+                .config()
+                .payments
+                .stripe_api_base
+                .as_ref()
+                .filter(|b| !b.trim().is_empty())
+            {
+                stripe = stripe.with_api_base(api_base.clone());
+            }
+            std::sync::Arc::new(crate::spt_ceiling_bridge::SptCeilingResolverAdapter::new(
+                std::sync::Arc::new(stripe),
+            ))
+        });
+    if let Some(ref cache) = spt_ceiling_cache {
+        node.set_spt_ceiling_cache(cache.clone());
+        info!("Stripe SPT ceiling-resolver cache registered on embedded TenzroNode");
+    }
 
     let node = Arc::new(node);
     let node_for_task = node.clone();
+
+    // Start the JSON-RPC server for the embedded node. The binary
+    // (`main.rs`) wires this after `start()`; embedding via this handle
+    // must do the same or consumers (Studio GUI, studio-cli) have no RPC
+    // surface — the status bar reads peers/block/wallet over
+    // `config.rpc_addr` and would otherwise stay stuck on "Connecting".
+    let rpc_addr = node.config().rpc_addr.clone();
+    let mut rpc_server = RpcServer::new(node.clone(), rpc_addr);
+
+    // Optional identity binder for HTTP 402 payer validation, mirroring
+    // `main.rs`: validates the payer DID is active and the amount/protocol/
+    // chain are within the payer's delegation scope, plus the runtime
+    // SpendingPolicy, lifecycle FSM, and (when configured) Stripe SPT
+    // ceilings.
+    let identity_binder: Option<
+        std::sync::Arc<tenzro_payments::identity_binding::IdentityPaymentBinder>,
+    > = node.identity_registry().map(|registry| {
+        let mut binder = tenzro_payments::identity_binding::IdentityPaymentBinder::new(
+            registry.clone(),
+            std::sync::Arc::new(tenzro_identity::IdentityVerifier::new(registry.clone())),
+        );
+        if let Some(agent_runtime) = node.agent_runtime() {
+            let resolver: std::sync::Arc<dyn tenzro_payments::SpendingPolicyResolver> =
+                std::sync::Arc::new(
+                    crate::spending_policy_bridge::AgentRuntimeSpendingPolicyResolver::new(
+                        agent_runtime.clone(),
+                    ),
+                );
+            binder = binder.with_spending_policy_resolver(resolver);
+
+            let lifecycle_resolver: std::sync::Arc<dyn tenzro_payments::LifecycleStateResolver> =
+                std::sync::Arc::new(
+                    crate::lifecycle_state_bridge::AgentRuntimeLifecycleResolver::new(
+                        agent_runtime.clone(),
+                    ),
+                );
+            binder = binder.with_lifecycle_resolver(lifecycle_resolver);
+        }
+        if let Some(cache) = spt_ceiling_cache.clone() {
+            let spt_resolver: std::sync::Arc<
+                dyn tenzro_payments::mpp::stripe_spt::SptCeilingResolver,
+            > = cache;
+            binder = binder.with_spt_ceiling_resolver(spt_resolver);
+            info!("Stripe SPT ceiling resolver wired into embedded IdentityPaymentBinder");
+        }
+        std::sync::Arc::new(binder)
+    });
+
+    if node.config().payments.enabled
+        && let Some(gateway) = node.payment_gateway()
+    {
+        let payments = &node.config().payments;
+        let mut rpc_gate = tenzro_payments::middleware::PaymentGateMiddleware::new(
+            gateway.clone(),
+            tenzro_payments::middleware::PaymentGateConfig {
+                default_amount: payments.default_amount,
+                default_asset: payments.default_asset.clone(),
+                recipient: payments.recipient.clone(),
+                default_protocol: payments.default_protocol.clone(),
+            },
+            gateway.challenge_store(),
+        );
+        if let Some(ref binder) = identity_binder {
+            rpc_gate = rpc_gate.with_identity_binder(binder.clone());
+        }
+        info!("HTTP 402 payment gate enabled for embedded RPC /v1/chat/completions");
+        rpc_server = rpc_server.with_payment_gate(rpc_gate);
+    }
+
+    let rpc_shutdown_rx = rpc_shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        if let Err(e) = rpc_server.start_with_shutdown(rpc_shutdown_rx).await {
+            error!("Embedded RPC server error: {}", e);
+        }
+    });
 
     let join = tokio::spawn(async move {
         info!("NodeHandle background task started");
@@ -196,6 +310,9 @@ async fn spawn_in_background_inner(
         }
 
         info!("NodeHandle initiating shutdown");
+        // Signal the RPC server to drain. `send` errors only when there are
+        // no live receivers (the RPC task already exited), which is benign.
+        let _ = rpc_shutdown_tx_for_task.send(());
         if let Some(event_tx) = node_for_task.event_sender() {
             if let Err(e) = event_tx.try_send(NodeEvent::Shutdown) {
                 warn!("NodeHandle failed to send Shutdown event: {}", e);

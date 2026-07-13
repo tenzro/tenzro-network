@@ -184,8 +184,9 @@ impl SchemeRegistry {
             Arc::new(Permit2Backend::new(Arc::new(CdpFacilitatorVerifier::new())));
         r.register("permit2", permit2);
 
-        let erc7710: Arc<dyn SchemeBackend> =
-            Arc::new(Erc7710Backend::new(Arc::new(NullDelegationVerifier)));
+        let erc7710: Arc<dyn SchemeBackend> = Arc::new(Erc7710Backend::new(Arc::new(
+            crate::x402::erc7710::Erc7710DelegationVerifier::default(),
+        )));
         r.register("erc7710", erc7710);
 
         r
@@ -1076,27 +1077,6 @@ pub trait DelegationVerifier: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// Placeholder verifier: rejects every redemption. Used as the default
-/// wiring so `erc7710` is registered (and discoverable) even before the
-/// on-chain verifier lands. Once a real verifier exists, replace this via
-/// `SchemeRegistry::register("erc7710", Arc::new(Erc7710Backend::new(real)))`.
-#[derive(Debug)]
-pub struct NullDelegationVerifier;
-
-#[async_trait]
-impl DelegationVerifier for NullDelegationVerifier {
-    async fn verify_redemption(
-        &self,
-        _challenge: &PaymentChallenge,
-        _credential: &PaymentCredential,
-    ) -> Result<()> {
-        Err(PaymentError::VerificationFailed(
-            "ERC-7710 redemption verifier is not configured on this server"
-                .to_string(),
-        ))
-    }
-}
-
 /// ERC-7710 redemption-of-delegation backend. The credential carries a
 /// `delegation_id` (the on-chain delegation hash) and a `redemption_proof`
 /// (the calldata or signature the redeemer submits to the delegation
@@ -1472,8 +1452,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn null_delegation_verifier_rejects_everything() {
-        let backend = Erc7710Backend::new(Arc::new(NullDelegationVerifier));
+    async fn default_erc7710_verifier_fails_closed() {
+        // The default verifier has no enforcer registry and a zero
+        // delegation-manager domain — a structurally-present but garbage
+        // proof must be rejected, never accepted.
+        let backend = Erc7710Backend::new(Arc::new(
+            crate::x402::erc7710::Erc7710DelegationVerifier::default(),
+        ));
         let ch = make_challenge("erc7710");
         let cred = make_erc7710_credential();
         let err = backend.verify(&ch, &cred).await.unwrap_err();

@@ -19,9 +19,12 @@
 //!   tier, pinned to the database domain so it never collides with storage-shard
 //!   placement over the same member ids. Wraps the local-first
 //!   [`tenzro_cluster::tiered`] primitive.
-//! - [`database`] — [`DatabaseDescriptor`], [`PlacementMode`], and the
-//!   write-through [`DatabaseRegistry`] that persists descriptors and their
-//!   partition placements to `CF_DATABASES` and hydrates them on boot.
+//! - [`database`] — [`DatabaseDescriptor`], [`PlacementMode`], the per-partition
+//!   [`ReplicationPolicy`] (floor/ceiling on distinct holders, placement fails
+//!   closed below the floor), and the write-through [`DatabaseRegistry`] that
+//!   persists descriptors and their partition placements to `CF_DATABASES`,
+//!   hydrates them on boot, and reports replication health via
+//!   `under_replicated` / `plan_repair` / `record_repair`.
 //! - [`access_control`] — the [`AccessPolicy`] every descriptor carries (who may
 //!   read and administer it, enforced identically across all three tiers) and an
 //!   opt-in [`ConfidentialSeal`] that encrypts network-tier data with a data key
@@ -32,8 +35,10 @@
 //!   and the write-through [`DatabaseUsageMeter`] a holder uses to count served
 //!   queries and settled payments. The node layer gates the query path on the
 //!   price via the payment gateway; the owner always queries free.
-//! - [`runtime`] — the [`DatabaseEngine`] trait: the seam to node-layer backends
-//!   that actually spin an engine up and run queries. The registry tracks *what*
+//! - [`runtime`] — the [`DatabaseEngine`] trait (the seam to node-layer backends
+//!   that actually spin an engine up and run queries) and the [`QueryRouter`]
+//!   that routes reads to one holder with deterministic failover and fans
+//!   writes out under a [`WriteConsistency`] level. The registry tracks *what*
 //!   exists and *where* its partitions land; the runtime backend does the rest.
 //!
 //! # Engine-agnostic split
@@ -64,7 +69,8 @@ pub use catalog::{
     ExternalDependency, NativeClusterSpec, NativeRole, NativeRoleSlot, ShardingModel,
 };
 pub use database::{
-    ClusterRole, DatabaseDescriptor, DatabaseRegistry, PartitionPlacement, PlacementMode,
+    ClusterRole, DatabaseDescriptor, DatabaseRegistry, PartitionPlacement,
+    PartitionReplicationStatus, PlacementMode, RepairAssignment, ReplicationPolicy,
 };
 pub use engine_config::{
     BackingServices, DgraphConfig, EmbeddedConfig, EmbeddedEngine, EngineConfig, MilvusConfig,
@@ -80,5 +86,6 @@ pub use placement::{
 };
 pub use pricing::{DatabasePricing, DatabaseUsageMeter, DatabaseUsageStats};
 pub use runtime::{
-    DatabaseEngine, PartitionHandle, PartitionHealth, QueryRequest, QueryResponse,
+    DatabaseEngine, HolderDispatch, PartitionHandle, PartitionHealth, QueryRequest,
+    QueryResponse, QueryRouter, WriteConsistency, WriteReceipt,
 };

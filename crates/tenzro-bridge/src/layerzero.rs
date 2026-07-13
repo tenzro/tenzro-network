@@ -921,31 +921,6 @@ impl LayerZeroConfig {
         self.rpc_url = rpc_url.into();
         self
     }
-
-    /// Estimates the LayerZero messaging fee for a given destination and payload
-    ///
-    /// In production, this calls the LayerZero EndpointV2's `quote()` function via eth_call.
-    ///
-    /// # Arguments
-    /// * `_dest_eid` - Destination endpoint ID
-    /// * `payload_size` - Size of the payload in bytes
-    ///
-    /// # Returns
-    /// Estimated fee in wei
-    pub async fn estimate_messaging_fee(&self, _dest_eid: u32, payload_size: usize) -> Result<u128> {
-        // Fallback calculation if no RPC configured
-        if self.rpc_url.is_empty() {
-            let base_fee = 100_000_000_000_000u128; // 0.0001 ETH base
-            let per_byte_fee = 1_000_000_000u128; // ~1 Gwei per byte
-            return Ok(base_fee + (payload_size as u128 * per_byte_fee));
-        }
-
-        // In production, make eth_call to EndpointV2.quote()
-        // For now, return estimate
-        let base_fee = 100_000_000_000_000u128;
-        let per_byte_fee = 1_000_000_000u128;
-        Ok(base_fee + (payload_size as u128 * per_byte_fee))
-    }
 }
 
 /// LayerZero cross-chain message

@@ -25,7 +25,7 @@
 //!
 //! # async fn example() -> tenzro_network::Result<()> {
 //! // Create network service
-//! let config = NetworkConfig::testnet();
+//! let config = NetworkConfig::default();
 //! let network = TenzroNetworkService::new(config).await?;
 //!
 //! // Subscribe to blocks
@@ -68,6 +68,7 @@ pub mod cluster_tunnel_proto;
 pub mod config;
 pub mod consensus_direct_proto;
 pub mod da_committee_relay;
+pub mod db_replicate_proto;
 pub mod discovery;
 pub mod error;
 pub mod gossip;
@@ -105,6 +106,14 @@ pub use da_committee_relay::{
     MAX_REQUEST_SIZE as DA_COMMITTEE_MAX_REQUEST_SIZE,
     MAX_RESPONSE_SIZE as DA_COMMITTEE_MAX_RESPONSE_SIZE,
     REQUEST_TIMEOUT as DA_COMMITTEE_REQUEST_TIMEOUT,
+};
+pub use db_replicate_proto::{
+    DbReplicateBehaviour, DbReplicateError, DbReplicateRequest, DbReplicateResponse,
+    DB_REPLICATE_PROTOCOL,
+    MAX_INBOUND_STREAMS_PER_PEER as DB_REPLICATE_MAX_INBOUND_STREAMS_PER_PEER,
+    MAX_REQUEST_SIZE as DB_REPLICATE_MAX_REQUEST_SIZE,
+    MAX_RESPONSE_SIZE as DB_REPLICATE_MAX_RESPONSE_SIZE,
+    REQUEST_TIMEOUT as DB_REPLICATE_REQUEST_TIMEOUT,
 };
 pub use mpc_relay::{
     session_topic as mpc_session_topic, MpcDidResolver, MpcRelayBehaviour, MpcRelayError,

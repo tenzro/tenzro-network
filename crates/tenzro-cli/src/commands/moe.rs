@@ -31,6 +31,12 @@ pub enum MoeCommand {
     UnloadGate(UnloadGateCmd),
     /// Show the node's resident experts and gates.
     Status(StatusCmd),
+    /// Extract per-expert (and optionally gate) weight blobs for a layer
+    /// from the catalog checkpoint, optionally quantizing them, and publish
+    /// each as a content-addressed tenzro://blob URI. Returns a job id.
+    PrepareExperts(PrepareExpertsCmd),
+    /// Snapshot one prepare-experts job by id (state, per-blob URIs, quant).
+    PrepareStatus(PrepareStatusCmd),
     /// Run a distributed MoE forward for one layer: route locally, fan
     /// expert sub-batches out to holders, gather the combined outputs.
     Forward(ForwardCmd),
@@ -48,6 +54,8 @@ impl MoeCommand {
             Self::UnloadExpert(c) => c.execute().await,
             Self::UnloadGate(c) => c.execute().await,
             Self::Status(c) => c.execute().await,
+            Self::PrepareExperts(c) => c.execute().await,
+            Self::PrepareStatus(c) => c.execute().await,
             Self::Forward(c) => c.execute().await,
         }
     }
@@ -316,6 +324,85 @@ impl StatusCmd {
         let rpc = RpcClient::new(&self.rpc);
         let v: serde_json::Value = rpc
             .call("tenzro_moeExpertStatus", serde_json::json!({}))
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct PrepareExpertsCmd {
+    #[arg(long, default_value_t = default_rpc())]
+    rpc: String,
+    #[arg(long)]
+    model_id: String,
+    #[arg(long)]
+    layer: u32,
+    /// Comma-separated expert ids to prepare; omit to prepare every expert
+    /// in the layer.
+    #[arg(long, value_delimiter = ',')]
+    experts: Vec<u32>,
+    /// Skip publishing the layer's gating-network blob.
+    #[arg(long, default_value_t = false)]
+    no_gate: bool,
+    /// Quantization preset (`q4_k_m`, `q8_0`, `q4_k`, `q6_k`) applied to all
+    /// projections. Omit to publish dense f32 blobs.
+    #[arg(long, conflicts_with = "quant_json")]
+    quant: Option<String>,
+    /// Per-projection quant as JSON, e.g. `{"gate":"q4_k","up":"q4_k","down":"q6_k"}`.
+    /// Omitted projections stay dense.
+    #[arg(long)]
+    quant_json: Option<String>,
+}
+
+impl PrepareExpertsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header(&format!(
+            "MoE Prepare Experts — {} l{}",
+            self.model_id, self.layer
+        ));
+        let mut params = serde_json::json!({
+            "model_id": self.model_id,
+            "layer": self.layer,
+            "include_gate": !self.no_gate,
+        });
+        if !self.experts.is_empty() {
+            params["experts"] = serde_json::json!(self.experts);
+        }
+        match (&self.quant, &self.quant_json) {
+            (Some(preset), None) => params["quant"] = serde_json::json!(preset),
+            (None, Some(raw)) => {
+                let obj: serde_json::Value = serde_json::from_str(raw)?;
+                params["quant"] = obj;
+            }
+            (None, None) => {}
+            (Some(_), Some(_)) => anyhow::bail!("pass only one of --quant or --quant-json"),
+        }
+        let rpc = RpcClient::new(&self.rpc);
+        let v: serde_json::Value = rpc.call("tenzro_moePrepareExperts", params).await?;
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct PrepareStatusCmd {
+    #[arg(long, default_value_t = default_rpc())]
+    rpc: String,
+    /// Job id returned by `moe prepare-experts`.
+    #[arg(long)]
+    job_id: String,
+}
+
+impl PrepareStatusCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("MoE Prepare Status");
+        let rpc = RpcClient::new(&self.rpc);
+        let v: serde_json::Value = rpc
+            .call(
+                "tenzro_moePrepareStatus",
+                serde_json::json!({ "job_id": self.job_id }),
+            )
             .await?;
         println!("{}", serde_json::to_string_pretty(&v)?);
         Ok(())

@@ -64,6 +64,11 @@ impl X402Facilitator {
         &self.scheme_registry
     }
 
+    /// CAIP-2 networks this facilitator accepts payloads on.
+    pub fn supported_chains(&self) -> &[String] {
+        &self.supported_chains
+    }
+
     /// Verifies a payment payload against requirements.
     ///
     /// Pipeline (Coinbase x402 V2 wire):

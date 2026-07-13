@@ -122,9 +122,12 @@ pub struct CreateCmd {
     /// Partition count (forced to 1 for local placement)
     #[arg(long, default_value_t = 1)]
     partitions: usize,
-    /// Replica count (forced to 1 for local placement)
-    #[arg(long, default_value_t = 1)]
-    replicas: usize,
+    /// Minimum holders per partition — writes below this fail (default 2)
+    #[arg(long)]
+    min_replication: Option<u8>,
+    /// Maximum holders per partition — repair never grows past this (default 4)
+    #[arg(long)]
+    max_replication: Option<u8>,
     /// Path to a JSON file with the engine-native config surface
     #[arg(long)]
     engine_config: Option<String>,
@@ -156,8 +159,13 @@ impl CreateCmd {
             "owner_did": self.owner_did,
             "placement": self.placement,
             "partitions": self.partitions,
-            "replicas": self.replicas,
         });
+        if self.min_replication.is_some() || self.max_replication.is_some() {
+            params["replication"] = serde_json::json!({
+                "min_replication": self.min_replication.unwrap_or(2),
+                "max_replication": self.max_replication.unwrap_or(4),
+            });
+        }
         if let Some(path) = &self.engine_config {
             params["engine_config"] = read_json_file(path, "engine_config")?;
         }
@@ -297,9 +305,12 @@ pub struct RescaleCmd {
     /// New partition count (defaults to current)
     #[arg(long)]
     partitions: Option<usize>,
-    /// New replica count (defaults to current)
-    #[arg(long)]
-    replicas: Option<usize>,
+    /// New minimum holders per partition (must be given with --max-replication)
+    #[arg(long, requires = "max_replication")]
+    min_replication: Option<u8>,
+    /// New maximum holders per partition (must be given with --min-replication)
+    #[arg(long, requires = "min_replication")]
+    max_replication: Option<u8>,
     /// Write-action AAP capability JWT (for CapabilityRequired policies)
     #[arg(long)]
     capability: Option<String>,
@@ -323,8 +334,11 @@ impl RescaleCmd {
         if let Some(p) = self.partitions {
             params["partitions"] = serde_json::json!(p);
         }
-        if let Some(r) = self.replicas {
-            params["replicas"] = serde_json::json!(r);
+        if let (Some(min), Some(max)) = (self.min_replication, self.max_replication) {
+            params["replication"] = serde_json::json!({
+                "min_replication": min,
+                "max_replication": max,
+            });
         }
         if let Some(cap) = &self.capability {
             params["capability"] = serde_json::json!(cap);
@@ -557,6 +571,9 @@ pub struct QueryCmd {
     /// Run as a write (requires the admin action)
     #[arg(long)]
     write: bool,
+    /// Write acknowledgement level: quorum (default) or all
+    #[arg(long)]
+    consistency: Option<String>,
     /// AAP capability JWT (from `tenzro db connect`)
     #[arg(long)]
     capability: Option<String>,
@@ -584,6 +601,9 @@ impl QueryCmd {
             "partition_index": self.partition,
             "write": self.write,
         });
+        if let Some(c) = &self.consistency {
+            params["consistency"] = serde_json::json!(c);
+        }
         if let Some(cap) = &self.capability {
             params["capability"] = serde_json::json!(cap);
         }
@@ -709,12 +729,24 @@ fn print_database(db: Option<&serde_json::Value>) {
     let engine = db.get("engine_id").and_then(|v| v.as_str()).unwrap_or("?");
     let placement = db.get("placement").and_then(|v| v.as_str()).unwrap_or("?");
     let partitions = db.get("partitions").and_then(|v| v.as_u64()).unwrap_or(0);
-    let replicas = db.get("replicas").and_then(|v| v.as_u64()).unwrap_or(0);
+    let min_repl = db
+        .get("replication")
+        .and_then(|r| r.get("min_replication"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let max_repl = db
+        .get("replication")
+        .and_then(|r| r.get("max_replication"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     output::print_field("Database", id);
     output::print_field("  Engine", engine);
     output::print_field(
         "  Placement",
-        &format!("{} · {} partitions · {} replicas", placement, partitions, replicas),
+        &format!(
+            "{} · {} partitions · {}-{} holders/partition",
+            placement, partitions, min_repl, max_repl
+        ),
     );
     if let Some(policy) = db.get("access_policy") {
         let kind = policy.get("kind").and_then(|v| v.as_str()).unwrap_or("?");

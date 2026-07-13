@@ -45,6 +45,20 @@ pub struct TokenRouting {
     pub experts: Vec<ExpertId>,
 }
 
+/// One reachable holder endpoint for an expert. The primary is carried
+/// inline on [`ExpertBatch`]; the remaining reachable holders are carried
+/// in [`ExpertBatch::backups`] so the dispatcher can redispatch the same
+/// token batch to a standby when the primary holder errors or times out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolderEndpoint {
+    /// Holder's wallet address.
+    pub provider: Address,
+    /// iroh endpoint id when available — dispatched over QUIC directly.
+    pub iroh_endpoint_id: Option<String>,
+    /// HTTP endpoint fallback (OpenAI-compatible).
+    pub http_endpoint: Option<String>,
+}
+
 /// Batch routed to one holder for one expert.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpertBatch {
@@ -60,6 +74,12 @@ pub struct ExpertBatch {
     /// Token indices whose top-k landed on this `(expert, provider)`
     /// tuple.
     pub token_indices: Vec<u32>,
+    /// Standby holders of the same expert, in the same warm-first order
+    /// as [`MoeShardView::holders`], excluding the primary. The
+    /// dispatcher redispatches this batch to the next standby when the
+    /// primary holder fails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backups: Vec<HolderEndpoint>,
 }
 
 /// Full dispatch plan returned by the planner.
@@ -133,20 +153,31 @@ pub fn plan_dispatch(
     for routing in routings {
         let mut slots = Vec::with_capacity(routing.experts.len());
         for &expert in &routing.experts {
-            let holder = pick_for_dispatch(view, expert, allow_cold);
-            match holder {
-                Some(h) => {
-                    let key = (expert, h.provider.0);
+            // Full warm-first candidate list, filtered by residency
+            // policy. The first entry is the primary holder; the rest
+            // become redispatch backups on the batch.
+            let candidates = candidates_for_dispatch(view, expert, allow_cold);
+            match candidates.split_first() {
+                Some((primary, rest)) => {
+                    let key = (expert, primary.provider.0);
                     let entry = batches_map.entry(key).or_insert_with(|| ExpertBatchKey {
-                        provider: h.provider,
-                        iroh_endpoint_id: h.iroh_endpoint_id.clone(),
-                        http_endpoint: h.http_endpoint.clone(),
+                        provider: primary.provider,
+                        iroh_endpoint_id: primary.iroh_endpoint_id.clone(),
+                        http_endpoint: primary.http_endpoint.clone(),
+                        backups: rest
+                            .iter()
+                            .map(|h| HolderEndpoint {
+                                provider: h.provider,
+                                iroh_endpoint_id: h.iroh_endpoint_id.clone(),
+                                http_endpoint: h.http_endpoint.clone(),
+                            })
+                            .collect(),
                         tokens: Vec::new(),
                     });
                     entry.tokens.push(routing.token_index);
                     slots.push(TokenSlot {
                         expert,
-                        provider: Some(h.provider),
+                        provider: Some(primary.provider),
                     });
                 }
                 None => {
@@ -171,6 +202,7 @@ pub fn plan_dispatch(
             iroh_endpoint_id: key.iroh_endpoint_id,
             http_endpoint: key.http_endpoint,
             token_indices: key.tokens,
+            backups: key.backups,
         })
         .collect();
     // HashMap iteration order is non-deterministic. Sort the batch list
@@ -193,24 +225,32 @@ struct ExpertBatchKey {
     provider: Address,
     iroh_endpoint_id: Option<String>,
     http_endpoint: Option<String>,
+    backups: Vec<HolderEndpoint>,
     tokens: Vec<u32>,
 }
 
-fn pick_for_dispatch(
+/// Warm-first ordered candidate holders for `expert`, filtered by the
+/// `allow_cold` residency policy. The first entry is the primary; the
+/// rest are redispatch backups. Empty when no holder satisfies the
+/// policy.
+fn candidates_for_dispatch(
     view: &MoeShardView,
     expert: ExpertId,
     allow_cold: bool,
-) -> Option<ExpertHolder> {
+) -> Vec<ExpertHolder> {
     let holders = view.holders(expert);
     if allow_cold {
-        holders.into_iter().next()
+        holders
     } else {
-        holders.into_iter().find(|h| {
-            matches!(
-                h.residency,
-                tenzro_types::model::MoeExpertResidency::Warm
-            )
-        })
+        holders
+            .into_iter()
+            .filter(|h| {
+                matches!(
+                    h.residency,
+                    tenzro_types::model::MoeExpertResidency::Warm
+                )
+            })
+            .collect()
     }
 }
 
@@ -327,6 +367,45 @@ mod tests {
         // Slot 0 → alice, slot 1 → bob.
         assert_eq!(ass.slots[0].provider.unwrap().as_bytes()[0], 1);
         assert_eq!(ass.slots[1].provider.unwrap().as_bytes()[0], 2);
+    }
+
+    #[test]
+    fn backups_carry_remaining_holders_warm_first() {
+        // Three holders of the same expert: alice cold, bob warm, carol
+        // warm. allow_cold=true → warm-first order is [bob, carol, alice];
+        // primary=bob, backups=[carol, alice].
+        let alice = provider(1, &[(0, 1, MoeExpertResidency::Cold, 100)]);
+        let bob = provider(2, &[(0, 1, MoeExpertResidency::Warm, 500)]);
+        let carol = provider(3, &[(0, 1, MoeExpertResidency::Warm, 300)]);
+        let view = MoeShardView::build("qwen", [&alice, &bob, &carol]);
+        let routings = vec![TokenRouting {
+            token_index: 0,
+            experts: vec![ExpertId::new(0, 1)],
+        }];
+        let plan = plan_dispatch(&view, &routings, true).unwrap();
+        assert_eq!(plan.batches.len(), 1);
+        let batch = &plan.batches[0];
+        // Primary is a warm holder (bob or carol — holders() is stable
+        // sort so warm entries keep insertion order: bob then carol).
+        assert_eq!(batch.provider.as_bytes()[0], 2);
+        let backup_addrs: Vec<u8> = batch.backups.iter().map(|b| b.provider.as_bytes()[0]).collect();
+        assert_eq!(backup_addrs, vec![3, 1]);
+    }
+
+    #[test]
+    fn warm_only_mode_excludes_cold_from_backups() {
+        // allow_cold=false → cold alice is filtered out entirely, so she
+        // never appears as a backup.
+        let alice = provider(1, &[(0, 1, MoeExpertResidency::Cold, 100)]);
+        let bob = provider(2, &[(0, 1, MoeExpertResidency::Warm, 500)]);
+        let view = MoeShardView::build("qwen", [&alice, &bob]);
+        let routings = vec![TokenRouting {
+            token_index: 0,
+            experts: vec![ExpertId::new(0, 1)],
+        }];
+        let plan = plan_dispatch(&view, &routings, false).unwrap();
+        assert_eq!(plan.batches[0].provider.as_bytes()[0], 2);
+        assert!(plan.batches[0].backups.is_empty());
     }
 
     #[test]

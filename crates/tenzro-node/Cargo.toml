@@ -106,7 +106,7 @@ arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 
 [features]
-default = ["cluster-serving"]
+default = ["cluster-serving", "visa-tap", "mastercard-agent-pay"]
 # LAN layer-pipeline cluster serving. Forwards to tenzro-model, which links
 # the ggml RPC backend and builds the rpc-server sidecar used to splice a
 # member's layer range into a head node's pipeline. Enabled by default — it
