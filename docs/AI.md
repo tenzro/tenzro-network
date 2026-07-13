@@ -122,9 +122,15 @@ A provider whose hardware fits the entire model holds it and serves single-peer 
 
 ### 3.2 Decentralized expert-shard mode
 
-For models too large for any single provider, providers declare which subset of expert weights they hold via `ProviderCapacity.moe_holdings` — a list of `MoeExpertHolding { model_id, layer, expert, residency, committed_tps }`. Residency is `Warm` (VRAM-resident), `Cold` (disk only), or `Evicting`.
+For models too large for any single provider, providers declare which subset of expert weights they hold via `ProviderCapacity.moe_holdings` — a list of `MoeExpertHolding { model_id, layer, expert, residency, committed_tps }`. Residency is `Warm` (memory-resident), `Cold` (on the holder's disk tier, decoded on demand), or `Evicting`. Each holder derives this residency from its own `MoeExpertRuntime` tier state (§3.6) rather than a static declaration, so the shard map reflects what is actually loaded at query time.
 
 A dispatch planner (`plan_dispatch`) aggregates per-token top-k routing decisions into per-holder batches. Each batch carries the tokens whose top-k landed on the same `(expert, holder)` tuple. The batch is dispatched directly over the holder's iroh QUIC endpoint when available, or the OpenAI-compatible HTTP endpoint otherwise.
+
+Three mechanisms overlap and harden the cross-holder fan-out:
+
+- **Q8_0 activation compression.** Batch hidden states cross the `tenzro/moe` wire as GGUF Q8_0 blocks (`ExpertExecuteRequest::compressed`) — one f16 scale plus 32 int8 values per 32-wide block, ~4× smaller than raw f32 at ~0.4% error. Compression engages only when `d_model % 32 == 0`; otherwise the request stays dense. The holder's `execute()` path is carrier-agnostic: `materialize_hidden()` yields f32 rows whether the request arrived compressed or dense.
+- **Backup redispatch.** The planner records every reachable holder for an expert in warm-first order. The primary is carried inline on the batch; the remaining holders become `ExpertBatch::backups`. When a holder fails at the transport level or returns a holder-side error, the router redispatches the same token batch to the next standby before failing the batch.
+- **Pipelined combine.** The router folds each holder response into a `MoeCombiner` the moment it arrives (fed from a `FuturesUnordered` stream), overlapping the gate-weighted gather with still-in-flight batches instead of blocking on the slowest holder. `MoeCombiner::finish` verifies every gate-selected `(expert, token)` contribution arrived.
 
 The shard view (`MoeShardView`) is a derived view over the existing `ProviderManager` — the compute providers serving MoE shards are the same network providers that serve dense models. The view is built from a borrowed slice of providers and pinned to one `model_id`. Stale providers (non-`Active`) and providers with no MoE roles declared are filtered out at view construction.
 
@@ -178,7 +184,18 @@ Members are discovered from the runtime ggml device API (`list_llama_ggml_backen
 
 The dispatch planner in §3.2 decides *where* each token batch goes; the expert-host execution runtime carries the tensors there and runs the math.
 
-Every node embeds a `MoeExpertRuntime` (`tenzro-model::moe_exec`). An expert holder loads expert FFN weights (`ExpertFfn`, gate/up/down projections with SwiGLU activation) and gating networks (`GatingNetwork`, softmax top-k router) from safetensors payloads, keyed by `(model_id, layer, expert)`. Loaded weights are counted against the same memory admission as dense models.
+Every node embeds a `MoeExpertRuntime` (`tenzro-model::moe_exec`). An expert holder loads expert FFN weights (`ExpertFfn`, gate/up/down projections with SwiGLU activation) and gating networks (`GatingNetwork`, softmax top-k router) from safetensors payloads, keyed by `(model_id, layer, expert)`.
+
+The runtime holds experts in two tiers under a byte budget, so a holder can advertise more experts than fit in memory:
+
+- **Memory tier.** A byte-bounded LRU keyed by `(model_id, layer, expert)`. Each admitted expert is charged its decoded footprint against `ResidencyConfig.memory_budget_bytes`. When the budget is exceeded the least-recently-used expert is evicted; a single oversized expert still stays servable rather than being rejected.
+- **Disk tier.** On load, the raw safetensors blob is written to `<data_dir>/moe_experts/` (atomic temp-write then rename). An evicted expert drops from memory but remains indexed on disk, so it is decoded back on demand instead of being re-fetched over the network.
+- **Auto budget.** With `ResidencyConfig::auto()` the budget is read from the host — 60% of Linux `MemAvailable` — falling back to 4 GiB off-Linux. Nodes set an explicit budget with `with_memory_budget(bytes)`.
+- **Readahead.** Before a distributed forward dispatches, the coordinating node promotes the disk-tier experts named by the current routing decision back into memory (`readahead`), so the experts a batch is about to hit are warm when the batch arrives.
+
+A holder can lower an expert's resident footprint by loading it block-quantized instead of dense. Each of the three projections is independently either dense f32 or GGUF k-quant: Q8_0 (block width 32), Q4_K, or Q6_K (block width 256). A quantized projection is stored as a flat `U8` safetensors tensor carrying `"<name>.quant"` (`q8_0` / `q4_k` / `q6_k`) and `"<name>.shape"` (`"rows,cols"`) in the blob's `__metadata__`; `ExpertFfn::from_safetensors` reads those back and keeps the projection in its quantized form. The SwiGLU forward dequantizes one weight row at a time into a scratch buffer, so the resident charge against the byte budget is the quantized size, not the dense size — a Q4_K expert costs ~4 bits/weight instead of 32, so roughly 8× more experts stay warm in the same budget. The GGUF `Q4_K_M` convention (`ExpertQuantPlan::q4_k_m`) keeps `gate`/`up` at Q4_K and `down` at Q6_K, since down-projection error dominates output quality. Projections whose column width is not a multiple of the kind's block width are left dense.
+
+`resolve` serves a memory hit directly (touching its LRU position) and, on a disk hit, decodes the blob, admits it to memory, and re-runs eviction. `status` reports both tiers — per-expert `tier` (`memory` / `disk`), the coarsest projection `quant` tag when quantized, plus `memory_bytes`, `memory_budget_bytes`, `memory_experts`, and `disk_experts`.
 
 A distributed layer forward (`tenzro_moeForward`) runs in three steps on the coordinating node:
 
@@ -202,15 +219,15 @@ Execution:
 
 - `tenzro_moeExpertLoad` / `tenzro_moeExpertUnload` — load or unload one expert FFN's safetensors weights for `(model_id, layer, expert)`
 - `tenzro_moeGateLoad` / `tenzro_moeGateUnload` — load or unload a layer's gating network
-- `tenzro_moeExpertStatus` — resident experts and gates on this node with memory footprint
+- `tenzro_moeExpertStatus` — resident experts and gates on this node: per-expert tier (`memory` / `disk`) and footprint, plus `memory_bytes` / `memory_budget_bytes` / `memory_experts` / `disk_experts`
 - `tenzro_moeRoute` — run the local gating network over a batch of hidden states, returning per-token top-k expert assignments
 - `tenzro_moeExecute` — run a batch of tokens through one locally-resident expert FFN
 - `tenzro_moeForward` — the full distributed layer forward: gate → plan → dispatch to holders (local / iroh / HTTP) → combine
 
 Weight preparation:
 
-- `tenzro_moePrepareExperts` — extract per-expert (and optionally gate) safetensors blobs for a catalog MoE model directly from its original checkpoint using HTTP-Range tensor fetches (only the requested tensors cross the wire, never whole shards), publish each blob into the iroh blob store, and return a background job id
-- `tenzro_moePrepareStatus` — progress snapshot for a prepare job: completed experts and the resulting `tenzro://blob/` URIs, which feed `tenzro_moeExpertLoad` / `tenzro_moeGateLoad` on any node
+- `tenzro_moePrepareExperts` — extract per-expert (and optionally gate) safetensors blobs for a catalog MoE model directly from its original checkpoint using HTTP-Range tensor fetches (only the requested tensors cross the wire, never whole shards), publish each blob into the iroh blob store, and return a background job id. An optional `quant` param re-encodes each expert blob before publish: a preset string (`"q4_k_m"`, or a uniform `"q8_0"` / `"q4_k"` / `"q6_k"`) or a per-projection object (`{ "gate": "q4_k", "up": "q4_k", "down": "q6_k" }`, any projection omitted stays dense). Prepared quantized blobs are self-describing, so a holder loads them at their reduced footprint with no extra flags.
+- `tenzro_moePrepareStatus` — progress snapshot for a prepare job: completed experts, each blob's `quant` tag when quantized, and the resulting `tenzro://blob/` URIs, which feed `tenzro_moeExpertLoad` / `tenzro_moeGateLoad` on any node
 
 ### 3.8 Catalog coverage
 

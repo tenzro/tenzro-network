@@ -73,6 +73,14 @@ tempfile = { workspace = true }
 # System memory/disk probing for model-load admission control.
 sysinfo = "0.31"
 
+# MoE GPU expert-compute backends (optional, pulled only by moe-cuda/moe-wgpu).
+# cudarc drives cuBLAS grouped GEMM on NVIDIA; wgpu runs cross-vendor WGSL
+# compute (AMD / Apple / Intel). The default build pulls neither.
+cudarc = { version = "0.12", optional = true, default-features = false, features = ["cuda-12040", "cublas", "driver"] }
+wgpu = { version = "22", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+
 [features]
 default = ["cluster-serving"]
 # LAN layer-pipeline cluster serving: builds the ggml RPC backend + rpc-server
@@ -98,6 +106,14 @@ metal = ["llama-cpp-2/metal"]
 onnx-cuda = ["ort/cuda"]
 onnx-tensorrt = ["ort/tensorrt"]
 onnx-coreml = ["ort/coreml"]
+# MoE expert-compute GPU backends for the hand-rolled `ExpertCompute` seam
+# (distinct from the llama.cpp GGUF and ONNX EP features above). `moe-gpu` is
+# the umbrella that turns on both device probes; `moe-cuda` / `moe-wgpu` pull
+# just one. Runtime `ComputeBackend::select()` picks whichever device is
+# actually present, always falling back to CPU. Default build pulls none.
+moe-gpu = ["moe-cuda", "moe-wgpu"]
+moe-cuda = ["dep:cudarc"]
+moe-wgpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -2,7 +2,8 @@
 //!
 //! A [`DatabaseDescriptor`] is the protocol-level record of one logical
 //! database: which engine serves it, how it is placed relative to the node,
-//! and — for network mode — how many partitions and replicas it carries. The
+//! and — for network mode — how many partitions it carries and the
+//! [`ReplicationPolicy`] every partition must satisfy. The
 //! [`DatabaseRegistry`] persists descriptors and their computed partition
 //! placements to `CF_DATABASES` and hydrates them on boot, so a node restores
 //! every database it serves without a coordinator round.
@@ -54,6 +55,24 @@ impl PlacementMode {
     }
 }
 
+/// Replication floor and ceiling per partition — the same policy shape the
+/// MoE expert-shard map uses. Placement fails closed when the membership view
+/// cannot supply `min_replication` distinct holders; repair never grows a
+/// holder set past `max_replication`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicationPolicy {
+    /// Every partition must be held by at least this many distinct providers.
+    pub min_replication: u8,
+    /// Hard ceiling on holders per partition.
+    pub max_replication: u8,
+}
+
+impl Default for ReplicationPolicy {
+    fn default() -> Self {
+        Self { min_replication: 2, max_replication: 4 }
+    }
+}
+
 /// The protocol-level record of one logical database.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatabaseDescriptor {
@@ -66,8 +85,9 @@ pub struct DatabaseDescriptor {
     /// Number of partitions. Always 1 for `Local`; 1 for an embedded engine
     /// regardless of mode; `>= 1` for a network-sharded external engine.
     pub partitions: usize,
-    /// Replica count per partition. 1 for `Local`; `>= 1` otherwise.
-    pub replicas: usize,
+    /// Replication floor/ceiling per partition. Normalized to `{1, 1}` for
+    /// `Local`.
+    pub replication: ReplicationPolicy,
     /// Free-form engine-specific config the runtime backend interprets (schema
     /// name, vector dimension, collection name, …). Opaque to the registry.
     pub engine_config: serde_json::Value,
@@ -126,6 +146,38 @@ impl PartitionPlacement {
     pub fn all_holders(&self) -> Vec<String> {
         self.local_holders.iter().chain(self.network_holders.iter()).cloned().collect()
     }
+
+    /// Distinct holders currently recorded for this partition.
+    pub fn holder_count(&self) -> usize {
+        self.local_holders.len() + self.network_holders.len()
+    }
+}
+
+/// Replication health of one partition, as reported by
+/// [`DatabaseRegistry::under_replicated`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionReplicationStatus {
+    /// Zero-based partition index.
+    pub partition_index: usize,
+    /// Holders currently recorded.
+    pub current: usize,
+    /// Holders the database's [`ReplicationPolicy`] floor demands.
+    pub required: usize,
+    /// `required - current`.
+    pub missing: usize,
+}
+
+/// One planned repair: copy the partition onto `new_holder`. Planning only —
+/// executing the copy is a node-layer concern; the node records the outcome
+/// via [`DatabaseRegistry::record_repair`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairAssignment {
+    /// Zero-based partition index.
+    pub partition_index: usize,
+    /// Endpoint id of the provider to copy the partition onto.
+    pub new_holder: String,
+    /// Whether the new holder was drawn from the caller's local segment.
+    pub local: bool,
 }
 
 /// Validates a descriptor against its engine's catalog constraints, normalizing
@@ -153,7 +205,7 @@ fn validate_descriptor(mut desc: DatabaseDescriptor) -> Result<DatabaseDescripto
         PlacementMode::Local => {
             // A local database is one partition, one holder (self).
             desc.partitions = 1;
-            desc.replicas = 1;
+            desc.replication = ReplicationPolicy { min_replication: 1, max_replication: 1 };
         }
         PlacementMode::LanCluster | PlacementMode::Network => {
             if engine.kind == EngineKind::Embedded && desc.partitions > 1 {
@@ -172,7 +224,16 @@ fn validate_descriptor(mut desc: DatabaseDescriptor) -> Result<DatabaseDescripto
                 });
             }
             desc.partitions = desc.partitions.max(1);
-            desc.replicas = desc.replicas.max(1);
+            if desc.replication.min_replication == 0 {
+                return Err(DatabaseError::InvalidRequest(
+                    "min_replication must be >= 1".to_string(),
+                ));
+            }
+            if desc.replication.max_replication < desc.replication.min_replication {
+                return Err(DatabaseError::InvalidRequest(
+                    "max_replication must be >= min_replication".to_string(),
+                ));
+            }
         }
     }
     Ok(desc)
@@ -310,12 +371,17 @@ impl DatabaseRegistry {
                     network_holders: Vec::new(),
                 },
                 PlacementMode::LanCluster | PlacementMode::Network => {
+                    let required = desc.replication.min_replication as usize;
                     let key = partition_key(&desc.database_id, idx);
-                    let holders = select_tiered_holders(&key, candidates, desc.replicas);
-                    if holders.is_empty() {
-                        return Err(DatabaseError::NoHolder {
+                    let holders = select_tiered_holders(&key, candidates, required);
+                    // Fail closed: an under-placed partition would silently
+                    // carry less redundancy than the policy floor.
+                    if holders.len() < required {
+                        return Err(DatabaseError::InsufficientProviders {
                             database_id: desc.database_id.clone(),
                             partition_index: idx,
+                            required,
+                            available: holders.len(),
                         });
                     }
                     PartitionPlacement {
@@ -428,26 +494,27 @@ impl DatabaseRegistry {
     /// Rescales an existing database along the local → LAN-cluster → network
     /// continuum without minting a new descriptor. `new_placement` may promote a
     /// `Local` database to `LanCluster` or `Network` (or demote it); `partitions`
-    /// and `replicas` set the new shard/replica counts. Placement is recomputed
-    /// over the current `candidates` and every partition row is rewritten;
-    /// partitions beyond the new count are dropped when shrinking. The
-    /// database's engine, access policy, and confidential seal are preserved.
+    /// and `replication` set the new shard count and replication policy.
+    /// Placement is recomputed over the current `candidates` and every partition
+    /// row is rewritten; partitions beyond the new count are dropped when
+    /// shrinking. The database's engine, access policy, and confidential seal
+    /// are preserved.
     ///
     /// The same descriptor-shape invariants apply as at creation (`Local`
-    /// forces a single partition/replica), so a caller may pass any counts and
-    /// let normalization settle them.
+    /// forces a single partition and a `{1, 1}` policy), so a caller may pass
+    /// any counts and let normalization settle them.
     pub fn rescale_database(
         &self,
         database_id: &str,
         new_placement: PlacementMode,
         partitions: usize,
-        replicas: usize,
+        replication: ReplicationPolicy,
         candidates: &[TieredCandidate],
     ) -> Result<DatabaseDescriptor> {
         let mut desc = self.get_database(database_id)?;
         desc.placement = new_placement;
         desc.partitions = partitions;
-        desc.replicas = replicas;
+        desc.replication = replication;
         let desc = validate_descriptor(desc)?;
 
         let new_placements = self.compute_placements(&desc, candidates)?;
@@ -493,6 +560,151 @@ impl DatabaseRegistry {
         }
         Ok(desc)
     }
+
+    fn persist_partition(&self, p: &PartitionPlacement) -> Result<()> {
+        if let Some(ref storage) = self.storage {
+            storage
+                .write_batch_sync(vec![WriteOp::Put {
+                    cf: CF_DATABASES.to_string(),
+                    key: Self::partition_storage_key(&p.database_id, p.partition_index),
+                    value: serde_json::to_vec(p)
+                        .map_err(|e| DatabaseError::Persistence(e.to_string()))?,
+                }])
+                .map_err(|e| DatabaseError::Persistence(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Records the loss of a holder (provider outage, departure) for one
+    /// partition, shrinking its holder set. Idempotent: removing a holder that
+    /// is not recorded returns the unchanged placement. The shrunk set is what
+    /// [`Self::under_replicated`] measures against the policy floor.
+    pub fn mark_holder_lost(
+        &self,
+        database_id: &str,
+        partition_index: usize,
+        endpoint_id: &str,
+    ) -> Result<PartitionPlacement> {
+        let mut p = self.get_partition(database_id, partition_index)?;
+        let before = p.holder_count();
+        p.local_holders.retain(|h| h != endpoint_id);
+        p.network_holders.retain(|h| h != endpoint_id);
+        if p.holder_count() == before {
+            tracing::warn!(
+                database_id,
+                partition_index,
+                endpoint_id,
+                "holder not recorded for partition; nothing to remove"
+            );
+            return Ok(p);
+        }
+        self.persist_partition(&p)?;
+        self.placements.insert(placement_map_key(database_id, partition_index), p.clone());
+        tracing::info!(
+            database_id,
+            partition_index,
+            endpoint_id,
+            remaining = p.holder_count(),
+            "holder marked lost"
+        );
+        Ok(p)
+    }
+
+    /// Partitions of `database_id` whose recorded holder count falls below the
+    /// database's `min_replication` floor, ordered by partition index.
+    pub fn under_replicated(&self, database_id: &str) -> Result<Vec<PartitionReplicationStatus>> {
+        let desc = self.get_database(database_id)?;
+        let required = desc.replication.min_replication as usize;
+        Ok(self
+            .list_partitions(database_id)
+            .into_iter()
+            .filter_map(|p| {
+                let current = p.holder_count();
+                (current < required).then(|| PartitionReplicationStatus {
+                    partition_index: p.partition_index,
+                    current,
+                    required,
+                    missing: required - current,
+                })
+            })
+            .collect())
+    }
+
+    /// Plans repairs for every under-replicated partition of `database_id`:
+    /// for each, HRW-selects `missing` new holders from `available_providers`
+    /// minus the partition's existing holders, local segment first. Pure
+    /// planning — executing the copy is a node-layer concern; the node records
+    /// each completed copy via [`Self::record_repair`]. When fewer candidates
+    /// remain than `missing`, the plan covers what it can and the shortfall
+    /// stays visible in [`Self::under_replicated`].
+    pub fn plan_repair(
+        &self,
+        database_id: &str,
+        available_providers: &[TieredCandidate],
+    ) -> Result<Vec<RepairAssignment>> {
+        let mut out = Vec::new();
+        for status in self.under_replicated(database_id)? {
+            let p = self.get_partition(database_id, status.partition_index)?;
+            let existing = p.all_holders();
+            let remaining: Vec<TieredCandidate> = available_providers
+                .iter()
+                .filter(|c| !existing.contains(&c.endpoint_id))
+                .cloned()
+                .collect();
+            let key = partition_key(database_id, status.partition_index);
+            let picked = select_tiered_holders(&key, &remaining, status.missing);
+            out.extend(picked.local.into_iter().map(|h| RepairAssignment {
+                partition_index: status.partition_index,
+                new_holder: h,
+                local: true,
+            }));
+            out.extend(picked.network.into_iter().map(|h| RepairAssignment {
+                partition_index: status.partition_index,
+                new_holder: h,
+                local: false,
+            }));
+        }
+        Ok(out)
+    }
+
+    /// Records a completed repair copy, appending `assignment.new_holder` to
+    /// the partition's holder set. Idempotent: a holder already recorded
+    /// returns the unchanged placement. Refuses to grow the set past the
+    /// database's `max_replication` ceiling.
+    pub fn record_repair(
+        &self,
+        database_id: &str,
+        assignment: &RepairAssignment,
+    ) -> Result<PartitionPlacement> {
+        let desc = self.get_database(database_id)?;
+        let mut p = self.get_partition(database_id, assignment.partition_index)?;
+        if p.all_holders().iter().any(|h| h == &assignment.new_holder) {
+            return Ok(p);
+        }
+        let ceiling = desc.replication.max_replication as usize;
+        if p.holder_count() >= ceiling {
+            return Err(DatabaseError::InvalidRequest(format!(
+                "partition {} of database {} already at max_replication {}",
+                assignment.partition_index, database_id, ceiling
+            )));
+        }
+        if assignment.local {
+            p.local_holders.push(assignment.new_holder.clone());
+        } else {
+            p.network_holders.push(assignment.new_holder.clone());
+        }
+        self.persist_partition(&p)?;
+        self.placements
+            .insert(placement_map_key(database_id, assignment.partition_index), p.clone());
+        tracing::info!(
+            database_id,
+            partition_index = assignment.partition_index,
+            new_holder = %assignment.new_holder,
+            holders = p.holder_count(),
+            "repair recorded"
+        );
+        Ok(p)
+    }
 }
 
 impl Default for DatabaseRegistry {
@@ -530,13 +742,17 @@ mod tests {
         (0..n).map(|i| TieredCandidate::direct(format!("net-{i}"))).collect()
     }
 
-    fn desc(id: &str, engine: &str, mode: PlacementMode, partitions: usize, replicas: usize) -> DatabaseDescriptor {
+    fn policy(min: u8) -> ReplicationPolicy {
+        ReplicationPolicy { min_replication: min, max_replication: min + 2 }
+    }
+
+    fn desc(id: &str, engine: &str, mode: PlacementMode, partitions: usize, min_replication: u8) -> DatabaseDescriptor {
         DatabaseDescriptor {
             database_id: id.to_string(),
             engine_id: engine.to_string(),
             placement: mode,
             partitions,
-            replicas,
+            replication: policy(min_replication),
             engine_config: serde_json::json!({}),
             access_policy: AccessPolicy::owner_only("did:tenzro:human:test-owner"),
             pricing: DatabasePricing::free(),
@@ -552,7 +768,7 @@ mod tests {
             .create_database(desc("db-l", engine_ids::POSTGRES, PlacementMode::Local, 8, 5), &cands)
             .unwrap();
         assert_eq!(out.partitions, 1);
-        assert_eq!(out.replicas, 1);
+        assert_eq!(out.replication, ReplicationPolicy { min_replication: 1, max_replication: 1 });
         let p = reg.get_partition("db-l", 0).unwrap();
         assert_eq!(p.all_holders(), vec!["local-0".to_string()]);
     }
@@ -762,7 +978,7 @@ mod tests {
         let mut cands = locals(1);
         cands.extend(directs(5));
         let out = reg
-            .rescale_database("db-r", PlacementMode::Network, 3, 2, &cands)
+            .rescale_database("db-r", PlacementMode::Network, 3, policy(2), &cands)
             .unwrap();
         assert_eq!(out.placement, PlacementMode::Network);
         assert_eq!(out.partitions, 3);
@@ -781,7 +997,7 @@ mod tests {
             .unwrap();
         assert_eq!(reg.list_partitions("db-s").len(), 4);
 
-        reg.rescale_database("db-s", PlacementMode::Network, 2, 2, &cands).unwrap();
+        reg.rescale_database("db-s", PlacementMode::Network, 2, policy(2), &cands).unwrap();
         assert_eq!(reg.list_partitions("db-s").len(), 2);
         // Rows 2 and 3 are gone, not merely orphaned in the map.
         assert!(reg.get_partition("db-s", 2).is_err());
@@ -797,7 +1013,7 @@ mod tests {
                 .unwrap();
             let mut cands = locals(2);
             cands.extend(directs(4));
-            reg.rescale_database("db-rp", PlacementMode::Network, 3, 2, &cands).unwrap();
+            reg.rescale_database("db-rp", PlacementMode::Network, 3, policy(2), &cands).unwrap();
         }
         let reg2 = DatabaseRegistry::with_storage(storage).unwrap();
         let d = reg2.get_database("db-rp").unwrap();
@@ -810,8 +1026,136 @@ mod tests {
     fn rescale_unknown_database_rejected() {
         let reg = DatabaseRegistry::new();
         let err = reg
-            .rescale_database("nope", PlacementMode::Network, 2, 2, &directs(3))
+            .rescale_database("nope", PlacementMode::Network, 2, policy(2), &directs(3))
             .unwrap_err();
         assert!(matches!(err, DatabaseError::DatabaseNotFound(_)));
+    }
+
+    #[test]
+    fn top_n_selection_is_deterministic_and_distinct() {
+        let mut cands = locals(3);
+        cands.extend(directs(7));
+
+        let reg_a = DatabaseRegistry::new();
+        let reg_b = DatabaseRegistry::new();
+        reg_a
+            .create_database(desc("db-det", engine_ids::POSTGRES, PlacementMode::Network, 4, 3), &cands)
+            .unwrap();
+        // Same descriptor, same view, reversed candidate order: HRW must
+        // produce the identical holder sets.
+        let mut reversed = cands.clone();
+        reversed.reverse();
+        reg_b
+            .create_database(desc("db-det", engine_ids::POSTGRES, PlacementMode::Network, 4, 3), &reversed)
+            .unwrap();
+
+        for idx in 0..4 {
+            let a = reg_a.get_partition("db-det", idx).unwrap();
+            let b = reg_b.get_partition("db-det", idx).unwrap();
+            assert_eq!(a, b);
+            let holders = a.all_holders();
+            assert_eq!(holders.len(), 3);
+            let distinct: std::collections::HashSet<_> = holders.iter().collect();
+            assert_eq!(distinct.len(), 3);
+        }
+    }
+
+    #[test]
+    fn placement_fails_closed_below_replication_floor() {
+        let reg = DatabaseRegistry::new();
+        let err = reg
+            .create_database(desc("db-f", engine_ids::POSTGRES, PlacementMode::Network, 2, 3), &directs(2))
+            .unwrap_err();
+        match err {
+            DatabaseError::InsufficientProviders { required, available, .. } => {
+                assert_eq!(required, 3);
+                assert_eq!(available, 2);
+            }
+            other => panic!("wrong error: {:?}", other),
+        }
+        // Fail-closed: nothing registered, nothing placed.
+        assert!(reg.get_database("db-f").is_err());
+        assert!(reg.list_partitions("db-f").is_empty());
+    }
+
+    #[test]
+    fn holder_loss_surfaces_under_replication() {
+        let reg = DatabaseRegistry::new();
+        let cands = directs(4);
+        reg.create_database(desc("db-h", engine_ids::POSTGRES, PlacementMode::Network, 2, 2), &cands)
+            .unwrap();
+        assert!(reg.under_replicated("db-h").unwrap().is_empty());
+
+        let lost = reg.get_partition("db-h", 1).unwrap().all_holders()[0].clone();
+        reg.mark_holder_lost("db-h", 1, &lost).unwrap();
+
+        let statuses = reg.under_replicated("db-h").unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(
+            statuses[0],
+            PartitionReplicationStatus { partition_index: 1, current: 1, required: 2, missing: 1 }
+        );
+    }
+
+    #[test]
+    fn repair_plan_excludes_existing_holders() {
+        let reg = DatabaseRegistry::new();
+        let cands = directs(5);
+        reg.create_database(desc("db-rep", engine_ids::POSTGRES, PlacementMode::Network, 1, 2), &cands)
+            .unwrap();
+        let lost = reg.get_partition("db-rep", 0).unwrap().all_holders()[0].clone();
+        reg.mark_holder_lost("db-rep", 0, &lost).unwrap();
+
+        let survivors = reg.get_partition("db-rep", 0).unwrap().all_holders();
+        let plan = reg.plan_repair("db-rep", &cands).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].partition_index, 0);
+        assert!(!survivors.contains(&plan[0].new_holder));
+
+        reg.record_repair("db-rep", &plan[0]).unwrap();
+        assert!(reg.under_replicated("db-rep").unwrap().is_empty());
+    }
+
+    #[test]
+    fn record_repair_refuses_past_max_replication() {
+        let reg = DatabaseRegistry::new();
+        let cands = directs(6);
+        let mut d = desc("db-max", engine_ids::POSTGRES, PlacementMode::Network, 1, 2);
+        d.replication = ReplicationPolicy { min_replication: 2, max_replication: 2 };
+        reg.create_database(d, &cands).unwrap();
+
+        let extra = RepairAssignment {
+            partition_index: 0,
+            new_holder: "net-extra".to_string(),
+            local: false,
+        };
+        let err = reg.record_repair("db-max", &extra).unwrap_err();
+        assert!(matches!(err, DatabaseError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn holder_loss_and_repair_persist_across_reopen() {
+        let storage: Arc<dyn KvStore> = Arc::new(tenzro_storage::MemoryStore::new());
+        let lost;
+        {
+            let reg = DatabaseRegistry::with_storage(storage.clone()).unwrap();
+            let cands = directs(5);
+            reg.create_database(desc("db-dur", engine_ids::POSTGRES, PlacementMode::Network, 1, 3), &cands)
+                .unwrap();
+            lost = reg.get_partition("db-dur", 0).unwrap().all_holders()[0].clone();
+            reg.mark_holder_lost("db-dur", 0, &lost).unwrap();
+        }
+        let reg2 = DatabaseRegistry::with_storage(storage.clone()).unwrap();
+        let holders = reg2.get_partition("db-dur", 0).unwrap().all_holders();
+        assert_eq!(holders.len(), 2);
+        assert!(!holders.contains(&lost));
+
+        let plan = reg2.plan_repair("db-dur", &directs(5)).unwrap();
+        assert_eq!(plan.len(), 1);
+        reg2.record_repair("db-dur", &plan[0]).unwrap();
+
+        let reg3 = DatabaseRegistry::with_storage(storage).unwrap();
+        assert_eq!(reg3.get_partition("db-dur", 0).unwrap().holder_count(), 3);
+        assert!(reg3.under_replicated("db-dur").unwrap().is_empty());
     }
 }

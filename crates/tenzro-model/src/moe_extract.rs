@@ -33,7 +33,10 @@ use tracing::debug;
 
 use crate::catalog::ModelArchitecture;
 use crate::error::{ModelError, Result};
-use crate::moe_exec::{TENSOR_DOWN_PROJ, TENSOR_GATE_PROJ, TENSOR_ROUTER, TENSOR_UP_PROJ};
+use crate::moe_exec::{
+    quantize_expert_blob, ExpertQuantPlan, TENSOR_DOWN_PROJ, TENSOR_GATE_PROJ, TENSOR_ROUTER,
+    TENSOR_UP_PROJ,
+};
 
 /// Upper bound on a shard's safetensors JSON header. Real headers for
 /// multi-GB shards are well under 1 MB; anything larger is corrupt.
@@ -322,6 +325,24 @@ impl MoeExtractor {
         ];
         safetensors::serialize(tensors, None).map_err(|e| {
             ModelError::SerializationError(format!("expert blob L{layer}/E{expert}: {e:?}"))
+        })
+    }
+
+    /// Extract one expert's FFN and re-encode it as a GGUF block-quantized
+    /// blob per `plan`. Equivalent to [`Self::expert_blob`] followed by
+    /// [`quantize_expert_blob`], but avoids exposing the intermediate dense
+    /// blob to callers that only want the smaller quantized payload.
+    pub async fn quantized_expert_blob(
+        &mut self,
+        layer: u32,
+        expert: u32,
+        plan: ExpertQuantPlan,
+    ) -> Result<Vec<u8>> {
+        let dense = self.expert_blob(layer, expert).await?;
+        quantize_expert_blob(&dense, plan).map_err(|e| {
+            ModelError::SerializationError(format!(
+                "quantize expert blob L{layer}/E{expert}: {e}"
+            ))
         })
     }
 

@@ -156,6 +156,25 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "outputModes": ["text/plain", "application/json"],
             },
             {
+                "id": "dvp-netting",
+                "name": "Delivery-versus-Payment & Netting",
+                "description": (
+                    "Bundle delivery and payment legs into an all-or-compensate "
+                    "delivery-versus-payment saga backed by on-chain escrow, and "
+                    "collapse a set of bilateral obligations into a minimal net "
+                    "settlement instruction set via multilateral netting."
+                ),
+                "tags": ["dvp", "netting", "escrow", "saga", "settlement"],
+                "examples": [
+                    "Open a DvP saga for a two-leg atomic swap",
+                    "Execute a DvP saga with per-leg release proofs",
+                    "Compute a multilateral netting batch over a set of obligations",
+                    "Settle a netting batch",
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "verification",
                 "name": "Proof Verification",
                 "description": (
@@ -1520,7 +1539,8 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "examples": [
                     "List database engines",
                     "Create database (metadata: database_id, engine_id=qdrant, "
-                    "owner_did, placement=lan_cluster, partitions=3, replicas=2)",
+                    "owner_did, placement=lan_cluster, partitions=3, "
+                    "min_replication=2, max_replication=4)",
                     "List databases",
                     "List database partitions (metadata: database_id)",
                     "Issue database connection (metadata: database_id, caller_did, "
@@ -1576,18 +1596,37 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "into the local expert runtime, and run distributed layer "
                     "forwards that fan hidden states out to expert holders over "
                     "local, iroh, or HTTP transports and gather gate-weighted "
-                    "outputs."
+                    "outputs. Prepare experts for holders by slicing a catalog "
+                    "checkpoint into per-expert blobs, optionally block-quantizing "
+                    "each projection (q4_k_m / q8_0 / q4_k / q6_k preset or a "
+                    "per-projection gate/up/down mix) so a holder loads a smaller "
+                    "footprint. The runtime tiers experts across a byte-bounded "
+                    "memory LRU and a disk tier that decodes spilled experts on "
+                    "demand, so a holder can serve more experts than fit in "
+                    "memory; runtime status reports each expert's residency tier "
+                    "(memory / disk), byte footprint, memory budget, and whether "
+                    "GPU compute is active. Expert compute runs on CPU by default "
+                    "(dense f32 plus a runtime-detected AVX-512-VNNI Q8_0 path) "
+                    "and on an optional CUDA or cross-vendor GPU backend where "
+                    "built; holders advertise GPU compute so routing can bias "
+                    "toward them. Cross-holder forwards overlap by compressing "
+                    "activations, dispatching warm-first backups for slow holders, "
+                    "and pipelining the gate-weighted combine as contributions "
+                    "arrive."
                 ),
                 "tags": [
                     "moe", "expert-shard", "dispatch", "replication",
                     "routing", "inference", "expert-execution",
+                    "quantization", "gpu",
                 ],
                 "examples": [
                     "Show the MoE shard map for model <id>",
                     "Plan dispatch for top-k routings on model <id>",
                     "Read the current MoE replication policy",
                     "Read the catalog MoE topology for model <id>",
+                    "Prepare layer 4 experts quantized q4_k_m for holders",
                     "Load an expert weight blob for layer 4 expert 17",
+                    "Report resident experts with their residency tier",
                     "Run a distributed MoE forward for one layer",
                 ],
                 "inputModes": ["text/plain", "application/json"],
@@ -1600,7 +1639,10 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Local-segment discovery and LAN cluster planning. List "
                     "peers discovered on this node's local segment via mDNS, "
                     "read this node's sustained connectivity tier (direct / "
-                    "relay_only / unreachable), read this node's hardware "
+                    "relay_only / unreachable) — the same tier the node acts on "
+                    "automatically to promote its Kademlia role to server once "
+                    "directly reachable and to book a relay reservation while "
+                    "still behind NAT — read this node's hardware "
                     "self-profile (runtime build commit, CPU architecture, OS, "
                     "detected compute devices, derived serving capacity / "
                     "backend / capability key), and compute a deterministic "

@@ -211,8 +211,9 @@ pub struct Ivms101TransferData {
     pub timestamp_iso8601: String,
     /// On-chain transaction hash (hex).
     pub transaction_hash_hex: String,
-    /// Bound ISO 20022 message identifier if the transfer was
-    /// initiated through a SWIFT-class message.
+    /// Bound ISO 20022 message identifier (`GrpHdr.MsgId` of the
+    /// pacs.008 built by [`crate::iso20022::Pacs008Document`]) if the
+    /// transfer was initiated through a SWIFT-class message.
     pub iso20022_message_id: Option<String>,
 }
 
@@ -231,24 +232,6 @@ pub struct Ivms101Binding {
     /// serves the full envelope to authenticated peers. Optional —
     /// some flows carry the envelope inline via the off-chain channel.
     pub envelope_url: Option<String>,
-}
-
-/// Minimal ISO 20022 message envelope shim — captures the canonical
-/// `MX` headers Tenzro needs to bind a TradFi instruction (`pacs.008`
-/// customer credit transfer, `pacs.009` financial-institution credit
-/// transfer, etc.) to an on-chain settlement. The full XSD is huge;
-/// this struct holds the four fields callers actually need.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Iso20022Message {
-    /// e.g. `pacs.008.001.10`.
-    pub message_type: String,
-    /// Globally-unique message identifier per ISO 20022 §1.6.
-    pub message_id: String,
-    pub creation_iso8601: String,
-    /// Optional CCIP-CRE intent payload — set when the message arrived
-    /// via the Chainlink Runtime Environment translator (the canonical
-    /// SWIFT → on-chain path).
-    pub cre_intent_calldata_hex: Option<String>,
 }
 
 /// Canonical JSON serialization for hash stability.
@@ -368,19 +351,6 @@ mod tests {
         let mut env2 = sample_envelope();
         env2.transfer.amount_smallest_unit = "9999".into();
         assert_ne!(env1.canonical_hash(), env2.canonical_hash());
-    }
-
-    #[test]
-    fn iso20022_message_round_trips() {
-        let m = Iso20022Message {
-            message_type: "pacs.008.001.10".into(),
-            message_id: "MSG-2026-06-09-0001".into(),
-            creation_iso8601: "2026-06-09T12:00:00Z".into(),
-            cre_intent_calldata_hex: Some("0xa9059cbb...".into()),
-        };
-        let json = serde_json::to_string(&m).unwrap();
-        let parsed: Iso20022Message = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.message_type, m.message_type);
     }
 
     #[test]

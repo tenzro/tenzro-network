@@ -84,6 +84,13 @@ Most home, mobile, and corporate networks are behind NAT. Tenzro composes Circui
 
 Driven by `NetworkConfig::enable_relay` (server side, default-on for `Validator` role) and `NetworkConfig::enable_hole_punching` (client side, default-on for every role). All five sub-behaviours are wrapped in libp2p `Toggle` so disabled halves are no-ops without bifurcating the `NetworkBehaviour` type.
 
+### Runtime-adaptive traversal
+
+Wiring the client behaviours is not enough — a NAT'd node still has to *act* on its reachability as it changes. Two runtime decisions close the loop, both keyed off the reachability tracker's tier (`Unknown` → `Private` → `Direct`):
+
+- **Kademlia mode promotion.** A node behind NAT starts Kademlia in **Client** mode. In Server mode it would advertise records that other peers cannot validate via dial-back, polluting their k-buckets. Once the reachability tracker reports sustained `Direct`, the node promotes itself to **Server** mode (`maybe_promote_kad_to_server`), called from the AutoNAT-client and DCUtR success handlers. Validators with a confirmed public address start directly in Server. Setting Server mode is idempotent, so repeated confirmations are no-ops.
+- **Relay reservation booking.** Constructing the relay-client behaviour does not itself book a slot — libp2p's relay-client treats `Swarm::listen_on(<relay-addr>/p2p-circuit)` as the reservation request. During the Identify handshake, a non-`Direct` node that meets a peer advertising the relay HOP protocol (`/libp2p/circuit/relay/0.2.0/hop`) on a globally-routable address books a reservation on it. The attempt is gated three ways: only when our own tier is not `Direct` (a public node would burn a relay slot a NAT'd peer needs), only against a HOP-advertising peer on a globally-routable address (a LAN reservation produces an unreachable circuit), and idempotently per peer (tracked in `attempted_relay_reservations`, cleared on relay-lost). With a reservation booked, peers reach the edge node through `/p2p-circuit` and DCUtR has a relayed connection to upgrade to a direct one via hole-punching.
+
 By default every node binds both `/ip4/0.0.0.0/tcp/9000` and `/ip4/0.0.0.0/udp/9000/quic-v1` — the universal transport set that lets cloud VMs, residential WiFi, mobile devices, and embedded boards reach the network through whichever transport NAT permits. Identify observed-address discovery gives a node its own external address as a tally of what peers report seeing.
 
 ---
@@ -152,6 +159,7 @@ A new node finds the network through a multi-source bootstrap path:
 
 - **Explicit `--boot-nodes`** — a comma-separated list of libp2p multiaddrs and peer IDs. Authoritative and direct.
 - **`--bootstrap-dns <base>`** — DNS-based discovery. The node resolves `_tenzro-boot._tcp.<base>` SRV records to a set of `(priority, weight, port, target)` tuples, then resolves each target's TXT records to obtain its libp2p peer ID. Rotating a boot validator's identity is a zone edit, not a fleet-wide wrapper update.
+- **Built-in fallback set** — the compiled-in testnet bootstrap list carries both DNS names *and* raw IP multiaddrs for the bootstrap validators, so a DNS outage cannot partition new joiners: a node that fails to resolve the DNS entry still dials the raw-IP fallback. The two are equivalent addresses for the same peers; whichever resolves first wins.
 - **Kademlia DHT** — once an initial connection is established, Kademlia handles ongoing peer discovery. The protocol id is `/tenzro/kad` so Tenzro peers don't accidentally exchange routing tables with other libp2p networks.
 - **Identify observed_addr tally** — Identify reports back what a peer sees as the local node's external address. With N≥3 confirmations from independent peers, the node treats the address as confirmed and updates its `external_addrs` so future Identify exchanges propagate the address forward.
 

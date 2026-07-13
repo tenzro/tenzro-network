@@ -111,6 +111,7 @@ pub mod traits;
 pub mod wormhole;
 pub mod wormhole_ntt;
 pub mod chainlink_feed;
+pub mod chainlink_por;
 pub mod fee_oracle;
 pub mod fee_sponsor;
 
@@ -124,6 +125,10 @@ pub use chainlink_feed::{
     FEED_ETH_USD_MAINNET, FEED_LINK_USD_MAINNET, QUOTE_CACHE_TTL_SECS,
     SELECTOR_DECIMALS, SELECTOR_LATEST_ROUND_DATA, STALENESS_THRESHOLD_LONGTAIL_SECS,
     STALENESS_THRESHOLD_MAJOR_SECS,
+};
+pub use chainlink_por::{
+    ChainlinkPorAdapter, PorAttestationInput, PorError, PorFeedConfig, PorReading,
+    decode_por_round, validate_freshness,
 };
 pub use fee_oracle::{
     BridgeAdapterId, BridgeFeeOracle, BridgeFeeQuote, ChainlinkFeedFeeOracle,

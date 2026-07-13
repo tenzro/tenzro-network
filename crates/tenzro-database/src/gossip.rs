@@ -73,7 +73,7 @@ pub fn decode_for_topic(topic: &str, bytes: &[u8]) -> Result<DatabaseGossipMessa
 mod tests {
     use super::*;
     use crate::access_control::AccessPolicy;
-    use crate::database::PlacementMode;
+    use crate::database::{PlacementMode, ReplicationPolicy};
 
     fn sample_descriptor() -> DatabaseDescriptor {
         DatabaseDescriptor {
@@ -81,7 +81,7 @@ mod tests {
             engine_id: "postgres".to_string(),
             placement: PlacementMode::Network,
             partitions: 3,
-            replicas: 2,
+            replication: ReplicationPolicy::default(),
             engine_config: serde_json::json!({}),
             access_policy: AccessPolicy::OwnerOnly {
                 owner_did: "did:tenzro:human:abc".to_string(),

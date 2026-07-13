@@ -670,21 +670,28 @@ async def create_database(
     owner_did: str,
     placement: str = "local",
     partitions: int = 1,
-    replicas: int = 1,
+    min_replication: int = 0,
+    max_replication: int = 0,
     engine_config: dict | None = None,
 ) -> dict:
     """Register a database this node serves, computing and persisting its
     partition placement over the live cluster. owner_did becomes the admin
     authority (owner-only access policy). placement is 'local', 'lan_cluster',
-    or 'network'. Returns {database, partitions}."""
+    or 'network'. min_replication/max_replication set the holders-per-partition
+    policy — writes below min fail, repair never grows past max; when 0 the
+    node default (2/4) applies. Returns {database, partitions}."""
     params: dict = {
         "database_id": database_id,
         "engine_id": engine_id,
         "owner_did": owner_did,
         "placement": placement,
         "partitions": partitions,
-        "replicas": replicas,
     }
+    if min_replication or max_replication:
+        params["replication"] = {
+            "min_replication": min_replication or 2,
+            "max_replication": max_replication or 4,
+        }
     if engine_config is not None:
         params["engine_config"] = engine_config
     return await rpc_call("tenzro_createDatabase", params)
@@ -755,14 +762,17 @@ async def database_query(
     partition_index: int = 0,
     write: bool = False,
     capability: str = "",
+    consistency: str = "",
 ) -> dict:
     """Run an engine-dialect query against a database partition. caller_did is
     authorized against the access policy (writes require the admin action,
     reads the read action) before any engine is touched. body is the engine
     dialect: SQL {sql, params} for Postgres, a {op, ...} document for Qdrant /
-    Lance / Tantivy, a {command: [...]} for Valkey. When this node holds the
-    target partition the result carries served_here=true and the engine result;
-    otherwise it carries holder endpoints."""
+    Lance / Tantivy, a {command: [...]} for Valkey. consistency is the write
+    acknowledgement level — 'quorum' (default) or 'all'; ignored on the read
+    path. When this node holds the target partition the result carries
+    served_here=true and the engine result; otherwise it carries holder
+    endpoints."""
     params: dict = {
         "database_id": database_id,
         "caller_did": caller_did,
@@ -772,6 +782,8 @@ async def database_query(
     }
     if capability:
         params["capability"] = capability
+    if consistency:
+        params["consistency"] = consistency
     return await rpc_call("tenzro_databaseQuery", params)
 
 
@@ -793,12 +805,14 @@ async def rescale_database(
     caller_did: str,
     placement: str,
     partitions: int = 0,
-    replicas: int = 0,
+    min_replication: int = 0,
+    max_replication: int = 0,
     capability: str = "",
 ) -> dict:
     """Grow or shrink a database along the local → lan_cluster → network
     continuum in place. Administrative — gated on the write action.
-    partitions/replicas default to the database's current counts when 0."""
+    partitions and the min_replication/max_replication policy default to the
+    database's current values when 0; min and max must be supplied together."""
     params: dict = {
         "database_id": database_id,
         "caller_did": caller_did,
@@ -806,8 +820,11 @@ async def rescale_database(
     }
     if partitions:
         params["partitions"] = partitions
-    if replicas:
-        params["replicas"] = replicas
+    if min_replication and max_replication:
+        params["replication"] = {
+            "min_replication": min_replication,
+            "max_replication": max_replication,
+        }
     if capability:
         params["capability"] = capability
     return await rpc_call("tenzro_rescaleDatabase", params)
@@ -4105,7 +4122,7 @@ async def compute_status() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# MoE Expert Sharding (4 tools)
+# MoE Expert Sharding (8 tools)
 # ---------------------------------------------------------------------------
 
 
@@ -4151,6 +4168,70 @@ async def moe_catalog_shape(model_id: str) -> dict:
     params_per_expert; null for dense models.
     """
     return await rpc_call("tenzro_moeCatalogShape", {"model_id": model_id})
+
+
+@mcp.tool
+async def moe_prepare_experts(
+    model_id: str,
+    layer: int,
+    experts: list | None = None,
+    include_gate: bool = True,
+    quant: str | dict | None = None,
+) -> dict:
+    """Slice a MoE checkpoint into per-expert blobs and publish them for holders.
+
+    Optionally block-quantizes each projection: ``quant`` is a preset string
+    (``q4_k_m`` / ``q8_0`` / ``q4_k`` / ``q6_k``) or a per-projection object like
+    ``{"gate": "q4_k", "up": "q4_k", "down": "q6_k"}``; omit for dense f32 blobs.
+    Omit ``experts`` (or pass an empty list) to prepare every expert in the layer.
+    Runs asynchronously — returns a ``job_id`` to poll with ``moe_prepare_status``.
+    """
+    params: dict = {"model_id": model_id, "layer": layer, "include_gate": include_gate}
+    if experts:
+        params["experts"] = experts
+    if quant is not None:
+        params["quant"] = quant
+    return await rpc_call("tenzro_moePrepareExperts", params)
+
+
+@mcp.tool
+async def moe_prepare_status(job_id: str) -> dict:
+    """Poll an expert-preparation job started by ``moe_prepare_experts``.
+
+    Returns the job's model_id, layer, state (running / done / error), any
+    error, and the prepared per-expert ``tenzro://blob`` URIs when done.
+    """
+    return await rpc_call("tenzro_moePrepareStatus", {"job_id": job_id})
+
+
+@mcp.tool
+async def moe_expert_status() -> dict:
+    """Snapshot this node's resident MoE experts and gating networks.
+
+    Each entry reports its residency tier (``memory`` / ``disk``) and byte
+    footprint, alongside the total footprint, the memory budget, and whether
+    GPU compute is active.
+    """
+    return await rpc_call("tenzro_moeExpertStatus", [])
+
+
+@mcp.tool
+async def moe_forward(
+    model_id: str,
+    layer: int,
+    d_model: int,
+    hidden: list,
+) -> dict:
+    """Run one distributed MoE layer forward.
+
+    Gate-routes the ``hidden`` activation (row-major ``[num_tokens, d_model]``
+    f32) locally, fans the selected experts out to holders over the
+    ``tenzro/moe`` transport, and combines the gate-weighted outputs.
+    """
+    return await rpc_call(
+        "tenzro_moeForward",
+        {"model_id": model_id, "layer": layer, "d_model": d_model, "hidden": hidden},
+    )
 
 
 # ---------------------------------------------------------------------------

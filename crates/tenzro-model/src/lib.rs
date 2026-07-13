@@ -123,8 +123,14 @@ pub mod latency;
 pub mod library;
 pub mod load;
 pub mod meta_router;
+pub mod moe_compute;
+#[cfg(all(feature = "moe-gpu", feature = "moe-cuda"))]
+pub mod moe_compute_cuda;
+#[cfg(all(feature = "moe-gpu", feature = "moe-wgpu"))]
+pub mod moe_compute_wgpu;
 pub mod moe_exec;
 pub mod moe_extract;
+pub mod moe_quant;
 pub mod moe_router;
 pub mod moe_shard;
 pub mod onnx_session;
@@ -159,14 +165,17 @@ pub use moe_shard::{
     ExpertHolder, ExpertId, MoeShardView, ReplicationPolicy,
 };
 pub use moe_router::{
-    plan_dispatch, DispatchPlan, ExpertBatch, MoeDispatchError, TokenAssignment,
-    TokenRouting, TokenSlot,
+    plan_dispatch, DispatchPlan, ExpertBatch, HolderEndpoint, MoeDispatchError,
+    TokenAssignment, TokenRouting, TokenSlot,
 };
 pub use moe_exec::{
-    combine_expert_outputs, to_token_routing, ExpertExecuteRequest, ExpertExecuteResponse,
-    ExpertFfn, GatingNetwork, MoeExecError, MoeExpertRuntime, MoeExpertRuntimeStatus,
-    MoeLoadedExpert, MoeLoadedGate, RoutedSlot, RoutedToken,
+    combine_expert_outputs, quantize_expert_blob, to_token_routing, ExpertExecuteRequest,
+    ExpertExecuteResponse, ExpertFfn, ExpertQuantPlan, ExpertTier, GatingNetwork, MoeCombiner,
+    MoeExecError, MoeExpertRuntime, MoeExpertRuntimeStatus, MoeLoadedExpert, MoeLoadedGate,
+    ResidencyConfig, RoutedSlot, RoutedToken,
 };
+pub use moe_compute::{BackendKind, ComputeBackend, CpuCompute, ExpertCompute, Weight};
+pub use moe_quant::{QuantError, QuantKind, QuantMatrix};
 pub use moe_extract::{MoeExtractor, MoeTensorNaming};
 pub use library::{
     CategoryType, CompatibilityRequirements, LibraryModelInfo, ModelCategory, ModelHighlight,

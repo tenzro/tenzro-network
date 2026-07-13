@@ -30,6 +30,7 @@ use crate::block_sync_proto::{self, BlockSyncBehaviour};
 use crate::cluster_tunnel_proto::{self, ClusterTunnelBehaviour};
 use crate::consensus_direct_proto::{self, ConsensusDirectBehaviour};
 use crate::da_committee_relay::{self, DaCommitteeBehaviour};
+use crate::db_replicate_proto::{self, DbReplicateBehaviour};
 use crate::gossip::{validate_gossip_message, MessageDeduplicator, MessageValidation};
 use crate::mpc_relay::{self, MpcRelayBehaviour};
 
@@ -158,6 +159,16 @@ pub struct TenzroBehaviour {
     /// (`tenzro_node::da_committee`) does the typed encode/decode. See
     /// `da_committee_relay.rs` for the wire types and concurrency limits.
     pub da_committee: DaCommitteeBehaviour,
+
+    /// Database replicated-write request/response protocol
+    /// (`/tenzro/db/replicate/1.0.0`). Carries the `ApplyWrite` RPC between the
+    /// holders of a database partition so a serving holder can fan a write out
+    /// to its peer holders and count acknowledgments for Quorum / All write
+    /// consistency. Request bodies travel as opaque blobs because this crate
+    /// does not depend on `tenzro-database`; the node-layer adapter
+    /// (`tenzro_node::db_holder_dispatch`) does the typed encode/decode. See
+    /// `db_replicate_proto.rs` for the wire types and concurrency limits.
+    pub db_replicate: DbReplicateBehaviour,
 
     // ─── NAT traversal stack (libp2p 2026 reference design) ────────────────
     //
@@ -351,8 +362,20 @@ impl TenzroBehaviour {
             .with_peer_score(peer_score_params, peer_score_thresholds)
             .map_err(|e| format!("Failed to install peer scoring: {}", e))?;
 
-        // Create Kademlia DHT (S/Kademlia disjoint paths, 30s timeout, k=10)
-        let kademlia = crate::discovery::create_kademlia(local_peer_id);
+        // Create Kademlia DHT (S/Kademlia disjoint paths, 30s timeout, k=10).
+        //
+        // Initial mode: `Client` when hole-punching is enabled (this node may
+        // be behind NAT and must not serve records it can't back with a
+        // reachable address); `Server` when the operator has declared us
+        // publicly reachable via `enable_relay` (validator class). The event
+        // loop promotes Client→Server at runtime when the reachability
+        // tracker reports sustained Direct.
+        let initial_kad_mode = if enable_relay {
+            libp2p::kad::Mode::Server
+        } else {
+            libp2p::kad::Mode::Client
+        };
+        let kademlia = crate::discovery::create_kademlia(local_peer_id, initial_kad_mode);
 
         // Create identify behaviour.
         //
@@ -438,6 +461,12 @@ impl TenzroBehaviour {
         // node-layer surface adapter is what services accepted requests
         // against the local sliver store.
         let da_committee = da_committee_relay::new_behaviour();
+
+        // Database replicated-write request/response protocol. Always
+        // constructed — a no-op on a node that holds no database partitions,
+        // since no peer dials it. The node-layer surface adapter services
+        // accepted `ApplyWrite` requests against the local database engine.
+        let db_replicate = db_replicate_proto::new_behaviour();
 
         // ─── NAT traversal stack ──────────────────────────────────────────
         //
@@ -535,6 +564,7 @@ impl TenzroBehaviour {
             mpc_relay,
             cluster_tunnel,
             da_committee,
+            db_replicate,
             relay,
             relay_client,
             autonat_client,

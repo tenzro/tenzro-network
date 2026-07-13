@@ -517,6 +517,12 @@ impl AgentMessageQueue {
         self.rx.write().await.recv().await
     }
 
+    /// Number of messages currently buffered in the queue (including
+    /// reserved-but-unsent permits).
+    fn depth(&self) -> usize {
+        self.tx.max_capacity() - self.tx.capacity()
+    }
+
     /// Tries to send without blocking
     fn try_send(&self, message: AgentMessage) -> Result<()> {
         self.tx.try_send(message).map_err(|e| match e {
@@ -1255,10 +1261,18 @@ impl MessageRouter {
         Ok(())
     }
 
-    /// Gets the number of pending messages for an agent
-    pub fn pending_message_count(&self, _agent_id: &str) -> Result<usize> {
-        // This is an approximation since we can't directly query mpsc queue length
-        Ok(0) // In a real implementation, we'd track this separately
+    /// Gets the number of pending messages for an agent.
+    ///
+    /// Queue depth is derived from the mpsc channel itself:
+    /// `max_capacity() - capacity()` counts buffered messages plus any
+    /// send permits currently reserved, which is the live backlog the
+    /// receiver has yet to drain.
+    pub fn pending_message_count(&self, agent_id: &str) -> Result<usize> {
+        let queue = self
+            .queues
+            .get(agent_id)
+            .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
+        Ok(queue.depth())
     }
 }
 
@@ -1348,6 +1362,35 @@ mod tests {
         let received = router.receive_message(&recipient.agent_id).await.unwrap();
         assert!(received.is_some());
         assert_eq!(received.unwrap().payload, b"Hello");
+    }
+
+    #[tokio::test]
+    async fn test_pending_message_count() {
+        let router = unsigned_test_router();
+
+        let sender = create_test_identity("sender");
+        let recipient = create_test_identity("recipient");
+
+        router.register_agent(sender.agent_id.clone()).unwrap();
+        router.register_agent(recipient.agent_id.clone()).unwrap();
+
+        assert_eq!(router.pending_message_count(&recipient.agent_id).unwrap(), 0);
+
+        for _ in 0..3 {
+            let message = AgentMessage::new(
+                sender.clone(),
+                recipient.clone(),
+                AgentMessageType::Query,
+                b"queued".to_vec(),
+            );
+            router.send_message(message).await.unwrap();
+        }
+        assert_eq!(router.pending_message_count(&recipient.agent_id).unwrap(), 3);
+
+        router.receive_message(&recipient.agent_id).await.unwrap();
+        assert_eq!(router.pending_message_count(&recipient.agent_id).unwrap(), 2);
+
+        assert!(router.pending_message_count("nonexistent").is_err());
     }
 
     #[tokio::test]

@@ -39,6 +39,12 @@ pub enum EscrowCommand {
     PrepaidWithdraw(PrepaidWithdrawCmd),
     /// Read the current prepaid balance
     PrepaidBalance(PrepaidBalanceCmd),
+    /// Delivery-versus-payment saga orchestration (all-or-compensate)
+    #[command(subcommand)]
+    Dvp(DvpCommand),
+    /// Multilateral obligation netting
+    #[command(subcommand)]
+    Netting(NettingCommand),
 }
 
 impl EscrowCommand {
@@ -56,7 +62,342 @@ impl EscrowCommand {
             Self::PrepaidDeposit(cmd) => cmd.execute().await,
             Self::PrepaidWithdraw(cmd) => cmd.execute().await,
             Self::PrepaidBalance(cmd) => cmd.execute().await,
+            Self::Dvp(cmd) => cmd.execute().await,
+            Self::Netting(cmd) => cmd.execute().await,
         }
+    }
+}
+
+/// Delivery-versus-payment saga subcommands.
+#[derive(Debug, Subcommand)]
+pub enum DvpCommand {
+    /// Open a DvP saga (legs supplied as inline JSON). Admin-token gated.
+    Open(DvpOpenCmd),
+    /// Drive a saga through its legs (all-or-compensate). Admin-token gated.
+    Execute(DvpExecuteCmd),
+    /// Finalize a saga in the Verifying state. Admin-token gated.
+    Finalize(DvpFinalizeCmd),
+    /// Read a saga record.
+    Get(DvpGetCmd),
+    /// List sagas opened by a creator.
+    List(DvpListCmd),
+}
+
+impl DvpCommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::Open(cmd) => cmd.execute().await,
+            Self::Execute(cmd) => cmd.execute().await,
+            Self::Finalize(cmd) => cmd.execute().await,
+            Self::Get(cmd) => cmd.execute().await,
+            Self::List(cmd) => cmd.execute().await,
+        }
+    }
+}
+
+/// Multilateral netting subcommands.
+#[derive(Debug, Subcommand)]
+pub enum NettingCommand {
+    /// Compute the minimal net instruction set for a batch. Admin-token gated.
+    Compute(NettingComputeCmd),
+    /// Mark a computed batch as settled. Admin-token gated.
+    Settle(NettingSettleCmd),
+    /// Read a netting batch record.
+    Get(NettingGetCmd),
+    /// List all computed netting batches.
+    List(NettingListCmd),
+}
+
+impl NettingCommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::Compute(cmd) => cmd.execute().await,
+            Self::Settle(cmd) => cmd.execute().await,
+            Self::Get(cmd) => cmd.execute().await,
+            Self::List(cmd) => cmd.execute().await,
+        }
+    }
+}
+
+fn print_json(result: &serde_json::Value) {
+    println!("{}", serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()));
+}
+
+/// Open a DvP saga.
+#[derive(Debug, Parser)]
+pub struct DvpOpenCmd {
+    /// Creator address (hex)
+    #[arg(long)]
+    creator: String,
+
+    /// Idempotency nonce (saga id = SHA-256(creator || nonce_le))
+    #[arg(long)]
+    nonce: u64,
+
+    /// Legs as a JSON array. Each leg:
+    /// {"leg_id":"...","payer":"0x..","payee":"0x..","asset":"TNZO","amount":"100","venue":{"escrow":{"escrow_id":"0x.."}}}
+    #[arg(long)]
+    legs: String,
+
+    /// Expiry as Unix timestamp in milliseconds
+    #[arg(long)]
+    expires_at_ms: i64,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl DvpOpenCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Open DvP Saga");
+
+        let legs: serde_json::Value = serde_json::from_str(&self.legs)
+            .map_err(|e| anyhow::anyhow!("invalid --legs JSON: {}", e))?;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_dvpOpenSaga", serde_json::json!({
+            "creator": self.creator,
+            "nonce": self.nonce,
+            "legs": legs,
+            "expires_at_ms": self.expires_at_ms,
+        })).await?;
+
+        output::print_success("DvP saga opened");
+        println!();
+        print_json(&result);
+        Ok(())
+    }
+}
+
+/// Execute a DvP saga.
+#[derive(Debug, Parser)]
+pub struct DvpExecuteCmd {
+    /// Saga id (hex)
+    saga_id: String,
+
+    /// Optional per-leg release proofs as JSON:
+    /// {"<leg_id>":{"proof_type":"cryptographic","proof_data_hex":"0x.."}}
+    #[arg(long)]
+    proofs: Option<String>,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl DvpExecuteCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Execute DvP Saga");
+
+        let mut params = serde_json::json!({ "saga_id": self.saga_id });
+        if let Some(p) = &self.proofs {
+            let proofs: serde_json::Value = serde_json::from_str(p)
+                .map_err(|e| anyhow::anyhow!("invalid --proofs JSON: {}", e))?;
+            params["proofs"] = proofs;
+        }
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_dvpExecuteSaga", params).await?;
+
+        output::print_success("DvP saga executed");
+        println!();
+        print_json(&result);
+        Ok(())
+    }
+}
+
+/// Finalize a DvP saga.
+#[derive(Debug, Parser)]
+pub struct DvpFinalizeCmd {
+    /// Saga id (hex)
+    saga_id: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl DvpFinalizeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Finalize DvP Saga");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_dvpFinalizeSaga", serde_json::json!({
+            "saga_id": self.saga_id,
+        })).await?;
+
+        output::print_success("DvP saga finalized");
+        println!();
+        print_json(&result);
+        Ok(())
+    }
+}
+
+/// Read a DvP saga.
+#[derive(Debug, Parser)]
+pub struct DvpGetCmd {
+    /// Saga id (hex)
+    saga_id: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl DvpGetCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("DvP Saga Details");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_dvpGetSaga", serde_json::json!({
+            "saga_id": self.saga_id,
+        })).await?;
+
+        println!();
+        print_json(&result);
+        Ok(())
+    }
+}
+
+/// List DvP sagas by creator.
+#[derive(Debug, Parser)]
+pub struct DvpListCmd {
+    /// Creator address (hex)
+    creator: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl DvpListCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("DvP Sagas by Creator");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_dvpListSagasByCreator", serde_json::json!({
+            "creator": self.creator,
+        })).await?;
+
+        println!();
+        print_json(&result);
+        Ok(())
+    }
+}
+
+/// Compute a netting batch.
+#[derive(Debug, Parser)]
+pub struct NettingComputeCmd {
+    /// Obligations as a JSON array. Each obligation:
+    /// {"debtor":"0x..","creditor":"0x..","asset":"TNZO","amount":"100"}
+    #[arg(long)]
+    obligations: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl NettingComputeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Compute Netting Batch");
+
+        let obligations: serde_json::Value = serde_json::from_str(&self.obligations)
+            .map_err(|e| anyhow::anyhow!("invalid --obligations JSON: {}", e))?;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_nettingCompute", serde_json::json!({
+            "obligations": obligations,
+        })).await?;
+
+        output::print_success("Netting batch computed");
+        println!();
+        print_json(&result);
+        Ok(())
+    }
+}
+
+/// Settle a netting batch.
+#[derive(Debug, Parser)]
+pub struct NettingSettleCmd {
+    /// Batch id (hex)
+    batch_id: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl NettingSettleCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Settle Netting Batch");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_nettingSettle", serde_json::json!({
+            "batch_id": self.batch_id,
+        })).await?;
+
+        output::print_success("Netting batch settled");
+        println!();
+        print_json(&result);
+        Ok(())
+    }
+}
+
+/// Read a netting batch.
+#[derive(Debug, Parser)]
+pub struct NettingGetCmd {
+    /// Batch id (hex)
+    batch_id: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl NettingGetCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Netting Batch Details");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_nettingGetBatch", serde_json::json!({
+            "batch_id": self.batch_id,
+        })).await?;
+
+        println!();
+        print_json(&result);
+        Ok(())
+    }
+}
+
+/// List netting batches.
+#[derive(Debug, Parser)]
+pub struct NettingListCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl NettingListCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        output::print_header("Netting Batches");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc.call("tenzro_nettingListBatches", serde_json::json!({})).await?;
+
+        println!();
+        print_json(&result);
+        Ok(())
     }
 }
 

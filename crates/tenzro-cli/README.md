@@ -152,7 +152,8 @@ tenzro database engines
 # validated against the engine before placement.
 tenzro database create --id <id> --engine <engine> \
   --placement <local|lan_cluster|network> \
-  --partitions <n> --replicas <n> --owner-did <did> [--config <json>]
+  --partitions <n> [--min-replication <n>] [--max-replication <n>] \
+  --owner-did <did> [--config <json>]
 
 # Mint a managed-database connection credential scoped to a single database
 # (calls tenzro_issueDatabaseConnection). Returns an AAP capability pinned to
@@ -162,12 +163,16 @@ tenzro database connect --id <id> --caller-did <did> [--write] [--ttl <secs>]
 # Run an engine-dialect query against a partition (calls tenzro_databaseQuery).
 # --body is the engine's own payload: SQL for Postgres, a vector search for
 # Qdrant or Lance, a full-text search for Tantivy, a command for Valkey.
-tenzro database query --id <id> --caller-did <did> --body <json> [--write]
+# --consistency sets the write acknowledgement level (quorum | all).
+tenzro database query --id <id> --caller-did <did> --body <json> [--write] \
+  [--consistency <quorum|all>]
 
 # Grow or shrink a database in place along the continuum (calls
 # tenzro_rescaleDatabase); a network-tier result is re-gossiped so peers
-# converge on the new shape.
-tenzro database rescale --id <id> --caller-did <did> --placement <mode>
+# converge on the new shape. --min-replication/--max-replication must be
+# supplied together.
+tenzro database rescale --id <id> --caller-did <did> --placement <mode> \
+  [--partitions <n>] [--min-replication <n> --max-replication <n>]
 
 tenzro database get --id <id>
 tenzro database list
@@ -578,7 +583,17 @@ config.
 
 `tenzro moe` is the CLI surface for distributed Mixture-of-Experts serving
 (`tenzro_moe*` RPCs) — shard-map planning plus expert/gate weight loading and
-distributed forward execution on the node's expert runtime.
+distributed forward execution on the node's expert runtime. The runtime keeps
+experts in a byte-bounded memory-tier LRU (budget auto-sized from host memory)
+over a disk tier that decodes spilled experts back on demand, so a holder can
+serve more experts than fit in memory; `tenzro moe status` reports each
+expert's tier and the memory budget. Expert projection math runs on CPU by
+default (`ndarray`, plus a runtime-detected AVX-512-VNNI path) or on GPU when
+the node was built with the `moe-cuda` / `moe-wgpu` features; a GPU holder
+advertises `moe_gpu` so the router biases dispatch toward it. `prepare-experts`
+slices a catalog checkpoint into per-expert blobs, optionally block-quantizes
+them (`q8_0` / `q4_k` / `q6_k`, or the `q4_k_m` preset — gate/up Q4_K, down
+Q6_K), and publishes them for holders to load.
 
 ```bash
 # Planning
@@ -587,13 +602,18 @@ tenzro moe plan-dispatch --model-id <id> --routing ./routing.json
 tenzro moe replication-policy                   # governance-tuned policy
 tenzro moe catalog-shape --model-id <id>        # catalog MoE topology
 
+# Preparation (slice + optional quantize + publish)
+tenzro moe prepare-experts --model-id <id> --layer <l> --quant q4_k_m
+tenzro moe prepare-experts --model-id <id> --layer <l> --experts 0,3,7 \
+  --quant-json '{"gate":"q4_k","up":"q4_k","down":"q6_k"}'
+
 # Execution
 tenzro moe load-expert --model-id <id> --layer <l> --expert <e> --file ./expert.safetensors
 tenzro moe load-expert --model-id <id> --layer <l> --expert <e> --uri tenzro://blob/<hash>
 tenzro moe load-gate --model-id <id> --layer <l> --file ./gate.safetensors
 tenzro moe unload-expert --model-id <id> --layer <l> --expert <e>
 tenzro moe unload-gate --model-id <id> --layer <l>
-tenzro moe status                               # resident experts + gates
+tenzro moe status                               # resident experts + gates, per-expert tier + memory budget
 tenzro moe forward --model-id <id> --layer <l> --d-model <dim> --hidden ./hidden.f32
 ```
 

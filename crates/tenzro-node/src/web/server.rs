@@ -257,6 +257,15 @@ impl WebServer {
                 "/wallet/share/escrow/unwrap",
                 post(wallet_share::unwrap_handler),
             )
+            // Static site serving — content-addressed blobs behind site
+            // manifests. Per-site x402 gating happens inside the handler
+            // (price is per-manifest, not per-route), so both routes stay
+            // on the open router.
+            .route("/sites/:site_id", get(crate::web::sites::serve_site_index))
+            .route(
+                "/sites/:site_id/*path",
+                get(crate::web::sites::serve_site_asset),
+            )
             // Prometheus metrics endpoint (kept at root for standard scrapers)
             .route("/metrics", get(handlers::prometheus_metrics));
 
@@ -321,6 +330,51 @@ impl WebServer {
 
         // Apply state to the open router
         let open = open.with_state(self.state.clone());
+
+        // Mount the Visa TAP recognition facilitator when the node has a
+        // verifier bound. The facilitator carries its own state
+        // (`TapFacilitatorState`), so it is built with its own `.with_state`
+        // and merged into the fully-stated `open` router. Routes resolve as
+        // `/facilitator/visa-tap/verify` and `/facilitator/visa-tap/supported`
+        // — no `/api/` prefix (the hostname is the namespace).
+        #[cfg(feature = "visa-tap")]
+        let open = {
+            let verifier = self
+                .state
+                .node
+                .as_ref()
+                .and_then(|n| n.visa_tap_verifier().cloned());
+            if let Some(verifier) = verifier {
+                let tap_state = tenzro_payments::visa_tap::TapFacilitatorState::new(
+                    verifier,
+                    "api.tenzro.xyz",
+                );
+                let tap_router = tenzro_payments::visa_tap::tap_facilitator_router(tap_state);
+                open.nest("/facilitator/visa-tap", tap_router)
+            } else {
+                open
+            }
+        };
+
+        // Mount the x402 facilitator (verify/settle) when the node has one
+        // bound. Routes resolve as `/facilitator/x402/verify`,
+        // `/facilitator/x402/settle`, `/facilitator/x402/supported`.
+        let open = {
+            let facilitator = self
+                .state
+                .node
+                .as_ref()
+                .and_then(|n| n.x402_facilitator().cloned());
+            if let Some(facilitator) = facilitator {
+                let x402_state =
+                    tenzro_payments::x402::FacilitatorServerState::new(facilitator);
+                let x402_router =
+                    tenzro_payments::x402::facilitator_router(x402_state);
+                open.nest("/facilitator/x402", x402_router)
+            } else {
+                open
+            }
+        };
 
         // If anything is gated, attach the middleware layer to the gated
         // sub-router and merge it back in. Each branch ends up with the

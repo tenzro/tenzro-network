@@ -302,6 +302,7 @@ fn apply_advertised_capacity(
     capacity.verifiable_inference = advertised.verifiable_inference;
     capacity.moe_holdings = advertised.moe_holdings.clone();
     capacity.moe_roles = advertised.moe_roles.clone();
+    capacity.moe_gpu = advertised.moe_gpu;
 }
 
 /// Manager for inference providers
@@ -640,11 +641,13 @@ impl ProviderManager {
         holdings: Vec<tenzro_types::MoeExpertHolding>,
         is_router: bool,
         iroh_endpoint_id: Option<String>,
+        moe_gpu: bool,
     ) {
         use tenzro_types::MoeProviderRole;
 
         let apply = |capacity: &mut tenzro_types::ProviderCapacity| {
             capacity.moe_holdings = holdings.clone();
+            capacity.moe_gpu = moe_gpu;
             capacity
                 .moe_roles
                 .retain(|r| !matches!(r, MoeProviderRole::Router | MoeProviderRole::ExpertHolder));

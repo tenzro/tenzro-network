@@ -573,16 +573,177 @@ pub fn bind_external_attestation_result(
     Ok(true)
 }
 
-/// Extract the TEE public key from an attestation report.
+// ---------------------------------------------------------------------------
+// TEE public-key extraction from raw attestation evidence
+// ---------------------------------------------------------------------------
+
+/// REPORT_DATA / REPORTDATA is 64 bytes on every Intel/AMD report format.
+const REPORT_DATA_LEN: usize = 64;
+
+/// Intel SGX DCAP ECDSA quote v3: 48-byte quote header followed by the
+/// 384-byte ISV enclave report body; REPORT_DATA sits at body offset 320.
+const SGX_QUOTE_REPORT_DATA_OFFSET: usize = 48 + 320; // = 368
+const SGX_QUOTE_MIN_LEN: usize = SGX_QUOTE_REPORT_DATA_OFFSET + REPORT_DATA_LEN; // = 432
+
+/// Intel TDX quote v4: 48-byte quote header followed by the 584-byte
+/// TD report body (TDREPORT_STRUCT); REPORTDATA sits at body offset 520.
+const TDX_QUOTE_REPORT_DATA_OFFSET: usize = 48 + 520; // = 568
+const TDX_QUOTE_MIN_LEN: usize = TDX_QUOTE_REPORT_DATA_OFFSET + REPORT_DATA_LEN; // = 632
+
+/// AMD SEV-SNP ATTESTATION_REPORT: report_data at struct offset 0x50.
+const SNP_REPORT_DATA_OFFSET: usize = 0x50; // = 80
+const SNP_REPORT_MIN_LEN: usize = SNP_REPORT_DATA_OFFSET + REPORT_DATA_LEN; // = 144
+
+/// Reduce a 64-byte REPORT_DATA field to the caller-bound public key.
 ///
-/// In a real implementation this would parse the attestation format and
-/// extract the embedded public key (Intel SGX REPORT_DATA, AWS Nitro
-/// attestation document, AMD SEV certificate chain). The current
-/// implementation derives a deterministic placeholder from the measurement.
+/// TEE providers zero-pad the caller's `user_data` into the 64-byte field
+/// (copy_len = min(len, 64)). A 32-byte key therefore arrives as
+/// `key || 32 zero bytes`; detect that convention and strip the padding,
+/// otherwise return the full 64 bytes (e.g. an uncompressed EC point).
+fn key_binding_from_report_data(report_data: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(report_data.len(), REPORT_DATA_LEN);
+    if report_data[32..].iter().all(|b| *b == 0) {
+        report_data[..32].to_vec()
+    } else {
+        report_data.to_vec()
+    }
+}
+
+/// Extract the `public_key` field from an AWS Nitro attestation document.
+///
+/// The document is a COSE_Sign1 structure (RFC 8152 §4.2): a CBOR array of
+/// four elements whose third entry (index 2) is the payload — a CBOR map
+/// that carries an optional `public_key` byte string. Some callers hand us
+/// the payload map directly, so a bare map is also accepted.
+fn nitro_public_key_from_document(evidence: &[u8]) -> Result<Vec<u8>> {
+    let value: ciborium::value::Value = ciborium::de::from_reader(evidence)
+        .map_err(|e| ZkError::TeeAttestationError(format!("Nitro document is not valid CBOR: {e}")))?;
+
+    let payload_value = match value {
+        ciborium::value::Value::Array(items) => {
+            if items.len() != 4 {
+                return Err(ZkError::TeeAttestationError(format!(
+                    "Nitro COSE_Sign1 must have 4 elements, got {}",
+                    items.len()
+                )));
+            }
+            match &items[2] {
+                ciborium::value::Value::Bytes(payload) => {
+                    ciborium::de::from_reader(payload.as_slice()).map_err(|e| {
+                        ZkError::TeeAttestationError(format!(
+                            "Nitro COSE_Sign1 payload is not valid CBOR: {e}"
+                        ))
+                    })?
+                }
+                _ => {
+                    return Err(ZkError::TeeAttestationError(
+                        "Nitro COSE_Sign1 payload is not a byte string".to_string(),
+                    ));
+                }
+            }
+        }
+        map @ ciborium::value::Value::Map(_) => map,
+        _ => {
+            return Err(ZkError::TeeAttestationError(
+                "Nitro document is neither COSE_Sign1 array nor attestation map".to_string(),
+            ));
+        }
+    };
+
+    let ciborium::value::Value::Map(entries) = payload_value else {
+        return Err(ZkError::TeeAttestationError(
+            "Nitro attestation payload is not a CBOR map".to_string(),
+        ));
+    };
+
+    for (key, val) in &entries {
+        if matches!(key, ciborium::value::Value::Text(k) if k == "public_key") {
+            return match val {
+                ciborium::value::Value::Bytes(pk) if !pk.is_empty() => Ok(pk.clone()),
+                ciborium::value::Value::Bytes(_) | ciborium::value::Value::Null => {
+                    Err(ZkError::TeeAttestationError(
+                        "Nitro attestation document has empty public_key".to_string(),
+                    ))
+                }
+                _ => Err(ZkError::TeeAttestationError(
+                    "Nitro attestation public_key is not a byte string".to_string(),
+                )),
+            };
+        }
+    }
+
+    Err(ZkError::TeeAttestationError(
+        "Nitro attestation document carries no public_key field".to_string(),
+    ))
+}
+
+/// Slice the 64-byte REPORT_DATA out of raw quote/report evidence.
+fn report_data_at(evidence: &[u8], offset: usize, min_len: usize, format: &str) -> Result<Vec<u8>> {
+    if evidence.len() < min_len {
+        return Err(ZkError::TeeAttestationError(format!(
+            "{format} evidence too short: {} bytes, need at least {min_len}",
+            evidence.len()
+        )));
+    }
+    Ok(key_binding_from_report_data(
+        &evidence[offset..offset + REPORT_DATA_LEN],
+    ))
+}
+
+/// Extract the enclave-bound public key from an attestation report.
+///
+/// The key is whatever the enclave bound into its attestation at quote time:
+///
+/// - **Intel SGX** (DCAP ECDSA quote v3): the 64-byte REPORT_DATA field at
+///   quote offset 368 (header 48 + ISV report body offset 320).
+/// - **Intel TDX** (quote v4): the 64-byte REPORTDATA field at quote offset
+///   568 (header 48 + TDREPORT body offset 520).
+/// - **AMD SEV-SNP**: the 64-byte report_data field at ATTESTATION_REPORT
+///   offset 0x50.
+/// - **AWS Nitro**: the `public_key` byte string inside the COSE_Sign1
+///   attestation document payload map.
+///
+/// A 32-byte binding zero-padded to 64 bytes is returned as the 32-byte key;
+/// otherwise the full 64-byte field is returned. Vendors without a
+/// standardized embedded-key format fail closed.
 pub fn extract_tee_public_key(report: &AttestationReport) -> Result<Vec<u8>> {
     debug!("Extracting TEE public key from {:?} attestation", report.vendor);
-    let pubkey = sha256(&report.measurement).as_bytes().to_vec();
-    Ok(pubkey)
+
+    let evidence: &[u8] = if !report.attestation_data.is_empty() {
+        &report.attestation_data
+    } else {
+        &report.quote
+    };
+    if evidence.is_empty() {
+        return Err(ZkError::TeeAttestationError(
+            "attestation report carries no quote evidence".to_string(),
+        ));
+    }
+
+    match report.vendor {
+        TeeVendor::IntelSGX => report_data_at(
+            evidence,
+            SGX_QUOTE_REPORT_DATA_OFFSET,
+            SGX_QUOTE_MIN_LEN,
+            "SGX DCAP quote",
+        ),
+        TeeVendor::IntelTdx => report_data_at(
+            evidence,
+            TDX_QUOTE_REPORT_DATA_OFFSET,
+            TDX_QUOTE_MIN_LEN,
+            "TDX quote",
+        ),
+        TeeVendor::AMDSEV | TeeVendor::AmdSevSnp => report_data_at(
+            evidence,
+            SNP_REPORT_DATA_OFFSET,
+            SNP_REPORT_MIN_LEN,
+            "SEV-SNP report",
+        ),
+        TeeVendor::AWSNitro | TeeVendor::AwsNitro => nitro_public_key_from_document(evidence),
+        other => Err(ZkError::TeeAttestationError(format!(
+            "{other:?} has no standardized embedded public key format"
+        ))),
+    }
 }
 
 /// Get the expected code measurement for a circuit.
@@ -618,17 +779,114 @@ mod tests {
         TeeZkProof::new(proof, attestation)
     }
 
+    /// Helper: raw evidence with a 64-byte REPORT_DATA planted at `offset`.
+    fn evidence_with_report_data(total_len: usize, offset: usize, report_data: &[u8; 64]) -> Vec<u8> {
+        let mut evidence = vec![0xAAu8; total_len];
+        evidence[offset..offset + 64].copy_from_slice(report_data);
+        evidence
+    }
+
+    /// Helper: 32-byte key zero-padded to a 64-byte REPORT_DATA field.
+    fn padded_key(key_byte: u8) -> ([u8; 32], [u8; 64]) {
+        let key = [key_byte; 32];
+        let mut report_data = [0u8; 64];
+        report_data[..32].copy_from_slice(&key);
+        (key, report_data)
+    }
+
+    /// Helper: COSE_Sign1 Nitro attestation document with the given payload map.
+    fn nitro_cose_document(payload_entries: Vec<(ciborium::value::Value, ciborium::value::Value)>) -> Vec<u8> {
+        use ciborium::value::Value;
+        let mut payload_bytes = Vec::new();
+        ciborium::ser::into_writer(&Value::Map(payload_entries), &mut payload_bytes).unwrap();
+        let doc = Value::Array(vec![
+            Value::Bytes(vec![0xA0]), // protected header
+            Value::Map(vec![]),       // unprotected header
+            Value::Bytes(payload_bytes),
+            Value::Bytes(vec![0u8; 96]), // signature
+        ]);
+        let mut out = Vec::new();
+        ciborium::ser::into_writer(&doc, &mut out).unwrap();
+        out
+    }
+
     #[test]
-    fn test_extract_tee_public_key() {
-        let report = AttestationReport::new(
-            TeeVendor::AWSNitro,
-            vec![],
-            vec![1, 2, 3],
-            vec![4, 5, 6],
-        );
+    fn test_extract_tee_public_key_sgx_padded_32_byte_key() {
+        let (key, report_data) = padded_key(0x11);
+        let quote = evidence_with_report_data(SGX_QUOTE_MIN_LEN, SGX_QUOTE_REPORT_DATA_OFFSET, &report_data);
+        let report = AttestationReport::new(TeeVendor::IntelSGX, quote, vec![], vec![7, 8, 9]);
 
         let pubkey = extract_tee_public_key(&report).unwrap();
-        assert_eq!(pubkey.len(), 32); // SHA-256 hash
+        assert_eq!(pubkey, key.to_vec());
+    }
+
+    #[test]
+    fn test_extract_tee_public_key_tdx_full_64_byte_binding() {
+        // Non-zero tail → the full 64-byte field is the key material.
+        let report_data = [0x22u8; 64];
+        let quote = evidence_with_report_data(TDX_QUOTE_MIN_LEN, TDX_QUOTE_REPORT_DATA_OFFSET, &report_data);
+        let report = AttestationReport::new(TeeVendor::IntelTdx, quote, vec![], vec![]);
+
+        let pubkey = extract_tee_public_key(&report).unwrap();
+        assert_eq!(pubkey, report_data.to_vec());
+    }
+
+    #[test]
+    fn test_extract_tee_public_key_snp_padded_key_via_quote_field() {
+        let (key, report_data) = padded_key(0x33);
+        let snp_report = evidence_with_report_data(SNP_REPORT_MIN_LEN, SNP_REPORT_DATA_OFFSET, &report_data);
+        // attestation_data empty → falls back to the quote field.
+        let report = AttestationReport::new(TeeVendor::AmdSevSnp, vec![], snp_report, vec![]);
+
+        let pubkey = extract_tee_public_key(&report).unwrap();
+        assert_eq!(pubkey, key.to_vec());
+    }
+
+    #[test]
+    fn test_extract_tee_public_key_nitro_cose_document() {
+        use ciborium::value::Value;
+        let enclave_key = vec![0x44u8; 33];
+        let doc = nitro_cose_document(vec![
+            (Value::Text("module_id".to_string()), Value::Text("i-0abc".to_string())),
+            (Value::Text("public_key".to_string()), Value::Bytes(enclave_key.clone())),
+        ]);
+        let report = AttestationReport::new(TeeVendor::AWSNitro, doc, vec![], vec![]);
+
+        let pubkey = extract_tee_public_key(&report).unwrap();
+        assert_eq!(pubkey, enclave_key);
+    }
+
+    #[test]
+    fn test_extract_tee_public_key_nitro_missing_key_fails() {
+        use ciborium::value::Value;
+        let doc = nitro_cose_document(vec![(
+            Value::Text("module_id".to_string()),
+            Value::Text("i-0abc".to_string()),
+        )]);
+        let report = AttestationReport::new(TeeVendor::AwsNitro, doc, vec![], vec![]);
+
+        assert!(extract_tee_public_key(&report).is_err());
+    }
+
+    #[test]
+    fn test_extract_tee_public_key_short_evidence_fails() {
+        let report = AttestationReport::new(TeeVendor::IntelSGX, vec![0u8; 100], vec![], vec![]);
+        assert!(extract_tee_public_key(&report).is_err());
+
+        let report = AttestationReport::new(TeeVendor::AmdSevSnp, vec![0u8; 100], vec![], vec![]);
+        assert!(extract_tee_public_key(&report).is_err());
+    }
+
+    #[test]
+    fn test_extract_tee_public_key_unsupported_vendor_fails() {
+        let report = AttestationReport::new(TeeVendor::Generic, vec![0u8; 1024], vec![], vec![]);
+        assert!(extract_tee_public_key(&report).is_err());
+    }
+
+    #[test]
+    fn test_extract_tee_public_key_empty_evidence_fails() {
+        let report = AttestationReport::new(TeeVendor::IntelTdx, vec![], vec![], vec![]);
+        assert!(extract_tee_public_key(&report).is_err());
     }
 
     #[test]

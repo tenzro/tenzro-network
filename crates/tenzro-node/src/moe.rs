@@ -38,8 +38,8 @@ use tenzro_iroh::{
     jsonrpc_call, EndpointId, IrohError, IrohResolver, IrohResult, JsonRpcDispatcher, ALPN_MOE,
 };
 use tenzro_model::{
-    combine_expert_outputs, to_token_routing, ExpertBatch, ExpertExecuteRequest,
-    ExpertExecuteResponse, MoeExpertRuntime, MoeExtractor, MoeTensorNaming, RoutedToken,
+    to_token_routing, ExpertBatch, ExpertExecuteRequest, ExpertExecuteResponse, ExpertQuantPlan,
+    MoeCombiner, MoeExpertRuntime, MoeExtractor, MoeTensorNaming, QuantKind, RoutedToken,
 };
 use tenzro_types::tenzro_uri::TenzroUri;
 use tenzro_types::{MoeExpertHolding, MoeExpertResidency};
@@ -200,6 +200,59 @@ fn req_u32(p: &Value, field: &str) -> Result<u32, JsonRpcError> {
         .ok_or_else(|| missing(field))
 }
 
+/// Map a quant tag (`"q8_0"` / `"q4_k"` / `"q6_k"`) to a [`QuantKind`].
+fn parse_quant_kind(tag: &str) -> Result<QuantKind, JsonRpcError> {
+    match tag {
+        "q8_0" => Ok(QuantKind::Q8_0),
+        "q4_k" => Ok(QuantKind::Q4K),
+        "q6_k" => Ok(QuantKind::Q6K),
+        other => Err(JsonRpcError {
+            code: -32602,
+            message: format!("unknown quant kind '{other}': expected q8_0, q4_k, or q6_k"),
+            data: None,
+        }),
+    }
+}
+
+/// Parse an optional `quant` param into a prepare-time quant plan. Accepts
+/// either a preset string (`"q4_k_m"` / `"q8_0"` / `"q4_k"` / `"q6_k"`) that
+/// applies a per-projection plan, or an object with explicit per-projection
+/// tags: `{ "gate": "q4_k", "up": "q4_k", "down": "q6_k" }` (any projection
+/// omitted stays dense f32). Returns `None` when the param is absent.
+fn parse_quant_plan(p: &Value) -> Result<Option<ExpertQuantPlan>, JsonRpcError> {
+    let Some(q) = p.get("quant") else {
+        return Ok(None);
+    };
+    if q.is_null() {
+        return Ok(None);
+    }
+    if let Some(tag) = q.as_str() {
+        let plan = match tag {
+            "q4_k_m" => ExpertQuantPlan::q4_k_m(),
+            other => ExpertQuantPlan::uniform(parse_quant_kind(other)?),
+        };
+        return Ok(Some(plan));
+    }
+    if let Some(obj) = q.as_object() {
+        let per = |key: &str| -> Result<Option<QuantKind>, JsonRpcError> {
+            match obj.get(key).and_then(|v| v.as_str()) {
+                Some(tag) => Ok(Some(parse_quant_kind(tag)?)),
+                None => Ok(None),
+            }
+        };
+        return Ok(Some(ExpertQuantPlan {
+            gate: per("gate")?,
+            up: per("up")?,
+            down: per("down")?,
+        }));
+    }
+    Err(JsonRpcError {
+        code: -32602,
+        message: "quant must be a preset string or a per-projection object".into(),
+        data: None,
+    })
+}
+
 /// Resolve an expert/gate weight blob from the params: either inline
 /// `blob_base64` or a content-addressed `uri` (`tenzro://blob/<hash>` or
 /// any hash-bearing variant) fetched over iroh-blobs.
@@ -274,7 +327,10 @@ fn sync_moe_declaration(node: &Arc<TenzroNode>) {
             model_id: e.model_id.clone(),
             layer: e.layer,
             expert: e.expert,
-            residency: MoeExpertResidency::Warm,
+            residency: match e.tier {
+                tenzro_model::ExpertTier::Memory => MoeExpertResidency::Warm,
+                tenzro_model::ExpertTier::Disk => MoeExpertResidency::Cold,
+            },
             committed_tps: 0,
         })
         .collect();
@@ -288,7 +344,14 @@ fn sync_moe_declaration(node: &Arc<TenzroNode>) {
         .external_rpc_addr
         .clone()
         .unwrap_or_else(|| format!("http://{}", config.rpc_addr));
-    pm.set_moe_declaration(address, Some(endpoint_url), holdings, is_router, iroh_endpoint_id);
+    pm.set_moe_declaration(
+        address,
+        Some(endpoint_url),
+        holdings,
+        is_router,
+        iroh_endpoint_id,
+        status.gpu,
+    );
 }
 
 /// `tenzro_moeExpertLoad` — decode a per-expert safetensors blob
@@ -486,6 +549,10 @@ pub struct MoePreparedExpert {
     pub expert: u32,
     pub uri: String,
     pub bytes: u64,
+    /// Coarsest quant tag of the published blob (`"q4_k"` / `"q6_k"` /
+    /// `"q8_0"`), or `None` when the blob is dense f32.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quant: Option<String>,
 }
 
 /// The published gating-network blob produced by a prepare job.
@@ -525,6 +592,7 @@ pub(crate) async fn handle_moe_prepare_experts(
     let model_id = req_str(&p, "model_id")?.to_string();
     let layer = req_u32(&p, "layer")?;
     let include_gate = p.get("include_gate").and_then(|v| v.as_bool()).unwrap_or(true);
+    let quant_plan = parse_quant_plan(&p)?;
 
     let entry = tenzro_model::catalog::get_model_by_id(&model_id).ok_or_else(|| JsonRpcError {
         code: -32602,
@@ -603,6 +671,8 @@ pub(crate) async fn handle_moe_prepare_experts(
         },
     );
 
+    let quant_echo = p.get("quant").cloned().unwrap_or(Value::Null);
+
     let jobs = Arc::clone(&node.moe_prepare_jobs);
     let spawn_job_id = job_id.clone();
     tokio::spawn(async move {
@@ -611,10 +681,16 @@ pub(crate) async fn handle_moe_prepare_experts(
                 .await
                 .map_err(|e| format!("open {repo}: {e}"))?;
             for expert in &expert_ids {
-                let blob = extractor
-                    .expert_blob(layer, *expert)
-                    .await
-                    .map_err(|e| format!("expert {expert}: {e}"))?;
+                let blob = match quant_plan {
+                    Some(plan) => extractor
+                        .quantized_expert_blob(layer, *expert, plan)
+                        .await
+                        .map_err(|e| format!("expert {expert}: {e}"))?,
+                    None => extractor
+                        .expert_blob(layer, *expert)
+                        .await
+                        .map_err(|e| format!("expert {expert}: {e}"))?,
+                };
                 let len = blob.len() as u64;
                 let uri = resolver
                     .publish_bytes(Bytes::from(blob))
@@ -626,6 +702,7 @@ pub(crate) async fn handle_moe_prepare_experts(
                         expert: *expert,
                         uri: uri.to_string(),
                         bytes: len,
+                        quant: quant_plan.and_then(|p| p.coarsest_tag()).map(String::from),
                     });
                 }
             }
@@ -667,6 +744,7 @@ pub(crate) async fn handle_moe_prepare_experts(
         "layer": layer,
         "total_experts": total_experts,
         "include_gate": include_gate,
+        "quant": quant_echo,
         "state": "running",
     }))
 }
@@ -760,6 +838,19 @@ pub(crate) async fn handle_moe_forward(
             data: None,
         })?;
 
+    // 1b. Readahead: warm any disk-tier experts the gate just selected into
+    //     the memory tier, overlapping the decode with dispatch planning and
+    //     network setup below.
+    let selected: Vec<tenzro_model::ExpertId> = routed
+        .iter()
+        .flat_map(|t| t.slots.iter().map(|s| s.expert))
+        .collect();
+    if !selected.is_empty() {
+        let runtime = Arc::clone(&node.moe_runtime);
+        let model = model_id.clone();
+        let _ = tokio::task::spawn_blocking(move || runtime.readahead(&model, &selected)).await;
+    }
+
     // 2. Dispatch plan against the provider shard view.
     let manager = node.provider_manager().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -776,36 +867,47 @@ pub(crate) async fn handle_moe_forward(
             data: None,
         })?;
 
-    // 3. Concurrent per-batch fan-out.
+    // 3. Concurrent per-batch fan-out with pipelined combine. Each batch
+    //    resolves independently (holder RTTs vary widely on a WAN); its
+    //    response is folded into the combiner the moment it lands via
+    //    `FuturesUnordered`, overlapping the gate-weighted gather with
+    //    still-in-flight batches rather than blocking on the slowest one.
     let n_tokens = hidden.len() / d_model;
-    let futures = plan.batches.iter().map(|batch| {
+    let mut inflight = futures::stream::FuturesUnordered::new();
+    for batch in &plan.batches {
         let req = batch_request(&model_id, d_model, &hidden, n_tokens, batch);
-        async move {
+        inflight.push(async move {
             let req = req?;
             execute_batch(node, batch, req).await
-        }
-    });
-    let results = futures::future::join_all(futures).await;
+        });
+    }
 
-    let mut responses: Vec<ExpertExecuteResponse> = Vec::with_capacity(results.len());
+    let mut combiner = MoeCombiner::new(d_model, &routed).map_err(|e| JsonRpcError {
+        code: -32004,
+        message: format!("moe combine setup: {e}"),
+        data: None,
+    })?;
     let (mut local_n, mut iroh_n, mut http_n) = (0usize, 0usize, 0usize);
-    for r in results {
+    use futures::StreamExt;
+    while let Some(r) = inflight.next().await {
         let (resp, transport) = r?;
         match transport {
             Transport::Local => local_n += 1,
             Transport::Iroh => iroh_n += 1,
             Transport::Http => http_n += 1,
         }
-        responses.push(resp);
-    }
-
-    // 4. Gate-weighted gather.
-    let combined = combine_expert_outputs(d_model, &routed, &responses).map_err(|e| {
-        JsonRpcError {
+        combiner.accumulate(&resp).map_err(|e| JsonRpcError {
             code: -32004,
             message: format!("moe combine: {e}"),
             data: None,
-        }
+        })?;
+    }
+
+    // 4. Finalize: verifies every gate-selected contribution arrived.
+    let combined = combiner.finish().map_err(|e| JsonRpcError {
+        code: -32004,
+        message: format!("moe combine: {e}"),
+        data: None,
     })?;
 
     Ok(json!({
@@ -842,21 +944,28 @@ fn batch_request(
         }
         rows.extend_from_slice(&hidden[i * d_model..(i + 1) * d_model]);
     }
-    Ok(ExpertExecuteRequest {
-        model_id: model_id.to_string(),
-        layer: batch.expert.layer,
-        expert: batch.expert.expert,
-        token_indices: batch.token_indices.clone(),
-        d_model: d_model as u32,
-        hidden_states: rows,
-    })
+    Ok(ExpertExecuteRequest::compressed(
+        model_id.to_string(),
+        batch.expert.layer,
+        batch.expert.expert,
+        batch.token_indices.clone(),
+        d_model as u32,
+        rows,
+    ))
+}
+
+/// One holder endpoint a batch can be dispatched to: the primary carried
+/// inline on the batch, or one of its standby backups.
+struct HolderTarget<'a> {
+    iroh_endpoint_id: Option<&'a str>,
+    http_endpoint: Option<&'a str>,
 }
 
 /// Execute one planned batch: local runtime when the expert is resident
-/// here, else iroh `tenzro/moe` against the holder's advertised endpoint
-/// id, else HTTP JSON-RPC (`tenzro_moeExecute`) against the holder's
-/// advertised HTTP endpoint. iroh transport failures fall through to
-/// HTTP; an authoritative holder-side JSON-RPC error propagates.
+/// here, else remote dispatch to the primary holder, redispatching to
+/// each standby backup in turn on failure. Per remote holder the order is
+/// iroh `tenzro/moe` (QUIC), then HTTP JSON-RPC (`tenzro_moeExecute`).
+/// The last holder's error propagates when every holder fails.
 async fn execute_batch(
     node: &Arc<TenzroNode>,
     batch: &ExpertBatch,
@@ -889,9 +998,61 @@ async fn execute_batch(
         data: None,
     })?;
 
+    // Primary holder first, then each standby backup in the planner's
+    // warm-first order. A holder that fails at the transport level or
+    // returns a holder-side error is retired for this batch and the next
+    // standby is tried.
+    let primary = HolderTarget {
+        iroh_endpoint_id: batch.iroh_endpoint_id.as_deref(),
+        http_endpoint: batch.http_endpoint.as_deref(),
+    };
+    let backups = batch.backups.iter().map(|b| HolderTarget {
+        iroh_endpoint_id: b.iroh_endpoint_id.as_deref(),
+        http_endpoint: b.http_endpoint.as_deref(),
+    });
+    let targets = std::iter::once(primary).chain(backups);
+
+    let mut last_err: Option<JsonRpcError> = None;
+    let total = 1 + batch.backups.len();
+    for (attempt, target) in targets.enumerate() {
+        match dispatch_to_holder(node, batch, &params, &target).await {
+            Ok(pair) => return Ok(pair),
+            Err(e) => {
+                if attempt + 1 < total {
+                    debug!(
+                        expert = %format!("l{}/e{}", batch.expert.layer, batch.expert.expert),
+                        attempt,
+                        "moe holder dispatch failed, redispatching to backup: {}",
+                        e.message
+                    );
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| JsonRpcError {
+        code: -32000,
+        message: format!(
+            "expert l{}/e{} has no reachable holder",
+            batch.expert.layer, batch.expert.expert
+        ),
+        data: None,
+    }))
+}
+
+/// Dispatch a batch to one holder: iroh `tenzro/moe` first, HTTP
+/// JSON-RPC fallback. iroh transport failures fall through to HTTP within
+/// the same holder; a holder-side JSON-RPC error propagates so the caller
+/// can redispatch to a standby.
+async fn dispatch_to_holder(
+    node: &Arc<TenzroNode>,
+    batch: &ExpertBatch,
+    params: &Value,
+    target: &HolderTarget<'_>,
+) -> Result<(ExpertExecuteResponse, Transport), JsonRpcError> {
     // iroh first — same envelope as the ALPN server half expects.
     if let (Some(endpoint_id_str), Some(resolver)) =
-        (batch.iroh_endpoint_id.as_deref(), node.iroh_resolver.as_ref())
+        (target.iroh_endpoint_id, node.iroh_resolver.as_ref())
     {
         match endpoint_id_str.parse::<EndpointId>() {
             Ok(endpoint_id) => {
@@ -930,7 +1091,7 @@ async fn execute_batch(
     }
 
     // HTTP JSON-RPC fallback.
-    let http_endpoint = batch.http_endpoint.as_deref().ok_or_else(|| JsonRpcError {
+    let http_endpoint = target.http_endpoint.ok_or_else(|| JsonRpcError {
         code: -32000,
         message: format!(
             "expert l{}/e{} holder unreachable: no working iroh endpoint and no http endpoint",

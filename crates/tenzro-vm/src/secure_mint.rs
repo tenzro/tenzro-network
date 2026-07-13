@@ -93,6 +93,15 @@ pub enum SecureMintError {
         /// Requested burn amount.
         amount: u128,
     },
+
+    /// A corporate-action supply scale had a zero term or overflowed u128.
+    #[error("invalid supply scale: num {num}, den {den}")]
+    InvalidScale {
+        /// Scale numerator.
+        num: u32,
+        /// Scale denominator.
+        den: u32,
+    },
 }
 
 /// Per-token Secure-Mint policy.
@@ -424,6 +433,59 @@ impl SecureMintRegistry {
         self.global_pause.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Scale `circulating` and `reserve` by `num/den` for a stock split
+    /// (called by the corporate-action engine, never directly by mint).
+    /// Rounding is adversarial to the issuer: circulating rounds up
+    /// (supply is never under-counted), reserve rounds down (backing is
+    /// never over-credited). A post-scale `circulating > reserve` rejects
+    /// with `ExceedsReserve` and leaves the policy untouched. The velocity
+    /// tally and cap scale the same way (tally up, cap down) so a split
+    /// never widens the remaining window headroom.
+    pub fn apply_supply_scale(
+        &self,
+        token: &[u8; 20],
+        num: u32,
+        den: u32,
+    ) -> Result<SecureMintPolicy, SecureMintError> {
+        if num == 0 || den == 0 {
+            return Err(SecureMintError::InvalidScale { num, den });
+        }
+        let scale_up = |v: u128| -> Result<u128, SecureMintError> {
+            v.checked_mul(num as u128)
+                .and_then(|x| x.checked_add(den as u128 - 1))
+                .map(|x| x / den as u128)
+                .ok_or(SecureMintError::InvalidScale { num, den })
+        };
+        let scale_down = |v: u128| -> Result<u128, SecureMintError> {
+            v.checked_mul(num as u128)
+                .map(|x| x / den as u128)
+                .ok_or(SecureMintError::InvalidScale { num, den })
+        };
+        let mut inner = self.inner.write();
+        let policy = inner
+            .get_mut(token)
+            .ok_or_else(|| SecureMintError::NotConfigured(hex::encode(token)))?;
+        let new_circulating = scale_up(policy.circulating)?;
+        let new_reserve = scale_down(policy.reserve)?;
+        let new_window_minted = scale_up(policy.window_minted)?;
+        let new_window_cap = scale_down(policy.mint_window_cap)?;
+        if new_circulating > new_reserve {
+            return Err(SecureMintError::ExceedsReserve {
+                circulating: new_circulating,
+                amount: 0,
+                reserve: new_reserve,
+            });
+        }
+        policy.circulating = new_circulating;
+        policy.reserve = new_reserve;
+        policy.window_minted = new_window_minted;
+        policy.mint_window_cap = new_window_cap;
+        let snapshot = policy.clone();
+        drop(inner);
+        self.persist(token, &snapshot);
+        Ok(snapshot)
+    }
+
     /// Convenience read-only check (used by callers that want to know
     /// whether a mint would succeed without mutating state).
     pub fn would_mint_succeed(
@@ -456,6 +518,8 @@ pub struct TokenizedEquityProfile {
     pub isin: String,
     /// CUSIP code.
     pub cusip: String,
+    /// Ticker symbol of the reference equity — empty when unset.
+    pub symbol: String,
     /// Per-share ratio expressed as `(numerator, denominator)`.
     pub per_share_ratio: (u128, u128),
     /// Hash of the latest corporate-action event applied.
@@ -585,6 +649,40 @@ mod tests {
         ));
         reg.set_global_pause(false);
         assert!(reg.check_and_mint(&token, 1, 1_700_000_000).is_ok());
+    }
+
+    #[test]
+    fn supply_scale_rounds_against_issuer() {
+        let reg = SecureMintRegistry::new();
+        let token = [11u8; 20];
+        let mut policy = policy_with_reserve(1_001);
+        policy.circulating = 999;
+        reg.set_policy(token, policy);
+        // 1:2 reverse split: circulating ceil(999/2)=500, reserve floor(1001/2)=500.
+        let after = reg.apply_supply_scale(&token, 1, 2).unwrap();
+        assert_eq!(after.circulating, 500);
+        assert_eq!(after.reserve, 500);
+        // Zero terms rejected.
+        assert!(matches!(
+            reg.apply_supply_scale(&token, 0, 2).unwrap_err(),
+            SecureMintError::InvalidScale { .. }
+        ));
+    }
+
+    #[test]
+    fn supply_scale_reserve_invariant_rejected() {
+        let reg = SecureMintRegistry::new();
+        let token = [12u8; 20];
+        let mut policy = policy_with_reserve(3);
+        policy.circulating = 3;
+        reg.set_policy(token, policy);
+        // 1:2 reverse split: circulating ceil(3/2)=2 > reserve floor(3/2)=1.
+        let err = reg.apply_supply_scale(&token, 1, 2).unwrap_err();
+        assert!(matches!(err, SecureMintError::ExceedsReserve { .. }));
+        // Policy untouched after rejection.
+        let p = reg.policy(&token).unwrap();
+        assert_eq!(p.circulating, 3);
+        assert_eq!(p.reserve, 3);
     }
 
     #[test]

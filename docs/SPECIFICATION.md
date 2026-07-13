@@ -227,7 +227,7 @@ Participants in the Tenzro Network operate nodes in one of several roles. Nodes 
 The node exposes four API interfaces:
 
 **JSON-RPC Server** (default `0.0.0.0:8545`):
-Standard Ethereum-compatible JSON-RPC for transaction submission, state queries, and subscription management. Tenzro-specific methods include `tenzro_createAccount`, `tenzro_createWallet`, `tenzro_registerIdentity`, `tenzro_resolveIdentity`, `tenzro_resolveDidDocument`, and `tenzro_listModels`. The Capital Intent + backing surface adds `tenzro_capitalIntentOpen` / `Quote` / `Assign` / `Execute` / `Verify` / `Settle` / `Compensate`, `tenzro_getCapitalIntent`, and `tenzro_submitReserveAttestation` / `tenzro_attestedMint` / `tenzro_getReserve` (all mirrored as Rust + Python MCP tools, agent SDK methods, and `tenzro capital` CLI subcommands). The Workflow surface adds `tenzro_workflowOpen` / `StepExecute` / `StepVerify` / `StepCompensate` / `Finalize`, the durable reads `tenzro_get{Workflow,WorkflowSaga,WorkflowLifecycle,WorkflowReceipt,WorkflowOperationalMetrics}`, list-by-creator / -participant / -status, `tenzro_mirrorWorkflowToCanton`, and `tenzro_verifyDidEnvelope`. The ERC-7683 origin opener adds `tenzro_open7683Order` alongside the existing read + fill surface. The CAIP discovery surface adds `tenzro_caip2` / `tenzro_caip10` / `tenzro_caip19` returning canonical chain-agnostic identifiers per CASA. The EIP-7702 Type-4 delegation surface adds `tenzro_install7702Delegation` / `tenzro_get7702Delegation` / `tenzro_revoke7702Delegation` for authority → target registry mutations alongside the stateless helpers `tenzro_eip7702SigningHash` / `BuildDesignator` / `ParseDesignator` / `ProtocolInfo`. The Permit2 SignatureTransfer surface adds `tenzro_permit2DomainSeparator` / `tenzro_permit2Digest` (with optional witness binding for ERC-7683) / `tenzro_permit2VerifyAndConsume` / `tenzro_permit2NonceUsed`. The Secure-Mint surface adds `tenzro_setSecureMintPolicy` / `tenzro_getSecureMintPolicy` / `tenzro_clearSecureMintPolicy` / `tenzro_secureMintCheck` / `tenzro_secureMintApply` / `tenzro_secureMintRecordBurn` enforcing `circulating + amount ≤ reserve` for tokenized assets. The Stable-Asset issuance surface adds `tenzro_registerStableAsset` / `tenzro_getStableAsset` / `tenzro_mintStableAsset` / `tenzro_redeemStableAsset` — issuer-agnostic stable-unit policies layered on the Secure-Mint reserve floor, with registration gated by the `issuer` API-key scope. The ERC-7943 (uRWA) tokenized real-world-asset surface adds `tenzro_urwaIsKillSwitched` / `tenzro_urwaGetFrozenTokens` for the kill-switch + per-account freeze read paths backed by the in-EVM precompiles at `0x101a`, `0x101b`, `0x101c` (the four canonical selectors `forcedTransfer(0x33e4e1d3)` / `setFrozenTokens(0x57c52a45)` / `getFrozenTokens(0xe4d8156e)` / `killSwitch(0x1c70d7e6)` are byte-identical to the ERC-7943 reference implementation, so wallets that already speak uRWA dispatch against Tenzro without recompilation). The IVMS101 Travel Rule surface adds `tenzro_ivms101Hash` for binding an originator/beneficiary envelope to a payment receipt via canonical SHA-256 — the envelope itself stays off-chain (typically carried via the TRP open HTTPS protocol the EEA/UK CASP infrastructure standardises on), the receipt records only the binding hash + originating-VASP + beneficiary-VASP DID + asset CAIP-19 + amount-smallest-unit. The TEE-attested clock surface adds `tenzro_attestedClockNow` returning the canonical `AttestedTimestamp` envelope with wall_ms + monotonic_ns + tee_vendor metadata used by long-running workflow deadlines, AP2 mandate expiry, margin-call grace windows, and parametric-insurance trigger evaluation — the monotonic counter detects clock-rollback attacks regardless of any claimed wall_ms drift. The A2A v1.0 SignedAgentCard surface adds `tenzro_signedAgentCardCanonicalHash` so domain owners hash + JWS-sign their agent card (the production-grade A2A 2026 conformance bar) and relying parties re-verify the canonical hash to detect a hostile reverse-proxy rewrite of `url` / `skills` / `securitySchemes`. The Wormhole NTT (Native Token Transfers) surface adds `tenzro_wormholeNttListChains` listing the registered Wormhole chain IDs + supported Transceiver kinds (Wormhole / Axelar / LayerZero / custom); the `NttInboundAttestation::has_quorum` primitive aggregates Transceiver attestations until the configured quorum is met, deduplicated by transceiver address. The bridge-fee-in-TNZO surface (the Cosmos ICS-29 Fee Middleware / Hyperlane IGP gas-oracle / Polkadot AssetHub asset-conversion pattern adapted for Tenzro) adds `tenzro_quoteBridgeFeeInTnzo` returning a TTL-bounded TNZO quote with monotonic-counter binding for a destination-native fee on any of the six registered bridge adapters, and `tenzro_listBridgeSponsorshipPools` enumerating the deterministic per-adapter sponsorship-pool vault addresses (computed as `SHA-256("tenzro/bridge/sponsorship-vault" || adapter_str)[..20]`) so users see exactly which vault their TNZO sponsorship debits land in.
+Standard Ethereum-compatible JSON-RPC for transaction submission, state queries, and subscription management. Tenzro-specific methods include `tenzro_createAccount`, `tenzro_createWallet`, `tenzro_registerIdentity`, `tenzro_resolveIdentity`, `tenzro_resolveDidDocument`, and `tenzro_listModels`. The Capital Intent + backing surface adds `tenzro_capitalIntentOpen` / `Quote` / `Assign` / `Execute` / `Verify` / `Settle` / `Compensate`, `tenzro_getCapitalIntent`, and `tenzro_submitReserveAttestation` / `tenzro_attestedMint` / `tenzro_getReserve` (all mirrored as Rust + Python MCP tools, agent SDK methods, and `tenzro capital` CLI subcommands). The Workflow surface adds `tenzro_workflowOpen` / `StepExecute` / `StepVerify` / `StepCompensate` / `Finalize`, the durable reads `tenzro_get{Workflow,WorkflowSaga,WorkflowLifecycle,WorkflowReceipt,WorkflowOperationalMetrics}`, list-by-creator / -participant / -status, `tenzro_mirrorWorkflowToCanton`, and `tenzro_verifyDidEnvelope`. The ERC-7683 origin opener adds `tenzro_open7683Order` alongside the existing read + fill surface. The CAIP discovery surface adds `tenzro_caip2` / `tenzro_caip10` / `tenzro_caip19` returning canonical chain-agnostic identifiers per CASA. The EIP-7702 Type-4 delegation surface adds `tenzro_install7702Delegation` / `tenzro_get7702Delegation` / `tenzro_revoke7702Delegation` for authority → target registry mutations alongside the stateless helpers `tenzro_eip7702SigningHash` / `BuildDesignator` / `ParseDesignator` / `ProtocolInfo`. The Permit2 SignatureTransfer surface adds `tenzro_permit2DomainSeparator` / `tenzro_permit2Digest` (with optional witness binding for ERC-7683) / `tenzro_permit2VerifyAndConsume` / `tenzro_permit2NonceUsed`. The Secure-Mint surface adds `tenzro_setSecureMintPolicy` / `tenzro_getSecureMintPolicy` / `tenzro_clearSecureMintPolicy` / `tenzro_secureMintCheck` / `tenzro_secureMintApply` / `tenzro_secureMintRecordBurn` enforcing `circulating + amount ≤ reserve` for tokenized assets. The Stable-Asset issuance surface adds `tenzro_registerStableAsset` / `tenzro_getStableAsset` / `tenzro_mintStableAsset` / `tenzro_redeemStableAsset` — issuer-agnostic stable-unit policies layered on the Secure-Mint reserve floor, with registration gated by the `issuer` API-key scope. The ERC-7943 (uRWA) tokenized real-world-asset surface adds `tenzro_urwaIsKillSwitched` / `tenzro_urwaGetFrozenTokens` for the kill-switch + per-account freeze read paths backed by the in-EVM precompiles at `0x101a`, `0x101b`, `0x101c` (the four canonical selectors `forcedTransfer(0x33e4e1d3)` / `setFrozenTokens(0x57c52a45)` / `getFrozenTokens(0xe4d8156e)` / `killSwitch(0x1c70d7e6)` are byte-identical to the ERC-7943 reference implementation, so wallets that already speak uRWA dispatch against Tenzro without recompilation). The IVMS101 Travel Rule surface adds `tenzro_ivms101Hash` for binding an originator/beneficiary envelope to a payment receipt via canonical SHA-256 — the envelope itself stays off-chain (typically carried via the TRP open HTTPS protocol the EEA/UK CASP infrastructure standardises on), the receipt records only the binding hash + originating-VASP + beneficiary-VASP DID + asset CAIP-19 + amount-smallest-unit. The TEE-attested clock surface adds `tenzro_attestedClockNow` returning the canonical `AttestedTimestamp` envelope with wall_ms + monotonic_ns + tee_vendor metadata used by long-running workflow deadlines, AP2 mandate expiry, margin-call grace windows, and parametric-insurance trigger evaluation — the monotonic counter detects clock-rollback attacks regardless of any claimed wall_ms drift. The A2A v1.0 SignedAgentCard surface adds `tenzro_signedAgentCardCanonicalHash` so domain owners hash + JWS-sign their agent card (the A2A 2026 conformance bar) and relying parties re-verify the canonical hash to detect a hostile reverse-proxy rewrite of `url` / `skills` / `securitySchemes`. The delivery-versus-payment surface adds `tenzro_dvpOpenSaga` / `tenzro_dvpExecuteSaga` / `tenzro_dvpFinalizeSaga` for coupled multi-leg trades that all complete or all unwind, `tenzro_dvpGetSaga` / `tenzro_dvpListSagasByCreator` for reads, and the multilateral-netting pair `tenzro_nettingCompute` / `tenzro_nettingSettle` (with `tenzro_nettingGetBatch` / `tenzro_nettingListBatches`). The Wormhole NTT (Native Token Transfers) surface adds `tenzro_wormholeNttListChains` listing the registered Wormhole chain IDs + supported Transceiver kinds (Wormhole / Axelar / LayerZero / custom); the `NttInboundAttestation::has_quorum` primitive aggregates Transceiver attestations until the configured quorum is met, deduplicated by transceiver address. The bridge-fee-in-TNZO surface (the Cosmos ICS-29 Fee Middleware / Hyperlane IGP gas-oracle / Polkadot AssetHub asset-conversion pattern adapted for Tenzro) adds `tenzro_quoteBridgeFeeInTnzo` returning a TTL-bounded TNZO quote with monotonic-counter binding for a destination-native fee on any of the six registered bridge adapters, and `tenzro_listBridgeSponsorshipPools` enumerating the deterministic per-adapter sponsorship-pool vault addresses (computed as `SHA-256("tenzro/bridge/sponsorship-vault" || adapter_str)[..20]`) so users see exactly which vault their TNZO sponsorship debits land in.
 
 `tenzro_createWallet` provisions a chain-agnostic 2-of-3 Ed25519 MPC wallet — there is no per-chain parameter. A single wallet projects into EVM, SVM, and Canton via the pointer-token model (§7), so apps do not select a chain at creation time. VM-specific operations are exposed through `tenzro_crossVmTransfer` and `tenzro_wrapTnzo`; transfers to external chains use `tenzro_bridgeTokens` (LayerZero V2), Chainlink CCIP, deBridge DLN, or Wormhole NTT.
 
@@ -246,6 +246,11 @@ Transaction submission goes through `tenzro_signAndSendTransaction` (server-side
 | `GET /health` | Health check (alias) |
 | `GET /status` | Node status and metrics |
 | `POST /faucet` | Request testnet TNZO tokens |
+| `POST /facilitator/visa-tap/verify` | Recognize a signed agent request per Visa TAP (RFC 9421) |
+| `GET /facilitator/visa-tap/supported` | Advertise the recognized signature format, domain, and agent tags |
+| `POST /facilitator/x402/verify` | Verify an x402 payment payload against its requirements |
+| `POST /facilitator/x402/settle` | Settle a verified x402 payment (Tenzro-native leg through the node settlement engine) |
+| `GET /facilitator/x402/supported` | Advertise the x402 schemes and chains this facilitator settles |
 
 **MCP Server** (default `0.0.0.0:3001`):
 Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 457 tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
@@ -949,6 +954,36 @@ scans the `escrow:` prefix and rebuilds in-memory indices. Escrow state survives
 restarts. Read RPCs `tenzro_getEscrow`, `tenzro_listEscrowsByPayer`, and
 `tenzro_listEscrowsByPayee` query this index.
 
+#### Delivery-versus-payment sagas
+
+A single escrow settles one payer→payee leg. A delivery-versus-payment (DvP)
+trade couples two or more legs that must all complete or all unwind — a
+tokenized-treasury delivery against a stablecoin payment, a cross-VM swap, a
+multi-party clearing step. The `SagaOrchestrator` runs these as compensating
+transactions: each `SagaLeg` executes against an escrow, and if a later leg
+fails or the deadline passes, the orchestrator compensates the already-executed
+legs (refunding their escrows) rather than leaving a half-settled trade. The
+state machine is `Open → Executing → Verifying → Finalized`, with
+`Compensating → Compensated` and `Expired` as the unwind paths; `Finalized`,
+`Compensated`, `Aborted`, and `Expired` are terminal. Every transition writes
+through to `CF_SETTLEMENTS` and is idempotent under an in-flight guard, so a
+retried or concurrently-driven step never double-refunds.
+
+Open a saga with `tenzro_dvpOpenSaga`, drive it with `tenzro_dvpExecuteSaga`
+and `tenzro_dvpFinalizeSaga`, and read state with `tenzro_dvpGetSaga` /
+`tenzro_dvpListSagasByCreator`. A saga whose counterparty stalls does not pin
+its escrows forever: validators run a periodic expiry sweep (every 300 s,
+leader-gated) that compensates and expires any `Open`/`Executing` saga past its
+deadline, releasing the locked funds without operator intervention.
+
+#### Multilateral netting
+
+`tenzro_nettingCompute` reduces a set of bilateral obligations to a minimal set
+of net transfers before settlement, and `tenzro_nettingSettle` executes the
+netted result atomically; `tenzro_nettingGetBatch` / `tenzro_nettingListBatches`
+read the batch records. Netting cuts the on-chain settlement count for a
+clearing round of mutually-offsetting obligations to the residual net positions.
+
 ### 9.4 Micropayment Channels
 
 For high-frequency, low-value payments such as per-token inference billing:
@@ -1509,6 +1544,8 @@ For Visa Trusted Agent Protocol (TAP) and Mastercard Agent Pay, the money moves 
 | **Visa TAP** (Trusted Agent Protocol) | Visa | Agent DID + delegation + AP2 mandate validation + audit receipt; Visa settles fiat |
 | **Mastercard Agent Pay** | Mastercard | Agent DID + delegation + AP2 mandate validation + audit receipt; Mastercard settles fiat |
 
+Visa TAP's recognition role is served over HTTP as a facilitator on the web API. A resource server fronting a checkout or browse endpoint forwards the signed request fields to `POST /facilitator/visa-tap/verify`; the node runs the RFC 9421 recognition pipeline and answers whether the request came from a recognized agent and with what tag (`agent-browser-auth` / `agent-payer-auth`). `GET /facilitator/visa-tap/supported` advertises the recognized signature format, domain, and tags. Recognition is distinct from settlement — a recognized `agent-payer-auth` request settles through the payment gateway, not this endpoint.
+
 ### 13.3 Payment Flow
 
 ```
@@ -1583,6 +1620,14 @@ on-chain through the consensus-mediated `X402Settle` path described in §9.6 —
 receipt's `settlement_tx` is the real in-block transaction hash. Payments in an
 external-chain asset settle through the facilitator (`X402Facilitator`) against
 that chain.
+
+**Facilitator HTTP surface.** The `X402Facilitator` is mounted on the web API so a
+resource server can forward a client's payment payload for verification and
+settlement without embedding the flow itself: `POST /facilitator/x402/verify`
+checks a payload against its requirements, `POST /facilitator/x402/settle`
+executes the settlement (Tenzro-native leg through the node settlement engine),
+and `GET /facilitator/x402/supported` advertises the schemes and chains the
+facilitator settles.
 
 ### 13.7 Stripe SPT (SharedPaymentToken)
 

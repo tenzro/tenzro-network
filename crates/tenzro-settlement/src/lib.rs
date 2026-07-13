@@ -153,9 +153,11 @@ pub mod fee_collector;
 pub mod intent_7683_fills;
 pub mod kill_switch;
 pub mod micropayments;
+pub mod netting;
 pub mod obligations;
 pub mod prepaid;
 pub mod rental;
+pub mod saga;
 
 // Re-export commonly used types
 pub use batch::{BatchProcessor, BatchSettlementResult, BatchStats, BatchStatus, SettlementBatch};
@@ -173,11 +175,19 @@ pub use micropayments::{
     DisputeStatus, InMemoryChannelStorage, MicropaymentChannel,
     NanopaymentBatcher, NanopaymentBatchResult, NanopaymentEntry, RocksDbChannelStorage,
 };
+pub use netting::{
+    compute_batch_id, verify_netting_invariant, NettingBatch, NettingManager, NettingStatus,
+    Obligation, SettlementInstruction,
+};
 pub use obligations::{ObligationSource, ProviderObligations};
 pub use prepaid::{AccountLedger, PrepaidLedger};
 pub use rental::{
     EpochOutcome, RentalAgreement, RentalManager, RentalStatus, StakeLedger, TerminationReason,
     DEFAULT_MISS_TERMINATION_THRESHOLD,
+};
+pub use saga::{
+    compute_saga_id, DvpSaga, LegExecutor, LegOutcome, LegReceipt, LegResult, LegVenue, SagaLeg,
+    SagaOrchestrator, SagaState,
 };
 
 #[cfg(test)]

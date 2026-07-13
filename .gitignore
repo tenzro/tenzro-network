@@ -51,8 +51,11 @@ docs/upstream-registrations.md
 docs/recognition-commands.md
 docs/recognition-roadmap.md
 docs/architecture/agentic-internet.md
+docs/architecture/meta-router-plan.md
 docs/architecture/gap-matrix.md
 docs/architecture/prior-art.md
+docs/architecture/tokenomics-economic-model.md
+docs/architecture/sponsorship-campaign.md
 docs/operators/
 docs/agent-launch-test-plan.md
 docs/landscape-2026.md
@@ -131,7 +134,3 @@ sdk/
 
 # Marketing / campaign content — never published to GitHub
 marketing/
-
-# Internal architecture research — dev-tree only
-docs/architecture/
-/cloudbuild-train-bench.yaml

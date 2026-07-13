@@ -873,6 +873,15 @@ pub struct ProviderCapacity {
     /// one role; the router picks the matching role per request.
     #[serde(default)]
     pub moe_roles: Vec<MoeProviderRole>,
+    /// Whether this provider's MoE expert-compute path runs on a GPU
+    /// (cuBLAS grouped GEMM on NVIDIA, or a cross-vendor WGSL compute
+    /// shader on AMD / Apple / Intel) rather than the CPU floor. Set from
+    /// the local `MoeExpertRuntime` compute-backend probe at declaration
+    /// time. The router biases large token batches toward GPU-backed
+    /// expert holders, since grouped-GEMM throughput dominates there; a
+    /// CPU holder still serves correctly, just slower.
+    #[serde(default)]
+    pub moe_gpu: bool,
     /// Iroh endpoint id of this provider. Used by the MoE router to
     /// dispatch batched expert calls over QUIC directly to the holder
     /// peer without going through the OpenAI-compatible HTTP endpoint.
@@ -942,6 +951,9 @@ pub struct AdvertisedCapacity {
     /// Replica / prefill-decode variants).
     #[serde(default)]
     pub moe_roles: Vec<MoeProviderRole>,
+    /// Whether this provider's MoE expert compute runs on a GPU backend.
+    #[serde(default)]
+    pub moe_gpu: bool,
 }
 
 impl ProviderCapacity {
@@ -957,6 +969,7 @@ impl ProviderCapacity {
             verifiable_inference: self.verifiable_inference,
             moe_holdings: self.moe_holdings.clone(),
             moe_roles: self.moe_roles.clone(),
+            moe_gpu: self.moe_gpu,
         }
     }
 }
@@ -1107,6 +1120,7 @@ impl Default for ProviderCapacity {
             drafter_vram_gb: None,
             moe_holdings: Vec::new(),
             moe_roles: Vec::new(),
+            moe_gpu: false,
             iroh_endpoint_id: None,
             lan_cluster: None,
             hardware: HardwareCapabilities::default(),

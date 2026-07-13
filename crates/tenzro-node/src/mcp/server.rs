@@ -389,8 +389,10 @@ pub struct CreateDatabaseParams {
     pub placement: Option<String>,
     #[schemars(description = "Partition count (default 1)")]
     pub partitions: Option<usize>,
-    #[schemars(description = "Replica count per partition (default 1)")]
-    pub replicas: Option<usize>,
+    #[schemars(description = "Minimum holders per partition — writes below this fail (default 2)")]
+    pub min_replication: Option<u8>,
+    #[schemars(description = "Maximum holders per partition — repair never grows past this (default 4)")]
+    pub max_replication: Option<u8>,
     #[schemars(description = "Per-engine configuration passed opaque to the driver")]
     pub engine_config: Option<serde_json::Value>,
     #[schemars(description = "Price a non-owner caller pays per query, in the pricing asset's base units, as a decimal string (omit for a free database)")]
@@ -443,6 +445,8 @@ pub struct DatabaseQueryParams {
     pub partition_index: Option<usize>,
     #[schemars(description = "When true the query is gated against the admin (write) action")]
     pub write: Option<bool>,
+    #[schemars(description = "Write acknowledgement level: 'quorum' (default) or 'all'")]
+    pub consistency: Option<String>,
     #[schemars(description = "AAP capability token when the caller is not the owner")]
     pub capability: Option<String>,
     #[schemars(description = "Hex-encoded signed DID envelope proving control of caller_did")]
@@ -473,8 +477,10 @@ pub struct RescaleDatabaseParams {
     pub placement: String,
     #[schemars(description = "New partition count (defaults to current)")]
     pub partitions: Option<usize>,
-    #[schemars(description = "New replica count (defaults to current)")]
-    pub replicas: Option<usize>,
+    #[schemars(description = "New minimum holders per partition (defaults to current)")]
+    pub min_replication: Option<u8>,
+    #[schemars(description = "New maximum holders per partition (defaults to current)")]
+    pub max_replication: Option<u8>,
     #[schemars(description = "AAP capability token when the caller is not the owner")]
     pub capability: Option<String>,
     #[schemars(description = "Hex-encoded signed DID envelope proving control of caller_did")]
@@ -3512,6 +3518,26 @@ pub struct MoeGateLoadParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoePrepareExpertsParams {
+    #[schemars(description = "Catalog model id (must be a MoE entry)")]
+    pub model_id: String,
+    #[schemars(description = "Layer index to prepare experts for")]
+    pub layer: u32,
+    #[schemars(description = "Expert indices to prepare; omit or empty to prepare every expert in the layer")]
+    pub experts: Option<Vec<u32>>,
+    #[schemars(description = "Publish the layer's gating-network blob alongside the experts (default true)")]
+    pub include_gate: Option<bool>,
+    #[schemars(description = "Block-quantization: a preset string (q4_k_m / q8_0 / q4_k / q6_k) or a per-projection object like {\"gate\":\"q4_k\",\"up\":\"q4_k\",\"down\":\"q6_k\"}. Omit for dense f32 blobs.")]
+    pub quant: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoePrepareStatusParams {
+    #[schemars(description = "Job id returned by moe_prepare_experts")]
+    pub job_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MoeForwardParams {
     #[schemars(description = "Catalog model id")]
     pub model_id: String,
@@ -3987,6 +4013,66 @@ pub struct GetWorkflowSagaParams {
     #[schemars(description = "Workflow id to read")]
     pub workflow_id: String,
 }
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct DvpOpenSagaParams {
+    #[schemars(description = "Creator address (hex). Saga id = SHA-256('tenzro/saga/id' || creator || nonce_le).")]
+    pub creator: String,
+    #[schemars(description = "Idempotency nonce — re-opening with the same (creator, nonce) returns the existing saga.")]
+    pub nonce: u64,
+    #[schemars(description = "Ordered legs; each an object {leg_id, payer(hex), payee(hex), asset, amount(decimal string), venue}. venue is one of \"native\", {\"escrow\":{\"escrow_id\":\"0x..\"}}, {\"channel\":{\"channel_id\":\"..\"}}, {\"external\":{\"reference\":\"..\"}}. Only escrow legs are saga-executable.")]
+    pub legs: Vec<serde_json::Value>,
+    #[schemars(description = "Expiry as a Unix timestamp in milliseconds.")]
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct DvpExecuteSagaParams {
+    #[schemars(description = "Saga id (hex).")]
+    pub saga_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional per-leg release proofs keyed by leg_id: {\"<leg_id>\":{\"proof_type\":\"cryptographic|tee|multi_party|merkle|zk|oracle\",\"proof_data_hex\":\"0x..\"}}. Signature-gated / custom-condition escrow legs require a proof here.")]
+    pub proofs: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct DvpFinalizeSagaParams {
+    #[schemars(description = "Saga id (hex) — all legs must be executed to finalize.")]
+    pub saga_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct DvpGetSagaParams {
+    #[schemars(description = "Saga id (hex) to read.")]
+    pub saga_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct DvpListSagasByCreatorParams {
+    #[schemars(description = "Creator address (hex). Returns {creator, count, sagas: [...]}.")]
+    pub creator: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct NettingComputeParams {
+    #[schemars(description = "Obligations to net; each an object {debtor(hex), creditor(hex), asset, amount(decimal string)}. Multilateral greedy netting is deterministic and idempotent by batch id.")]
+    pub obligations: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct NettingSettleParams {
+    #[schemars(description = "Batch id (hex) to mark settled.")]
+    pub batch_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct NettingGetBatchParams {
+    #[schemars(description = "Batch id (hex) to read.")]
+    pub batch_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct NettingListBatchesParams {}
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct VerifyDidEnvelopeParams {
@@ -4792,6 +4878,123 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
+    #[tool(description = "Open a delivery-versus-payment saga: bundle two or more legs (delivery + payment) into an all-or-compensate unit. Only escrow-venue legs are saga-executable (the payer pre-funds and authorizes the escrow, so release/refund needs no fresh signature); native/channel/external legs are rejected. Returns the opened saga. Mirrors tenzro_dvpOpenSaga.")]
+    async fn dvp_open_saga(
+        &self,
+        Parameters(params): Parameters<DvpOpenSagaParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_dvpOpenSaga", req)
+            .await
+            .map_err(|e| err_internal(format!("dvpOpenSaga failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Execute a DvP saga: run each escrow leg forward (release vault→payee). Signature-gated / custom-condition escrows require a per-leg release proof supplied via `proofs`. Any leg failure triggers automatic compensation (refund vault→payer) of already-executed legs. Mirrors tenzro_dvpExecuteSaga.")]
+    async fn dvp_execute_saga(
+        &self,
+        Parameters(params): Parameters<DvpExecuteSagaParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_dvpExecuteSaga", req)
+            .await
+            .map_err(|e| err_internal(format!("dvpExecuteSaga failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Finalize a DvP saga once every leg has executed: compute the receipt and mark it Completed. Mirrors tenzro_dvpFinalizeSaga.")]
+    async fn dvp_finalize_saga(
+        &self,
+        Parameters(params): Parameters<DvpFinalizeSagaParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_dvpFinalizeSaga", req)
+            .await
+            .map_err(|e| err_internal(format!("dvpFinalizeSaga failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read the current state of a DvP saga (legs, per-leg outcomes, escrows, receipt). Mirrors tenzro_dvpGetSaga.")]
+    async fn dvp_get_saga(
+        &self,
+        Parameters(params): Parameters<DvpGetSagaParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_dvpGetSaga", req)
+            .await
+            .map_err(|e| err_internal(format!("dvpGetSaga failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List DvP sagas opened by a creator address. Returns {creator, count, sagas: [...]}. Mirrors tenzro_dvpListSagasByCreator.")]
+    async fn dvp_list_sagas_by_creator(
+        &self,
+        Parameters(params): Parameters<DvpListSagasByCreatorParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_dvpListSagasByCreator", req)
+            .await
+            .map_err(|e| err_internal(format!("dvpListSagasByCreator failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Compute a multilateral netting batch over a set of bilateral obligations: greedy netting collapses the gross obligation graph into a minimal set of net settlement instructions. Deterministic and idempotent by batch id. Mirrors tenzro_nettingCompute.")]
+    async fn netting_compute(
+        &self,
+        Parameters(params): Parameters<NettingComputeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_nettingCompute", req)
+            .await
+            .map_err(|e| err_internal(format!("nettingCompute failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Mark a computed netting batch as settled once its net settlement instructions have been executed. Mirrors tenzro_nettingSettle.")]
+    async fn netting_settle(
+        &self,
+        Parameters(params): Parameters<NettingSettleParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_nettingSettle", req)
+            .await
+            .map_err(|e| err_internal(format!("nettingSettle failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read a netting batch (gross obligations, net settlement instructions, status). Mirrors tenzro_nettingGetBatch.")]
+    async fn netting_get_batch(
+        &self,
+        Parameters(params): Parameters<NettingGetBatchParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_nettingGetBatch", req)
+            .await
+            .map_err(|e| err_internal(format!("nettingGetBatch failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List all netting batches. Returns {count, batches: [...]}. Mirrors tenzro_nettingListBatches.")]
+    async fn netting_list_batches(
+        &self,
+        Parameters(params): Parameters<NettingListBatchesParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("serialize params: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_nettingListBatches", req)
+            .await
+            .map_err(|e| err_internal(format!("nettingListBatches failed: {}", e)))?;
+        json_result(result)
+    }
+
     #[tool(description = "Verify a Tenzro DID envelope carried as a tool argument (the hex X-Tenzro-DID-Envelope value). Supports did:tenzro (registry), did:key, did:ethr (recoverable secp256k1), and did:web (resolved over HTTPS). Returns {valid, did, method} or {valid:false, error}. MCP-native carriage: tool calls expose no HTTP headers, so the envelope rides as an argument.")]
     async fn verify_did_envelope(
         &self,
@@ -5555,8 +5758,14 @@ impl TenzroMcpServer {
             "owner_did": p.owner_did,
             "placement": p.placement.unwrap_or_else(|| "local".to_string()),
             "partitions": p.partitions.unwrap_or(1),
-            "replicas": p.replicas.unwrap_or(1),
         });
+        if p.min_replication.is_some() || p.max_replication.is_some() {
+            let default = tenzro_database::ReplicationPolicy::default();
+            params["replication"] = serde_json::json!({
+                "min_replication": p.min_replication.unwrap_or(default.min_replication),
+                "max_replication": p.max_replication.unwrap_or(default.max_replication),
+            });
+        }
         if let Some(cfg) = p.engine_config {
             params["engine_config"] = cfg;
         }
@@ -5642,6 +5851,7 @@ impl TenzroMcpServer {
             "partition_index": p.partition_index.unwrap_or(0),
             "write": p.write.unwrap_or(false),
         });
+        if let Some(v) = p.consistency { params["consistency"] = serde_json::json!(v); }
         if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
         if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
         if let Some(v) = p.payment_credential { params["payment_credential"] = v; }
@@ -5662,7 +5872,7 @@ impl TenzroMcpServer {
         dispatch_rpc(&self.node, "tenzro_authorizeDatabaseRead", params).await
     }
 
-    #[tool(description = "Grow or shrink a database along the local → lan_cluster → network continuum in place. Administrative — gated on the write action. partitions/replicas default to the database's current counts when omitted.")]
+    #[tool(description = "Grow or shrink a database along the local → lan_cluster → network continuum in place. Administrative — gated on the write action. partitions and the replication bounds default to the database's current values when omitted; min_replication and max_replication must be supplied together.")]
     async fn rescale_database(
         &self,
         Parameters(p): Parameters<RescaleDatabaseParams>,
@@ -5673,7 +5883,24 @@ impl TenzroMcpServer {
             "placement": p.placement,
         });
         if let Some(v) = p.partitions { params["partitions"] = serde_json::json!(v); }
-        if let Some(v) = p.replicas { params["replicas"] = serde_json::json!(v); }
+        match (p.min_replication, p.max_replication) {
+            (Some(min), Some(max)) => {
+                params["replication"] = serde_json::json!({
+                    "min_replication": min,
+                    "max_replication": max,
+                });
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "min_replication and max_replication must be supplied together",
+                    ),
+                    data: None,
+                })
+            }
+        }
         if let Some(v) = p.capability { params["capability"] = serde_json::json!(v); }
         if let Some(v) = p.envelope { params["envelope"] = serde_json::json!(v); }
         dispatch_rpc(&self.node, "tenzro_rescaleDatabase", params).await
@@ -15152,7 +15379,43 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Snapshot of this node's resident MoE experts and gating networks with total byte footprint.")]
+    #[tool(description = "Slice a catalog MoE checkpoint into per-expert safetensors blobs (and optionally the layer gate), optionally block-quantizing each projection (q4_k_m / q8_0 / q4_k / q6_k preset, or a per-projection gate/up/down mix), and publish them as tenzro://blob content so holders can load them. Runs asynchronously; returns a job_id to poll with moe_prepare_status. Omit experts to prepare every expert in the layer.")]
+    async fn moe_prepare_experts(
+        &self,
+        Parameters(params): Parameters<MoePrepareExpertsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut payload = serde_json::json!({
+            "model_id": params.model_id,
+            "layer": params.layer,
+            "include_gate": params.include_gate.unwrap_or(true),
+        });
+        if let Some(experts) = params.experts {
+            if !experts.is_empty() {
+                payload["experts"] = serde_json::json!(experts);
+            }
+        }
+        if let Some(quant) = params.quant {
+            payload["quant"] = quant;
+        }
+        let result = rpc_dispatch(&self.node, "tenzro_moePrepareExperts", payload)
+            .await
+            .map_err(|e| err_internal(format!("moePrepareExperts failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Poll the state of an expert-preparation job started by moe_prepare_experts. Returns the job's model_id, layer, state (running / done / error), any error, and the prepared per-expert tenzro://blob URIs when done.")]
+    async fn moe_prepare_status(
+        &self,
+        Parameters(params): Parameters<MoePrepareStatusParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "job_id": params.job_id });
+        let result = rpc_dispatch(&self.node, "tenzro_moePrepareStatus", payload)
+            .await
+            .map_err(|e| err_internal(format!("moePrepareStatus failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Snapshot of this node's resident MoE experts and gating networks: each entry's residency tier (memory / disk), byte footprint, the total footprint, the memory budget, and whether GPU compute is active.")]
     async fn moe_expert_status(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_moeExpertStatus", serde_json::json!({}))
             .await

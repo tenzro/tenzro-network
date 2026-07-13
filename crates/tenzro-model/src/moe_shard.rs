@@ -74,6 +74,11 @@ pub struct ExpertHolder {
     /// Provider's OpenAI-compatible HTTP endpoint, when set. Used as
     /// fallback when no iroh endpoint is declared.
     pub http_endpoint: Option<String>,
+    /// Whether the holder's expert compute runs on a GPU backend. The
+    /// planner prefers GPU holders for the primary of a batch, since
+    /// grouped-GEMM throughput dominates there; CPU holders remain valid
+    /// standbys.
+    pub gpu: bool,
 }
 
 /// Governance policy for expert replication.
@@ -141,6 +146,7 @@ impl MoeShardView {
                     committed_tps: h.committed_tps,
                     iroh_endpoint_id: p.capacity.iroh_endpoint_id.clone(),
                     http_endpoint: p.endpoint_url.clone(),
+                    gpu: p.capacity.moe_gpu,
                 });
             }
         }
@@ -157,17 +163,24 @@ impl MoeShardView {
         &self.model_id
     }
 
-    /// All holders of `expert`. Warm-residency holders sort first.
+    /// All holders of `expert`. Warm-residency holders sort first; within
+    /// the same residency tier GPU-backed holders sort ahead of CPU ones,
+    /// then higher committed TPS. The planner takes the first entry as the
+    /// batch primary, so this ordering is what steers a batch to the
+    /// fastest reachable holder.
     pub fn holders(&self, expert: ExpertId) -> Vec<ExpertHolder> {
         let mut hs = self
             .by_expert
             .get(&expert)
             .cloned()
             .unwrap_or_default();
-        hs.sort_by_key(|h| match h.residency {
-            MoeExpertResidency::Warm => 0,
-            MoeExpertResidency::Cold => 1,
-            MoeExpertResidency::Evicting => 2,
+        hs.sort_by(|a, b| {
+            let ra = residency_rank(a.residency);
+            let rb = residency_rank(b.residency);
+            ra.cmp(&rb)
+                // GPU holders first (false < true, so invert).
+                .then((!a.gpu).cmp(&(!b.gpu)))
+                .then(b.committed_tps.cmp(&a.committed_tps))
         });
         hs
     }
@@ -261,14 +274,26 @@ impl MoeShardView {
     }
 }
 
+fn residency_rank(r: MoeExpertResidency) -> u8 {
+    match r {
+        MoeExpertResidency::Warm => 0,
+        MoeExpertResidency::Cold => 1,
+        MoeExpertResidency::Evicting => 2,
+    }
+}
+
 fn score_holder(h: &ExpertHolder) -> u64 {
     let residency_score: u64 = match h.residency {
         MoeExpertResidency::Warm => 1_000_000,
         MoeExpertResidency::Cold => 100_000,
         MoeExpertResidency::Evicting => 0,
     };
+    // GPU bonus sits below residency but above the iroh-reachability and
+    // committed-TPS signals, so a warm GPU holder beats a warm CPU holder
+    // while never overriding residency.
+    let gpu_bonus: u64 = if h.gpu { 50_000 } else { 0 };
     let iroh_bonus: u64 = if h.iroh_endpoint_id.is_some() { 10_000 } else { 0 };
-    residency_score + iroh_bonus + h.committed_tps as u64
+    residency_score + gpu_bonus + iroh_bonus + h.committed_tps as u64
 }
 
 #[cfg(test)]
