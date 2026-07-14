@@ -1324,6 +1324,50 @@ pub struct NodeConfig {
     /// no engines.
     #[serde(default)]
     pub databases: DatabasesConfig,
+
+    /// Application-hosting edge configuration. Each operator serves deployed
+    /// sites under its own domain — there is no network-wide edge. `None`
+    /// (default) means this node advertises no auto-subdomain suffix and the
+    /// custom-domain onboarding records are emitted with placeholders the
+    /// operator fills in. An RPC-public operator sets `app_domain` to the
+    /// domain it terminates TLS for (e.g. its own `apps.<operator>.tld`).
+    #[serde(default)]
+    pub hosting: HostingConfig,
+}
+
+/// Application-hosting edge configuration.
+///
+/// Site hosting is operator-served, not network-served: each operator runs its
+/// own ingress under its own domain, so nothing here is baked into the
+/// protocol. The node reports whatever the operator configured so onboarding
+/// records (auto subdomains, custom-domain CNAME targets) name the operator's
+/// edge rather than any single canonical host.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct HostingConfig {
+    /// The domain this operator's edge serves deployed sites under. When set,
+    /// auto-assigned site subdomains are `<name>-<hash>.<app_domain>` and a
+    /// custom-domain subdomain claim is told to `CNAME` to `<app_domain>`.
+    /// When `None`, the node advertises no suffix and onboarding output uses a
+    /// `<your-operator-app-domain>` placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_domain: Option<String>,
+
+    /// Public IPv4 the edge answers on, printed as the `A` record for apex
+    /// custom domains. `None` leaves an `<edge-ipv4>` placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_ipv4: Option<String>,
+
+    /// Public IPv6 the edge answers on, printed as the `AAAA` record for apex
+    /// custom domains. `None` leaves an `<edge-ipv6>` placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_ipv6: Option<String>,
+
+    /// Per-hour price in TNZO this operator quotes to host an app deployment.
+    /// Advertised in the provider announcement as the operator's hosting bid;
+    /// placement ranks capable nodes cheapest first. `0` (the default) means the
+    /// operator hosts for free — the most competitive bid.
+    #[serde(default)]
+    pub price_per_hour: u128,
 }
 
 /// Operator-supplied Canton/DAML mirror config for the ERC-8004
@@ -1485,6 +1529,7 @@ impl NodeConfig {
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
+            hosting: HostingConfig::default(),
         }
     }
 
@@ -1526,6 +1571,7 @@ impl NodeConfig {
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
+            hosting: HostingConfig::default(),
         }
     }
 
@@ -1567,6 +1613,7 @@ impl NodeConfig {
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
+            hosting: HostingConfig::default(),
         }
     }
 
@@ -1608,6 +1655,7 @@ impl NodeConfig {
             erc8004_daml: None,
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
+            hosting: HostingConfig::default(),
         }
     }
 

@@ -27,8 +27,8 @@ use tokio::sync::Mutex;
 use crate::config::TenzroIrohConfig;
 use crate::error::{IrohError, IrohResult};
 use crate::jsonrpc::{
-    JsonRpcDispatcher, JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_INFER,
-    ALPN_MCP, ALPN_MOE,
+    HttpForwardHandler, HttpForwardProtocol, JsonRpcDispatcher, JsonRpcProtocol, McpProtocol,
+    McpStreamHandler, ALPN_A2A, ALPN_HTTP, ALPN_INFER, ALPN_MCP, ALPN_MOE,
 };
 use crate::tdip::derive_iroh_secret_key_from_ed25519;
 use tenzro_types::tenzro_uri::TenzroUri;
@@ -154,6 +154,7 @@ impl IrohBackedResolver {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -192,7 +193,7 @@ impl IrohBackedResolver {
     pub async fn bind_with_config(cfg: &TenzroIrohConfig) -> IrohResult<Arc<Self>> {
         let endpoint = Self::bind_endpoint_for_config(cfg).await?;
         let store = Self::load_fs_store(cfg).await?;
-        Self::with_endpoint(endpoint, store, None, None, None, None)
+        Self::with_endpoint(endpoint, store, None, None, None, None, None)
     }
 
     /// Endpoint bind decision shared by `bind_with_config` and
@@ -324,16 +325,18 @@ impl IrohBackedResolver {
         mcp: Option<Arc<dyn McpStreamHandler>>,
         moe: Option<Arc<dyn JsonRpcDispatcher>>,
         infer: Option<Arc<dyn JsonRpcDispatcher>>,
+        http: Option<Arc<dyn HttpForwardHandler>>,
     ) -> IrohResult<Arc<Self>> {
         let endpoint = Self::bind_endpoint_for_config(cfg).await?;
         let store = Self::load_fs_store(cfg).await?;
-        Self::with_endpoint(endpoint, store, a2a, mcp, moe, infer)
+        Self::with_endpoint(endpoint, store, a2a, mcp, moe, infer, http)
     }
 
     /// Stand up the blob store + iroh-blobs ALPN router on top of an
     /// already-bound endpoint, optionally registering an A2A JSON-RPC
-    /// dispatcher, an MCP session handler, and a MoE expert-host
-    /// dispatcher on the same router.
+    /// dispatcher, an MCP session handler, a MoE expert-host dispatcher,
+    /// an inference dispatcher, and an HTTP-forward handler (the
+    /// app-hosting ingress data plane) on the same router.
     fn with_endpoint(
         endpoint: Endpoint,
         store: ResolverStore,
@@ -341,6 +344,7 @@ impl IrohBackedResolver {
         mcp: Option<Arc<dyn McpStreamHandler>>,
         moe: Option<Arc<dyn JsonRpcDispatcher>>,
         infer: Option<Arc<dyn JsonRpcDispatcher>>,
+        http: Option<Arc<dyn HttpForwardHandler>>,
     ) -> IrohResult<Arc<Self>> {
         let blobs = BlobsProtocol::new(&store, None);
         let mut builder = Router::builder(endpoint.clone()).accept(ALPN, blobs);
@@ -355,6 +359,9 @@ impl IrohBackedResolver {
         }
         if let Some(dispatcher) = infer {
             builder = builder.accept(ALPN_INFER, JsonRpcProtocol::infer(dispatcher));
+        }
+        if let Some(handler) = http {
+            builder = builder.accept(ALPN_HTTP, HttpForwardProtocol::new(handler));
         }
         let router = builder.spawn();
         let downloader = Downloader::new(&*store, &endpoint);

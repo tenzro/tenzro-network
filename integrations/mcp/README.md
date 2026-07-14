@@ -10,7 +10,7 @@ The official [Model Context Protocol](https://modelcontextprotocol.io) server fo
 
 The Tenzro MCP server is an installable Python package that exposes blockchain and multi-modal AI tools across 19+ categories to any MCP-compatible AI agent (Claude, GPT, Cursor, Windsurf, etc.) via **stdio** or **Streamable HTTP** transport. Install with `pip install tenzro-mcp-server` and run locally, or connect directly to the live testnet endpoint. Agents can query balances, send transactions, mint NFTs, bridge tokens, check compliance, subscribe to events, run timeseries forecasts, embed images and text, segment and detect objects, transcribe audio, and interact with AI models — all through the standard MCP tool interface.
 
-The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **416 tools** (Tenzro Ledger + multi-modal AI + distributed MoE serving + AgentBond/insurance + agent memory) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
+The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **500+ tools** (Tenzro Ledger + multi-modal AI + distributed MoE serving + AgentBond/insurance + agent memory + app hosting) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
 
 **Testnet endpoint:** `https://mcp.tenzro.xyz/mcp`
 **Local:** `http://localhost:3001/mcp`
@@ -554,7 +554,7 @@ In addition to the main Tenzro MCP server, the node runs specialized servers for
 
 | Server | Port | Endpoint | Description |
 |--------|------|----------|-------------|
-| **Tenzro** | 3001 | `/mcp` | 416 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + distributed MoE serving + AgentBond/insurance + agent memory |
+| **Tenzro** | 3001 | `/mcp` | 500+ tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + distributed MoE serving + AgentBond/insurance + agent memory + app hosting |
 | **Solana** | 3003 | `/mcp` | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking |
 | **Ethereum** | 3004 | `/mcp` | 17 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
 | **Canton** | 3005 | `/mcp` | 15 tools — Canton 3.5+ JSON Ledger API (active-contracts queries with live offset + FQ party id, party / package / connected-synchronizer / version / health reads, CIP-56 Canton Coin balance, AmuletRules fee schedule, DAR upload via `/v2/packages`, submit-and-wait DAML commands, DvP settlement) |

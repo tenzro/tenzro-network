@@ -3634,14 +3634,47 @@ async fn handle_swarm_event(
                         && peer_speaks_hop
                         && !already_attempted
                     {
-                        // Pick a globally-routable listen address for the relay
-                        // multiaddr. Prefer an address the peer itself is
-                        // listening on; if none is routable, we can't reach it
-                        // via WAN anyway.
+                        // Pick a reachable listen address for the relay
+                        // multiaddr. `is_globally_routable` rejects DNS
+                        // components (it only accepts Ip4/Ip6), so use a
+                        // laxer filter here: accept anything that isn't
+                        // obviously LAN/loopback. A publicly-advertised DNS
+                        // listen addr (e.g. `/dns4/testnet-boot-1.tenzro.xyz`)
+                        // is the CORRECT reservation target — libp2p will
+                        // resolve it against an existing connection to the
+                        // same peer_id, and it survives IP rotations.
+                        let is_relay_target_ok = |addr: &Multiaddr| -> bool {
+                            use libp2p::multiaddr::Protocol;
+                            for proto in addr.iter() {
+                                match proto {
+                                    Protocol::Ip4(ip) => {
+                                        if ip.is_loopback()
+                                            || ip.is_link_local()
+                                            || ip.is_unspecified()
+                                        {
+                                            return false;
+                                        }
+                                        return true;
+                                    }
+                                    Protocol::Ip6(ip) => {
+                                        if ip.is_loopback() || ip.is_unspecified() {
+                                            return false;
+                                        }
+                                        return true;
+                                    }
+                                    Protocol::Dns(_)
+                                    | Protocol::Dns4(_)
+                                    | Protocol::Dns6(_)
+                                    | Protocol::Dnsaddr(_) => return true,
+                                    _ => {}
+                                }
+                            }
+                            false
+                        };
                         let relay_addr = info
                             .listen_addrs
                             .iter()
-                            .find(|addr| is_globally_routable(addr))
+                            .find(|addr| is_relay_target_ok(addr))
                             .cloned();
                         if let Some(base_addr) = relay_addr {
                             // Compose `/dns-or-ip/tcp/port/p2p/<relay>/p2p-circuit`.
@@ -4154,6 +4187,78 @@ async fn handle_swarm_event(
                             peer_id
                         );
                         state.peer_event_subscriber = None;
+                    }
+                }
+
+                // Eager Circuit-Relay v2 reservation on the first accepting
+                // publicly-reachable peer. Bootstrap peers are the natural
+                // candidates (they run `enable_relay: true` on validator
+                // class) but our configured DNS multiaddrs have NO
+                // `/p2p/<peer_id>` suffix, so `bootstrap_peers` (peer-keyed)
+                // is empty — we can only recognize a boot peer once it
+                // actually connects. Solution: try a reservation on any
+                // freshly-connected peer we've dialed OUTBOUND with a
+                // globally-routable remote address. If the peer doesn't
+                // support HOP the reservation errors and we move on;
+                // idempotency prevents retries on the same peer.
+                //
+                // Gated on: (a) we're NAT'd (not Direct), (b) the connection
+                // is outbound (we dialed them, i.e. they're a public peer we
+                // trust to relay via), (c) globally-routable remote, (d)
+                // haven't already tried this peer.
+                use crate::reachability::ReachabilityTier;
+                let our_tier = state.reachability.tier();
+                let is_outbound =
+                    matches!(&endpoint, libp2p::core::ConnectedPoint::Dialer { .. });
+                let is_routable = is_globally_routable(&remote_addr)
+                    || remote_addr.iter().any(|p| {
+                        matches!(
+                            p,
+                            libp2p::multiaddr::Protocol::Dns(_)
+                                | libp2p::multiaddr::Protocol::Dns4(_)
+                                | libp2p::multiaddr::Protocol::Dns6(_)
+                                | libp2p::multiaddr::Protocol::Dnsaddr(_)
+                        )
+                    });
+                let already_attempted =
+                    state.attempted_relay_reservations.contains(&peer_id);
+                if our_tier != ReachabilityTier::Direct
+                    && is_outbound
+                    && is_routable
+                    && !already_attempted
+                {
+                    // Reservation target: the address we just dialed, minus
+                    // any trailing /p2p/... suffix (we add it ourselves), then
+                    // /p2p/<pid>/p2p-circuit. libp2p relay-client resolves
+                    // this against the existing connection to `peer_id`.
+                    let mut circuit_addr = remote_addr
+                        .iter()
+                        .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                        .collect::<Multiaddr>();
+                    circuit_addr =
+                        circuit_addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
+                    circuit_addr =
+                        circuit_addr.with(libp2p::multiaddr::Protocol::P2pCircuit);
+                    match state.swarm.listen_on(circuit_addr.clone()) {
+                        Ok(listener_id) => {
+                            tracing::info!(
+                                %peer_id,
+                                our_tier = %our_tier.as_str(),
+                                ?listener_id,
+                                circuit = %circuit_addr,
+                                "Requesting Circuit-Relay v2 reservation \
+                                 (eager, on outbound connect)"
+                            );
+                            state.attempted_relay_reservations.insert(peer_id);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                %peer_id,
+                                error = %e,
+                                circuit = %circuit_addr,
+                                "Eager relay reservation failed"
+                            );
+                        }
                     }
                 }
             }

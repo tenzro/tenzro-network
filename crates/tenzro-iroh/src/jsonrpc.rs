@@ -482,6 +482,200 @@ impl McpStreamHandler for DeferredMcpHandler {
     }
 }
 
+/// ALPN for HTTP request forwarding over iroh — the app-hosting ingress
+/// data plane.
+///
+/// A public-facing edge node terminates TLS for a hosted app's hostname,
+/// then forwards each inbound HTTP request to the app's serving node by
+/// its iroh `EndpointId` on this ALPN. Peer-identity addressing traverses
+/// NAT (DCUtR hole-punch, Circuit-Relay v2 fallback — both already wired
+/// in the network layer), so an app can be served from a node that has no
+/// reachable public HTTP endpoint of its own.
+///
+/// Per `feedback_no_version_prefix_in_identifiers`, no version segment is
+/// embedded — the namespace owns the wire-format contract.
+pub const ALPN_HTTP: &[u8] = b"tenzro/http";
+
+/// One HTTP request/response exchange forwarded over an iroh bi-stream.
+///
+/// Unlike [`JsonRpcDispatcher`] (one length-prefixed request → one
+/// length-prefixed response) this handler is handed the *raw
+/// bidirectional QUIC stream pair* so it can stream a request body in and
+/// a response body out without buffering either whole in memory — a large
+/// upload or a chunked/streamed response never has to fit in one frame.
+///
+/// The wire is raw HTTP/1.1 bytes in both directions: the edge writes the
+/// request line + headers + body it received from the public client, the
+/// serving node runs it against the local app runtime (a static blob, a
+/// `wasi:http` component, or a microVM loopback port) and writes the raw
+/// HTTP/1.1 response back. The edge relays that response to the public
+/// client verbatim.
+///
+/// Implemented in the node layer (`crate::ingress::*`), which owns the
+/// app-runtime dispatch. Keeping the trait here keeps `tenzro-iroh` free
+/// of any HTTP-server or app-runtime dependency.
+#[async_trait]
+pub trait HttpForwardHandler: Send + Sync + std::fmt::Debug + 'static {
+    /// Serve one forwarded HTTP request over an iroh bi-stream.
+    ///
+    /// `send`/`recv` are the raw QUIC stream halves. The handler reads the
+    /// raw HTTP/1.1 request from `recv`, dispatches it to the target app
+    /// runtime, and writes the raw HTTP/1.1 response to `send`, finishing
+    /// the send half when the response body is complete. Returning `Err`
+    /// resets the stream; a clean exchange returns `Ok(())`.
+    async fn serve_request(
+        self: Arc<Self>,
+        send: SendStream,
+        recv: RecvStream,
+    ) -> IrohResult<()>;
+}
+
+/// `iroh::ProtocolHandler` adapter for HTTP forwarding over iroh.
+///
+/// Registered under [`ALPN_HTTP`] on the shared endpoint. Each inbound
+/// bi-stream is one HTTP request, served on its own tokio task so
+/// concurrent requests (from the same edge or different edges) never block
+/// each other. A single QUIC connection between an edge and a serving node
+/// multiplexes every in-flight request as an independent stream.
+#[derive(Debug, Clone)]
+pub struct HttpForwardProtocol {
+    handler: Arc<dyn HttpForwardHandler>,
+}
+
+impl HttpForwardProtocol {
+    /// Wrap an [`HttpForwardHandler`] for registration under [`ALPN_HTTP`].
+    pub fn new(handler: Arc<dyn HttpForwardHandler>) -> Self {
+        Self { handler }
+    }
+}
+
+impl ProtocolHandler for HttpForwardProtocol {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let remote = conn.remote_id();
+        debug!(
+            target: "tenzro_iroh::jsonrpc",
+            alpn = "http",
+            remote = %remote,
+            "accepted iroh HTTP-forward connection",
+        );
+
+        loop {
+            let (send, recv) = match conn.accept_bi().await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    trace!(
+                        target: "tenzro_iroh::jsonrpc",
+                        alpn = "http",
+                        error = %e,
+                        "remote closed HTTP-forward connection",
+                    );
+                    return Ok(());
+                }
+            };
+
+            let handler = self.handler.clone();
+            tokio::spawn(async move {
+                if let Err(e) = handler.serve_request(send, recv).await {
+                    warn!(
+                        target: "tenzro_iroh::jsonrpc",
+                        alpn = "http",
+                        error = %e,
+                        "iroh HTTP-forward request failed",
+                    );
+                }
+            });
+        }
+    }
+}
+
+/// Deferred [`HttpForwardHandler`] trampoline — same chicken-and-egg
+/// resolution as [`DeferredJsonRpcDispatcher`] / [`DeferredMcpHandler`].
+///
+/// Lets the resolver register the `tenzro/http` ALPN at bind time, before
+/// the node's ingress dispatcher (which needs `Arc<TenzroNode>` to reach
+/// the site registry and app runtimes) is constructible. A forwarded
+/// request that arrives before [`Self::set`] gets a `503` so the edge can
+/// surface a defined error rather than a hung stream.
+#[derive(Debug, Clone)]
+pub struct DeferredHttpHandler {
+    inner: Arc<RwLock<Option<Arc<dyn HttpForwardHandler>>>>,
+}
+
+impl DeferredHttpHandler {
+    /// Create an unbound handler.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Install the real backing handler. Idempotent.
+    pub fn set(&self, handler: Arc<dyn HttpForwardHandler>) {
+        *self.inner.write() = Some(handler);
+    }
+
+    /// Has a real handler been installed?
+    pub fn is_ready(&self) -> bool {
+        self.inner.read().is_some()
+    }
+}
+
+impl Default for DeferredHttpHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl HttpForwardHandler for DeferredHttpHandler {
+    async fn serve_request(
+        self: Arc<Self>,
+        mut send: SendStream,
+        recv: RecvStream,
+    ) -> IrohResult<()> {
+        let backing = self.inner.read().clone();
+        match backing {
+            Some(h) => h.serve_request(send, recv).await,
+            None => {
+                // Ingress-not-ready: write a minimal HTTP/1.1 503 so the
+                // edge relays a defined status to the public client.
+                let body = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                let _ = send.write_all(body).await;
+                let _ = send.finish();
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Open a raw HTTP-forward bi-stream to `remote` on [`ALPN_HTTP`].
+///
+/// The edge calls this to reach a serving node, then streams the raw
+/// HTTP/1.1 request into the returned `SendStream` and reads the raw
+/// HTTP/1.1 response from the returned `RecvStream`. Unlike [`call`], no
+/// framing or buffering is applied — the caller owns the stream halves and
+/// drives the request/response copy directly (potentially streaming large
+/// bodies both ways).
+///
+/// Returns the open [`Connection`] alongside the stream pair; the caller
+/// keeps it alive for the duration of the exchange (dropping it resets the
+/// stream) and may open further concurrent request streams on the same
+/// connection.
+pub async fn open_http_stream(
+    endpoint: &Endpoint,
+    remote: impl Into<EndpointAddr>,
+) -> IrohResult<(Connection, SendStream, RecvStream)> {
+    let conn = endpoint
+        .connect(remote, ALPN_HTTP)
+        .await
+        .map_err(|e| IrohError::Backend(format!("connect: {e}")))?;
+    let (send, recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| IrohError::Backend(format!("open_bi: {e}")))?;
+    Ok((conn, send, recv))
+}
+
 /// Client-side JSON-RPC-over-iroh caller.
 ///
 /// Opens a bidirectional stream against `remote` on the given ALPN,

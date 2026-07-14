@@ -1587,6 +1587,59 @@ async fn dispatch_request(
         "tenzro_siteGet" => handle_site_get(node, request.params).await,
         "tenzro_listSites" => handle_list_sites(node, request.params).await,
         "tenzro_siteRemove" => handle_site_remove(node, request.params).await,
+        // Site alias (hostname → site_id) naming layer. Set/remove are
+        // DID-owner-authenticated; get/list are open reads.
+        "tenzro_siteSetAlias" => handle_site_set_alias(node, request.params).await,
+        "tenzro_siteGetAlias" => handle_site_get_alias(node, request.params).await,
+        "tenzro_listSiteAliases" => handle_list_site_aliases(node, request.params).await,
+        "tenzro_siteRemoveAlias" => handle_site_remove_alias(node, request.params).await,
+        // Custom-domain (bring-your-own hostname) layer. Claim returns the
+        // ownership TXT record the caller must publish; verify checks DNS and
+        // flips the domain to verified so a certificate is issued and the
+        // hostname serves. Claim/verify/remove are DID-owner-authenticated;
+        // get/list are open reads.
+        "tenzro_siteClaimDomain" => handle_site_claim_domain(node, request.params).await,
+        "tenzro_siteVerifyDomain" => handle_site_verify_domain(node, request.params).await,
+        "tenzro_siteGetDomain" => handle_site_get_domain(node, request.params).await,
+        "tenzro_listSiteDomains" => handle_list_site_domains(node, request.params).await,
+        "tenzro_siteRemoveDomain" => handle_site_remove_domain(node, request.params).await,
+        // Dynamic-ingress placement (site_id → serving-node EndpointIds). The
+        // edge forwards a request to a placed serving node over `tenzro/http`;
+        // an empty placement serves locally. Set/remove are site-owner-
+        // authenticated; get/list are open reads.
+        "tenzro_siteSetPlacement" => handle_site_set_placement(node, request.params).await,
+        "tenzro_siteGetPlacement" => handle_site_get_placement(node, request.params).await,
+        "tenzro_listSitePlacements" => handle_list_site_placements(node, request.params).await,
+        "tenzro_siteRemovePlacement" => handle_site_remove_placement(node, request.params).await,
+
+        // Function hosting — deploy/inspect/remove `wasi:http` component
+        // deployments served over the same `tenzro/http` ingress path as static
+        // sites (share the naming layer: a host resolves to an id that is either
+        // a function or a site). Upload the component blob via
+        // `tenzro_iroh_publishBlob` first, then deploy referencing its hash.
+        // Deploy/remove are DID-owner-authenticated; get/list are open reads.
+        "tenzro_functionDeploy" => handle_function_deploy(node, request.params).await,
+        "tenzro_functionGet" => handle_function_get(node, request.params).await,
+        "tenzro_listFunctions" => handle_list_functions(node, request.params).await,
+        "tenzro_functionRemove" => handle_function_remove(node, request.params).await,
+
+        // Machine hosting methods (Firecracker microVM runtime — unmodified
+        // long-lived servers). Deploy / get / list / remove operate on the
+        // metadata registry (present on every node); status reports the
+        // microVM run-state on this node (Stopped when no supervisor).
+        "tenzro_machineDeploy" => handle_machine_deploy(node, request.params).await,
+        "tenzro_machineGet" => handle_machine_get(node, request.params).await,
+        "tenzro_listMachines" => handle_list_machines(node, request.params).await,
+        "tenzro_machineRemove" => handle_machine_remove(node, request.params).await,
+        "tenzro_machineStatus" => handle_machine_status(node, request.params).await,
+        "tenzro_machineSealingKey" => handle_machine_sealing_key(node, request.params).await,
+
+        // App-hosting placement leases. `auto_place` (invoked on deploy) leases
+        // capable remote nodes and records the lease on-ledger; these read the
+        // scheduler's lease table. `getLeasesForApp` filters by app id;
+        // `listLeases` returns every active lease across apps. Open reads.
+        "tenzro_getLeasesForApp" => handle_get_leases_for_app(node, request.params).await,
+        "tenzro_listLeases" => handle_list_leases(node).await,
 
         // Capability registry methods (read surface for the
         // `CapabilityRegistry` held inside `AgentRuntime` — exposes
@@ -7608,6 +7661,7 @@ async fn handle_site_publish(
         .get("not_found_path")
         .and_then(|v| v.as_str())
         .map(String::from);
+    let spa = params.get("spa").and_then(|v| v.as_bool()).unwrap_or(false);
     let price_per_request = match params.get("price_per_request") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => Some(s.parse::<u128>().map_err(|e| JsonRpcError {
@@ -7631,13 +7685,44 @@ async fn handle_site_publish(
 
     let manifest = node
         .site_registry()
-        .publish_site(name, owner_did, routes, index_path, not_found_path, price_per_request)
+        .publish_site(name, owner_did, routes, index_path, not_found_path, spa, price_per_request)
         .map_err(|e| JsonRpcError {
             code: -32602,
             message: e.to_string(),
             data: None,
         })?;
-    Ok(site_manifest_to_json(&manifest))
+
+    let replicas = params
+        .get("replicas")
+        .and_then(|v| v.as_u64())
+        .map(|r| r.max(1) as usize)
+        .unwrap_or(1);
+    let region_hint = params
+        .get("region_hint")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let max_price_per_hour = params.get("max_price_per_hour").and_then(|v| match v {
+        Value::String(s) => s.parse::<u128>().ok(),
+        Value::Number(n) => n.as_u64().map(|x| x as u128),
+        _ => None,
+    });
+    let placement = node.auto_place(&crate::placement::PlacementRequest {
+        app_id: manifest.site_id.clone(),
+        class: crate::placement::RuntimeClass::Static,
+        min_cpu_cores: 0,
+        min_ram_gb: 0,
+        min_disk_gb: 0,
+        tee_required: false,
+        replicas,
+        region_hint,
+        max_price_per_hour,
+    });
+
+    let mut out = site_manifest_to_json(&manifest);
+    if let Value::Object(ref mut map) = out {
+        map.insert("placement".to_string(), serde_json::json!(placement));
+    }
+    Ok(out)
 }
 
 async fn handle_site_get(
@@ -7724,10 +7809,1169 @@ async fn handle_site_remove(
                 data: None,
             },
         })?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    node.placement_scheduler().release_app(&manifest.site_id, now_ms);
+
     Ok(serde_json::json!({
         "removed": true,
         "site_id": manifest.site_id,
         "version": manifest.version,
+    }))
+}
+
+// ---- Function hosting RPCs -------------------------------------------------
+//
+// A function deployment is a content-addressed `wasi:http` component blob plus a
+// capability manifest. The blob is uploaded via `tenzro_iroh_publishBlob`; the
+// deployment here references it by hash. Serving flows through the same
+// `tenzro/http` ingress edge as static sites — the shared naming layer resolves
+// a public hostname to an id that is either a function or a site. Deploy/remove
+// are DID-owner-authenticated (same signed envelope as sites); get/list are
+// open reads.
+
+fn function_deployment_to_json(d: &crate::functions::FunctionDeployment) -> Value {
+    serde_json::json!({
+        "id": d.id,
+        "name": d.name,
+        "owner_did": d.owner_did,
+        "version": d.version,
+        "wasm_blob_hash": d.wasm_blob_hash,
+        "capabilities": serde_json::to_value(&d.capabilities).unwrap_or(Value::Null),
+        "fuel_limit": d.fuel_limit,
+        "deadline_ms": d.deadline_ms,
+        "price_per_request": d.price_per_request.map(|p| p.to_string()),
+        "created_at": d.created_at,
+        "updated_at": d.updated_at,
+    })
+}
+
+fn function_error_to_rpc(e: crate::functions::FunctionError) -> JsonRpcError {
+    match e {
+        crate::functions::FunctionError::NotFound(_) => JsonRpcError {
+            code: -32004,
+            message: e.to_string(),
+            data: None,
+        },
+        crate::functions::FunctionError::NotOwner => JsonRpcError {
+            code: -32001,
+            message: e.to_string(),
+            data: None,
+        },
+        crate::functions::FunctionError::InvalidDeployment(_) => JsonRpcError {
+            code: -32602,
+            message: e.to_string(),
+            data: None,
+        },
+        _ => JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+            data: None,
+        },
+    }
+}
+
+async fn handle_function_deploy(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing name".to_string(),
+            data: None,
+        })?;
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing owner_did".to_string(),
+            data: None,
+        })?;
+    require_did_owner(node, &params, owner_did).await?;
+    let wasm_blob_hash = params
+        .get("wasm_blob_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing wasm_blob_hash (upload the component via tenzro_iroh_publishBlob first)".to_string(),
+            data: None,
+        })?;
+    let capabilities: crate::functions::FunctionCapabilities = match params.get("capabilities") {
+        None | Some(Value::Null) => Default::default(),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("malformed capabilities: {e}"),
+            data: None,
+        })?,
+    };
+    let fuel_limit = params.get("fuel_limit").and_then(|v| v.as_u64());
+    let deadline_ms = params.get("deadline_ms").and_then(|v| v.as_u64());
+    let price_per_request = match params.get("price_per_request") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.parse::<u128>().map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("price_per_request not a u128: {e}"),
+            data: None,
+        })?),
+        Some(Value::Number(n)) => Some(n.as_u64().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "price_per_request must be a non-negative integer".to_string(),
+            data: None,
+        })? as u128),
+        Some(_) => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "price_per_request must be a string or integer".to_string(),
+                data: None,
+            });
+        }
+    };
+
+    let deployment = node
+        .function_registry()
+        .deploy(
+            name,
+            owner_did,
+            wasm_blob_hash,
+            capabilities,
+            fuel_limit,
+            deadline_ms,
+            price_per_request,
+        )
+        .map_err(function_error_to_rpc)?;
+
+    // A redeploy under the same id may have superseded a compiled handle; drop
+    // any cached compilation so the next request recompiles the new version.
+    #[cfg(feature = "wasi-skills")]
+    node.function_components().invalidate(&deployment.id);
+
+    let replicas = params
+        .get("replicas")
+        .and_then(|v| v.as_u64())
+        .map(|r| r.max(1) as usize)
+        .unwrap_or(1);
+    let region_hint = params
+        .get("region_hint")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let max_price_per_hour = params.get("max_price_per_hour").and_then(|v| match v {
+        Value::String(s) => s.parse::<u128>().ok(),
+        Value::Number(n) => n.as_u64().map(|x| x as u128),
+        _ => None,
+    });
+    let placement = node.auto_place(&crate::placement::PlacementRequest {
+        app_id: deployment.id.clone(),
+        class: crate::placement::RuntimeClass::Function,
+        min_cpu_cores: 0,
+        min_ram_gb: 0,
+        min_disk_gb: 0,
+        tee_required: false,
+        replicas,
+        region_hint,
+        max_price_per_hour,
+    });
+
+    let mut out = function_deployment_to_json(&deployment);
+    if let Value::Object(ref mut map) = out {
+        map.insert("placement".to_string(), serde_json::json!(placement));
+    }
+    Ok(out)
+}
+
+async fn handle_function_get(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let id = params
+        .as_ref()
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing id".to_string(),
+            data: None,
+        })?;
+    let deployment = node.function_registry().get(id).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: format!("function not found: {id}"),
+        data: None,
+    })?;
+    Ok(function_deployment_to_json(&deployment))
+}
+
+async fn handle_list_functions(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let owner = params
+        .as_ref()
+        .and_then(|p| p.get("owner_did"))
+        .and_then(|v| v.as_str());
+    let functions: Vec<Value> = node
+        .function_registry()
+        .list(owner)
+        .iter()
+        .map(function_deployment_to_json)
+        .collect();
+    Ok(serde_json::json!({ "functions": functions, "count": functions.len() }))
+}
+
+async fn handle_function_remove(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id = params
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing id".to_string(),
+            data: None,
+        })?;
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing owner_did".to_string(),
+            data: None,
+        })?;
+    require_did_owner(node, &params, owner_did).await?;
+    let deployment = node
+        .function_registry()
+        .remove(id, owner_did)
+        .map_err(function_error_to_rpc)?;
+
+    #[cfg(feature = "wasi-skills")]
+    node.function_components().invalidate(&deployment.id);
+
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    node.placement_scheduler().release_app(&deployment.id, now_ms);
+
+    Ok(serde_json::json!({
+        "removed": true,
+        "id": deployment.id,
+        "version": deployment.version,
+    }))
+}
+
+// ---- Machine hosting RPCs (Firecracker microVM runtime) --------------------
+
+fn machine_deployment_to_json(d: &crate::machines::MachineDeployment) -> Value {
+    serde_json::json!({
+        "id": d.id,
+        "name": d.name,
+        "owner_did": d.owner_did,
+        "version": d.version,
+        "artifact_caid": d.artifact_caid,
+        "internal_port": d.internal_port,
+        "resources": serde_json::to_value(&d.resources).unwrap_or(Value::Null),
+        "sealed_env": d.sealed_env.iter().map(|e| e.name.clone()).collect::<Vec<_>>(),
+        "tee_required": d.tee_required,
+        "price_per_request": d.price_per_request.map(|p| p.to_string()),
+        "created_at": d.created_at,
+        "updated_at": d.updated_at,
+    })
+}
+
+fn machine_error_to_rpc(e: crate::machines::MachineError) -> JsonRpcError {
+    match e {
+        crate::machines::MachineError::NotFound(_) => JsonRpcError {
+            code: -32004,
+            message: e.to_string(),
+            data: None,
+        },
+        crate::machines::MachineError::NotOwner => JsonRpcError {
+            code: -32001,
+            message: e.to_string(),
+            data: None,
+        },
+        crate::machines::MachineError::InvalidDeployment(_) => JsonRpcError {
+            code: -32602,
+            message: e.to_string(),
+            data: None,
+        },
+        _ => JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+            data: None,
+        },
+    }
+}
+
+async fn handle_machine_deploy(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing name".to_string(),
+            data: None,
+        })?;
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing owner_did".to_string(),
+            data: None,
+        })?;
+    require_did_owner(node, &params, owner_did).await?;
+    let artifact_caid = params
+        .get("artifact_caid")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing artifact_caid (upload the microVM image via tenzro_iroh_publishBlob first)".to_string(),
+            data: None,
+        })?;
+    let internal_port = params
+        .get("internal_port")
+        .and_then(|v| v.as_u64())
+        .and_then(|p| u16::try_from(p).ok())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing internal_port (the loopback port the guest server listens on, 1-65535)".to_string(),
+            data: None,
+        })?;
+    let resources: crate::machines::MachineResources = match params.get("resources") {
+        None | Some(Value::Null) => Default::default(),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("malformed resources: {e}"),
+            data: None,
+        })?,
+    };
+    let sealed_env: Vec<crate::machines::SealedEnvVar> = match params.get("sealed_env") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("malformed sealed_env: {e}"),
+            data: None,
+        })?,
+    };
+    let tee_required = params
+        .get("tee_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let price_per_request = match params.get("price_per_request") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.parse::<u128>().map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("price_per_request not a u128: {e}"),
+            data: None,
+        })?),
+        Some(Value::Number(n)) => Some(n.as_u64().ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "price_per_request must be a non-negative integer".to_string(),
+            data: None,
+        })? as u128),
+        Some(_) => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "price_per_request must be a string or integer".to_string(),
+                data: None,
+            });
+        }
+    };
+
+    let deployment = node
+        .machine_registry()
+        .deploy(
+            name,
+            owner_did,
+            artifact_caid,
+            internal_port,
+            resources,
+            sealed_env,
+            tee_required,
+            price_per_request,
+        )
+        .map_err(machine_error_to_rpc)?;
+
+    let replicas = params
+        .get("replicas")
+        .and_then(|v| v.as_u64())
+        .map(|r| r.max(1) as usize)
+        .unwrap_or(1);
+    let region_hint = params
+        .get("region_hint")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let max_price_per_hour = params.get("max_price_per_hour").and_then(|v| match v {
+        Value::String(s) => s.parse::<u128>().ok(),
+        Value::Number(n) => n.as_u64().map(|x| x as u128),
+        _ => None,
+    });
+    let placement = node.auto_place(&crate::placement::PlacementRequest {
+        app_id: deployment.id.clone(),
+        class: crate::placement::RuntimeClass::Machine,
+        min_cpu_cores: deployment.resources.vcpus,
+        min_ram_gb: deployment.resources.mem_mib / 1024,
+        min_disk_gb: deployment.resources.disk_mib / 1024,
+        tee_required: deployment.tee_required,
+        replicas,
+        region_hint,
+        max_price_per_hour,
+    });
+
+    let mut out = machine_deployment_to_json(&deployment);
+    if let Value::Object(ref mut map) = out {
+        map.insert("placement".to_string(), serde_json::json!(placement));
+    }
+    Ok(out)
+}
+
+async fn handle_machine_get(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let id = params
+        .as_ref()
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing id".to_string(),
+            data: None,
+        })?;
+    let deployment = node.machine_registry().get(id).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: format!("machine not found: {id}"),
+        data: None,
+    })?;
+    Ok(machine_deployment_to_json(&deployment))
+}
+
+async fn handle_list_machines(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let owner = params
+        .as_ref()
+        .and_then(|p| p.get("owner_did"))
+        .and_then(|v| v.as_str());
+    let machines: Vec<Value> = node
+        .machine_registry()
+        .list(owner)
+        .iter()
+        .map(machine_deployment_to_json)
+        .collect();
+    Ok(serde_json::json!({ "machines": machines, "count": machines.len() }))
+}
+
+async fn handle_machine_remove(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id = params
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing id".to_string(),
+            data: None,
+        })?;
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing owner_did".to_string(),
+            data: None,
+        })?;
+    require_did_owner(node, &params, owner_did).await?;
+
+    // Stop any running microVM for this deployment before dropping the record,
+    // so a remove doesn't orphan a live instance on a supervisor node.
+    #[cfg(feature = "firecracker")]
+    if let Some(supervisor) = node.machine_supervisor() {
+        if let Err(e) = supervisor.stop(id).await {
+            tracing::warn!("machine remove: stop {id} failed: {e}");
+        }
+    }
+
+    let deployment = node
+        .machine_registry()
+        .remove(id, owner_did)
+        .map_err(machine_error_to_rpc)?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    node.placement_scheduler().release_app(&deployment.id, now_ms);
+
+    Ok(serde_json::json!({
+        "removed": true,
+        "id": deployment.id,
+        "version": deployment.version,
+    }))
+}
+
+async fn handle_machine_status(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let id = params
+        .as_ref()
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing id".to_string(),
+            data: None,
+        })?;
+    let deployment = node.machine_registry().get(id).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: format!("machine not found: {id}"),
+        data: None,
+    })?;
+
+    // With a supervisor, report the live microVM run-state; without one (no
+    // feature / no hardware) the node holds metadata only, so the machine is
+    // Stopped here — placement puts it on a capability node that runs it.
+    #[cfg(feature = "firecracker")]
+    let status = match node.machine_supervisor() {
+        Some(supervisor) => supervisor.status(&deployment),
+        None => crate::machines::MachineStatus {
+            id: deployment.id.clone(),
+            version: deployment.version,
+            state: crate::machines::MachineRunState::Stopped,
+            detail: "no machine supervisor on this node".to_string(),
+        },
+    };
+    #[cfg(not(feature = "firecracker"))]
+    let status = crate::machines::MachineStatus {
+        id: deployment.id.clone(),
+        version: deployment.version,
+        state: crate::machines::MachineRunState::Stopped,
+        detail: "machine runtime not built into this node".to_string(),
+    };
+
+    Ok(serde_json::to_value(&status).unwrap_or(Value::Null))
+}
+
+/// Return this node's X25519 machine-sealing public key (hex). A deployer wraps
+/// each environment secret to this key with `envelope_encrypt` before calling
+/// `tenzro_machineDeploy`, so plaintext secrets never leave the deployer and are
+/// decrypted only inside the assigned node's enclave at microVM launch. The key
+/// is derived deterministically from the node's validator secret (domain-
+/// separated), so it is stable across restarts and identical to the key the
+/// supervisor uses to unseal — available on every node regardless of the
+/// `firecracker` feature, since sealing happens on the deploy side.
+async fn handle_machine_sealing_key(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let vkp = crate::keygen::load_validator_keypair(&node.config().data_dir).map_err(|e| {
+        JsonRpcError {
+            code: -32000,
+            message: format!("validator keypair unavailable: {e}"),
+            data: None,
+        }
+    })?;
+    let seed = tenzro_crypto::sha256(
+        &[b"tenzro/hosting/machine/sealing".as_ref(), &vkp.to_bytes()].concat(),
+    );
+    let sealing_key =
+        tenzro_crypto::encryption::X25519KeyPair::from_secret_bytes(seed.as_bytes()).map_err(
+            |e| JsonRpcError {
+                code: -32000,
+                message: format!("sealing key derivation failed: {e}"),
+                data: None,
+            },
+        )?;
+    Ok(serde_json::json!({
+        "sealing_public_key": hex::encode(sealing_key.public_key_bytes()),
+        "alg": "x25519-envelope-aes-256-gcm",
+    }))
+}
+
+// ---- App-hosting placement lease reads -------------------------------------
+//
+// A lease is the on-ledger record that a serving node has agreed to host an app
+// deployment at its advertised per-hour price for a bounded window. Leases are
+// created by `auto_place` on deploy, renewed on failover, and released on
+// removal. These handlers expose the scheduler's lease table for inspection.
+
+fn lease_record_to_json(l: &crate::placement::LeaseRecord) -> Value {
+    serde_json::json!({
+        "app_id": l.app_id,
+        "node_id": l.node_id,
+        "runtime_class": l.runtime_class,
+        "cpu_cores": l.cpu_cores,
+        "ram_gb": l.ram_gb,
+        "disk_gb": l.disk_gb,
+        "tee": l.tee,
+        "price_per_hour": l.price_per_hour.to_string(),
+        "region": l.region,
+        "capability_set": l.capability_set,
+        "leased_at": l.leased_at,
+        "expires_at": l.expires_at,
+        "metered_tnzo": l.metered_tnzo.to_string(),
+    })
+}
+
+async fn handle_get_leases_for_app(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let app_id = params
+        .as_ref()
+        .and_then(|p| p.get("app_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing app_id".to_string(),
+            data: None,
+        })?;
+    let leases: Vec<Value> = node
+        .placement_scheduler()
+        .leases_for(app_id)
+        .iter()
+        .map(lease_record_to_json)
+        .collect();
+    Ok(serde_json::json!({ "app_id": app_id, "leases": leases, "count": leases.len() }))
+}
+
+async fn handle_list_leases(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let leases: Vec<Value> = node
+        .placement_scheduler()
+        .all_leases()
+        .iter()
+        .map(lease_record_to_json)
+        .collect();
+    Ok(serde_json::json!({ "leases": leases, "count": leases.len() }))
+}
+
+// ---- Site placement RPCs (dynamic-ingress routing table) -------------------
+//
+// A placement records the serving nodes (iroh `EndpointId`s) that hold a site's
+// blobs and answer `tenzro/http` forwards for it. The edge that terminates TLS
+// for the site's hostname consults the placement: a remote serving node means
+// forward the request over iroh; an empty placement means serve locally. Set /
+// remove are site-owner-authenticated (the DID that published the manifest);
+// get / list are open reads so any node can inspect routing.
+
+fn placement_record_to_json(r: &crate::ingress::PlacementRecord) -> Value {
+    serde_json::json!({
+        "site_id": r.site_id,
+        "serving_nodes": r.serving_nodes,
+        "updated_at": r.updated_at,
+    })
+}
+
+async fn handle_site_set_placement(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let site_id = params
+        .get("site_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing site_id".to_string(),
+            data: None,
+        })?;
+
+    // The manifest's owner is the authority over where the site is served.
+    let manifest = node
+        .site_registry()
+        .get_site(site_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("site not found: {site_id}"),
+            data: None,
+        })?;
+    require_did_owner(node, &params, &manifest.owner_did).await?;
+
+    let serving_nodes: Vec<String> = params
+        .get("serving_nodes")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing serving_nodes (array of iroh EndpointId strings; empty serves locally)".to_string(),
+            data: None,
+        })?;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    node.ingress_table()
+        .set_placement(site_id, serving_nodes.clone(), now_ms)
+        .map_err(|e| match e {
+            crate::ingress::IngressError::BadEndpointId(m) => JsonRpcError {
+                code: -32602,
+                message: m,
+                data: None,
+            },
+            _ => JsonRpcError {
+                code: -32000,
+                message: e.to_string(),
+                data: None,
+            },
+        })?;
+
+    Ok(serde_json::json!({
+        "site_id": site_id,
+        "serving_nodes": serving_nodes,
+        "serves_locally": serving_nodes.is_empty(),
+    }))
+}
+
+async fn handle_site_get_placement(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let site_id = params
+        .as_ref()
+        .and_then(|p| p.get("site_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing site_id".to_string(),
+            data: None,
+        })?;
+    match node.ingress_table().get_placement(site_id) {
+        Some(record) => Ok(placement_record_to_json(&record)),
+        None => Ok(serde_json::json!({
+            "site_id": site_id,
+            "serving_nodes": [],
+            "serves_locally": true,
+        })),
+    }
+}
+
+async fn handle_list_site_placements(
+    node: &Arc<TenzroNode>,
+    _params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let placements: Vec<Value> = node
+        .ingress_table()
+        .list_placements()
+        .iter()
+        .map(placement_record_to_json)
+        .collect();
+    Ok(serde_json::json!({ "placements": placements, "count": placements.len() }))
+}
+
+async fn handle_site_remove_placement(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let site_id = params
+        .get("site_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing site_id".to_string(),
+            data: None,
+        })?;
+    let manifest = node
+        .site_registry()
+        .get_site(site_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("site not found: {site_id}"),
+            data: None,
+        })?;
+    require_did_owner(node, &params, &manifest.owner_did).await?;
+    node.ingress_table()
+        .remove_placement(site_id)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+            data: None,
+        })?;
+    Ok(serde_json::json!({ "removed": true, "site_id": site_id }))
+}
+
+// ---- Site alias RPCs (hostname → site_id naming layer) ---------------------
+//
+// An alias points a public hostname (`myapp.apps.tenzro.xyz`) at a site so the
+// Web-API edge resolves an incoming Host header to a manifest. Setting or
+// removing an alias is DID-owner-authenticated the same way as publish/remove:
+// the caller must supply a signed `did_envelope` for the site owner, and the
+// alias target's manifest owner must match.
+
+fn site_error_to_json_rpc(e: crate::sites::SiteError) -> JsonRpcError {
+    match e {
+        crate::sites::SiteError::NotFound(_) => JsonRpcError {
+            code: -32004,
+            message: e.to_string(),
+            data: None,
+        },
+        crate::sites::SiteError::NotOwner => JsonRpcError {
+            code: -32001,
+            message: e.to_string(),
+            data: None,
+        },
+        crate::sites::SiteError::InvalidManifest(_) => JsonRpcError {
+            code: -32602,
+            message: e.to_string(),
+            data: None,
+        },
+        _ => JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+            data: None,
+        },
+    }
+}
+
+fn site_alias_to_json(a: &crate::sites::SiteAlias) -> Value {
+    serde_json::to_value(a).unwrap_or(Value::Null)
+}
+
+async fn handle_site_set_alias(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let hostname = params
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing hostname".to_string(),
+            data: None,
+        })?;
+    let site_id = params
+        .get("site_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing site_id".to_string(),
+            data: None,
+        })?;
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing owner_did".to_string(),
+            data: None,
+        })?;
+    require_did_owner(node, &params, owner_did).await?;
+    let alias = node
+        .site_registry()
+        .set_alias(hostname, site_id, owner_did)
+        .map_err(site_error_to_json_rpc)?;
+    Ok(site_alias_to_json(&alias))
+}
+
+async fn handle_site_get_alias(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let hostname = params
+        .as_ref()
+        .and_then(|p| p.get("hostname"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing hostname".to_string(),
+            data: None,
+        })?;
+    let alias = node
+        .site_registry()
+        .get_alias(hostname)
+        .ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("alias not found: {hostname}"),
+            data: None,
+        })?;
+    Ok(site_alias_to_json(&alias))
+}
+
+async fn handle_list_site_aliases(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let owner = params
+        .as_ref()
+        .and_then(|p| p.get("owner_did"))
+        .and_then(|v| v.as_str());
+    let aliases: Vec<Value> = node
+        .site_registry()
+        .list_aliases(owner)
+        .iter()
+        .map(site_alias_to_json)
+        .collect();
+    Ok(serde_json::json!({ "aliases": aliases, "count": aliases.len() }))
+}
+
+async fn handle_site_remove_alias(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let hostname = params
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing hostname".to_string(),
+            data: None,
+        })?;
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing owner_did".to_string(),
+            data: None,
+        })?;
+    require_did_owner(node, &params, owner_did).await?;
+    let alias = node
+        .site_registry()
+        .remove_alias(hostname, owner_did)
+        .map_err(site_error_to_json_rpc)?;
+    Ok(serde_json::json!({
+        "removed": true,
+        "hostname": alias.hostname,
+        "site_id": alias.site_id,
+    }))
+}
+
+fn site_domain_to_json(node: &Arc<TenzroNode>, d: &crate::sites::CustomDomain) -> Value {
+    let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
+    // Carry the exact DNS records the owner must publish so the CLI prints them
+    // verbatim. They name THIS operator's configured edge — site hosting is
+    // operator-served under the operator's own domain, so the records are not
+    // hardcoded to any canonical host. `ownership_txt_name` is retained for the
+    // proof record's name.
+    if let Value::Object(ref mut map) = v {
+        map.insert(
+            "ownership_txt_name".to_string(),
+            Value::String(crate::sites::ownership_txt_name(&d.hostname)),
+        );
+        let records = node.site_registry().domain_onboarding(d);
+        map.insert(
+            "dns_records".to_string(),
+            serde_json::to_value(&records).unwrap_or(Value::Null),
+        );
+    }
+    v
+}
+
+async fn handle_site_claim_domain(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let hostname = params
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing hostname".to_string(),
+            data: None,
+        })?;
+    let site_id = params
+        .get("site_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing site_id".to_string(),
+            data: None,
+        })?;
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing owner_did".to_string(),
+            data: None,
+        })?;
+    require_did_owner(node, &params, owner_did).await?;
+    let domain = node
+        .site_registry()
+        .claim_domain(hostname, site_id, owner_did)
+        .map_err(site_error_to_json_rpc)?;
+    Ok(site_domain_to_json(node, &domain))
+}
+
+async fn handle_site_verify_domain(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let hostname = params
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing hostname".to_string(),
+            data: None,
+        })?;
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing owner_did".to_string(),
+            data: None,
+        })?;
+    require_did_owner(node, &params, owner_did).await?;
+    // Only the claim owner may trigger verification, but the DNS proof is what
+    // actually admits the domain — a matching TXT record is required.
+    let claimed = node
+        .site_registry()
+        .get_domain(hostname)
+        .ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("domain not claimed: {hostname}"),
+            data: None,
+        })?;
+    if claimed.owner_did != owner_did {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: "not domain owner".to_string(),
+            data: None,
+        });
+    }
+    let domain = node
+        .site_registry()
+        .verify_domain(hostname)
+        .await
+        .map_err(site_error_to_json_rpc)?;
+    Ok(site_domain_to_json(node, &domain))
+}
+
+async fn handle_site_get_domain(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let hostname = params
+        .as_ref()
+        .and_then(|p| p.get("hostname"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing hostname".to_string(),
+            data: None,
+        })?;
+    let domain = node
+        .site_registry()
+        .get_domain(hostname)
+        .ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("domain not found: {hostname}"),
+            data: None,
+        })?;
+    Ok(site_domain_to_json(node, &domain))
+}
+
+async fn handle_list_site_domains(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let owner = params
+        .as_ref()
+        .and_then(|p| p.get("owner_did"))
+        .and_then(|v| v.as_str());
+    let domains: Vec<Value> = node
+        .site_registry()
+        .list_domains(owner)
+        .iter()
+        .map(|d| site_domain_to_json(node, d))
+        .collect();
+    Ok(serde_json::json!({ "domains": domains, "count": domains.len() }))
+}
+
+async fn handle_site_remove_domain(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let hostname = params
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing hostname".to_string(),
+            data: None,
+        })?;
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing owner_did".to_string(),
+            data: None,
+        })?;
+    require_did_owner(node, &params, owner_did).await?;
+    let domain = node
+        .site_registry()
+        .remove_domain(hostname, owner_did)
+        .map_err(site_error_to_json_rpc)?;
+    Ok(serde_json::json!({
+        "removed": true,
+        "hostname": domain.hostname,
+        "site_id": domain.site_id,
     }))
 }
 

@@ -1,13 +1,15 @@
 //! Static site serving: `GET /sites/{site_id}` and `GET /sites/{site_id}/*path`.
 //!
-//! Resolution: manifest lookup → exact route match (falling back to the
+//! Resolution: manifest lookup → exact route match (falling back to the SPA
+//! index for a route-miss when the manifest is a single-page app, then the
 //! manifest's `not_found_path`, then plain 404) → per-site x402 gate when the
 //! manifest carries a price → LRU byte cache → iroh blob fetch. Content never
 //! touches the filesystem; paths only ever index the manifest's route map.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
@@ -20,6 +22,30 @@ use tracing::{debug, warn};
 
 use crate::sites::SiteManifest;
 use crate::web::handlers::WebState;
+
+/// Caddy on-demand-TLS ask endpoint. Caddy issues one request per unseen
+/// hostname during a TLS handshake and issues a certificate only when this
+/// returns 200. We admit a hostname only if it is a custom domain whose owner
+/// has proved control (a verified claim). This runs on the handshake path and
+/// does no network I/O — a fast in-memory lookup. The wildcard
+/// `*.apps.tenzro.xyz` is served by a single pre-issued cert and never reaches
+/// this endpoint.
+pub async fn tls_ask(
+    State(state): State<Arc<WebState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(node) = &state.node else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "node unavailable").into_response();
+    };
+    let Some(domain) = params.get("domain") else {
+        return (StatusCode::BAD_REQUEST, "missing domain").into_response();
+    };
+    if node.site_registry().is_domain_verified(domain) {
+        (StatusCode::OK, "ok").into_response()
+    } else {
+        (StatusCode::FORBIDDEN, "domain not verified").into_response()
+    }
+}
 
 pub async fn serve_site_index(
     State(state): State<Arc<WebState>>,
@@ -59,6 +85,14 @@ async fn serve(
 
     let (route_path, status) = if manifest.routes.contains_key(&request_path) {
         (request_path.clone(), StatusCode::OK)
+    } else if manifest.spa
+        && !crate::sites::is_asset_path(&request_path)
+        && manifest.routes.contains_key(&manifest.index_path)
+    {
+        // SPA route-miss: hand the URL to the client-side router by serving the
+        // index at 200. Asset misses skip this branch and fall through to 404 so
+        // a missing bundle chunk is not masked as the index page.
+        (manifest.index_path.clone(), StatusCode::OK)
     } else if let Some(nf) = manifest
         .not_found_path
         .as_ref()
@@ -181,7 +215,7 @@ async fn enforce_payment(
 /// Header-credential decode matching the payment-gate middleware conventions:
 /// `Payment ` prefix is base64url-nopad; protocol prefixes and the raw
 /// `Payment-Credential` value are STANDARD base64 JSON.
-fn parse_credential(header_value: &str) -> Result<PaymentCredential, String> {
+pub(crate) fn parse_credential(header_value: &str) -> Result<PaymentCredential, String> {
     let (data, url_safe) = if let Some(rest) = header_value.strip_prefix("Payment ") {
         (rest, true)
     } else if let Some(rest) = header_value

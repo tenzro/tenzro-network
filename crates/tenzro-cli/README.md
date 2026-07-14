@@ -51,7 +51,7 @@ tenzro model list
 tenzro chat
 ```
 
-## Commands (96 command modules)
+## Commands (101 command modules)
 
 All commands use real JSON-RPC calls via reqwest. No artificial delays.
 
@@ -1302,7 +1302,7 @@ The CLI is organized into several modules:
 - `output.rs` - Output formatting utilities (tables, progress bars, colors)
 - `rpc.rs` - Real JSON-RPC client (reqwest)
 - `config.rs` - Configuration management
-- `commands/` - Command implementations (63 modules: adaptive_burn, admin, agent, ap2, app, approval, auth, bond, bridge, canton, capability, capital, cct, compliance, contract, cortex, crosschain, crypto, custody, debridge, dispute, erc7579, erc7683, erc8004, escrow, events, governance, hardware, identity, inference, insurance, interop, iroh, join, key, lifi, marketplace, memory, model, multimodal, nft, node, payment, pq_hybrid, provenance, provider, reputation, schedule, seed_agent, skill, stake, task, tee, token, tool, train, username, validator, vrf, wallet, wormhole, x402, zk)
+- `commands/` - Command implementations (101 modules: adaptive_burn, admin, agent, ap2, app, approval, attested_clock, auth, axelar, babylon, bitvm2, bond, bridge, bridge_fee, caip, canton, capability, capital, ccip, cct, cluster, compliance, contract, cortex, crosschain, crypto, custody, da, database, debridge, discover, dispute, eip7702, erc7579, erc7683, erc8004, escrow, events, function, global_supply, governance, hardware, hyperbridge, hyperlane, ibc_eureka, identity, institution, insurance, interop, inference, iroh, ivms101, join, keri, key, lease, lifi, machine, marketplace, mcp, memory, moe, model, multimodal, near_chain_sig, nft, node, passkey, payment, permit2, pq_hybrid, presign, provenance, provider, reputation, resources, schedule, secure_mint, seed_agent, siwt, site, skill, stable_asset, stake, stargate_v2, task, tee, token, tool, train, treasury, urwa, username, validator, vrf, wallet, workflow, wormhole, wormhole_ntt, x402, zk)
 
 All commands use real JSON-RPC calls to tenzro-node RPC endpoints. No simulated calls, no artificial delays.
 

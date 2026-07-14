@@ -1315,6 +1315,13 @@ pub const BILLING_EPOCH_INTERVAL_SECS: u64 = 3_600;
 /// too aggressively.
 pub const SAGA_EXPIRY_SWEEP_INTERVAL_SECS: u64 = 300;
 
+/// Interval between app-hosting placement reconciles. Each tick sweeps expired
+/// leases and evicts any serving node whose provider announcement has gone stale
+/// (dropped off `tenzro/status`), re-letting its replica slot over the surviving
+/// candidates. Thirty seconds bounds the failover delay after a host stops
+/// announcing without polling the announcement map too aggressively.
+pub const PLACEMENT_RECONCILE_INTERVAL_SECS: u64 = 30;
+
 /// Rendezvous (HRW) replica set size for shard self-selection. This is the
 /// top-`R` cut a storage-serving node applies when deciding which shards of an
 /// announced object it should hold. It matches the default erasure scheme's
@@ -1414,6 +1421,44 @@ pub struct NetworkAgentEntry {
 pub struct NetworkProviderEntry {
     pub announcement: tenzro_network::ProviderAnnouncementMessage,
     pub last_seen: std::time::Instant,
+}
+
+/// Distill the live provider-announcement map into app-hosting placement
+/// candidates. Each entry is kept only if its announcement is still within TTL,
+/// carries a bound iroh endpoint, and advertises at least one hosting runtime
+/// class; placement's `select` applies the per-request filters (class, TEE,
+/// headroom, price ceiling, reachability) on top. Shared by
+/// `TenzroNode::hosting_candidates` and the background placement-reconcile tick.
+fn distill_hosting_candidates(
+    providers: &DashMap<String, NetworkProviderEntry>,
+) -> Vec<crate::placement::NodeCandidate> {
+    let now = std::time::Instant::now();
+    providers
+        .iter()
+        .filter(|entry| {
+            let ttl = std::time::Duration::from_secs(entry.announcement.ttl_secs);
+            now.duration_since(entry.last_seen) < ttl
+        })
+        .filter_map(|entry| {
+            let ann = &entry.announcement;
+            if ann.iroh_endpoint_id.is_empty()
+                || ann.runtime_support.hosting_runtimes.is_empty()
+            {
+                return None;
+            }
+            Some(crate::placement::NodeCandidate {
+                endpoint_id: ann.iroh_endpoint_id.clone(),
+                hosting_runtimes: ann.runtime_support.hosting_runtimes.clone(),
+                cpu_cores: ann.hardware.cpu_cores,
+                ram_gb: ann.hardware.ram_gb,
+                disk_gb: ann.hardware.disk_gb,
+                tee_available: ann.hardware.tee_available,
+                reachability: ann.network_profile.reachability.clone(),
+                region: ann.geography.clone(),
+                price_per_hour: ann.runtime_support.hosting_price_per_hour,
+            })
+        })
+        .collect()
 }
 
 /// Derive the 32-byte provider wallet address for a plain node that has no
@@ -1889,6 +1934,14 @@ pub struct TenzroNode {
     /// is installed from `main.rs` after `Arc::new(node)` exists.
     pub iroh_infer_dispatcher: Option<Arc<tenzro_iroh::DeferredJsonRpcDispatcher>>,
 
+    /// Deferred HTTP-forward-over-iroh handler — the app-hosting ingress
+    /// data plane. Same chicken-and-egg pattern as `iroh_a2a_dispatcher`:
+    /// the `tenzro/http` ALPN is registered on the iroh router at bind time
+    /// backed by an unbound trampoline, then the real ingress handler
+    /// (which needs `Arc<TenzroNode>` to reach the site registry + app
+    /// runtimes) is installed from `main.rs` after `Arc::new(node)` exists.
+    pub iroh_http_handler: Option<Arc<tenzro_iroh::DeferredHttpHandler>>,
+
     // Identity & Payments (TDIP + MPP/x402)
     identity_registry: Option<Arc<IdentityRegistry>>,
     payment_gateway: Option<Arc<TenzroPaymentGateway>>,
@@ -1939,6 +1992,45 @@ pub struct TenzroNode {
     /// iroh blob hashes, served at `/sites/{site_id}`. RocksDB-backed via
     /// `CF_METADATA / site:*` once storage is up; in-memory before that.
     site_registry: Arc<crate::sites::SiteRegistry>,
+
+    /// Dynamic-ingress placement table — `site_id → [serving EndpointId]`.
+    /// The edge consults it to decide whether to serve a site locally or
+    /// forward the request to a remote serving node over the `tenzro/http`
+    /// iroh ALPN. RocksDB-backed via `CF_METADATA / site_placement:*` once
+    /// storage is up; in-memory before that.
+    ingress_table: Arc<crate::ingress::IngressTable>,
+
+    /// Function-deployment registry — `wasi:http` components served over the
+    /// same `tenzro/http` ingress as static sites. Shares the site naming layer
+    /// (alias / custom domain → id). RocksDB-backed via `CF_METADATA /
+    /// function:*` once storage is up; in-memory before that.
+    function_registry: Arc<crate::functions::FunctionRegistry>,
+
+    /// Compiled `wasi:http` component cache for served functions. Present only
+    /// when the node is built with the `wasi-skills` feature; a node without it
+    /// holds function metadata but answers function requests with 501.
+    #[cfg(feature = "wasi-skills")]
+    function_components: Arc<crate::functions::FunctionComponentCache>,
+
+    /// Machine-deployment registry — unmodified long-lived server processes run
+    /// in a Firecracker microVM, served over the same `tenzro/http` ingress as
+    /// static sites and functions. Shares the site naming layer. RocksDB-backed
+    /// via `CF_METADATA / machine:*` once storage is up; in-memory before that.
+    machine_registry: Arc<crate::machines::MachineRegistry>,
+
+    /// Firecracker microVM supervisor. Present only when the node is built with
+    /// the `firecracker` feature and set during the boot path once the iroh
+    /// resolver and sealing key are available. `None` on a node that cannot run
+    /// microVMs — it still serves the machine metadata RPCs but answers a machine
+    /// request with 501 at ingress.
+    #[cfg(feature = "firecracker")]
+    machine_supervisor: Option<Arc<crate::machines::MachineSupervisor>>,
+
+    /// App-hosting placement scheduler — decides which nodes serve a deployment,
+    /// records the resulting leases (`CF_METADATA / hosting_lease:*`, hydrated on
+    /// boot), and re-places on liveness loss / lease expiry by rewriting the
+    /// `ingress_table`. In-memory before storage is up.
+    placement_scheduler: Arc<crate::placement::PlacementScheduler>,
 
     /// Spec-2 per-DID admission controller. Wired into the consensus
     /// mempool at startup (`set_admission`); also held here so RPC
@@ -2312,6 +2404,13 @@ impl TenzroNode {
         let peer_status = tenzro_network::PeerStatusTracker::new(chain_id);
         let moe_disk_dir = config.data_dir.join("moe_experts");
 
+        // Ingress table and placement scheduler share one `IngressTable` Arc so a
+        // placement decision writes the routing table the edge reads. Both are
+        // rebuilt storage-backed in the boot path once RocksDB is up.
+        let ingress_table = Arc::new(crate::ingress::IngressTable::new());
+        let placement_scheduler =
+            Arc::new(crate::placement::PlacementScheduler::new(ingress_table.clone()));
+
         Ok(Self {
             config,
             state: Arc::new(RwLock::new(NodeState::Created)),
@@ -2407,6 +2506,7 @@ impl TenzroNode {
             iroh_a2a_dispatcher: None,
             iroh_mcp_handler: None,
             iroh_infer_dispatcher: None,
+            iroh_http_handler: None,
             identity_registry: None,
             payment_gateway: None,
             x402_server: None,
@@ -2418,6 +2518,20 @@ impl TenzroNode {
             db_engine_registry: Arc::new(crate::db_engine_registry::EngineRegistry::new()),
             db_usage_meter: Arc::new(tenzro_database::DatabaseUsageMeter::new()),
             site_registry: Arc::new(crate::sites::SiteRegistry::new()),
+            ingress_table,
+            function_registry: Arc::new(crate::functions::FunctionRegistry::new()),
+            #[cfg(feature = "wasi-skills")]
+            function_components: Arc::new(
+                crate::functions::FunctionComponentCache::new().map_err(|e| {
+                    crate::error::NodeError::Internal(format!(
+                        "wasm engine init for functions: {e}"
+                    ))
+                })?,
+            ),
+            machine_registry: Arc::new(crate::machines::MachineRegistry::new()),
+            #[cfg(feature = "firecracker")]
+            machine_supervisor: None,
+            placement_scheduler,
             bazaar_catalog: None,
             admission: None,
             agent_kit: None,
@@ -3158,6 +3272,9 @@ impl TenzroNode {
         self.db_engine_registry = Arc::new(crate::db_engine_registry::EngineRegistry::new());
         self.db_usage_meter = Arc::new(tenzro_database::DatabaseUsageMeter::new());
         self.site_registry = Arc::new(crate::sites::SiteRegistry::new());
+        self.ingress_table = Arc::new(crate::ingress::IngressTable::new());
+        self.placement_scheduler =
+            Arc::new(crate::placement::PlacementScheduler::new(self.ingress_table.clone()));
         self.admission = None;
         self.identity_registry = None;
         self.agent_runtime = None;
@@ -5335,12 +5452,21 @@ impl TenzroNode {
         self.iroh_infer_dispatcher = Some(infer_deferred.clone());
         let infer_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = infer_deferred;
 
+        // HTTP-forward-over-iroh (app-hosting ingress data plane): same
+        // trampoline pattern. The real handler (`crate::ingress::IrohIngressHandler`)
+        // needs `Arc<TenzroNode>` to reach the site registry + app runtimes
+        // and is installed from `main.rs` after `Arc::new(node)`.
+        let http_deferred = Arc::new(tenzro_iroh::DeferredHttpHandler::new());
+        self.iroh_http_handler = Some(http_deferred.clone());
+        let http_handler: Arc<dyn tenzro_iroh::HttpForwardHandler> = http_deferred;
+
         match tenzro_iroh::IrohBackedResolver::bind_with_jsonrpc(
             &cfg,
             Some(a2a_dispatcher),
             Some(mcp_handler),
             Some(moe_dispatcher),
             Some(infer_dispatcher),
+            Some(http_handler),
         )
         .await
         {
@@ -5349,20 +5475,80 @@ impl TenzroNode {
                     info!(
                         pkarr_relay = %cfg.pkarr_relay_url.as_ref().unwrap(),
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A + MCP + MoE ALPNs registered)"
+                        "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A + MCP + MoE + infer + http ALPNs registered)"
                     );
                 } else if cfg.secret_key_seed.is_some() {
                     info!(
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A + MCP + MoE ALPNs registered)"
+                        "Tenzro iroh resolver bound (TDIP-anchored, n0-dns discovery only, A2A + MCP + MoE + infer + http ALPNs registered)"
                     );
                 } else {
                     info!(
                         bind_addr = %cfg.bind_addr,
-                        "Tenzro iroh resolver bound (ephemeral key, persistent blob store, A2A + MCP + MoE ALPNs registered)"
+                        "Tenzro iroh resolver bound (ephemeral key, persistent blob store, A2A + MCP + MoE + infer + http ALPNs registered)"
                     );
                 }
                 self.iroh_resolver = Some(resolver);
+
+                // Machine supervisor: only on a node built with the
+                // `firecracker` feature. The microVM image is fetched over this
+                // iroh resolver, and sealed env vars are unwrapped against an
+                // X25519 sealing key derived from the node's validator secret
+                // (domain-separated hash) so the sealing pubkey is stable and
+                // advertisable. Absent hardware, launches surface an explicit
+                // error rather than a silent no-op (no simulation on testnet).
+                #[cfg(feature = "firecracker")]
+                if let Some(resolver) = &self.iroh_resolver {
+                    match crate::keygen::load_validator_keypair(&self.config.data_dir) {
+                        Ok(vkp) => {
+                            let seed = tenzro_crypto::sha256(
+                                &[b"tenzro/hosting/machine/sealing".as_ref(), &vkp.to_bytes()]
+                                    .concat(),
+                            );
+                            match tenzro_crypto::encryption::X25519KeyPair::from_secret_bytes(
+                                seed.as_bytes(),
+                            ) {
+                                Ok(sealing_key) => {
+                                    let chroot_base =
+                                        self.config.data_dir.join("machines");
+                                    let resolver: Arc<dyn tenzro_iroh::IrohResolver> =
+                                        resolver.clone();
+                                    let mut supervisor =
+                                        crate::machines::MachineSupervisor::new(
+                                            resolver,
+                                            Arc::new(sealing_key),
+                                            chroot_base,
+                                        );
+                                    // Firecracker / jailer binaries and the guest
+                                    // kernel are operator infrastructure, so let
+                                    // the operator point at their own via env.
+                                    if let (Ok(fc), Ok(jl)) = (
+                                        std::env::var("TENZRO_FIRECRACKER_BIN"),
+                                        std::env::var("TENZRO_JAILER_BIN"),
+                                    ) {
+                                        supervisor = supervisor.with_binaries(fc, jl);
+                                    }
+                                    if let Ok(kernel) =
+                                        std::env::var("TENZRO_MACHINE_KERNEL")
+                                    {
+                                        supervisor = supervisor
+                                            .with_kernel(std::path::PathBuf::from(kernel));
+                                    }
+                                    self.machine_supervisor = Some(Arc::new(supervisor));
+                                    info!("Machine supervisor wired (firecracker feature)");
+                                }
+                                Err(e) => tracing::warn!(
+                                    "Machine sealing key derivation failed ({e}); \
+                                     machine hosting disabled on this node"
+                                ),
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            "Machine supervisor needs the validator keypair ({e}); \
+                             machine hosting disabled on this node"
+                        ),
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -5374,6 +5560,7 @@ impl TenzroNode {
                 self.iroh_a2a_dispatcher = None;
                 self.iroh_mcp_handler = None;
                 self.iroh_infer_dispatcher = None;
+                self.iroh_http_handler = None;
             }
         }
 
@@ -5608,6 +5795,40 @@ impl TenzroNode {
                     "DvP saga expiry sweep spawned (validator role, leader-gated)"
                 );
             }
+        }
+
+        // App-hosting placement reconcile. Each node reconciles the leases it
+        // created: sweep expired leases, and evict any serving node whose
+        // provider announcement has aged out of the live candidate set,
+        // re-letting its replica slot over the survivors. No leader gate — a
+        // lease is owned by the node that placed it, and `handle_liveness_loss`
+        // + `sweep_expired` both terminate in an idempotent
+        // `IngressTable::set_placement` write-through, so concurrent reconciles
+        // on different nodes converge. Skipped in in-memory mode (no storage).
+        if self.storage.is_some() {
+            let scheduler = self.placement_scheduler.clone();
+            let providers = self.network_providers.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                    PLACEMENT_RECONCILE_INTERVAL_SECS,
+                ));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // Skip the immediate first tick — nothing is placed at boot.
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    let candidates = distill_hosting_candidates(&providers);
+                    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                    let evicted = scheduler.reconcile(&candidates, now_ms);
+                    if evicted > 0 {
+                        info!(evicted, "placement reconcile evicted stale serving node(s)");
+                    }
+                }
+            });
+            info!(
+                interval_secs = PLACEMENT_RECONCILE_INTERVAL_SECS,
+                "App-hosting placement reconcile spawned"
+            );
         }
 
         // Phase B agent memory tier: Lance vector + Tantivy BM25 + DA archive,
@@ -8127,10 +8348,16 @@ impl TenzroNode {
 
         // Static-site registry — durable site manifests under `CF_METADATA /
         // site:*`, hydrated on boot.
+        let sites_config = crate::sites::SitesConfig::default()
+            .with_app_domain(self.config.hosting.app_domain.clone())
+            .with_edge_addrs(
+                self.config.hosting.edge_ipv4.clone(),
+                self.config.hosting.edge_ipv6.clone(),
+            );
         self.site_registry = if let Some(storage) = &self.storage {
             match crate::sites::SiteRegistry::with_storage(
                 storage.clone() as Arc<dyn KvStore>,
-                crate::sites::SitesConfig::default(),
+                sites_config,
             ) {
                 Ok(registry) => Arc::new(registry),
                 Err(e) => {
@@ -8141,6 +8368,94 @@ impl TenzroNode {
         } else {
             Arc::new(crate::sites::SiteRegistry::new())
         };
+
+        // Dynamic-ingress placement table — durable `site_id → serving-node`
+        // records under `CF_METADATA / site_placement:*`, hydrated on boot.
+        self.ingress_table = if let Some(storage) = &self.storage {
+            match crate::ingress::IngressTable::with_storage(storage.clone() as Arc<dyn KvStore>) {
+                Ok(table) => Arc::new(table),
+                Err(e) => {
+                    warn!("Ingress table hydration failed ({e}); starting in-memory");
+                    Arc::new(crate::ingress::IngressTable::new())
+                }
+            }
+        } else {
+            Arc::new(crate::ingress::IngressTable::new())
+        };
+
+        // Placement scheduler — durable app-hosting leases under
+        // `CF_METADATA / hosting_lease:*`, hydrated on boot. Shares the
+        // storage-backed ingress table so a placement decision writes the routing
+        // table the edge reads.
+        self.placement_scheduler = if let Some(storage) = &self.storage {
+            match crate::placement::PlacementScheduler::with_storage(
+                self.ingress_table.clone(),
+                storage.clone() as Arc<dyn KvStore>,
+            ) {
+                Ok(scheduler) => Arc::new(scheduler),
+                Err(e) => {
+                    warn!("Placement scheduler hydration failed ({e}); starting in-memory");
+                    Arc::new(crate::placement::PlacementScheduler::new(
+                        self.ingress_table.clone(),
+                    ))
+                }
+            }
+        } else {
+            Arc::new(crate::placement::PlacementScheduler::new(
+                self.ingress_table.clone(),
+            ))
+        };
+
+        // Function-runtime registry — durable `wasi:http` component
+        // deployments under `CF_METADATA / function:*`, hydrated on boot.
+        // The compiled-component cache is not persisted; components are
+        // recompiled on first invocation from the content-addressed blob.
+        self.function_registry = if let Some(storage) = &self.storage {
+            match crate::functions::FunctionRegistry::with_storage(storage.clone() as Arc<dyn KvStore>)
+            {
+                Ok(registry) => Arc::new(registry),
+                Err(e) => {
+                    warn!("Function registry hydration failed ({e}); starting in-memory");
+                    Arc::new(crate::functions::FunctionRegistry::new())
+                }
+            }
+        } else {
+            Arc::new(crate::functions::FunctionRegistry::new())
+        };
+
+        // Machine-runtime registry — durable microVM deployments under
+        // `CF_METADATA / machine:*`, hydrated on boot. The live Firecracker
+        // supervisor (feature-gated) is set later once the iroh resolver and
+        // sealing key are available; the registry itself is metadata-only.
+        self.machine_registry = if let Some(storage) = &self.storage {
+            match crate::machines::MachineRegistry::with_storage(storage.clone() as Arc<dyn KvStore>)
+            {
+                Ok(registry) => Arc::new(registry),
+                Err(e) => {
+                    warn!("Machine registry hydration failed ({e}); starting in-memory");
+                    Arc::new(crate::machines::MachineRegistry::new())
+                }
+            }
+        } else {
+            Arc::new(crate::machines::MachineRegistry::new())
+        };
+
+        // Epoch ticker for the function wasm engine. `HttpComponent::serve`
+        // sets an epoch deadline per request; the deadline only trips if the
+        // engine's global epoch is advanced. One ticker at 1ms granularity
+        // drives every function invocation on this node.
+        #[cfg(feature = "wasi-skills")]
+        {
+            let cache = self.function_components.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    cache.engine().tick_epoch();
+                }
+            });
+        }
 
         // Register Visa TAP server (RFC 9421 HTTP Message Signatures).
         //
@@ -8998,6 +9313,7 @@ impl TenzroNode {
                 ttl_secs: 120,
                 cluster_profile,
                 capacity,
+                hosting_price_per_hour: self.config.hosting.price_per_hour,
             };
             event_loop = event_loop.with_provider_announcement(ctx);
         }
@@ -10287,6 +10603,91 @@ impl TenzroNode {
     /// is up).
     pub fn site_registry(&self) -> &Arc<crate::sites::SiteRegistry> {
         &self.site_registry
+    }
+
+    /// Returns the dynamic-ingress placement table (always present; durable
+    /// once storage is up).
+    pub fn ingress_table(&self) -> &Arc<crate::ingress::IngressTable> {
+        &self.ingress_table
+    }
+
+    /// Returns the app-hosting placement scheduler (always present; durable once
+    /// storage is up).
+    pub fn placement_scheduler(&self) -> &Arc<crate::placement::PlacementScheduler> {
+        &self.placement_scheduler
+    }
+
+    /// Distill the current provider-announcement snapshot into placement
+    /// candidates. Each fresh announcement that carries a bound iroh endpoint and
+    /// advertises at least one hosting runtime class becomes a [`NodeCandidate`];
+    /// placement's `select` applies the per-request filters (class, TEE, headroom,
+    /// price ceiling, reachability) on top. A node advertising no hosting runtime
+    /// is dropped here so it never enters ranking.
+    pub fn hosting_candidates(&self) -> Vec<crate::placement::NodeCandidate> {
+        distill_hosting_candidates(&self.network_providers)
+    }
+
+    /// Best-effort auto-placement for a deployment. Selects serving nodes from
+    /// the current announcement snapshot and writes the ingress routing table.
+    /// A deployment with no capable remote node is left with an empty placement
+    /// — the edge then serves it locally on whichever node receives the request,
+    /// so deploy never fails for want of a remote host. Returns the chosen
+    /// serving-node ids (empty when placed locally).
+    pub fn auto_place(&self, req: &crate::placement::PlacementRequest) -> Vec<String> {
+        let candidates = self.hosting_candidates();
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        match self.placement_scheduler.select_and_lease(
+            req,
+            &candidates,
+            now_ms,
+            crate::placement::DEFAULT_LEASE_MS,
+        ) {
+            Ok(nodes) => {
+                tracing::info!(
+                    app_id = %req.app_id,
+                    class = req.class.as_str(),
+                    replicas = nodes.len(),
+                    "auto-placed deployment onto {} serving node(s)",
+                    nodes.len()
+                );
+                nodes
+            }
+            Err(e) => {
+                tracing::debug!(
+                    app_id = %req.app_id,
+                    class = req.class.as_str(),
+                    "no remote placement ({e}); deployment serves locally"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Returns the function-deployment registry (always present; durable once
+    /// storage is up).
+    pub fn function_registry(&self) -> &Arc<crate::functions::FunctionRegistry> {
+        &self.function_registry
+    }
+
+    /// Returns the compiled `wasi:http` component cache used to serve function
+    /// deployments. Present only when built with the `wasi-skills` feature.
+    #[cfg(feature = "wasi-skills")]
+    pub fn function_components(&self) -> &Arc<crate::functions::FunctionComponentCache> {
+        &self.function_components
+    }
+
+    /// Returns the machine-deployment registry (always present; durable once
+    /// storage is up).
+    pub fn machine_registry(&self) -> &Arc<crate::machines::MachineRegistry> {
+        &self.machine_registry
+    }
+
+    /// Returns the Firecracker microVM supervisor if this node can run machine
+    /// apps. Present only when built with the `firecracker` feature and after
+    /// the boot path has wired it. `None` means machine requests answer 501.
+    #[cfg(feature = "firecracker")]
+    pub fn machine_supervisor(&self) -> Option<&Arc<crate::machines::MachineSupervisor>> {
+        self.machine_supervisor.as_ref()
     }
 
     /// Returns the model registry if initialized
