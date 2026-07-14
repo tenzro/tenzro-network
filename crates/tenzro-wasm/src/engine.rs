@@ -55,9 +55,9 @@ impl WasmEngine {
         config.wasm_simd(true);
         config.wasm_bulk_memory(true);
         config.wasm_multi_value(true);
-        // `wasm_reference_types` lives behind the `gc` feature in
-        // wasmtime 27; keeping it off-by-default is the wasmtime
-        // default, so the explicit toggle is unnecessary here.
+        // `wasm_reference_types` lives behind the `gc` feature;
+        // keeping it off-by-default is the wasmtime default, so the
+        // explicit toggle is unnecessary here.
 
         let engine = Engine::new(&config).map_err(|e| {
             WasmError::Wasmtime(format!("constructing wasmtime engine: {e:#}"))

@@ -23,6 +23,8 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use wasmtime::Store;
+use wasmtime::component::{Component, Linker, TypedFunc};
 
 use crate::capabilities::SkillCapabilities;
 use crate::engine::WasmEngine;
@@ -30,6 +32,10 @@ use crate::error::{WasmError, WasmResult};
 use crate::host::SharedHost;
 use crate::manifest::ComponentManifest;
 use crate::metrics::{ExecutionReceipt, FuelReport, InvocationOutcome};
+use crate::wasi_state::WasiState;
+
+/// WIT interface path of the Tenzro skill export.
+const SKILL_INTERFACE: &str = "tenzro:skill/skill@1.0.0";
 
 /// A component that has been validated and admitted to the runtime.
 #[derive(Clone, Debug)]
@@ -253,7 +259,7 @@ impl SkillRuntime {
         &self,
         component: Arc<LoadedComponent>,
         function: &str,
-        _input: Bytes,
+        input: Bytes,
         caller_did: Option<String>,
     ) -> WasmResult<(InvocationOutcome, Bytes, u64)> {
         // Per-invocation method-level capability check.
@@ -278,13 +284,94 @@ impl SkillRuntime {
             }
         }
 
-        Err(WasmError::HostContractViolation(format!(
-            "component-model instantiation not available for {function} on {} ({} bytes, hash {})",
-            component.id,
-            component.bytes.len(),
-            component.manifest.content_hash_hex
-        )))
+        // Compile + link the component. WASI 0.2 base interfaces are
+        // linked; the store's context is built from the manifest's
+        // capabilities so the guest starts with no ambient authority.
+        let engine = self.engine.inner();
+        let wasm_component = Component::new(engine, component.bytes.as_ref())
+            .map_err(|e| WasmError::InvalidComponent(format!("recompile failed: {e:#}")))?;
+
+        let mut linker: Linker<WasiState> = Linker::new(engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+            .map_err(|e| WasmError::Wasmtime(format!("adding wasi to linker: {e:#}")))?;
+
+        let state = WasiState::from_capabilities(caps);
+        let mut store = Store::new(engine, state);
+        store
+            .set_fuel(component.fuel_limit)
+            .map_err(|e| WasmError::Wasmtime(format!("setting fuel: {e:#}")))?;
+        let epoch_ticks = component.deadline.as_millis().max(1) as u64;
+        store.set_epoch_deadline(epoch_ticks);
+
+        let instance = linker
+            .instantiate_async(&mut store, &wasm_component)
+            .await
+            .map_err(|e| classify_wasmtime_error(e))?;
+
+        // Resolve the exported `tenzro:skill/skill@1.0.0#invoke` function.
+        // `function` selects the export name inside that interface;
+        // callers pass "invoke" for the request/response entry point.
+        let iface_index = instance
+            .get_export_index(&mut store, None, SKILL_INTERFACE)
+            .ok_or_else(|| {
+                WasmError::HostContractViolation(format!(
+                    "component {} does not export interface {SKILL_INTERFACE}",
+                    component.id
+                ))
+            })?;
+        let func_index = instance
+            .get_export_index(&mut store, Some(&iface_index), function)
+            .ok_or_else(|| {
+                WasmError::HostContractViolation(format!(
+                    "interface {SKILL_INTERFACE} has no export {function}",
+                ))
+            })?;
+        let invoke: TypedFunc<(String,), (Result<String, String>,)> = instance
+            .get_typed_func(&mut store, &func_index)
+            .map_err(|e| {
+                WasmError::HostContractViolation(format!(
+                    "export {function} has the wrong signature (want (string) -> result<string,string>): {e:#}"
+                ))
+            })?;
+
+        // The skill contract is JSON-in / JSON-out. We hand the raw
+        // input bytes as a UTF-8 string; malformed UTF-8 is a caller
+        // error, not a guest trap.
+        let request = String::from_utf8(input.to_vec())
+            .map_err(|e| WasmError::Serialization(format!("skill input is not UTF-8: {e}")))?;
+
+        let call_result = invoke.call_async(&mut store, (request,)).await;
+        let consumed = component
+            .fuel_limit
+            .saturating_sub(store.get_fuel().unwrap_or(0));
+
+        // `call_async` runs the component's post-return automatically,
+        // so no manual cleanup step is needed here.
+        match call_result {
+            Ok((Ok(json),)) => {
+                Ok((InvocationOutcome::Success, Bytes::from(json.into_bytes()), consumed))
+            }
+            Ok((Err(guest_err),)) => Err(WasmError::HostContractViolation(format!(
+                "skill returned error: {guest_err}"
+            ))),
+            Err(e) => Err(classify_wasmtime_error(e)),
+        }
     }
+}
+
+/// Maps a wasmtime instantiation / call error onto the fuel / deadline /
+/// trap variants of [`WasmError`].
+fn classify_wasmtime_error(err: anyhow::Error) -> WasmError {
+    if let Some(trap) = err.downcast_ref::<wasmtime::Trap>() {
+        return match trap {
+            wasmtime::Trap::OutOfFuel => WasmError::FuelExhausted { consumed: 0 },
+            wasmtime::Trap::Interrupt => WasmError::DeadlineExceeded {
+                elapsed: Duration::ZERO,
+            },
+            other => WasmError::Trap(format!("{other:?}")),
+        };
+    }
+    WasmError::Wasmtime(format!("{err:#}"))
 }
 
 impl std::fmt::Debug for SkillRuntime {

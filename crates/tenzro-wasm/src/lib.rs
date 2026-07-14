@@ -21,14 +21,20 @@ pub mod capabilities;
 pub mod engine;
 pub mod error;
 pub mod host;
+pub mod http;
 pub mod manifest;
 pub mod metrics;
 pub mod runtime;
+pub mod wasi_state;
 
 pub use capabilities::{NetworkCapability, SkillCapabilities, StorageCapability};
 pub use engine::WasmEngine;
 pub use error::{WasmError, WasmResult};
 pub use host::{HostInterface, HostInvocation, InvocationResult};
+pub use http::{
+    incoming_body_from_bytes, FunctionResponse, HttpComponent, IncomingBody, OutgoingBody, Scheme,
+};
 pub use manifest::{ComponentManifest, ComponentRuntime};
 pub use metrics::{ExecutionReceipt, FuelReport};
 pub use runtime::{LoadedComponent, SkillRuntime};
+pub use wasi_state::WasiState;

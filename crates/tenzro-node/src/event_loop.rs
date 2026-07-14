@@ -74,6 +74,9 @@ pub struct ProviderAnnouncementContext {
     /// provider heartbeat. Captured from the node's `ProviderCapacity` at the
     /// point the announcement context is built.
     pub capacity: tenzro_types::AdvertisedCapacity,
+    /// Per-hour TNZO price this operator quotes to host an app deployment — the
+    /// operator's hosting bid, from `HostingConfig::price_per_hour`. `0` = free.
+    pub hosting_price_per_hour: u128,
 }
 
 /// Maximum tolerated forward clock skew for announcement timestamps (ms).
@@ -102,6 +105,23 @@ fn check_announcement_freshness(timestamp_ms: i64, ttl_secs: u64) -> std::result
         ));
     }
     Ok(())
+}
+
+/// The app-hosting runtime classes this build can serve, advertised in the
+/// provider announcement so placement can filter deployments to capable nodes.
+/// `static` is always served (content-addressed assets need no special host).
+/// `function` (a `wasi:http` component sandbox) needs the `wasi-skills` feature.
+/// `machine` (an unmodified server in a Firecracker microVM) needs the
+/// `firecracker` feature and, at runtime, a Linux host with KVM — placement
+/// still filters on the runtime facts before assigning, so advertising the
+/// class only claims the binary can serve it.
+fn hosting_runtime_classes() -> Vec<String> {
+    let mut classes = vec!["static".to_string()];
+    #[cfg(feature = "wasi-skills")]
+    classes.push("function".to_string());
+    #[cfg(feature = "firecracker")]
+    classes.push("machine".to_string());
+    classes
 }
 
 /// Map an announced reachability tier string onto the storage placement tier.
@@ -1907,7 +1927,11 @@ impl EventLoop {
                             status: "active".to_string(),
                             timestamp: chrono::Utc::now().timestamp_millis(),
                             ttl_secs: ctx.ttl_secs,
-                            runtime_support: tenzro_types::RuntimeSupport::default(),
+                            runtime_support: tenzro_types::RuntimeSupport {
+                                hosting_runtimes: hosting_runtime_classes(),
+                                hosting_price_per_hour: ctx.hosting_price_per_hour,
+                                ..Default::default()
+                            },
                             network_profile: tenzro_types::NodeNetworkProfile {
                                 reachability: network.reachability().tier().as_str().to_string(),
                                 ..Default::default()

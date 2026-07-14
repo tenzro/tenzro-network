@@ -282,6 +282,9 @@ tenzro model list
 # Chat (local llama.cpp + RPC fallback)
 tenzro chat
 
+# Deploy a static site or single-page app (see docs/HOSTING.md)
+tenzro site deploy --name my-app --owner-did did:tenzro:... --dir ./dist --did-envelope <hex>
+
 # Interactive mode launches automatically when invoked without a subcommand on a TTY
 tenzro
 ```

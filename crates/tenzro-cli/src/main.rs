@@ -34,7 +34,10 @@ use commands::{
     KeyCommand,
     WorkflowCommand, Eip7702Command, Permit2Command, SecureMintCommand, StableAssetCommand,
     HyperlaneCommand, AxelarCommand, BabylonCommand, CaipCommand,
-    DiscoverCommand, ClusterCommand, database::DatabaseCommand,
+    DiscoverCommand, ClusterCommand, database::DatabaseCommand, site::SiteCommand,
+    function::FunctionCommand,
+    machine::MachineCommand,
+    lease::LeaseCommand,
     urwa::UrwaCommand, ivms101::Ivms101Command, attested_clock::AttestedClockCommand,
     bridge_fee::BridgeFeeCommand, wormhole_ntt::WormholeNttCommand,
 };
@@ -205,6 +208,22 @@ enum Command {
     /// Application management (register, users, funding, sponsoring, stats)
     #[command(subcommand)]
     App(AppCommand),
+
+    /// Static-site hosting (deploy, get, list, remove, aliases)
+    #[command(subcommand)]
+    Site(SiteCommand),
+
+    /// Function hosting (deploy, get, list, remove) — wasi:http components
+    #[command(subcommand)]
+    Function(FunctionCommand),
+
+    /// Machine hosting (deploy, get, list, remove, status) — Firecracker microVMs
+    #[command(subcommand)]
+    Machine(MachineCommand),
+
+    /// Hosting leases (list, get) — on-ledger placement records with per-hour price
+    #[command(subcommand)]
+    Lease(LeaseCommand),
 
     /// AP2 (Agent Payments Protocol): mandate verify, validate, info
     #[command(subcommand)]
@@ -628,6 +647,10 @@ async fn main() -> Result<()> {
         Command::Custody(cmd) => cmd.execute().await?,
         Command::Passkey(cmd) => cmd.execute(None).await?,
         Command::App(cmd) => cmd.execute().await?,
+        Command::Site(cmd) => cmd.execute().await?,
+        Command::Function(cmd) => cmd.execute().await?,
+        Command::Machine(cmd) => cmd.execute().await?,
+        Command::Lease(cmd) => cmd.execute().await?,
         Command::Ap2(cmd) => cmd.execute().await?,
         Command::Erc8004(cmd) => cmd.execute().await?,
         Command::Wormhole(cmd) => cmd.execute().await?,

@@ -12,7 +12,7 @@ use tenzro_node::error::{self, Result};
 use tenzro_node::node::TenzroNode;
 use tenzro_node::rpc::RpcServer;
 use tenzro_node::{
-    a2a, event_loop, genesis, infer, lifecycle_state_bridge, mcp, spending_policy_bridge,
+    a2a, event_loop, genesis, infer, ingress, lifecycle_state_bridge, mcp, spending_policy_bridge,
     spt_ceiling_bridge, web,
 };
 use tenzro_storage::KvStore;
@@ -852,6 +852,19 @@ async fn main() -> Result<()> {
         info!("Inference dispatcher installed on iroh transport (ALPN tenzro/infer)");
     }
 
+    // Install the iroh-side ingress handler. The iroh router registered the
+    // `tenzro/http` ALPN at bind time backed by a deferred handler (see
+    // `init_ai_infrastructure`); now that we have `Arc<TenzroNode>` we swap the
+    // real one in. The edge dials a serving node's `EndpointId` on this ALPN,
+    // writes a raw HTTP/1.1 request, and this handler renders the placed site
+    // and writes the raw HTTP/1.1 response back.
+    if let Some(deferred) = node_arc.iroh_http_handler.as_ref() {
+        let handler: Arc<dyn tenzro_iroh::HttpForwardHandler> =
+            Arc::new(ingress::IrohIngressHandler::new(node_arc.clone()));
+        deferred.set(handler);
+        info!("Ingress handler installed on iroh transport (ALPN tenzro/http)");
+    }
+
     let a2a_shutdown_rx = shutdown_tx.subscribe();
     let a2a_addr_https = a2a_addr.clone();
     let mut a2a_handle = tokio::spawn(async move {
@@ -1318,7 +1331,16 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
     // the persistent data_dir when models_dir is unset.
     if cli.config.is_none() {
         if config.roles.is_validator() && config.consensus.is_none() {
-            config.consensus = NodeConfig::default_validator().consensus;
+            let vdef = NodeConfig::default_validator();
+            config.consensus = vdef.consensus;
+            // Validators are the relay-serving class — they run the relay-v2
+            // server + AutoNAT-v2 server so NAT'd edge nodes can register a
+            // reservation and become reachable via
+            // `/p2p/<validator>/p2p-circuit/p2p/<edge>`. Without this, edge
+            // nodes hang at "Peers 0" because `--roles validator` alone
+            // previously only copied `consensus` from `default_validator`
+            // and left `enable_relay=false` from `NetworkConfig::default()`.
+            config.network.enable_relay = vdef.network.enable_relay;
         }
         if config.roles.serves_tee() {
             config.tee_enabled = NodeConfig::default_tee_provider().tee_enabled;

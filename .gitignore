@@ -118,6 +118,14 @@ deploy/kubernetes/secrets/
 deploy/kubernetes/*-secret.yaml
 deploy/kubernetes/*-credentials.yaml
 
+# Operator-specific deployment artifacts (belong in the operator's own tree)
+cloudbuild-*.yaml
+config/genesis-prod.toml
+deploy/rpc-node/
+scripts/deploy-testnet.sh
+scripts/rollout-validators.sh
+scripts/stop-the-world-cutover.sh
+
 # Coverage
 *.profraw
 *.profdata

@@ -58,7 +58,7 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
                                    | JSON-RPC + HTTP
                     +--------------v----------------------+
                     |           tenzro-node               |
-                    |  RPC (490+) + MCP (330+) + A2A (42) |
+                    |  RPC (700+) + MCP (500+) + A2A (35) |
                     +--------------+----------------------+
                                    |
         +----------+---------------+---------------+----------+
@@ -77,7 +77,7 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
    +----------+--------+---------------+-----------+------------+
 ```
 
-## Workspace — 27 Crates
+## Workspace — 31 Crates
 
 | Crate | Description |
 |-------|-------------|
@@ -89,6 +89,8 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
 | **tenzro-iroh** | iroh data plane (content-addressed transport): `IrohBackedResolver` over QUIC + iroh-blobs, DA backend, gradient store, sealed-shard store, A2A-over-iroh on the `tenzro/a2a` ALPN. Resolves `tenzro://{blob,gradient,shard,manifest,memory}/...`. TDIP-anchored Pkarr discovery (EndpointId byte-identical to TDIP key) |
 | **tenzro-storage** | RocksDB with column families, Merkle Patricia Trie, snapshots, fsync durability |
 | **tenzro-wallet** | FROST-Ed25519 (RFC 9591) 2-of-3 threshold wallets + ML-DSA-65 hybrid PQ leg, Argon2id keystore, transaction builder, nonce management, key zeroization |
+| **tenzro-keystore-unlock** | Platform-agnostic `KeystoreUnlocker` trait for reproducing the wallet keystore password across restarts (`StaticUnlocker`, `EnvUnlocker`); no platform dependencies, so it sits in the public API of wallet/node without pulling in OS crates |
+| **tenzro-device-key** | Hardware-backed non-extractable P-256 device keys (macOS/iOS Secure Enclave, Touch ID / Face ID gated): biometric prehash signing and stable secret wrapping/unwrapping used to derive a persistent keystore password |
 | **tenzro-auth** | Authentication engine: AAP (Agent Authentication Protocol), DPoP, RAR (Rich Authorization Requests) |
 | **tenzro-consensus** | HotStuff-2 BFT: three-phase PREPARE → COMMIT → DECIDE, stake-weighted quorum with a 10% per-validator cap (consensus voting reserved for staked validators; service roles earn proof-of-service rewards), TEE-weighted leader selection (1.5×), equivocation detection + slashing |
 | **tenzro-vm** | Multi-VM: EVM (revm) + SVM (solana_rbpf) + DAML, Block-STM parallel execution, EIP-1559, ERC-4337 AA, ERC-7579 modular validators, **EIP-7702 Type-4 delegation registry**, **Permit2 SignatureTransfer + witness** (ERC-7683-ready gasless flows), **Secure-Mint precompile** (1:1 reserve-attestation invariant for tokenized assets), standard EVM + EIP-2537 BLS12-381 + Tenzro precompiles (TEE_VERIFY, ZK_VERIFY, VRF_VERIFY at 0x1007) |
@@ -108,8 +110,8 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
 | **tenzro-events** | Event sourcing and subscription system with replay, webhooks, websockets |
 | **tenzro-workflow** | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
 | **tenzro-wasm** | WASI 0.2 component host for sandboxed agent skills and MCP tools: language-agnostic, capability-based, deterministic fuel metering, content-addressed component identity |
-| **tenzro-node** | Full node binary: JSON-RPC (490+ methods), MCP (330+ tools), A2A (42 skills), Web API |
-| **tenzro-cli** | CLI tool: 63 command modules with interactive mode and full RPC coverage |
+| **tenzro-node** | Full node binary: JSON-RPC (700+ methods), MCP (500+ tools), A2A (35 skills), Web API |
+| **tenzro-cli** | CLI tool: 101 command modules with interactive mode and full RPC coverage |
 
 ## Quick Start
 
@@ -202,10 +204,10 @@ The node exposes 4 protocol servers, plus 6 ecosystem MCP servers:
 
 | Server | Port | Protocol | Endpoints |
 |--------|------|----------|-----------|
-| **JSON-RPC** | 8545 | HTTP | 490+ methods across 26+ namespaces (EVM-compatible + Tenzro extensions, incl. multi-modal AI: forecast, vision, text-embed, segmentation, detection, audio, video; CAIP discovery; EIP-7702 delegation; Permit2; Secure-Mint; Capital Intent; Workflow) |
+| **JSON-RPC** | 8545 | HTTP | 700+ methods across 30+ namespaces (EVM-compatible + Tenzro extensions, incl. multi-modal AI: forecast, vision, text-embed, segmentation, detection, audio, video; MoE sharded serving; LAN clustering; managed databases; app hosting: sites, functions, machines, leases; CAIP discovery; EIP-7702 delegation; Permit2; Secure-Mint; Capital Intent; Workflow) |
 | **Web API** | 8080 | REST | Verification, status, faucet, health |
-| **MCP** | 3001 | Streamable HTTP | 416 tools + OAuth 2.1 |
-| **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 42 skills, task streaming |
+| **MCP** | 3001 | Streamable HTTP | 500+ tools + OAuth 2.1 |
+| **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 35 skills, task streaming |
 
 ### Ecosystem MCP Servers
 
@@ -250,6 +252,18 @@ The protocol layer treats AI compute as a coordinated resource, not a centralize
 - **Decentralized training — Tenzro Train (Decoupled DiLoCo).** Rust protocol layer (`tenzro-training`) owns the syncer state machine, five aggregation rules (Mean / LoraAlternating / TrimmedMean / CoordinateMedian / Krum), Nesterov outer optimizer, fragment commitment, training receipts, and on-chain run-root commitments. Python reference trainer wraps PyTorch FSDP2 + Hivemind + safetensors for per-modality inner loops (transformers, native PyTorch, gluonts, timm). k-of-N witness committee with idempotent finalization and no-endorsement certificates handles multi-syncer coordination across regions. Communication efficiency: blockwise symmetric gradient quantization (Int8 4×, Int4 ~8× smaller than f32, byte-identical Rust/Python codecs), streaming synchronization (one parameter shard syncs per round, `active_shard = round % num_shards`), delayed application (round r's outer update applies during round r+1 so communication overlaps computation), adaptive outer learning rate scaled by pairwise cosine gradient agreement, and pipeline-parallel trainer groups for models too large for one trainer. Inner optimizer is selectable per task (`inner_optimizer`: `muon` / `adamw` / `sgd`) — Muon orthogonalizes 2D weight updates with Newton-Schulz iteration. Confidential tier uses HPKE RFC 9180 base-mode wrapping of per-shard data keys to enclave-resident trainers (data unsealed only inside the trainer's TEE). Three trust tiers: Open (Mean and LoraAlternating), Verified, Confidential.
 - **Cortex.** Recurrent-depth-Transformer reasoning workers exposed as a separate compute lane — HTTP sidecar architecture, signed receipts, attestation suite, gossip-based worker discovery, depth-priced billing.
 - **Confidential inference.** Model providers can wrap inference inside an Intel TDX / AMD SEV-SNP / AWS Nitro / NVIDIA GPU CC enclave; the result hash is signed with an enclave-bound key and the attestation chain verifies through `TEE_VERIFY` on-chain.
+
+### Decentralized application hosting
+
+Publish a static site, a server-side function, or an unmodified long-lived server to Tenzro nodes and serve it over the public internet — with no manual TLS, DNS, Caddy, or port setup. Three runtime classes share one deploy → discover → place → serve path:
+
+- **Static sites and single-page apps.** A site is a signed route manifest mapping request paths to content-addressed blobs in the node's iroh store (`tenzro://blob/<hash>`). Content never touches the filesystem; a request path only indexes the route map. SPA fallback serves the index at 200 for non-asset paths (asset misses 404 directly so a missing bundle chunk is never masked). Responses carry an ETag (the blob hash) with `If-None-Match` 304 support. RPC `tenzro_siteDeploy` / CLI `tenzro site deploy`.
+- **Functions.** A `wasi:http` component (WASI 0.2, hosted on wasmtime under the `wasi-skills` feature) that answers requests directly in a sandbox with capability-gated authority, deterministic fuel metering, and a per-request wall-clock deadline. RPC `tenzro_functionDeploy` / CLI `tenzro function deploy`.
+- **Machines.** A resident process in a Firecracker microVM (under the `firecracker` feature, on operator nodes with KVM + nested-virt) for an unmodified Node / Python / Rust server. RPC `tenzro_machineDeploy` / CLI `tenzro machine deploy`.
+- **Placement and economics.** A provider's advertised per-hour price is its bid; deploy discovers capable nodes, hard-filters by runtime class / CPU / RAM / disk / TEE / price ceiling, ranks region-first then cheapest, and leases the top-N distinct nodes — recorded as on-ledger `LeaseRecord`s readable via `tenzro_listLeases` / `tenzro_getLeasesForApp` (CLI `tenzro lease list` / `tenzro lease get`). Placement is best-effort: with no capable remote node, the app serves locally so deploy never fails. A 30s reconcile pass sweeps expired leases (provider-announcement TTL staleness is the liveness signal) and re-places replicas of silent nodes onto survivors, holding replica count stable. Deploy flags: `--replicas`, `--region-hint`, `--max-price-per-hour`.
+- **Operator-configured edge.** Each operator configures the domain its edge serves apps under — there is no network-wide canonical host. A hostname alias rewrites an incoming request to the app's serving path; the edge forwards over the `tenzro/http` transport (one QUIC bi-stream per HTTP request) to a placed node and streams the response back. TLS at the edge is PQ-hybrid and provisioned automatically. Naming, placement, and mutations all require a signed envelope proving control of the owner DID.
+
+See [`docs/HOSTING.md`](docs/HOSTING.md) for the full RPC and CLI surface.
 
 ### Multi-modal inference
 
@@ -349,11 +363,11 @@ The workflow runtime is its own state machine. It runs alongside (not inside) th
 
 | Component | Repository | Description |
 |-----------|------------|-------------|
-| **MCP Server** (Python) | [tenzro/tenzro-mcp-server](https://github.com/tenzro/tenzro-mcp-server) | 152 tools, FastMCP 3.2 |
-| **A2A Server** (Python) | [tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) | 42 skills, FastAPI |
-| **TenzroClaw** (Python) | [tenzro/TenzroClaw](https://github.com/tenzro/TenzroClaw) | 303 commands, OpenClaw skill |
-| **Rust SDK** | [tenzro/tenzro-sdk-rust](https://github.com/tenzro/tenzro-sdk-rust) | 41 modules |
-| **TypeScript SDK** | [tenzro/tenzro-sdk-typescript](https://github.com/tenzro/tenzro-sdk-typescript) | 36 modules |
+| **MCP Server** (Python) | [tenzro/tenzro-mcp-server](https://github.com/tenzro/tenzro-mcp-server) | 300+ tools, FastMCP 3.2 |
+| **A2A Server** (Python) | [tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) | 67 skills, FastAPI |
+| **TenzroClaw** (Python) | [tenzro/TenzroClaw](https://github.com/tenzro/TenzroClaw) | 599 commands, OpenClaw skill |
+| **Rust SDK** | [tenzro/tenzro-sdk-rust](https://github.com/tenzro/tenzro-sdk-rust) | 76 modules |
+| **TypeScript SDK** | [tenzro/tenzro-sdk-typescript](https://github.com/tenzro/tenzro-sdk-typescript) | 84 modules |
 | **Browser-extension provider** | [`sdk/tenzro-inject`](sdk/tenzro-inject/README.md) | `window.tenzro` for dApps — EIP-1193 / EIP-6963 / Wallet Standard / CAIP-25 |
 | **Homebrew** | [tenzro/homebrew-tap](https://github.com/tenzro/homebrew-tap) | `brew install tenzro` |
 | **Cookbook** | [tenzro/tenzro-cookbook](https://github.com/tenzro/tenzro-cookbook) | 34 runnable examples |
@@ -460,6 +474,9 @@ The canonical deployment is Docker on a host with systemd. See [`deploy/validato
 | [`docs/AI.md`](docs/AI.md) | Tenzro AI — decentralized inference (single-replica + sharded MoE + MTP + multi-modal), Cortex reasoning, confidential inference, and Tenzro Train (Decoupled DiLoCo) training |
 | [`docs/COMPUTE.md`](docs/COMPUTE.md) | Tenzro Compute — rentable compute capacity: per-epoch booking, availability-proof gate, streaming escrow, fixed or network-dynamic pricing, shared coverage with storage |
 | [`docs/STORAGE.md`](docs/STORAGE.md) | Tenzro Storage — decentralized content-addressed storage: byte-epoch billing, proof of retrievability, redundancy, and one stake shared with compute |
+| [`docs/DATABASE.md`](docs/DATABASE.md) | Tenzro Database — managed-database protocol layer: engine catalog (PostgreSQL, Qdrant, Milvus, Valkey, Dgraph, Lance, Tantivy), placement across local / LAN-cluster / network tiers, access policy + confidential seal |
+| [`docs/HOSTING.md`](docs/HOSTING.md) | Tenzro Hosting — static sites, functions, and machines on Tenzro nodes: content-addressed serving, `wasi:http` sandbox, Firecracker microVM, bid/lease placement, operator-configured edge with automatic TLS |
+| [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md) | Intent orchestration — composing models, skills, tools, and agents behind an LLM planner with deterministic guardrails |
 | [`docs/NETWORK.md`](docs/NETWORK.md) | Tenzro Network — decentralized networking: libp2p control plane (gossipsub topics, NAT traversal, validator-only topic authentication, request/response protocols) + iroh QUIC data plane (DA, model weights, gradients, sealed shards, agent memory, A2A + MCP ALPNs) |
 | [`docs/GUIDE.md`](docs/GUIDE.md) | Operator and developer guide: build, run, deploy, troubleshoot |
 | [`docs/did-method-tenzro.md`](docs/did-method-tenzro.md) | `did:tenzro` DID method specification (W3C registration submission) |

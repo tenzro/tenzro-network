@@ -129,6 +129,15 @@ mastercard-agent-pay = ["tenzro-payments/mastercard-agent-pay"]
 # tool components published as `.wasm` files alongside their manifests
 # and execute them in-process under capability checks.
 wasi-skills = ["dep:tenzro-wasm"]
+# Enable the Firecracker microVM supervisor for `machine`-class app hosting —
+# unmodified long-lived server processes run in a hardware-isolated microVM.
+# Only meaningful on a Linux node with `/dev/kvm`, root / CAP_NET_ADMIN, and the
+# `firecracker` + `jailer` binaries on PATH. Firecracker is driven over its
+# unix-socket REST API, so no in-process VMM crate is linked. A node built
+# without this feature still holds machine deployment metadata (deploy / list /
+# get / remove RPCs work) but never runs a microVM — ingress answers a machine
+# request with 501.
+firecracker = []
 
 [dev-dependencies]
 tempfile = "3"

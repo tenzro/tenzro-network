@@ -23,17 +23,25 @@ sha2 = { workspace = true }
 dashmap = { workspace = true }
 
 # Wasmtime + WASI 0.2 component model.
-# Pinned to the workspace-level version so the desktop app, the node, and
-# the agent kit all share a single Wasmtime build.
-wasmtime = { version = "27", default-features = false, features = [
+# Pinned so the desktop app, the node, and the agent kit all share a
+# single Wasmtime build.
+wasmtime = { version = "46", default-features = false, features = [
     "component-model",
     "async",
     "cranelift",
     "parallel-compilation",
     "pooling-allocator",
     "cache",
+    "runtime",
 ] }
-wasmtime-wasi = { version = "27" }
+wasmtime-wasi = { version = "46" }
+# WASI HTTP proxy world — turns a wasi:http component into a request
+# handler. Powers the `function` app runtime class.
+wasmtime-wasi-http = { version = "46" }
+
+# HTTP plumbing shared with the node's edge server (axum 0.7 / hyper 1.x).
+http = "1"
+http-body-util = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

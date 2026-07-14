@@ -258,6 +258,23 @@ pub struct RuntimeSupport {
     /// Whether this node has a verified TEE enclave.
     #[serde(default)]
     pub tee_capable: bool,
+    /// App-hosting runtime classes this node can serve. Values are the runtime
+    /// class identifiers `static`, `function`, and `machine`. Every node can
+    /// serve `static` (content-addressed assets) and, when built with the
+    /// `wasi-skills` feature, `function` (a `wasi:http` component sandbox).
+    /// `machine` (an unmodified server in a Firecracker microVM) requires the
+    /// `firecracker` feature plus a Linux host with KVM and nested
+    /// virtualization, so most nodes omit it. Placement filters app deployments
+    /// to nodes advertising the deployment's class.
+    #[serde(default)]
+    pub hosting_runtimes: Vec<String>,
+    /// Per-hour price in TNZO this node quotes to host an app deployment. This
+    /// is the operator's hosting bid: placement ranks capable nodes cheapest
+    /// first, so a node advertising a lower price is chosen ahead of a costlier
+    /// one. `0` (the default) means the node hosts for free — the most
+    /// competitive bid. Ignored on nodes that advertise no `hosting_runtimes`.
+    #[serde(default)]
+    pub hosting_price_per_hour: u128,
 }
 
 /// TEE trust provenance for a provider or inference session.

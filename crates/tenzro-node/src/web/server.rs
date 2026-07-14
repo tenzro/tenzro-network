@@ -48,6 +48,154 @@ impl PaymentGateSetup {
     }
 }
 
+/// Host-header rewrite. When an incoming request's `Host` maps to a registered
+/// site alias or a verified custom domain, rewrite the URI path to
+/// `/sites/<site_id><path>` so the static-site handlers serve it. A custom
+/// hostname (`myapp.apps.tenzro.xyz`) or an owner's own domain
+/// (`shop.example.com`) thus lands on its site without the caller ever naming
+/// the raw site id. Aliases are checked first; a verified custom domain is the
+/// fallback. Unverified custom domains do not resolve, so an in-flight claim
+/// never serves content.
+///
+/// The rewrite is skipped when the path already targets an API surface
+/// (`/sites/`, `/facilitator/`, `/wallet/`, `/metrics`, `/health`, `/ready`,
+/// `/status`, `/verify/`, `/faucet`, `/chat`, `/v1/`, `/models/`, `/providers`,
+/// `/execution/`) so an aliased hostname cannot shadow the node's own routes —
+/// aliases only ever add site paths, never intercept the control plane.
+async fn host_alias_rewrite(
+    axum::extract::State(state): axum::extract::State<Arc<WebState>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Some(node) = state.node.as_ref() {
+        let host = req
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let path = req.uri().path().to_string();
+        if let Some(host) = host
+            && !is_reserved_path(&path)
+            && let Some(site_id) = node
+                .site_registry()
+                .resolve_alias(&host)
+                .or_else(|| node.site_registry().resolve_domain(&host))
+        {
+            // Placement decides local-vs-remote. When the site is placed on a
+            // remote serving node, forward the request over the `tenzro/http`
+            // iroh ALPN and relay the response verbatim; the local static
+            // handler is bypassed. An empty remote list means "serve locally".
+            if let Some(resolver) = node.iroh_resolver() {
+                let local = resolver.endpoint_id();
+                let remotes = node.ingress_table().remote_serving_nodes(&site_id, &local);
+                if !remotes.is_empty() {
+                    return forward_to_serving_node(node.clone(), &site_id, remotes, req).await;
+                }
+            }
+
+            let suffix = if path == "/" { "" } else { path.as_str() };
+            let query = req
+                .uri()
+                .query()
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default();
+            let rewritten = format!("/sites/{site_id}{suffix}{query}");
+            if let Ok(uri) = rewritten.parse::<axum::http::Uri>() {
+                *req.uri_mut() = uri;
+            }
+        }
+    }
+    next.run(req).await
+}
+
+/// Edge dispatch for a remotely-placed site: assemble the raw HTTP/1.1 request
+/// from the axum request, open a `tenzro/http` bi-stream to the first reachable
+/// serving node (the rest are failover), and relay the raw response back as an
+/// axum response. On total failure across all candidates, return 502.
+async fn forward_to_serving_node(
+    node: Arc<crate::node::TenzroNode>,
+    site_id: &str,
+    remotes: Vec<tenzro_iroh::EndpointId>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let method = req.method().clone();
+    // Rewrite the forwarded path to the site-scoped form the serving node's
+    // ingress handler resolves (`/sites/<id><suffix>`), so the serving node
+    // does not depend on its own alias/domain tables to identify the site.
+    let path = req.uri().path();
+    let suffix = if path == "/" { String::new() } else { path.to_string() };
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let forwarded_target = format!("/sites/{site_id}{suffix}{query}");
+
+    // Build the raw HTTP/1.1 head. Preserve the caller's headers (Host,
+    // payment credential, if-none-match, etc.) so the serving node renders and
+    // meters identically to a local serve.
+    let mut head = format!("{} {} HTTP/1.1\r\n", method.as_str(), forwarded_target);
+    for (name, value) in req.headers() {
+        if let Ok(v) = value.to_str() {
+            head.push_str(&format!("{}: {}\r\n", name.as_str(), v));
+        }
+    }
+    head.push_str("\r\n");
+
+    let body = match axum::body::to_bytes(req.into_body(), crate::ingress::MAX_FORWARD_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "request body too large to forward",
+            )
+                .into_response();
+        }
+    };
+
+    for serving_node in remotes {
+        match crate::ingress::forward_request(&node, serving_node, head.as_bytes(), &body).await {
+            Ok(raw) => match crate::ingress::raw_http_to_response(&raw) {
+                Some(resp) => return resp,
+                None => continue,
+            },
+            Err(e) => {
+                tracing::debug!("ingress: forward to {serving_node} failed: {e}");
+                continue;
+            }
+        }
+    }
+
+    (
+        axum::http::StatusCode::BAD_GATEWAY,
+        "no serving node reachable for site",
+    )
+        .into_response()
+}
+
+/// Paths that belong to the node's own control plane and must never be
+/// shadowed by a site alias.
+fn is_reserved_path(path: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "/sites/",
+        "/facilitator/",
+        "/wallet/",
+        "/verify/",
+        "/execution/",
+        "/models/",
+        "/v1/",
+    ];
+    const RESERVED_EXACT: &[&str] = &[
+        "/metrics",
+        "/health",
+        "/ready",
+        "/status",
+        "/faucet",
+        "/chat",
+        "/providers",
+    ];
+    RESERVED.iter().any(|p| path.starts_with(p))
+        || RESERVED_EXACT.iter().any(|p| path == *p)
+}
+
 pub struct WebServer {
     listen_addr: String,
     state: Arc<WebState>,
@@ -88,7 +236,15 @@ impl WebServer {
             .allow_methods(Any)
             .allow_headers(Any);
 
-        let app = self.build_app().layer(cors)
+        let app = self.build_app()
+            // Host-header alias rewrite: an aliased custom hostname is
+            // rewritten to its `/sites/<site_id>` path before routing. Inner
+            // relative to CORS so preflight is untouched.
+            .layer(axum::middleware::from_fn_with_state(
+                self.state.clone(),
+                host_alias_rewrite,
+            ))
+            .layer(cors)
             // Concurrency limit: max 100 in-flight requests
             .layer(ConcurrencyLimitLayer::new(100))
             // Request body size limit: 2 MB
@@ -261,6 +417,13 @@ impl WebServer {
             // manifests. Per-site x402 gating happens inside the handler
             // (price is per-manifest, not per-route), so both routes stay
             // on the open router.
+            // On-demand-TLS ask endpoint. Caddy calls this once per unseen
+            // hostname during the TLS handshake; it returns 200 only for a
+            // verified custom domain, so a certificate is issued only for a
+            // domain whose owner has proved control. The static `tls-ask`
+            // segment is matched ahead of the `:site_id` param route. It runs
+            // no network I/O — a fast in-memory lookup on the handshake path.
+            .route("/sites/tls-ask", get(crate::web::sites::tls_ask))
             .route("/sites/:site_id", get(crate::web::sites::serve_site_index))
             .route(
                 "/sites/:site_id/*path",
