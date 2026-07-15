@@ -1668,6 +1668,55 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
             },
+            {
+                "id": "hosting",
+                "name": "Decentralized App Hosting",
+                "description": (
+                    "Publish and serve apps under *.apps.tenzro.xyz behind "
+                    "wildcard TLS, host-routed to any serving node in the "
+                    "fleet over the tenzro/http ALPN. Three runtime classes: "
+                    "static sites (any framework's static export — a route "
+                    "map of BLAKE3 blob hashes served by any node), functions "
+                    "(a wasi:http WebAssembly component run under wasmtime "
+                    "with capability, fuel, and per-request deadline limits), "
+                    "and machines (a Firecracker microVM from a "
+                    "content-addressed image, placed only on KVM + "
+                    "nested-virt nodes, optionally TEE-sealed). Site surface: "
+                    "publish / get / list / remove, hostname aliases "
+                    "(set / get / list / remove), serving-node placement "
+                    "(set / get / list / remove), and custom domains "
+                    "(claim → publish DNS TXT proof → verify → activate). "
+                    "Function surface: deploy / get / list / remove. Machine "
+                    "surface: deploy / get / list / remove / status, plus "
+                    "machine_sealing_key to fetch the node's X25519 key for "
+                    "wrapping env-var ciphertext (alg "
+                    "x25519-envelope-aes-256-gcm) before deploy. Placement "
+                    "leases (list_leases, get_leases_for_app) surface the "
+                    "bid/lease bindings and tenzro/sla heartbeat failover. "
+                    "Requests can be x402-gated per request. All mutations "
+                    "require a signed did_envelope whose did equals owner_did."
+                ),
+                "tags": [
+                    "hosting", "apps", "static-site", "function",
+                    "wasi-http", "wasm", "microvm", "firecracker",
+                    "iroh", "tenzro-http", "custom-domain", "x402",
+                    "placement", "lease", "tee",
+                ],
+                "examples": [
+                    "Publish a static site 'my-app' with these routes for owner did:tenzro:human:…",
+                    "Map my-app.apps.tenzro.xyz to site site-abc123",
+                    "Claim custom domain app.example.com for site site-abc123 and give me the DNS TXT proof",
+                    "Verify custom domain app.example.com now that the TXT record is published",
+                    "Pin site site-abc123 to serving nodes [endpoint1, endpoint2]",
+                    "Deploy a wasi:http function 'edge-fn' from wasm blob 0x… with a 1s deadline",
+                    "Fetch this node's machine sealing key",
+                    "Deploy a TEE-sealed microVM 'api-vm' from artifact caid… on internal port 8080",
+                    "Show the live status of machine machine-xyz",
+                    "List the placement leases bound to app site-abc123",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
         ],
         "defaultInputModes": ["text/plain", "application/json"],
         "defaultOutputModes": ["text/plain", "application/json"],

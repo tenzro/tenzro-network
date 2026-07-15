@@ -195,7 +195,7 @@ The system is implemented as a Rust workspace of 26 crates plus SDKs, organized 
 | Workflow | `tenzro-workflow` | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
 | Sandboxed skills | `tenzro-wasm` | WASI 0.2 component host for language-agnostic agent skills and MCP tools. Capability-based sandbox, deterministic fuel metering, content-addressed component identity, execution receipts |
 | Bridge | `tenzro-bridge` | LayerZero V2, Chainlink CCIP + CCT, deBridge DLN, Li.Fi, Wormhole NTT (with Guardian quorum verifier), Canton, **Hyperlane V3** (sovereign Tenzro-ISM), **Axelar GMP** (Cosmos / Move / Stellar reach), **Babylon Bitcoin staking** (finality-providers protocol) |
-| Node | `tenzro-node` | Full node binary, RPC server (490+ methods across 26+ namespaces), MCP (457 tools), A2A (42 skills), web API |
+| Node | `tenzro-node` | Full node binary, RPC server (700+ methods across 30+ namespaces), MCP (500+ tools), A2A (68 skills), web API |
 | CLI | `tenzro-cli` | Command-line interface (63 command modules) |
 | SDK | `tenzro-sdk` | Rust SDK with builder-pattern configuration |
 | TypeScript SDK | `tenzro-ts-sdk` | TypeScript SDK for browser and Node.js integration |
@@ -253,7 +253,7 @@ Transaction submission goes through `tenzro_signAndSendTransaction` (server-side
 | `GET /facilitator/x402/supported` | Advertise the x402 schemes and chains this facilitator settles |
 
 **MCP Server** (default `0.0.0.0:3001`):
-Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 457 tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
+Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 500+ tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -278,7 +278,7 @@ Agent-to-Agent protocol server implementing the Google A2A specification with JS
 | `POST /a2a` | JSON-RPC 2.0 dispatcher for task management |
 | `POST /a2a/stream` | SSE streaming for real-time task updates |
 
-JSON-RPC methods: `message/send`, `tasks/send`, `tasks/get`, `tasks/list`, `tasks/cancel`. The Agent Card advertises 42 skills: `wallet`, `identity`, `inference`, `cortex`, `settlement`, `verification`, `staking`, `task_marketplace`, `agent_marketplace`, `agent_spawning`, `swarm_orchestration`, `lifecycle`, `bond-insurance`, `token`, `contract`, `ap2-payments`, `erc8004`, `wormhole`, `cct`, `auth`, `approval`, `join`, `nft`, `bridge`, `compliance`, `crosschain`, `events`, `forecast`, `vision-embed`, `text-embed`, `segmentation`, `text-segmentation`, `detection`, `audio-transcribe`, `video-embed`, `workflow`, `agent-memory`, `adaptive-burn`, `seed-agent`, `erc7683`, `operability`. Supports streaming responses via Server-Sent Events and multi-turn conversation history.
+JSON-RPC methods: `message/send`, `tasks/send`, `tasks/get`, `tasks/list`, `tasks/cancel`. The Agent Card advertises 68 skills: `wallet`, `identity`, `inference`, `cortex`, `settlement`, `verification`, `staking`, `task_marketplace`, `agent_marketplace`, `agent_spawning`, `swarm_orchestration`, `lifecycle`, `bond-insurance`, `token`, `contract`, `ap2-payments`, `erc8004`, `wormhole`, `cct`, `auth`, `approval`, `join`, `nft`, `bridge`, `compliance`, `crosschain`, `events`, `forecast`, `vision-embed`, `text-embed`, `segmentation`, `text-segmentation`, `detection`, `audio-transcribe`, `video-embed`, `workflow`, `agent-memory`, `adaptive-burn`, `seed-agent`, `erc7683`, `hosting`, `operability`. Supports streaming responses via Server-Sent Events and multi-turn conversation history.
 
 ---
 
@@ -1295,7 +1295,7 @@ The A2A protocol enables structured inter-agent communication following the Goog
 | `/a2a` | POST | JSON-RPC 2.0 dispatcher |
 | `/a2a/stream` | POST | SSE streaming for task updates |
 
-**Agent Card.** Each node publishes an Agent Card at `/.well-known/agent.json` per the A2A specification. The card advertises the node's capabilities, skills, supported input/output modes, authentication requirements, and protocol version (0.2.0). 42 skills are advertised covering core blockchain (wallet, token, contract, NFT, staking), identity & payments (identity, settlement, ap2-payments, lifecycle, bond-insurance), AI & agents (inference, cortex, agent_spawning, swarm_orchestration, task_marketplace, agent_marketplace, agent-memory, erc8004), multi-modal AI (forecast, vision-embed, text-embed, segmentation, text-segmentation, detection, audio-transcribe, video-embed), cross-chain & compliance (bridge, crosschain, wormhole, cct, erc7683, compliance), and verification & operations (verification, events, join, auth, approval, workflow, adaptive-burn, seed-agent, operability).
+**Agent Card.** Each node publishes an Agent Card at `/.well-known/agent.json` per the A2A specification. The card advertises the node's capabilities, skills, supported input/output modes, authentication requirements, and protocol version (0.2.0). 68 skills are advertised covering core blockchain (wallet, token, contract, NFT, staking), identity & payments (identity, settlement, ap2-payments, lifecycle, bond-insurance), AI & agents (inference, cortex, agent_spawning, swarm_orchestration, task_marketplace, agent_marketplace, agent-memory, erc8004), multi-modal AI (forecast, vision-embed, text-embed, segmentation, text-segmentation, detection, audio-transcribe, video-embed), cross-chain & compliance (bridge, crosschain, wormhole, cct, erc7683, compliance), and verification & operations (verification, events, join, auth, approval, workflow, adaptive-burn, seed-agent, operability).
 
 **JSON-RPC Methods:**
 - `message/send` / `tasks/send` — Send a message to create or continue a task
@@ -1324,7 +1324,7 @@ Each Tenzro node runs a Model Context Protocol (MCP) server (default port 3001) 
 - Capabilities: Tools
 - Server name: `tenzro`
 
-**Available tools (457)** spanning wallet & ledger, network & blocks, identity & delegation (including right-to-erasure via `forget_identity`), payments (AP2 sign + verify, ERC-8004 v0.6+ Trustless Agents Registry, MPP, x402, Stripe SPT, Visa TAP, Mastercard Agent Pay), AI models & inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
+**Available tools (500+)** spanning wallet & ledger, network & blocks, identity & delegation (including right-to-erasure via `forget_identity`), payments (AP2 sign + verify, ERC-8004 v0.6+ Trustless Agents Registry, MPP, x402, Stripe SPT, Visa TAP, Mastercard Agent Pay), AI models & inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -2696,8 +2696,8 @@ The Python `OuterGradient.to_json()` produces the *exact* JSON shape the Rust sy
 - Connect payment protocols to live settlement rails (Stripe MPP, Coinbase x402, Tempo network)
 
 ### Phase 3: Agent & Protocol Integration
-- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 457 tools
-- ~~Implement A2A protocol server~~ — **DONE**: JSON-RPC 2.0 on port 3002, Agent Card discovery, SSE streaming, 42 skills
+- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 500+ tools
+- ~~Implement A2A protocol server~~ — **DONE**: JSON-RPC 2.0 on port 3002, Agent Card discovery, SSE streaming, 68 skills
 - ~~Implement ecosystem MCP servers~~ — **DONE**: Solana (3003), Ethereum (3004), Canton (3005), LayerZero (3006), Chainlink (3007), Li.Fi (3008)
 - ~~Implement challenge store for payment protocols~~ — **DONE**: persistent challenge lookup for MPP and x402
 - ~~Implement OpenClaw skill integration~~ — **DONE**: `skills/openclaw-tenzro/SKILL.md`

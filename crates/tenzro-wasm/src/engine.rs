@@ -23,7 +23,6 @@ impl WasmEngine {
     /// Builds the engine with Tenzro's default configuration:
     ///
     /// - Component model enabled (WASI 0.2 is component-model only).
-    /// - Async support enabled so host calls can be `async fn`.
     /// - Cranelift with `Speed` opt-level — components are compiled
     ///   once at registration time, so we spend the cycles there to
     ///   keep per-invocation overhead low.
@@ -39,7 +38,6 @@ impl WasmEngine {
         let mut config = Config::new();
 
         config.wasm_component_model(true);
-        config.async_support(true);
         config.consume_fuel(true);
         config.epoch_interruption(true);
 

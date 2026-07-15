@@ -57,7 +57,7 @@ boundary), `tenzro-cli`, `tools/genkeys`.
 | Surface | Port | Code | Auth |
 |---|---|---|---|
 | libp2p gossip + request-response | 9000 tcp/quic | `tenzro-network`, dispatch in `tenzro-node/src/event_loop.rs` | Peer scoring; validator-only topics via `peer_manager.rs:386` |
-| JSON-RPC | 8545 | `tenzro-node/src/rpc.rs` (490+ methods) | None (public) / API key / admin token (`rpc.rs:641`) |
+| JSON-RPC | 8545 | `tenzro-node/src/rpc.rs` (700+ methods) | None (public) / API key / admin token (`rpc.rs:641`) |
 | Web verification API | 8080 | `tenzro-node/src/web/server.rs` | None; `/chat` optionally 402-gated |
 | MCP | 3001 (+3003–3008) | `tenzro-node/src/mcp/` | None on testnet |
 | A2A | 3002 | `tenzro-node/src/a2a/` | None on testnet |

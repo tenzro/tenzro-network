@@ -1,0 +1,129 @@
+# rsync exclude list for the tenzro-network root mirror.
+#
+# Used when syncing ~/AI/tenzronetwork/ → ~/Documents/tenzro-github/tenzro-network/.
+# Subdirectory mirrors (tenzro-cli, sdk repos, etc.) use rsync-excludes-sub.txt
+# instead — that one also excludes .gitignore and .github/ so each mirror keeps
+# its own copy.
+#
+# Invocation:
+#   rsync -a \
+#     --exclude-from=tools/sync/rsync-excludes-root.txt \
+#     /Users/hilarl/AI/tenzronetwork/ \
+#     /Users/hilarl/Documents/tenzro-github/tenzro-network/
+#
+# Do NOT pass --delete or --delete-excluded — that can wipe the destination's
+# .git/ directory and sever the local clone from the remote.
+
+# Internal AI-assistant instructions and memory
+CLAUDE.md
+.claude/
+
+# Git metadata (preserve the mirror's own)
+.git/
+
+# The dev-tree .gitignore enumerates internal-only artifact paths (research
+# docs, operator runbooks, IaC dirs) so git ignores them locally. Those names
+# must not appear in the public mirror, so the mirror keeps its own trimmed
+# .gitignore (generic patterns only). Never overwrite it from the dev tree.
+.gitignore
+
+# Build outputs (any language)
+target/
+node_modules/
+dist/
+build/
+.next/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+*.egg-info/
+.venv/
+venv/
+.coverage
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.*
+.vercel/
+
+# Logs
+*.log
+
+# Runtime data
+/crates/tenzro-node/data/
+/data/
+
+# Operator-specific genesis (our testnet's validator pubkeys + peer IDs).
+# Other operators generate their own via tools/genkeys; the public guide is
+# deploy/validator-deployment.md. genesis-local.toml is a dev throwaway.
+/config/genesis-prod.toml
+/config/genesis-local.toml
+
+# Surfaces with their own publish path / mirror
+/website/
+/apps/
+/sdk/
+
+# Vendored upstream managed as a git submodule in the mirror (DINOZYAVIER/llama-cpp-rs).
+# The dev tree carries a plain-file copy; rsyncing it over the mirror's submodule
+# working tree introduces stray -dirty state, so never sync this path.
+vendor/
+
+# Operator-specific deployment IaC (our GCE fleet, project IDs, subnets).
+# Other operators bring their own IaC; see deploy/validator-deployment.md
+# for the IaC-agnostic operator guide.
+# Patterns are anchored with a leading "/" so rsync excludes the whole subtree
+# from the transfer root — an unanchored "dir/" can let stray files slip through.
+/deploy/terraform/
+
+# Operator-specific runbooks, IaC, and scripts (Tenzro Labs testnet specifics:
+# GCP project IDs, bucket names, validator hostnames, fleet topology).
+# Other operators bring their own runbooks; the public-facing equivalent is
+# deploy/validator-deployment.md.
+/deploy/README.md
+/deploy/kubernetes/
+/deploy/rpc-node/
+/docs/operators/
+/scripts/deploy-testnet.sh
+/scripts/stop-the-world-cutover.sh
+/scripts/rollout-validators.sh
+/tools/testnet-smoke/
+/cloudbuild-image.yaml
+/cloudbuild-da-committee-bench.yaml
+/cloudbuild-train-cross-node.yaml
+/cloudbuild-train-decentralized.yaml
+/cloudbuild-train-lora-bench.yaml
+/cloudbuild-train-peered-syncer.yaml
+/cloudbuild-train-bench.yaml
+/cloudbuild-lockfile.yaml
+/docker-compose.yml
+
+# Internal audit / planning artifacts, scoped to local use only.
+/tools/doc-audit/
+/tools/sync/
+# docs/architecture/ is entirely internal research (SOTA mapping, plans,
+# prior-art, gap matrices). Never mirror any of it to the public repo.
+/docs/architecture/
+/docs/recognition-commands.md
+/docs/recognition-roadmap.md
+/docs/upstream-registrations.md
+/docs/upstream-staging/
+
+# Internal research, pitch, and time-stamped landscape docs.
+/docs/agent-launch-test-plan.md
+/docs/landscape-2026.md
+/docs/protocol-coverage-2026-05.md
+/docs/protocol-coverage-2026-06.md
+/docs/protocol-research-2026-05/
+/docs/papers/
+/docs/pitch/

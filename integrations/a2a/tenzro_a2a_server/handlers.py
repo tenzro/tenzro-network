@@ -3519,6 +3519,209 @@ async def handle_discovery(text: str, metadata: dict = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Decentralized app hosting (static sites / functions / machines)
+# ---------------------------------------------------------------------------
+
+def _with_env(params: dict, md: dict) -> dict:
+    """Attach a signed DID envelope to mutation params when present in
+    metadata. The node verifies env.did == owner_did before mutating."""
+    env = md.get("did_envelope")
+    if env is not None:
+        params = dict(params)
+        params["did_envelope"] = env
+    return params
+
+
+async def handle_hosting(text: str, metadata: dict = None) -> str:
+    """Publish and serve apps under *.apps.tenzro.xyz: static sites,
+    wasi:http functions, and Firecracker machines. Route maps, capability
+    manifests, resource requests, and sealed env vars carry structured
+    fields, so they read from `metadata`. Mutations require a signed
+    `did_envelope` (metadata) whose did equals `owner_did`.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    # ── Machines (check before "machine sealing key" collides with site) ──
+    if "sealing key" in t or ("sealing" in t and "key" in t):
+        result = await rpc_call("tenzro_machineSealingKey", {})
+        return f"Machine sealing key:\n{json.dumps(result, indent=2)}"
+
+    if "machine" in t:
+        machine_id = md.get("id") or _extract_id(text, "machine-")
+        if "deploy" in t and md.get("name") and md.get("owner_did") and md.get("artifact_caid"):
+            params = {
+                "name": md["name"],
+                "owner_did": md["owner_did"],
+                "artifact_caid": md["artifact_caid"],
+                "internal_port": md.get("internal_port", 8080),
+            }
+            for k in ("resources", "sealed_env", "tee_required",
+                      "price_per_request", "replicas", "region_hint",
+                      "max_price_per_hour"):
+                if md.get(k) is not None:
+                    params[k] = md[k]
+            result = await rpc_call("tenzro_machineDeploy", _with_env(params, md))
+            return f"Machine deployed:\n{json.dumps(result, indent=2)}"
+        if "status" in t and machine_id:
+            result = await rpc_call("tenzro_machineStatus", {"id": machine_id})
+            return f"Machine status:\n{json.dumps(result, indent=2)}"
+        if "remove" in t and machine_id and md.get("owner_did"):
+            params = {"id": machine_id, "owner_did": md["owner_did"]}
+            result = await rpc_call("tenzro_machineRemove", _with_env(params, md))
+            return f"Machine removed:\n{json.dumps(result, indent=2)}"
+        if machine_id and ("get" in t or "show" in t or "read" in t):
+            result = await rpc_call("tenzro_machineGet", {"id": machine_id})
+            return f"Machine:\n{json.dumps(result, indent=2)}"
+        if "list" in t:
+            params = {"owner_did": md["owner_did"]} if md.get("owner_did") else {}
+            result = await rpc_call("tenzro_listMachines", params)
+            return f"Machines:\n{json.dumps(result, indent=2)}"
+
+    # ── Functions (wasi:http components) ──
+    if "function" in t:
+        fn_id = md.get("id") or _extract_id(text, "function-")
+        if "deploy" in t and md.get("name") and md.get("owner_did") and md.get("wasm_blob_hash"):
+            params = {
+                "name": md["name"],
+                "owner_did": md["owner_did"],
+                "wasm_blob_hash": md["wasm_blob_hash"],
+            }
+            for k in ("capabilities", "fuel_limit", "deadline_ms",
+                      "price_per_request", "replicas", "region_hint",
+                      "max_price_per_hour"):
+                if md.get(k) is not None:
+                    params[k] = md[k]
+            result = await rpc_call("tenzro_functionDeploy", _with_env(params, md))
+            return f"Function deployed:\n{json.dumps(result, indent=2)}"
+        if "remove" in t and fn_id and md.get("owner_did"):
+            params = {"id": fn_id, "owner_did": md["owner_did"]}
+            result = await rpc_call("tenzro_functionRemove", _with_env(params, md))
+            return f"Function removed:\n{json.dumps(result, indent=2)}"
+        if fn_id and ("get" in t or "show" in t or "read" in t):
+            result = await rpc_call("tenzro_functionGet", {"id": fn_id})
+            return f"Function:\n{json.dumps(result, indent=2)}"
+        if "list" in t:
+            params = {"owner_did": md["owner_did"]} if md.get("owner_did") else {}
+            result = await rpc_call("tenzro_listFunctions", params)
+            return f"Functions:\n{json.dumps(result, indent=2)}"
+
+    # ── Placement leases ──
+    if "lease" in t:
+        if md.get("app_id"):
+            result = await rpc_call("tenzro_getLeasesForApp", {"app_id": md["app_id"]})
+            return f"Leases for app:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_listLeases", {})
+        return f"Active leases:\n{json.dumps(result, indent=2)}"
+
+    # ── Custom domains ──
+    if "domain" in t:
+        hostname = md.get("hostname")
+        if "claim" in t and hostname and md.get("site_id") and md.get("owner_did"):
+            params = {"hostname": hostname, "site_id": md["site_id"],
+                      "owner_did": md["owner_did"]}
+            result = await rpc_call("tenzro_siteClaimDomain", _with_env(params, md))
+            return f"Domain claimed (publish the DNS TXT proof, then verify):\n{json.dumps(result, indent=2)}"
+        if "verify" in t and hostname and md.get("owner_did"):
+            params = {"hostname": hostname, "owner_did": md["owner_did"]}
+            result = await rpc_call("tenzro_siteVerifyDomain", _with_env(params, md))
+            return f"Domain verified:\n{json.dumps(result, indent=2)}"
+        if "remove" in t and hostname and md.get("owner_did"):
+            params = {"hostname": hostname, "owner_did": md["owner_did"]}
+            result = await rpc_call("tenzro_siteRemoveDomain", _with_env(params, md))
+            return f"Domain removed:\n{json.dumps(result, indent=2)}"
+        if "list" in t:
+            result = await rpc_call("tenzro_listSiteDomains", {})
+            return f"Custom domains:\n{json.dumps(result, indent=2)}"
+        if hostname:
+            result = await rpc_call("tenzro_siteGetDomain", {"hostname": hostname})
+            return f"Domain:\n{json.dumps(result, indent=2)}"
+
+    # ── Hostname aliases ──
+    if "alias" in t or "hostname" in t:
+        hostname = md.get("hostname")
+        if ("set" in t or "map" in t) and hostname and md.get("site_id") and md.get("owner_did"):
+            params = {"hostname": hostname, "site_id": md["site_id"],
+                      "owner_did": md["owner_did"]}
+            result = await rpc_call("tenzro_siteSetAlias", _with_env(params, md))
+            return f"Alias set:\n{json.dumps(result, indent=2)}"
+        if "remove" in t and hostname and md.get("owner_did"):
+            params = {"hostname": hostname, "owner_did": md["owner_did"]}
+            result = await rpc_call("tenzro_siteRemoveAlias", _with_env(params, md))
+            return f"Alias removed:\n{json.dumps(result, indent=2)}"
+        if "list" in t:
+            result = await rpc_call("tenzro_listSiteAliases", {})
+            return f"Aliases:\n{json.dumps(result, indent=2)}"
+        if hostname:
+            result = await rpc_call("tenzro_siteGetAlias", {"hostname": hostname})
+            return f"Alias:\n{json.dumps(result, indent=2)}"
+
+    # ── Placement ──
+    if "placement" in t or ("pin" in t and "site" in t):
+        site_id = md.get("site_id") or _extract_id(text, "site-")
+        if ("set" in t or "pin" in t) and site_id and md.get("serving_nodes") is not None:
+            params = {"site_id": site_id, "serving_nodes": md["serving_nodes"]}
+            result = await rpc_call("tenzro_siteSetPlacement", _with_env(params, md))
+            return f"Placement set:\n{json.dumps(result, indent=2)}"
+        if "remove" in t and site_id:
+            params = {"site_id": site_id}
+            result = await rpc_call("tenzro_siteRemovePlacement", _with_env(params, md))
+            return f"Placement cleared (reverts to local serving):\n{json.dumps(result, indent=2)}"
+        if "list" in t:
+            result = await rpc_call("tenzro_listSitePlacements", {})
+            return f"Placements:\n{json.dumps(result, indent=2)}"
+        if site_id:
+            result = await rpc_call("tenzro_siteGetPlacement", {"site_id": site_id})
+            return f"Placement:\n{json.dumps(result, indent=2)}"
+
+    # ── Static sites ──
+    site_id = md.get("site_id") or _extract_id(text, "site-")
+    if ("publish" in t or "deploy" in t) and md.get("name") and md.get("owner_did") and md.get("routes"):
+        params = {
+            "name": md["name"],
+            "owner_did": md["owner_did"],
+            "routes": md["routes"],
+        }
+        for k in ("index_path", "not_found_path", "spa",
+                  "price_per_request", "replicas", "region_hint",
+                  "max_price_per_hour"):
+            if md.get(k) is not None:
+                params[k] = md[k]
+        result = await rpc_call("tenzro_sitePublish", _with_env(params, md))
+        return f"Site published:\n{json.dumps(result, indent=2)}"
+    if "remove" in t and site_id and md.get("owner_did"):
+        params = {"site_id": site_id, "owner_did": md["owner_did"]}
+        result = await rpc_call("tenzro_siteRemove", _with_env(params, md))
+        return f"Site removed:\n{json.dumps(result, indent=2)}"
+    if site_id and ("get" in t or "show" in t or "read" in t):
+        result = await rpc_call("tenzro_siteGet", {"site_id": site_id})
+        return f"Site:\n{json.dumps(result, indent=2)}"
+    if "list" in t and "site" in t:
+        params = {"owner_did": md["owner_did"]} if md.get("owner_did") else {}
+        result = await rpc_call("tenzro_listSites", params)
+        return f"Sites:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Decentralized app hosting (*.apps.tenzro.xyz):\n"
+        "Static sites:\n"
+        "  - 'Publish site' (metadata: name, owner_did, routes[{path, blob_hash, content_type, size}], index_path?, not_found_path?, spa?, price_per_request?, did_envelope)\n"
+        "  - 'Get site site-…' / 'List sites' (metadata: owner_did?) / 'Remove site site-…' (metadata: owner_did, did_envelope)\n"
+        "  - 'Set alias' (metadata: hostname, site_id, owner_did, did_envelope) / 'Get alias', 'List aliases', 'Remove alias'\n"
+        "  - 'Set placement' (metadata: site_id, serving_nodes[], did_envelope) / 'Get placement', 'List placements', 'Remove placement'\n"
+        "  - 'Claim domain' (metadata: hostname, site_id, owner_did, did_envelope) → publish DNS TXT → 'Verify domain' (metadata: hostname, owner_did, did_envelope)\n"
+        "Functions (wasi:http):\n"
+        "  - 'Deploy function' (metadata: name, owner_did, wasm_blob_hash, capabilities?, fuel_limit?, deadline_ms?, did_envelope)\n"
+        "  - 'Get function function-…' / 'List functions' / 'Remove function function-…'\n"
+        "Machines (Firecracker microVM):\n"
+        "  - 'Fetch machine sealing key' → wrap env ciphertext to it (x25519-envelope-aes-256-gcm)\n"
+        "  - 'Deploy machine' (metadata: name, owner_did, artifact_caid, internal_port, resources?, sealed_env?, tee_required?, did_envelope)\n"
+        "  - 'Get/Status/Remove machine machine-…' / 'List machines'\n"
+        "Leases:\n"
+        "  - 'List leases' / 'Leases for app' (metadata: app_id)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Managed databases
 # ---------------------------------------------------------------------------
 
@@ -3720,5 +3923,6 @@ HANDLERS: dict[str, callable] = {
     "moe": handle_moe,
     "operability": handle_operability,
     "discovery": handle_discovery,
+    "hosting": handle_hosting,
     "help": handle_help,
 }

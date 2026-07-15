@@ -4014,6 +4014,264 @@ pub struct GetWorkflowSagaParams {
     pub workflow_id: String,
 }
 
+// ─── App hosting (sites / functions / machines) params ───
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct HostingSiteRoute {
+    #[schemars(description = "Request path, e.g. /index.html or /assets/app.js")]
+    pub path: String,
+    #[schemars(description = "BLAKE3 blob hash of the asset (from iroh publishBlob)")]
+    pub blob_hash: String,
+    #[schemars(description = "MIME type served in the Content-Type header")]
+    pub content_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Byte length of the asset")]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SitePublishParams {
+    #[schemars(description = "Site name (unique per owner; site_id derives from owner_did + name)")]
+    pub name: String,
+    #[schemars(description = "Owner DID; mutations require a matching signed did_envelope")]
+    pub owner_did: String,
+    #[schemars(description = "Route map: [{path, blob_hash, content_type, size}]")]
+    pub routes: Vec<HostingSiteRoute>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Override the default index path (/index.html)")]
+    pub index_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Route served for unmatched paths (custom 404 page)")]
+    pub not_found_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Serve the index for unmatched non-asset paths (single-page-app routing)")]
+    pub spa: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "x402 price per request in base TNZO units (stringified integer)")]
+    pub price_per_request: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Number of serving replicas to place")]
+    pub replicas: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Preferred region for placement")]
+    pub region_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Maximum price per hour a serving node may charge (stringified integer)")]
+    pub max_price_per_hour: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation (env.did must equal owner_did)")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteGetParams {
+    #[schemars(description = "Site id to read")]
+    pub site_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct ListSitesParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Filter by owner DID; omit to list all")]
+    pub owner_did: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteRemoveParams {
+    #[schemars(description = "Site id to remove")]
+    pub site_id: String,
+    #[schemars(description = "Owner DID")]
+    pub owner_did: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteSetAliasParams {
+    #[schemars(description = "Public hostname, e.g. my-app.apps.tenzro.xyz")]
+    pub hostname: String,
+    #[schemars(description = "Site id the hostname resolves to")]
+    pub site_id: String,
+    #[schemars(description = "Owner DID")]
+    pub owner_did: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteHostnameParams {
+    #[schemars(description = "Public hostname")]
+    pub hostname: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteRemoveAliasParams {
+    #[schemars(description = "Hostname to unmap")]
+    pub hostname: String,
+    #[schemars(description = "Owner DID")]
+    pub owner_did: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteSetPlacementParams {
+    #[schemars(description = "Site id")]
+    pub site_id: String,
+    #[schemars(description = "Serving nodes (iroh EndpointId strings) that answer tenzro/http forwards; empty list serves locally")]
+    pub serving_nodes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteRemovePlacementParams {
+    #[schemars(description = "Site id whose placement to clear (reverts to local serving)")]
+    pub site_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteClaimDomainParams {
+    #[schemars(description = "Custom domain to claim, e.g. app.example.com")]
+    pub hostname: String,
+    #[schemars(description = "Site id the domain resolves to")]
+    pub site_id: String,
+    #[schemars(description = "Owner DID")]
+    pub owner_did: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteVerifyDomainParams {
+    #[schemars(description = "Custom domain to verify against its published DNS TXT proof")]
+    pub hostname: String,
+    #[schemars(description = "Owner DID")]
+    pub owner_did: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SiteRemoveDomainParams {
+    #[schemars(description = "Custom domain to remove")]
+    pub hostname: String,
+    #[schemars(description = "Owner DID")]
+    pub owner_did: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct FunctionDeployParams {
+    #[schemars(description = "Function name (unique per owner)")]
+    pub name: String,
+    #[schemars(description = "Owner DID")]
+    pub owner_did: String,
+    #[schemars(description = "BLAKE3 blob hash of the wasi:http component")]
+    pub wasm_blob_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Capability manifest (host imports the component is granted)")]
+    pub capabilities: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "wasmtime fuel limit per request")]
+    pub fuel_limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Wall-clock deadline per request, in milliseconds")]
+    pub deadline_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "x402 price per request in base TNZO units (stringified integer)")]
+    pub price_per_request: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Number of serving replicas to place")]
+    pub replicas: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Preferred region for placement")]
+    pub region_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Maximum price per hour a serving node may charge (stringified integer)")]
+    pub max_price_per_hour: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct HostingIdParams {
+    #[schemars(description = "Deployment id")]
+    pub id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct HostingListByOwnerParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Filter by owner DID; omit to list all")]
+    pub owner_did: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct HostingRemoveByIdParams {
+    #[schemars(description = "Deployment id to remove")]
+    pub id: String,
+    #[schemars(description = "Owner DID")]
+    pub owner_did: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct MachineDeployParams {
+    #[schemars(description = "Machine name (unique per owner)")]
+    pub name: String,
+    #[schemars(description = "Owner DID")]
+    pub owner_did: String,
+    #[schemars(description = "Content-addressed id of the microVM image artifact")]
+    pub artifact_caid: String,
+    #[schemars(description = "Loopback port the guest server listens on")]
+    pub internal_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Resource request: {vcpus, mem_mib, disk_mib}")]
+    pub resources: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Sealed env vars, each ciphertext wrapped to the node's X25519 sealing key (see machine_sealing_key)")]
+    pub sealed_env: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Require a TEE-capable serving node")]
+    pub tee_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "x402 price per request in base TNZO units (stringified integer)")]
+    pub price_per_request: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Number of serving replicas to place")]
+    pub replicas: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Preferred region for placement")]
+    pub region_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Maximum price per hour a serving node may charge (stringified integer)")]
+    pub max_price_per_hour: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Signed DID envelope authorizing the mutation")]
+    pub did_envelope: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct GetLeasesForAppParams {
+    #[schemars(description = "App id (site / function / machine) whose placement leases to read")]
+    pub app_id: String,
+}
+
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct DvpOpenSagaParams {
     #[schemars(description = "Creator address (hex). Saga id = SHA-256('tenzro/saga/id' || creator || nonce_le).")]
@@ -15485,6 +15743,376 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_clusterPlan", payload)
             .await
             .map_err(|e| err_internal(format!("clusterPlan failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── App hosting: static sites ───
+
+    #[tool(description = "Publish a static site (any framework's static export). Uploads the route map of BLAKE3 blob hashes; the node serves them over the tenzro/http ALPN behind wildcard TLS. Returns the site_id. Mutations require a signed did_envelope matching owner_did.")]
+    async fn site_publish(
+        &self,
+        Parameters(params): Parameters<SitePublishParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("sitePublish encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_sitePublish", req)
+            .await
+            .map_err(|e| err_internal(format!("sitePublish failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read a published site's manifest by site_id: routes, index/not-found paths, SPA flag, price per request, and placement.")]
+    async fn site_get(
+        &self,
+        Parameters(params): Parameters<SiteGetParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteGet encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteGet", req)
+            .await
+            .map_err(|e| err_internal(format!("siteGet failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List published sites, optionally filtered by owner DID.")]
+    async fn list_sites(
+        &self,
+        Parameters(params): Parameters<ListSitesParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("listSites encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listSites", req)
+            .await
+            .map_err(|e| err_internal(format!("listSites failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Remove a published site by site_id. Requires a signed did_envelope matching owner_did.")]
+    async fn site_remove(
+        &self,
+        Parameters(params): Parameters<SiteRemoveParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteRemove encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteRemove", req)
+            .await
+            .map_err(|e| err_internal(format!("siteRemove failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Map a public hostname (e.g. my-app.apps.tenzro.xyz) to a site_id. Requires a signed did_envelope matching owner_did.")]
+    async fn site_set_alias(
+        &self,
+        Parameters(params): Parameters<SiteSetAliasParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteSetAlias encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteSetAlias", req)
+            .await
+            .map_err(|e| err_internal(format!("siteSetAlias failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Resolve a public hostname to its site_id.")]
+    async fn site_get_alias(
+        &self,
+        Parameters(params): Parameters<SiteHostnameParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteGetAlias encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteGetAlias", req)
+            .await
+            .map_err(|e| err_internal(format!("siteGetAlias failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List all hostname aliases and the site_ids they resolve to.")]
+    async fn list_site_aliases(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listSiteAliases", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listSiteAliases failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Unmap a public hostname alias. Requires a signed did_envelope matching owner_did.")]
+    async fn site_remove_alias(
+        &self,
+        Parameters(params): Parameters<SiteRemoveAliasParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteRemoveAlias encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteRemoveAlias", req)
+            .await
+            .map_err(|e| err_internal(format!("siteRemoveAlias failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Pin a site's serving nodes (iroh EndpointId strings). An empty list reverts to serving locally on this node. Requires a signed did_envelope.")]
+    async fn site_set_placement(
+        &self,
+        Parameters(params): Parameters<SiteSetPlacementParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteSetPlacement encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteSetPlacement", req)
+            .await
+            .map_err(|e| err_internal(format!("siteSetPlacement failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read a site's current serving-node placement.")]
+    async fn site_get_placement(
+        &self,
+        Parameters(params): Parameters<SiteGetParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteGetPlacement encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteGetPlacement", req)
+            .await
+            .map_err(|e| err_internal(format!("siteGetPlacement failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List all site placements across the node.")]
+    async fn list_site_placements(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listSitePlacements", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listSitePlacements failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Clear a site's pinned placement, reverting to local serving. Requires a signed did_envelope.")]
+    async fn site_remove_placement(
+        &self,
+        Parameters(params): Parameters<SiteRemovePlacementParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteRemovePlacement encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteRemovePlacement", req)
+            .await
+            .map_err(|e| err_internal(format!("siteRemovePlacement failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Claim a custom domain (e.g. app.example.com) for a site. Returns the DNS TXT proof to publish before verification. Requires a signed did_envelope.")]
+    async fn site_claim_domain(
+        &self,
+        Parameters(params): Parameters<SiteClaimDomainParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteClaimDomain encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteClaimDomain", req)
+            .await
+            .map_err(|e| err_internal(format!("siteClaimDomain failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Verify a claimed custom domain against its published DNS TXT proof, activating wildcard-independent TLS for it. Requires a signed did_envelope.")]
+    async fn site_verify_domain(
+        &self,
+        Parameters(params): Parameters<SiteVerifyDomainParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteVerifyDomain encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteVerifyDomain", req)
+            .await
+            .map_err(|e| err_internal(format!("siteVerifyDomain failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read a custom domain's claim/verification state for a site.")]
+    async fn site_get_domain(
+        &self,
+        Parameters(params): Parameters<SiteHostnameParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteGetDomain encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteGetDomain", req)
+            .await
+            .map_err(|e| err_internal(format!("siteGetDomain failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List all claimed custom domains and their site_ids.")]
+    async fn list_site_domains(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listSiteDomains", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listSiteDomains failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Remove a claimed custom domain. Requires a signed did_envelope matching owner_did.")]
+    async fn site_remove_domain(
+        &self,
+        Parameters(params): Parameters<SiteRemoveDomainParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("siteRemoveDomain encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_siteRemoveDomain", req)
+            .await
+            .map_err(|e| err_internal(format!("siteRemoveDomain failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── App hosting: functions (wasi:http components) ───
+
+    #[tool(description = "Deploy a wasi:http WebAssembly component as a request-scoped function. The node runs it under wasmtime with the granted capabilities, fuel limit, and per-request deadline. Requires a signed did_envelope.")]
+    async fn function_deploy(
+        &self,
+        Parameters(params): Parameters<FunctionDeployParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("functionDeploy encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_functionDeploy", req)
+            .await
+            .map_err(|e| err_internal(format!("functionDeploy failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read a deployed function's manifest: wasm blob hash, capabilities, fuel/deadline limits, price, and placement.")]
+    async fn function_get(
+        &self,
+        Parameters(params): Parameters<HostingIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("functionGet encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_functionGet", req)
+            .await
+            .map_err(|e| err_internal(format!("functionGet failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List deployed functions, optionally filtered by owner DID.")]
+    async fn list_functions(
+        &self,
+        Parameters(params): Parameters<HostingListByOwnerParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("listFunctions encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listFunctions", req)
+            .await
+            .map_err(|e| err_internal(format!("listFunctions failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Remove a deployed function by id. Requires a signed did_envelope matching owner_did.")]
+    async fn function_remove(
+        &self,
+        Parameters(params): Parameters<HostingRemoveByIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("functionRemove encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_functionRemove", req)
+            .await
+            .map_err(|e| err_internal(format!("functionRemove failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── App hosting: machines (Firecracker microVMs) ───
+
+    #[tool(description = "Deploy a long-running microVM (Firecracker) from a content-addressed image. Placed only on KVM+nested-virt nodes; optionally TEE-sealed. Env vars are wrapped to the node's X25519 sealing key. Requires a signed did_envelope.")]
+    async fn machine_deploy(
+        &self,
+        Parameters(params): Parameters<MachineDeployParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("machineDeploy encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_machineDeploy", req)
+            .await
+            .map_err(|e| err_internal(format!("machineDeploy failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read a deployed machine's manifest: artifact CAID, internal port, resources, TEE requirement, price, and placement.")]
+    async fn machine_get(
+        &self,
+        Parameters(params): Parameters<HostingIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("machineGet encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_machineGet", req)
+            .await
+            .map_err(|e| err_internal(format!("machineGet failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List deployed machines, optionally filtered by owner DID.")]
+    async fn list_machines(
+        &self,
+        Parameters(params): Parameters<HostingListByOwnerParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("listMachines encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listMachines", req)
+            .await
+            .map_err(|e| err_internal(format!("listMachines failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Remove a deployed machine by id, tearing down the microVM. Requires a signed did_envelope matching owner_did.")]
+    async fn machine_remove(
+        &self,
+        Parameters(params): Parameters<HostingRemoveByIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("machineRemove encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_machineRemove", req)
+            .await
+            .map_err(|e| err_internal(format!("machineRemove failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Read a running machine's live status: lifecycle state, serving node, and last heartbeat.")]
+    async fn machine_status(
+        &self,
+        Parameters(params): Parameters<HostingIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("machineStatus encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_machineStatus", req)
+            .await
+            .map_err(|e| err_internal(format!("machineStatus failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch this node's X25519 machine sealing public key. Wrap machine env-var ciphertext to it (alg x25519-envelope-aes-256-gcm) before machine_deploy.")]
+    async fn machine_sealing_key(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_machineSealingKey", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("machineSealingKey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── App hosting: placement leases ───
+
+    #[tool(description = "List all active placement leases held on this node across sites, functions, and machines.")]
+    async fn list_leases(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listLeases", serde_json::json!({}))
+            .await
+            .map_err(|e| err_internal(format!("listLeases failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List the placement leases bound to a specific app (site / function / machine) id.")]
+    async fn get_leases_for_app(
+        &self,
+        Parameters(params): Parameters<GetLeasesForAppParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let req = serde_json::to_value(&params)
+            .map_err(|e| err_internal(format!("getLeasesForApp encode failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_getLeasesForApp", req)
+            .await
+            .map_err(|e| err_internal(format!("getLeasesForApp failed: {}", e)))?;
         json_result(result)
     }
 }

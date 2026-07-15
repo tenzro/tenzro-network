@@ -33,7 +33,8 @@ struct Cli {
 
     /// Node roles, comma-separated (e.g. "validator,storage,ai"). A node may
     /// serve any combination of roles under a single stake. Aliases accepted:
-    /// validator, model-provider/ai, tee-provider/tee, storage, user/light.
+    /// validator, model-provider/ai, tee-provider/tee, storage, edge/ingress,
+    /// user/light.
     #[arg(short, long, value_name = "ROLES")]
     roles: Option<String>,
 

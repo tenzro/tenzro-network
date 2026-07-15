@@ -361,7 +361,7 @@ impl SkillRuntime {
 
 /// Maps a wasmtime instantiation / call error onto the fuel / deadline /
 /// trap variants of [`WasmError`].
-fn classify_wasmtime_error(err: anyhow::Error) -> WasmError {
+fn classify_wasmtime_error(err: wasmtime::Error) -> WasmError {
     if let Some(trap) = err.downcast_ref::<wasmtime::Trap>() {
         return match trap {
             wasmtime::Trap::OutOfFuel => WasmError::FuelExhausted { consumed: 0 },

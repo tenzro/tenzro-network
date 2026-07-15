@@ -39,7 +39,7 @@ Responses carry an ETag (the blob hash) and a short cache-control window. A matc
 
 ## Naming
 
-A hostname can point at a site. When the Web-API edge receives a request whose Host header matches an alias, it rewrites the request to the site's serving path, so the site is served by hostname without the caller naming the `site_id`. Control-plane paths are never shadowed by an alias.
+A hostname can point at a site. When the Web-API edge receives a request whose Host header matches an alias, it serves that site's route map directly, so the site is served by hostname without the caller naming the `site_id`. Control-plane paths are never shadowed by an alias.
 
 Setting an alias requires control of the owner DID and ownership of the target site. Re-pointing an existing hostname additionally requires ownership of the existing alias.
 

@@ -70,8 +70,11 @@ RUN mkdir -p apps/tenzro-desktop/src-tauri/src && \
       'custom-protocol = ["tauri/custom-protocol"]' \
       > apps/tenzro-desktop/src-tauri/Cargo.toml
 
-# Build tenzro-node and tenzro-cli (excludes desktop app)
-RUN cargo build --release -p tenzro-node -p tenzro-cli
+# Build tenzro-node and tenzro-cli (excludes desktop app).
+# wasi-skills enables the wasi:http function runtime; firecracker compiles the
+# microVM machine supervisor (only runs on a KVM host with the jailer binary).
+RUN cargo build --release -p tenzro-node -p tenzro-cli \
+      --features tenzro-node/wasi-skills,tenzro-node/firecracker
 
 # The `rpc` feature (on by default via cluster-serving) builds the standalone
 # ggml `rpc-server` binary into llama-cpp-sys-2's cargo OUT_DIR. That path does

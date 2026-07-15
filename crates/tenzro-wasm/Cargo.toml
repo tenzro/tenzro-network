@@ -40,8 +40,11 @@ wasmtime-wasi = { version = "46" }
 wasmtime-wasi-http = { version = "46" }
 
 # HTTP plumbing shared with the node's edge server (axum 0.7 / hyper 1.x).
+# `hyper` supplies the Request/Response types wasmtime-wasi-http's
+# new_incoming_request / response-outparam operate on.
 http = "1"
 http-body-util = "0.1"
+hyper = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

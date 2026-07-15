@@ -230,7 +230,7 @@ Usage:
 
 import json
 import sys
-from typing import Any
+from typing import Any, List, Optional
 
 try:
     import requests
@@ -5824,6 +5824,358 @@ def iroh_fetch_blob(tenzro_uri: str) -> bytes:
 def iroh_resolve(tenzro_uri: str) -> bytes:
     """Alias for iroh_fetch_blob for code that thinks of the URI as a name."""
     return iroh_fetch_blob(tenzro_uri)
+
+
+# ── App hosting (sites / functions / machines) ────────────────────
+#
+# Wraps the tenzro_site* / tenzro_function* / tenzro_machine* / lease
+# JSON-RPC surface. Deploy a static site, a wasi:http function, or a
+# Firecracker microVM and serve it under a public hostname
+# (myapp.apps.tenzro.xyz) routed from the operator's ingress edge to any
+# serving node over the tenzro/http ALPN. Content is uploaded as
+# content-addressed blobs first (iroh_publish_blob); deploy calls
+# reference each blob by hash.
+#
+# Mutations (publish / remove / set-alias / claim-domain …) are
+# DID-owner authenticated: pass did_envelope=<signed envelope value>.
+# The node verifies the envelope's did equals the owner_did.
+
+
+def _with_env(params: dict, did_envelope: Optional[str]) -> dict:
+    """Attach the signed DID envelope to a mutation's params when supplied."""
+    if did_envelope is not None:
+        params = dict(params)
+        params["did_envelope"] = did_envelope
+    return params
+
+
+# Static sites ---------------------------------------------------------
+
+
+def site_publish(
+    name: str,
+    owner_did: str,
+    routes: List[dict],
+    index_path: Optional[str] = None,
+    not_found_path: Optional[str] = None,
+    spa: Optional[bool] = None,
+    price_per_request: Optional[str] = None,
+    replicas: Optional[int] = None,
+    region_hint: Optional[str] = None,
+    max_price_per_hour: Optional[str] = None,
+    did_envelope: Optional[str] = None,
+) -> dict:
+    """Publish a static site from a route map.
+
+    Each entry in `routes` is a dict:
+    {"path", "blob_hash", "content_type", "size"} — the blob_hash comes
+    from `iroh_publish_blob`. Optional: `index_path` (default
+    "/index.html"), `not_found_path`, `spa` (single-page-app routing),
+    `price_per_request` (x402, stringified integer base units),
+    `replicas`, `region_hint`, `max_price_per_hour`.
+    """
+    params: dict = {"name": name, "owner_did": owner_did, "routes": routes}
+    if index_path is not None:
+        params["index_path"] = index_path
+    if not_found_path is not None:
+        params["not_found_path"] = not_found_path
+    if spa is not None:
+        params["spa"] = spa
+    if price_per_request is not None:
+        params["price_per_request"] = price_per_request
+    if replicas is not None:
+        params["replicas"] = replicas
+    if region_hint is not None:
+        params["region_hint"] = region_hint
+    if max_price_per_hour is not None:
+        params["max_price_per_hour"] = max_price_per_hour
+    return _rpc("tenzro_sitePublish", _with_env(params, did_envelope))
+
+
+def site_get(site_id: str) -> dict:
+    """Fetch a site manifest by site_id."""
+    return _rpc("tenzro_siteGet", {"site_id": site_id})
+
+
+def list_sites(owner_did: Optional[str] = None) -> dict:
+    """List sites, optionally filtered by owner DID."""
+    return _rpc("tenzro_listSites", {"owner_did": owner_did} if owner_did else {})
+
+
+def site_remove(site_id: str, owner_did: str, did_envelope: Optional[str] = None) -> dict:
+    """Remove a site. Owner-authenticated."""
+    return _rpc(
+        "tenzro_siteRemove",
+        _with_env({"site_id": site_id, "owner_did": owner_did}, did_envelope),
+    )
+
+
+# Hostname aliases -----------------------------------------------------
+
+
+def site_set_alias(
+    hostname: str, site_id: str, owner_did: str, did_envelope: Optional[str] = None
+) -> dict:
+    """Point a public hostname at a site so it serves by name. Owner-authenticated."""
+    return _rpc(
+        "tenzro_siteSetAlias",
+        _with_env(
+            {"hostname": hostname, "site_id": site_id, "owner_did": owner_did},
+            did_envelope,
+        ),
+    )
+
+
+def site_get_alias(hostname: str) -> dict:
+    """Resolve a hostname to its alias record."""
+    return _rpc("tenzro_siteGetAlias", {"hostname": hostname})
+
+
+def list_site_aliases(owner_did: Optional[str] = None) -> dict:
+    """List hostname aliases, optionally filtered by owner DID."""
+    return _rpc(
+        "tenzro_listSiteAliases", {"owner_did": owner_did} if owner_did else {}
+    )
+
+
+def site_remove_alias(
+    hostname: str, owner_did: str, did_envelope: Optional[str] = None
+) -> dict:
+    """Remove a hostname alias. Owner-authenticated."""
+    return _rpc(
+        "tenzro_siteRemoveAlias",
+        _with_env({"hostname": hostname, "owner_did": owner_did}, did_envelope),
+    )
+
+
+# Ingress placement ----------------------------------------------------
+
+
+def site_set_placement(
+    site_id: str, serving_nodes: List[str], did_envelope: Optional[str] = None
+) -> dict:
+    """Set the serving nodes (iroh EndpointId strings) that answer
+    tenzro/http forwards for a site. An empty list serves locally.
+    Owner-authenticated (owner resolved from the manifest).
+    """
+    return _rpc(
+        "tenzro_siteSetPlacement",
+        _with_env(
+            {"site_id": site_id, "serving_nodes": serving_nodes}, did_envelope
+        ),
+    )
+
+
+def site_get_placement(site_id: str) -> dict:
+    """Get the ingress placement record for a site."""
+    return _rpc("tenzro_siteGetPlacement", {"site_id": site_id})
+
+
+def list_site_placements() -> dict:
+    """List all ingress placement records."""
+    return _rpc("tenzro_listSitePlacements", {})
+
+
+def site_remove_placement(site_id: str, did_envelope: Optional[str] = None) -> dict:
+    """Remove a site's ingress placement (reverts to local serving). Owner-authenticated."""
+    return _rpc(
+        "tenzro_siteRemovePlacement", _with_env({"site_id": site_id}, did_envelope)
+    )
+
+
+# Custom domains -------------------------------------------------------
+
+
+def site_claim_domain(
+    hostname: str, site_id: str, owner_did: str, did_envelope: Optional[str] = None
+) -> dict:
+    """Claim a custom domain for a site. Returns the DNS records the owner
+    must publish (`dns_records` + `ownership_txt_name`). Owner-authenticated.
+    """
+    return _rpc(
+        "tenzro_siteClaimDomain",
+        _with_env(
+            {"hostname": hostname, "site_id": site_id, "owner_did": owner_did},
+            did_envelope,
+        ),
+    )
+
+
+def site_verify_domain(
+    hostname: str, owner_did: str, did_envelope: Optional[str] = None
+) -> dict:
+    """Verify a claimed domain against its published DNS TXT proof. Owner-authenticated."""
+    return _rpc(
+        "tenzro_siteVerifyDomain",
+        _with_env({"hostname": hostname, "owner_did": owner_did}, did_envelope),
+    )
+
+
+def site_get_domain(hostname: str) -> dict:
+    """Get a custom-domain record (status + DNS records)."""
+    return _rpc("tenzro_siteGetDomain", {"hostname": hostname})
+
+
+def list_site_domains(owner_did: Optional[str] = None) -> dict:
+    """List custom domains, optionally filtered by owner DID."""
+    return _rpc(
+        "tenzro_listSiteDomains", {"owner_did": owner_did} if owner_did else {}
+    )
+
+
+def site_remove_domain(
+    hostname: str, owner_did: str, did_envelope: Optional[str] = None
+) -> dict:
+    """Remove a custom domain. Owner-authenticated."""
+    return _rpc(
+        "tenzro_siteRemoveDomain",
+        _with_env({"hostname": hostname, "owner_did": owner_did}, did_envelope),
+    )
+
+
+# Functions (wasi:http components) -------------------------------------
+
+
+def function_deploy(
+    name: str,
+    owner_did: str,
+    wasm_blob_hash: str,
+    capabilities: Optional[dict] = None,
+    fuel_limit: Optional[int] = None,
+    deadline_ms: Optional[int] = None,
+    price_per_request: Optional[str] = None,
+    replicas: Optional[int] = None,
+    region_hint: Optional[str] = None,
+    max_price_per_hour: Optional[str] = None,
+    did_envelope: Optional[str] = None,
+) -> dict:
+    """Deploy a wasi:http function from a component blob hash."""
+    params: dict = {
+        "name": name,
+        "owner_did": owner_did,
+        "wasm_blob_hash": wasm_blob_hash,
+    }
+    if capabilities is not None:
+        params["capabilities"] = capabilities
+    if fuel_limit is not None:
+        params["fuel_limit"] = fuel_limit
+    if deadline_ms is not None:
+        params["deadline_ms"] = deadline_ms
+    if price_per_request is not None:
+        params["price_per_request"] = price_per_request
+    if replicas is not None:
+        params["replicas"] = replicas
+    if region_hint is not None:
+        params["region_hint"] = region_hint
+    if max_price_per_hour is not None:
+        params["max_price_per_hour"] = max_price_per_hour
+    return _rpc("tenzro_functionDeploy", _with_env(params, did_envelope))
+
+
+def function_get(id: str) -> dict:
+    """Fetch a function deployment by id."""
+    return _rpc("tenzro_functionGet", {"id": id})
+
+
+def list_functions(owner_did: Optional[str] = None) -> dict:
+    """List function deployments, optionally filtered by owner DID."""
+    return _rpc("tenzro_listFunctions", {"owner_did": owner_did} if owner_did else {})
+
+
+def function_remove(id: str, owner_did: str, did_envelope: Optional[str] = None) -> dict:
+    """Remove a function deployment. Owner-authenticated."""
+    return _rpc(
+        "tenzro_functionRemove",
+        _with_env({"id": id, "owner_did": owner_did}, did_envelope),
+    )
+
+
+# Machines (Firecracker microVMs) --------------------------------------
+
+
+def machine_deploy(
+    name: str,
+    owner_did: str,
+    artifact_caid: str,
+    internal_port: int,
+    resources: Optional[dict] = None,
+    sealed_env: Optional[dict] = None,
+    tee_required: Optional[bool] = None,
+    price_per_request: Optional[str] = None,
+    replicas: Optional[int] = None,
+    region_hint: Optional[str] = None,
+    max_price_per_hour: Optional[str] = None,
+    did_envelope: Optional[str] = None,
+) -> dict:
+    """Deploy a microVM from an image artifact CAID and the loopback port
+    the guest server listens on. Wrap each secret in `sealed_env` to the
+    node's X25519 sealing key first (see `machine_sealing_key`).
+    """
+    params: dict = {
+        "name": name,
+        "owner_did": owner_did,
+        "artifact_caid": artifact_caid,
+        "internal_port": internal_port,
+    }
+    if resources is not None:
+        params["resources"] = resources
+    if sealed_env is not None:
+        params["sealed_env"] = sealed_env
+    if tee_required is not None:
+        params["tee_required"] = tee_required
+    if price_per_request is not None:
+        params["price_per_request"] = price_per_request
+    if replicas is not None:
+        params["replicas"] = replicas
+    if region_hint is not None:
+        params["region_hint"] = region_hint
+    if max_price_per_hour is not None:
+        params["max_price_per_hour"] = max_price_per_hour
+    return _rpc("tenzro_machineDeploy", _with_env(params, did_envelope))
+
+
+def machine_get(id: str) -> dict:
+    """Fetch a machine deployment by id."""
+    return _rpc("tenzro_machineGet", {"id": id})
+
+
+def list_machines(owner_did: Optional[str] = None) -> dict:
+    """List machine deployments, optionally filtered by owner DID."""
+    return _rpc("tenzro_listMachines", {"owner_did": owner_did} if owner_did else {})
+
+
+def machine_remove(id: str, owner_did: str, did_envelope: Optional[str] = None) -> dict:
+    """Remove a machine deployment (stops any running microVM first). Owner-authenticated."""
+    return _rpc(
+        "tenzro_machineRemove",
+        _with_env({"id": id, "owner_did": owner_did}, did_envelope),
+    )
+
+
+def machine_status(id: str) -> dict:
+    """Live run-state of a machine deployment."""
+    return _rpc("tenzro_machineStatus", {"id": id})
+
+
+def machine_sealing_key() -> dict:
+    """This node's X25519 machine-sealing public key. Wrap each environment
+    secret to this key before `machine_deploy` so plaintext never leaves
+    the deployer. Returns {sealing_public_key (hex), alg}.
+    """
+    return _rpc("tenzro_machineSealingKey", {})
+
+
+# Placement leases -----------------------------------------------------
+
+
+def list_leases() -> dict:
+    """All placement leases across every hosted app on this node's scheduler."""
+    return _rpc("tenzro_listLeases", {})
+
+
+def get_leases_for_app(app_id: str) -> dict:
+    """Placement leases for a single app (site / function / machine) id."""
+    return _rpc("tenzro_getLeasesForApp", {"app_id": app_id})
 
 
 # ── CCT (Chainlink Cross-Chain Token) Pool Registry ──────────────
