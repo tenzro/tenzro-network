@@ -190,6 +190,19 @@ def route_message(text: str) -> str:
         "mdns", "reachability", "node profile", "hardware profile",
     ]):
         return "discovery"
+    # App hosting must precede the broad Tier 3 routes: "sealing key"
+    # contains "seal" (tee), "function deploy" contains "deploy"
+    # (contract), and static-site publishing overlaps "model"/"deploy".
+    if any(k in t for k in [
+        "hosting", "publish site", "static site", "static export",
+        "site alias", "site placement", "custom domain", "claim domain",
+        "verify domain", "apps.tenzro.xyz", "wasi:http", "wasi http",
+        "wasm function", "function deploy", "deploy function",
+        "microvm", "micro vm", "firecracker", "machine deploy",
+        "deploy machine", "machine status", "sealing key",
+        "placement lease", "serving lease",
+    ]):
+        return "hosting"
     if any(k in t for k in [
         "database", "managed database", "database engine", "database partition",
         "database query", "database connection", "create database",

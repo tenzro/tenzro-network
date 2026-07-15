@@ -500,6 +500,20 @@ impl PlacementScheduler {
         for node_id in node_ids {
             self.drop_lease_row(app_id, &node_id)?;
         }
+        // Storage-authoritative sweep: delete any lease row under this app's
+        // prefix that the in-memory map did not cover (e.g. a row persisted by a
+        // prior process instance that failed to hydrate).
+        if let Some(storage) = &self.storage {
+            let prefix = lease_app_prefix(app_id);
+            let keys = storage
+                .get_keys_with_prefix(CF_METADATA, &prefix)
+                .map_err(|e| PlacementError::Storage(e.to_string()))?;
+            for key in keys {
+                storage
+                    .delete(CF_METADATA, &key)
+                    .map_err(|e| PlacementError::Storage(e.to_string()))?;
+            }
+        }
         // Empty serving set removes the placement record.
         self.ingress
             .set_placement(app_id, Vec::new(), now_ms)

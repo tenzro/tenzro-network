@@ -25,6 +25,11 @@ pub enum NetworkRole {
     ModelProvider,
     /// Storage provider node
     StorageProvider,
+    /// Edge/ingress node — terminates public TLS at a controlled DNS name and
+    /// host-routes any incoming hostname to whichever fleet node holds the
+    /// content, serving locally or forwarding over p2p. Any operator can run
+    /// one; it is a public front door, not a consensus participant.
+    Edge,
     /// Archive node (stores full history)
     Archive,
     /// Bootstrap/seed node
@@ -49,6 +54,11 @@ impl NetworkRole {
         )
     }
 
+    /// Checks if this role terminates public TLS and host-routes ingress.
+    pub fn is_edge(&self) -> bool {
+        matches!(self, Self::Edge)
+    }
+
     /// Checks if this role maintains full state
     pub fn is_full_node(&self) -> bool {
         matches!(
@@ -71,6 +81,7 @@ impl NetworkRole {
             Self::TeeProvider => "tee",
             Self::ModelProvider => "ai",
             Self::StorageProvider => "storage",
+            Self::Edge => "edge",
             Self::Archive => "archive",
             Self::Bootstrap => "bootstrap",
             Self::MicroNode => "micro",
@@ -97,6 +108,7 @@ impl FromStr for NetworkRole {
                 Ok(Self::ModelProvider)
             }
             "storage" | "storageprovider" | "storage_provider" => Ok(Self::StorageProvider),
+            "edge" | "ingress" => Ok(Self::Edge),
             "archive" => Ok(Self::Archive),
             "bootstrap" | "seed" => Ok(Self::Bootstrap),
             "micro" | "micronode" | "user" => Ok(Self::MicroNode),
@@ -184,6 +196,11 @@ impl RoleSet {
     /// True if the node offers TEE confidential compute.
     pub fn serves_tee(&self) -> bool {
         self.has(NetworkRole::TeeProvider)
+    }
+
+    /// True if the node terminates public TLS and host-routes ingress.
+    pub fn serves_edge(&self) -> bool {
+        self.has(NetworkRole::Edge)
     }
 
     /// True if the node provides any paid service (AI, storage, or TEE).
@@ -578,6 +595,7 @@ mod tests {
             NetworkRole::TeeProvider,
             NetworkRole::ModelProvider,
             NetworkRole::StorageProvider,
+            NetworkRole::Edge,
             NetworkRole::Archive,
             NetworkRole::Bootstrap,
             NetworkRole::MicroNode,

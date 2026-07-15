@@ -201,32 +201,32 @@ unsafe fn dot_q8_0_avx512_vnni(a: &[u8], b: &[u8]) -> f32 {
         let da = f16::from_le_bytes([ab[0], ab[1]]).to_f32();
         let db = f16::from_le_bytes([bb[0], bb[1]]).to_f32();
 
-        // 32 i8 quants per block. Load as __m256i (32 bytes).
-        let qa = _mm256_loadu_si256(ab.as_ptr().add(2) as *const __m256i);
-        let qb = _mm256_loadu_si256(bb.as_ptr().add(2) as *const __m256i);
+        let raw = unsafe {
+            // 32 i8 quants per block. Load as __m256i (32 bytes).
+            let qa = _mm256_loadu_si256(ab.as_ptr().add(2) as *const __m256i);
+            let qb = _mm256_loadu_si256(bb.as_ptr().add(2) as *const __m256i);
 
-        // vpdpbusd wants u8 × i8. Q8_0 quants are signed i8; make the `a`
-        // side unsigned by adding 128 and correct the bias afterward:
-        //   Σ (aᵢ+128)·bᵢ = Σ aᵢ·bᵢ + 128·Σ bᵢ
-        // so subtract 128·Σ bᵢ.
-        let bias = _mm256_set1_epi8(-128i8 as u8 as i8);
-        let qa_u = _mm256_sub_epi8(qa, bias); // aᵢ + 128, as u8 bit-pattern
+            // vpdpbusd wants u8 × i8. Q8_0 quants are signed i8; make the `a`
+            // side unsigned by adding 128 and correct the bias afterward:
+            //   Σ (aᵢ+128)·bᵢ = Σ aᵢ·bᵢ + 128·Σ bᵢ
+            // so subtract 128·Σ bᵢ.
+            let bias = _mm256_set1_epi8(-128i8 as u8 as i8);
+            let qa_u = _mm256_sub_epi8(qa, bias); // aᵢ + 128, as u8 bit-pattern
 
-        let zero = _mm256_setzero_si256();
-        let mut dot = _mm256_setzero_si256();
-        dot = _mm256_dpbusd_epi32(dot, qa_u, qb);
+            let mut dot = _mm256_setzero_si256();
+            dot = _mm256_dpbusd_epi32(dot, qa_u, qb);
 
-        // Σ bᵢ via vpdpbusd of ones(u8) · b(i8).
-        let ones = _mm256_set1_epi8(1);
-        let mut sum_b = _mm256_setzero_si256();
-        sum_b = _mm256_dpbusd_epi32(sum_b, ones, qb);
+            // Σ bᵢ via vpdpbusd of ones(u8) · b(i8).
+            let ones = _mm256_set1_epi8(1);
+            let mut sum_b = _mm256_setzero_si256();
+            sum_b = _mm256_dpbusd_epi32(sum_b, ones, qb);
 
-        // Horizontal-sum both i32x8 accumulators.
-        let dot_sum = hsum_i32x8(dot);
-        let b_sum = hsum_i32x8(sum_b);
-        let _ = zero;
+            // Horizontal-sum both i32x8 accumulators.
+            let dot_sum = hsum_i32x8(dot);
+            let b_sum = hsum_i32x8(sum_b);
 
-        let raw = dot_sum - 128 * b_sum;
+            dot_sum - 128 * b_sum
+        };
         acc += (raw as f32) * da * db;
     }
     acc
@@ -237,12 +237,14 @@ unsafe fn dot_q8_0_avx512_vnni(a: &[u8], b: &[u8]) -> f32 {
 #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
 unsafe fn hsum_i32x8(v: std::arch::x86_64::__m256i) -> i32 {
     use std::arch::x86_64::*;
-    let lo = _mm256_castsi256_si128(v);
-    let hi = _mm256_extracti128_si256(v, 1);
-    let s = _mm_add_epi32(lo, hi);
-    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
-    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b00_00_00_01));
-    _mm_cvtsi128_si32(s)
+    unsafe {
+        let lo = _mm256_castsi256_si128(v);
+        let hi = _mm256_extracti128_si256(v, 1);
+        let s = _mm_add_epi32(lo, hi);
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b00_00_00_01));
+        _mm_cvtsi128_si32(s)
+    }
 }
 
 /// Which compute backend the runtime resolved for this node.

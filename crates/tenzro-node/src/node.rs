@@ -9209,7 +9209,10 @@ impl TenzroNode {
         // anonymous on this topic. Hardware is detected once at startup; the
         // served-models snapshot is re-read from the live `Arc<DashMap>` at
         // each tick.
-        if self.config.roles.is_provider() || self.config.roles.is_validator() {
+        if self.config.roles.is_provider()
+            || self.config.roles.is_validator()
+            || self.config.roles.serves_edge()
+        {
             // The probe shells out to vendor tools (nvidia-smi / rocm-smi /
             // sysctl) synchronously — keep it off the async executor.
             let mut hardware =
@@ -9252,12 +9255,19 @@ impl TenzroNode {
             if self.config.roles.is_validator() {
                 capabilities.push("consensus".to_string());
             }
+            if self.config.roles.serves_edge() {
+                // Serving nodes read this to discover which peers can terminate
+                // public TLS and front them over the `tenzro/http` ALPN.
+                capabilities.push("edge-ingress".to_string());
+            }
             let provider_type: &str = if self.config.roles.serves_ai() {
                 "llm"
             } else if self.config.roles.serves_tee() {
                 "tee"
             } else if self.config.roles.serves_storage() {
                 "storage"
+            } else if self.config.roles.serves_edge() {
+                "edge"
             } else {
                 "general"
             };

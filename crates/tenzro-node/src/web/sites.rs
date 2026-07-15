@@ -63,7 +63,7 @@ pub async fn serve_site_asset(
     serve(state, site_id, Some(path), headers).await
 }
 
-async fn serve(
+pub(crate) async fn serve(
     state: Arc<WebState>,
     site_id: String,
     path: Option<String>,

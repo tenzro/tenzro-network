@@ -1,0 +1,80 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenzro-validator-policy
+  namespace: tenzro-testnet
+spec:
+  podSelector:
+    matchLabels:
+      component: validator
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow P2P from within cluster
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tenzro-testnet
+      ports:
+        - port: 9000
+          protocol: TCP
+    # Allow RPC from within cluster
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tenzro-testnet
+      ports:
+        - port: 8545
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+    # Allow metrics scraping
+    - from: []
+      ports:
+        - port: 9090
+          protocol: TCP
+  egress:
+    # Allow all egress (P2P, DNS, etc.)
+    - {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenzro-rpc-policy
+  namespace: tenzro-testnet
+spec:
+  podSelector:
+    matchLabels:
+      component: rpc
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow public RPC/Web/MCP/A2A and ecosystem MCP access
+    - ports:
+        - port: 8545
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+        - port: 3001
+          protocol: TCP
+        - port: 3002
+          protocol: TCP
+        - port: 3003
+          protocol: TCP
+        - port: 3004
+          protocol: TCP
+        - port: 3005
+          protocol: TCP
+        - port: 3006
+          protocol: TCP
+        - port: 3007
+          protocol: TCP
+    # Allow P2P from validators
+    - from:
+        - podSelector:
+            matchLabels:
+              component: validator
+      ports:
+        - port: 9000
+          protocol: TCP

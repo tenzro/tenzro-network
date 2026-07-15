@@ -1,0 +1,140 @@
+# Headless service for validator StatefulSet (P2P discovery)
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenzro-validator
+  namespace: tenzro-testnet
+  labels:
+    app: tenzro
+    component: validator
+spec:
+  clusterIP: None
+  selector:
+    app: tenzro
+    component: validator
+  ports:
+    - name: p2p
+      port: 9000
+      targetPort: p2p
+    - name: rpc
+      port: 8545
+      targetPort: rpc
+    - name: web
+      port: 8080
+      targetPort: web
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+---
+# LoadBalancer for public RPC access
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenzro-rpc-public
+  namespace: tenzro-testnet
+  labels:
+    app: tenzro
+    component: rpc
+spec:
+  type: ClusterIP
+  selector:
+    app: tenzro
+    component: rpc
+  ports:
+    - name: rpc
+      port: 8545
+      targetPort: rpc
+    - name: web
+      port: 8080
+      targetPort: web
+    - name: mcp
+      port: 3001
+      targetPort: mcp
+    - name: a2a
+      port: 3002
+      targetPort: a2a
+    - name: solana-mcp
+      port: 3003
+      targetPort: solana-mcp
+    - name: eth-mcp
+      port: 3004
+      targetPort: eth-mcp
+    - name: canton-mcp
+      port: 3005
+      targetPort: canton-mcp
+    - name: lz-mcp
+      port: 3006
+      targetPort: lz-mcp
+    - name: cl-mcp
+      port: 3007
+      targetPort: cl-mcp
+    - name: lifi-mcp
+      port: 3008
+      targetPort: lifi-mcp
+---
+# ClusterIP for internal RPC access
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenzro-rpc-internal
+  namespace: tenzro-testnet
+spec:
+  type: ClusterIP
+  selector:
+    app: tenzro
+    component: rpc
+  ports:
+    - name: rpc
+      port: 8545
+      targetPort: rpc
+    - name: web
+      port: 8080
+      targetPort: web
+    - name: mcp
+      port: 3001
+      targetPort: mcp
+    - name: a2a
+      port: 3002
+      targetPort: a2a
+    - name: solana-mcp
+      port: 3003
+      targetPort: solana-mcp
+    - name: eth-mcp
+      port: 3004
+      targetPort: eth-mcp
+    - name: canton-mcp
+      port: 3005
+      targetPort: canton-mcp
+    - name: lz-mcp
+      port: 3006
+      targetPort: lz-mcp
+    - name: cl-mcp
+      port: 3007
+      targetPort: cl-mcp
+    - name: lifi-mcp
+      port: 3008
+      targetPort: lifi-mcp
+---
+# Internal LoadBalancer for P2P access from GCE model-provider nodes
+# Static IP 10.0.0.10 on the VPC, used as boot-node address
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenzro-validator-p2p-lb
+  namespace: tenzro-testnet
+  labels:
+    app: tenzro
+    component: validator
+  annotations:
+    networking.gke.io/load-balancer-type: "Internal"
+spec:
+  type: LoadBalancer
+  loadBalancerIP: "10.0.0.10"
+  selector:
+    app: tenzro
+    component: validator
+  ports:
+    - name: p2p
+      port: 9000
+      targetPort: p2p
+      protocol: TCP

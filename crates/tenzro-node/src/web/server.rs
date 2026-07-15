@@ -48,10 +48,10 @@ impl PaymentGateSetup {
     }
 }
 
-/// Host-header rewrite. When an incoming request's `Host` maps to a registered
-/// site alias or a verified custom domain, rewrite the URI path to
-/// `/sites/<site_id><path>` so the static-site handlers serve it. A custom
-/// hostname (`myapp.apps.tenzro.xyz`) or an owner's own domain
+/// Host-header dispatch. When an incoming request's `Host` maps to a registered
+/// site alias or a verified custom domain, serve it from that site's manifest
+/// (path `<path>` under `site_id`) so the static-site handler renders it. A
+/// custom hostname (`myapp.apps.tenzro.xyz`) or an owner's own domain
 /// (`shop.example.com`) thus lands on its site without the caller ever naming
 /// the raw site id. Aliases are checked first; a verified custom domain is the
 /// fallback. Unverified custom domains do not resolve, so an in-flight claim
@@ -64,7 +64,7 @@ impl PaymentGateSetup {
 /// aliases only ever add site paths, never intercept the control plane.
 async fn host_alias_rewrite(
     axum::extract::State(state): axum::extract::State<Arc<WebState>>,
-    mut req: axum::extract::Request,
+    req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     if let Some(node) = state.node.as_ref() {
@@ -93,16 +93,18 @@ async fn host_alias_rewrite(
                 }
             }
 
-            let suffix = if path == "/" { "" } else { path.as_str() };
-            let query = req
-                .uri()
-                .query()
-                .map(|q| format!("?{q}"))
-                .unwrap_or_default();
-            let rewritten = format!("/sites/{site_id}{suffix}{query}");
-            if let Ok(uri) = rewritten.parse::<axum::http::Uri>() {
-                *req.uri_mut() = uri;
-            }
+            // Dispatch straight to the site handler rather than mutating the URI
+            // and re-entering the router. `Router::layer` in axum 0.7 wraps each
+            // matched route *after* routing has already run against the original
+            // path, so a rewritten URI would never re-route — the request would
+            // fall through to the 404 fallback. Calling `serve` directly with the
+            // resolved `site_id` skips routing entirely.
+            let asset = path
+                .strip_prefix('/')
+                .filter(|p| !p.is_empty())
+                .map(|p| p.to_string());
+            let headers = req.headers().clone();
+            return crate::web::sites::serve(state.clone(), site_id, asset, headers).await;
         }
     }
     next.run(req).await

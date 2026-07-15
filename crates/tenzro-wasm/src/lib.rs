@@ -30,7 +30,7 @@ pub mod wasi_state;
 pub use capabilities::{NetworkCapability, SkillCapabilities, StorageCapability};
 pub use engine::WasmEngine;
 pub use error::{WasmError, WasmResult};
-pub use host::{HostInterface, HostInvocation, InvocationResult};
+pub use host::{HostInterface, HostInvocation, InvocationResult, SharedHost};
 pub use http::{
     incoming_body_from_bytes, FunctionResponse, HttpComponent, IncomingBody, OutgoingBody, Scheme,
 };

@@ -1841,5 +1841,315 @@ class TestManagedDatabases(unittest.TestCase):
         self.assertEqual(kwargs["json"]["params"]["database_id"], "vecmem")
 
 
+class TestHosting(unittest.TestCase):
+    """Tests for the app-hosting site / function / machine / lease wrappers."""
+
+    _OWNER = "did:tenzro:human:abc"
+    _ENV = "signed-envelope-value"
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_publish_minimal(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"site_id": "site_123"})
+        routes = [
+            {
+                "path": "/index.html",
+                "blob_hash": "blake3hex",
+                "content_type": "text/html",
+                "size": 42,
+            }
+        ]
+        result = tenzro_rpc.site_publish("my-app", self._OWNER, routes)
+        self.assertEqual(result["site_id"], "site_123")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_sitePublish")
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["name"], "my-app")
+        self.assertEqual(params["owner_did"], self._OWNER)
+        self.assertEqual(params["routes"], routes)
+        # No optional fields and no envelope when not supplied.
+        self.assertNotIn("did_envelope", params)
+        self.assertNotIn("spa", params)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_publish_with_options_and_envelope(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"site_id": "site_123"})
+        tenzro_rpc.site_publish(
+            "my-app",
+            self._OWNER,
+            [],
+            index_path="/main.html",
+            not_found_path="/404.html",
+            spa=True,
+            price_per_request="1000",
+            replicas=3,
+            region_hint="europe-west1",
+            max_price_per_hour="500",
+            did_envelope=self._ENV,
+        )
+        _, kwargs = mock_post.call_args
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["index_path"], "/main.html")
+        self.assertEqual(params["not_found_path"], "/404.html")
+        self.assertTrue(params["spa"])
+        self.assertEqual(params["price_per_request"], "1000")
+        self.assertEqual(params["replicas"], 3)
+        self.assertEqual(params["region_hint"], "europe-west1")
+        self.assertEqual(params["max_price_per_hour"], "500")
+        self.assertEqual(params["did_envelope"], self._ENV)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_get(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"site_id": "site_123", "routes": []})
+        result = tenzro_rpc.site_get("site_123")
+        self.assertEqual(result["site_id"], "site_123")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteGet")
+        self.assertEqual(kwargs["json"]["params"]["site_id"], "site_123")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_sites_filtered(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"sites": []})
+        tenzro_rpc.list_sites(self._OWNER)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_listSites")
+        self.assertEqual(kwargs["json"]["params"]["owner_did"], self._OWNER)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_sites_unfiltered(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"sites": []})
+        tenzro_rpc.list_sites()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["params"], {})
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_remove_carries_envelope(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"removed": True})
+        tenzro_rpc.site_remove("site_123", self._OWNER, did_envelope=self._ENV)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteRemove")
+        self.assertEqual(kwargs["json"]["params"]["did_envelope"], self._ENV)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_set_alias(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"hostname": "my-app.apps.tenzro.xyz"})
+        tenzro_rpc.site_set_alias(
+            "my-app.apps.tenzro.xyz", "site_123", self._OWNER, did_envelope=self._ENV
+        )
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteSetAlias")
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["hostname"], "my-app.apps.tenzro.xyz")
+        self.assertEqual(params["site_id"], "site_123")
+        self.assertEqual(params["did_envelope"], self._ENV)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_get_alias(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"site_id": "site_123"})
+        tenzro_rpc.site_get_alias("my-app.apps.tenzro.xyz")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteGetAlias")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_site_aliases(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"aliases": []})
+        tenzro_rpc.list_site_aliases()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_listSiteAliases")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_remove_alias(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"removed": True})
+        tenzro_rpc.site_remove_alias("my-app.apps.tenzro.xyz", self._OWNER)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteRemoveAlias")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_set_placement(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"serving_nodes": ["node1"]})
+        tenzro_rpc.site_set_placement("site_123", ["node1", "node2"])
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteSetPlacement")
+        self.assertEqual(
+            kwargs["json"]["params"]["serving_nodes"], ["node1", "node2"]
+        )
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_get_placement(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"serving_nodes": []})
+        tenzro_rpc.site_get_placement("site_123")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteGetPlacement")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_site_placements(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"placements": []})
+        tenzro_rpc.list_site_placements()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_listSitePlacements")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_remove_placement(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"removed": True})
+        tenzro_rpc.site_remove_placement("site_123")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteRemovePlacement")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_claim_domain(self, mock_post):
+        mock_post.return_value = _mock_rpc_response(
+            {"ownership_txt_name": "_tenzro.example.com", "dns_records": []}
+        )
+        result = tenzro_rpc.site_claim_domain(
+            "example.com", "site_123", self._OWNER, did_envelope=self._ENV
+        )
+        self.assertIn("ownership_txt_name", result)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteClaimDomain")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_verify_domain(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"verified": True})
+        tenzro_rpc.site_verify_domain("example.com", self._OWNER)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteVerifyDomain")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_get_domain(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"status": "verified"})
+        tenzro_rpc.site_get_domain("example.com")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteGetDomain")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_site_domains(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"domains": []})
+        tenzro_rpc.list_site_domains(self._OWNER)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_listSiteDomains")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_site_remove_domain(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"removed": True})
+        tenzro_rpc.site_remove_domain("example.com", self._OWNER)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_siteRemoveDomain")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_function_deploy(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"id": "fn_1"})
+        tenzro_rpc.function_deploy(
+            "fn",
+            self._OWNER,
+            "wasmblob",
+            fuel_limit=1_000_000,
+            deadline_ms=5000,
+            did_envelope=self._ENV,
+        )
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_functionDeploy")
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["wasm_blob_hash"], "wasmblob")
+        self.assertEqual(params["fuel_limit"], 1_000_000)
+        self.assertEqual(params["deadline_ms"], 5000)
+        self.assertEqual(params["did_envelope"], self._ENV)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_function_get(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"id": "fn_1"})
+        tenzro_rpc.function_get("fn_1")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_functionGet")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_functions(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"functions": []})
+        tenzro_rpc.list_functions()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_listFunctions")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_function_remove(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"removed": True})
+        tenzro_rpc.function_remove("fn_1", self._OWNER)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_functionRemove")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_machine_deploy(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"id": "vm_1"})
+        tenzro_rpc.machine_deploy(
+            "vm",
+            self._OWNER,
+            "caid123",
+            8080,
+            resources={"vcpus": 2, "mem_mib": 512},
+            sealed_env={"SECRET": "wrapped"},
+            tee_required=True,
+            did_envelope=self._ENV,
+        )
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_machineDeploy")
+        params = kwargs["json"]["params"]
+        self.assertEqual(params["artifact_caid"], "caid123")
+        self.assertEqual(params["internal_port"], 8080)
+        self.assertEqual(params["resources"], {"vcpus": 2, "mem_mib": 512})
+        self.assertEqual(params["sealed_env"], {"SECRET": "wrapped"})
+        self.assertTrue(params["tee_required"])
+
+    @patch("tenzro_rpc.requests.post")
+    def test_machine_get(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"id": "vm_1"})
+        tenzro_rpc.machine_get("vm_1")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_machineGet")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_machines(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"machines": []})
+        tenzro_rpc.list_machines()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_listMachines")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_machine_remove(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"removed": True})
+        tenzro_rpc.machine_remove("vm_1", self._OWNER)
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_machineRemove")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_machine_status(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"state": "running"})
+        result = tenzro_rpc.machine_status("vm_1")
+        self.assertEqual(result["state"], "running")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_machineStatus")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_machine_sealing_key(self, mock_post):
+        mock_post.return_value = _mock_rpc_response(
+            {"sealing_public_key": "abcd", "alg": "x25519-envelope-aes-256-gcm"}
+        )
+        result = tenzro_rpc.machine_sealing_key()
+        self.assertEqual(result["alg"], "x25519-envelope-aes-256-gcm")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_machineSealingKey")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_leases(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"leases": []})
+        tenzro_rpc.list_leases()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_listLeases")
+
+    @patch("tenzro_rpc.requests.post")
+    def test_get_leases_for_app(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"leases": []})
+        tenzro_rpc.get_leases_for_app("site_123")
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["method"], "tenzro_getLeasesForApp")
+        self.assertEqual(kwargs["json"]["params"]["app_id"], "site_123")
+
+
 if __name__ == "__main__":
     unittest.main()

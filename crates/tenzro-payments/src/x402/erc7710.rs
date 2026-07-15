@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
-use sha3::{Digest as Sha3Digest, Keccak256};
+use sha3::Keccak256;
 
 use crate::error::{PaymentError, Result};
 use crate::types::{PaymentChallenge, PaymentCredential};

@@ -7811,7 +7811,9 @@ async fn handle_site_remove(
         })?;
 
     let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    node.placement_scheduler().release_app(&manifest.site_id, now_ms);
+    if let Err(e) = node.placement_scheduler().release_app(&manifest.site_id, now_ms) {
+        tracing::warn!(site_id = %manifest.site_id, error = %e, "placement release failed on site removal");
+    }
 
     Ok(serde_json::json!({
         "removed": true,
@@ -8060,7 +8062,9 @@ async fn handle_function_remove(
     node.function_components().invalidate(&deployment.id);
 
     let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    node.placement_scheduler().release_app(&deployment.id, now_ms);
+    if let Err(e) = node.placement_scheduler().release_app(&deployment.id, now_ms) {
+        tracing::warn!(app_id = %deployment.id, error = %e, "placement release failed on undeploy");
+    }
 
     Ok(serde_json::json!({
         "removed": true,
@@ -8324,7 +8328,9 @@ async fn handle_machine_remove(
         .map_err(machine_error_to_rpc)?;
 
     let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    node.placement_scheduler().release_app(&deployment.id, now_ms);
+    if let Err(e) = node.placement_scheduler().release_app(&deployment.id, now_ms) {
+        tracing::warn!(app_id = %deployment.id, error = %e, "placement release failed on undeploy");
+    }
 
     Ok(serde_json::json!({
         "removed": true,

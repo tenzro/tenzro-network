@@ -110,7 +110,7 @@ For the full architecture see [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) and [`d
 | **tenzro-events** | Event sourcing and subscription system with replay, webhooks, websockets |
 | **tenzro-workflow** | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
 | **tenzro-wasm** | WASI 0.2 component host for sandboxed agent skills and MCP tools: language-agnostic, capability-based, deterministic fuel metering, content-addressed component identity |
-| **tenzro-node** | Full node binary: JSON-RPC (700+ methods), MCP (500+ tools), A2A (35 skills), Web API |
+| **tenzro-node** | Full node binary: JSON-RPC (700+ methods), MCP (500+ tools), A2A (68 skills), Web API |
 | **tenzro-cli** | CLI tool: 101 command modules with interactive mode and full RPC coverage |
 
 ## Quick Start
@@ -207,7 +207,7 @@ The node exposes 4 protocol servers, plus 6 ecosystem MCP servers:
 | **JSON-RPC** | 8545 | HTTP | 700+ methods across 30+ namespaces (EVM-compatible + Tenzro extensions, incl. multi-modal AI: forecast, vision, text-embed, segmentation, detection, audio, video; MoE sharded serving; LAN clustering; managed databases; app hosting: sites, functions, machines, leases; CAIP discovery; EIP-7702 delegation; Permit2; Secure-Mint; Capital Intent; Workflow) |
 | **Web API** | 8080 | REST | Verification, status, faucet, health |
 | **MCP** | 3001 | Streamable HTTP | 500+ tools + OAuth 2.1 |
-| **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 35 skills, task streaming |
+| **A2A** | 3002 | JSON-RPC + SSE | Agent Card with 68 skills, task streaming |
 
 ### Ecosystem MCP Servers
 
@@ -364,7 +364,7 @@ The workflow runtime is its own state machine. It runs alongside (not inside) th
 | Component | Repository | Description |
 |-----------|------------|-------------|
 | **MCP Server** (Python) | [tenzro/tenzro-mcp-server](https://github.com/tenzro/tenzro-mcp-server) | 300+ tools, FastMCP 3.2 |
-| **A2A Server** (Python) | [tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) | 67 skills, FastAPI |
+| **A2A Server** (Python) | [tenzro/tenzro-a2a-server](https://github.com/tenzro/tenzro-a2a-server) | 68 skills, FastAPI |
 | **TenzroClaw** (Python) | [tenzro/TenzroClaw](https://github.com/tenzro/TenzroClaw) | 599 commands, OpenClaw skill |
 | **Rust SDK** | [tenzro/tenzro-sdk-rust](https://github.com/tenzro/tenzro-sdk-rust) | 76 modules |
 | **TypeScript SDK** | [tenzro/tenzro-sdk-typescript](https://github.com/tenzro/tenzro-sdk-typescript) | 84 modules |

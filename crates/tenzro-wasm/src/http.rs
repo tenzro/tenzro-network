@@ -255,7 +255,7 @@ impl HttpComponent {
     }
 
     /// Maps a wasmtime error into the fuel / deadline / trap variants.
-    fn classify_trap(err: anyhow::Error) -> WasmError {
+    fn classify_trap(err: wasmtime::Error) -> WasmError {
         // Wasmtime surfaces resource-limit traps as `wasmtime::Trap`
         // values wrapped in the anyhow chain.
         if let Some(trap) = err.downcast_ref::<wasmtime::Trap>() {
