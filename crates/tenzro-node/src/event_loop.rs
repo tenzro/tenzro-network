@@ -1344,7 +1344,16 @@ impl EventLoop {
         // interrupted cleanly while waiting for validator peers.
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        if let Some(ref network) = self.network {
+        // Edge nodes (no consensus engine — ModelProvider-only, storage-
+        // only, etc.) MUST NOT enter the validator warm-up. They have no
+        // consensus role, so waiting for admitted validator peers is
+        // (a) pointless — they can't participate anyway — and (b) noisy
+        // in the log, emitting a 30 s "Bootstrap quorum not yet reached"
+        // warning every attempt until infinity. Fixed 2026-07-16 after
+        // a Studio dev launch spent minutes emitting this warning for
+        // a NAT'd edge ModelProvider that never intended to validate.
+        if self.consensus.is_some() && self.network.is_some() {
+            let network = self.network.as_ref().expect("checked above");
             const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
             let warmup_start = std::time::Instant::now();
             let mut attempt: u32 = 0;
@@ -4956,6 +4965,27 @@ impl EventLoop {
                     "Failed to write erc8004_did_index entry; subsequent lookups will miss"
                 );
                 continue;
+            }
+
+            // 1b. Write the reverse owner-address → agentId index. The owner
+            //     is topics[2] (32-byte word, address in the low 20 bytes).
+            //     This is what the autonomous-agent bootstrap paymaster
+            //     consults via `AgentRegistryLookup::is_registered`.
+            let owner_topic = log.topics[2].as_slice();
+            if owner_topic.len() == 32 {
+                let owner_addr = &owner_topic[12..32];
+                let owner_key = crate::erc8004_mirror::owner_index_key(owner_addr);
+                if let Err(e) =
+                    self.storage.put(tenzro_storage::CF_IDENTITIES, &owner_key, &val)
+                {
+                    warn!(
+                        target: "tenzro::erc8004::listener",
+                        owner = %hex::encode(owner_addr),
+                        agent_id,
+                        error = %e,
+                        "Failed to write erc8004_owner_index entry; paymaster lookups will miss"
+                    );
+                }
             }
 
             // 2. Patch the in-memory TDIP record's `erc8004_agent_id`

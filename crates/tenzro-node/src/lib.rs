@@ -115,6 +115,7 @@ pub mod moe;
 pub mod mpc_keyshare_store;
 pub mod mpc_libp2p_adapter;
 pub mod mpc_threshold_signer;
+pub mod sealed_agent_wallet_signer;
 pub mod placement;
 pub mod compute_rental_runtime;
 pub mod cluster_serving_runtime;

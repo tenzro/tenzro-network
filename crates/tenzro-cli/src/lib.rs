@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod keystore;
 pub mod output;
 pub mod rpc;
 pub mod units;

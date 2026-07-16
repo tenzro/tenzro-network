@@ -519,6 +519,69 @@ def sign_and_send(from_addr: str, to_addr: str,
     )
 
 
+def send_self_custody_transaction(from_addr: str, to_addr: str, value: int,
+                                  signature: str, public_key: str,
+                                  pq_signature: str, pq_public_key: str,
+                                  timestamp: int,
+                                  gas_limit: int = 21000,
+                                  gas_price: int = 1_000_000_000,
+                                  nonce: int = None,
+                                  chain_id: int = None) -> dict:
+    """Submit a pre-signed self-custody TNZO transfer via eth_sendRawTransaction.
+
+    A self-custody runner holds its Ed25519 + ML-DSA-65 keypair locally (in a
+    TEE seal or an offline signer), builds the canonical Transaction::hash()
+    preimage, and signs both legs itself — the node never sees the secret.
+    This wrapper only forwards the already-signed material; it does not sign,
+    because ML-DSA-65 signing lives with the local signer (the Tenzro CLI
+    keystore, the Rust/TypeScript SDK, or a hardware enclave).
+
+    The preimage that `signature` and `pq_signature` cover is
+    `chain_id.le || from(32) || to(32) || nonce.le || gas_limit.le ||
+    gas_price.le || timestamp.le || {"Transfer":{"amount":<value>}} ||
+    pq_len.u32.le || pq_public_key` hashed with SHA-256. `timestamp` is the
+    ms-epoch used at signing time and MUST match — the node rebuilds the same
+    preimage and rejects a mismatch.
+
+    Args:
+        from_addr: 32-byte hex Ed25519 public key (the account address).
+        to_addr: 32-byte hex recipient address.
+        value: Amount in wei (1 TNZO = 10**18 wei).
+        signature: 64-byte hex Ed25519 signature over the preimage.
+        public_key: 32-byte hex Ed25519 public key (must derive from_addr).
+        pq_signature: 3309-byte hex ML-DSA-65 signature over the preimage.
+        pq_public_key: 1952-byte hex ML-DSA-65 verifying key.
+        timestamp: ms-epoch timestamp used when the preimage was built.
+        gas_limit: Gas limit used at signing time (default 21000).
+        gas_price: Gas price in wei used at signing time (default 1e9).
+        nonce: Nonce used at signing time. Queried live if omitted — pass it
+            explicitly when it must match a nonce fixed at signing.
+        chain_id: Chain id used at signing time. Queried live if omitted.
+    """
+    if nonce is None:
+        nonce_result = _rpc("eth_getTransactionCount", [from_addr, "latest"])
+        nonce = int(nonce_result, 16) if isinstance(nonce_result, str) else 0
+
+    if chain_id is None:
+        chain_id_result = _rpc("eth_chainId", [])
+        chain_id = int(chain_id_result, 16) if isinstance(chain_id_result, str) else 1337
+
+    return _rpc("eth_sendRawTransaction", {
+        "from": from_addr,
+        "to": to_addr,
+        "value": str(value),
+        "gas_limit": gas_limit,
+        "gas_price": gas_price,
+        "nonce": nonce,
+        "chain_id": chain_id,
+        "timestamp": timestamp,
+        "public_key": public_key,
+        "signature": signature,
+        "pq_public_key": pq_public_key,
+        "pq_signature": pq_signature,
+    })
+
+
 # ── Faucet ────────────────────────────────────────────────────────
 
 

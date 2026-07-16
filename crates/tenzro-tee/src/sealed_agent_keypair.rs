@@ -49,11 +49,26 @@ use zeroize::Zeroizing;
 
 use crate::error::{Result, TeeError};
 use crate::traits::TeeProvider;
+use tenzro_crypto::bls::BlsKeyPair;
+use tenzro_crypto::MlDsaSigningKey;
 use tenzro_types::tee::AttestationReport;
 
 /// HKDF info string for agent Ed25519 derivation. Bumped if the
 /// derivation chain ever changes.
 const HKDF_INFO: &[u8] = b"tenzro/sealed-agent-ed25519/v1";
+
+/// HKDF info string for the agent ML-DSA-65 seed derivation. A distinct
+/// info string from [`HKDF_INFO`] so the classical and post-quantum legs
+/// derive to independent secrets from the same TEE root.
+const HKDF_INFO_PQ: &[u8] = b"tenzro/sealed-agent-ml-dsa-65/v1";
+
+/// HKDF info string for the agent BLS12-381 seed derivation. A distinct
+/// info string again, so the BLS leg is independent of the classical and
+/// PQ legs while still rooting in the same TEE material. The BLS leg is
+/// the verifying key a machine identity needs to satisfy the wallet's
+/// structural invariant and, if the machine ever stakes as a validator,
+/// to aggregate HotStuff-2 votes.
+const HKDF_INFO_BLS: &[u8] = b"tenzro/sealed-agent-bls12-381/v1";
 
 /// Domain-separation prefix for the per-agent salt. Two agents with the
 /// same TEE root **must not** yield the same key — the salt mixes in the
@@ -86,6 +101,31 @@ pub struct AgentKeyHandle {
     /// The 32-byte Ed25519 secret scalar, behind `Arc<Zeroizing<_>>` so
     /// the byte buffer is zeroed when the last clone is dropped.
     secret_scalar: Arc<Zeroizing<[u8; 32]>>,
+    /// The ML-DSA-65 (FIPS 204) post-quantum leg. Derived from the same
+    /// TEE-rooted IKM as `secret_scalar` but under a distinct HKDF info
+    /// string, so the classical and PQ secrets are independent. Only the
+    /// 32-byte seed is retained (`MlDsaSigningKey` re-expands on every
+    /// sign); shared behind `Arc` so clones share one backing store.
+    pq_signing_key: Arc<MlDsaSigningKey>,
+    /// The BLS12-381 leg. Derived from the same TEE-rooted IKM under a
+    /// third distinct HKDF info string. Shared behind `Arc` so clones
+    /// share one backing store. Kept so the machine wallet's BLS
+    /// verifying key traces to the enclave root rather than a throwaway
+    /// key the node holds.
+    bls_key: Arc<BlsKeyPair>,
+}
+
+/// A hybrid (Ed25519 classical + ML-DSA-65 PQ) signature minted by an
+/// [`AgentKeyHandle`]. Wire-shape mirrors the wallet service's
+/// `HybridSignatureBytes`: both legs mandatory, no classical-only
+/// fallback. Machine wallets consume this in place of the FROST/ML-DSA
+/// reconstruction the Shamir keystore performed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedAgentHybridSignature {
+    /// Classical Ed25519 signature (64 bytes).
+    pub classical: Vec<u8>,
+    /// ML-DSA-65 signature (3309 bytes).
+    pub pq: Vec<u8>,
 }
 
 impl std::fmt::Debug for AgentKeyHandle {
@@ -149,6 +189,37 @@ impl AgentKeyHandle {
     /// returned key is local to this call and dropped after use.
     fn signing_key_local(&self) -> Ed25519SigningKey {
         Ed25519SigningKey::from_bytes(&self.secret_scalar)
+    }
+
+    /// The ML-DSA-65 verifying-key bytes (1952 bytes). This is the PQ
+    /// half of the machine wallet's hybrid public key; the classical
+    /// half is [`Self::pubkey`].
+    pub fn pq_verifying_key(&self) -> Vec<u8> {
+        self.pq_signing_key.verifying_key_bytes().to_vec()
+    }
+
+    /// The BLS12-381 G1-compressed verifying-key bytes (48 bytes,
+    /// `min_pk` scheme). Completes the machine wallet's three-key public
+    /// identity (Ed25519 classical + ML-DSA-65 PQ + BLS12-381).
+    pub fn bls_verifying_key(&self) -> Vec<u8> {
+        self.bls_key.public_key().to_bytes().to_vec()
+    }
+
+    /// Mint a hybrid signature over `message`: the Ed25519 leg and the
+    /// ML-DSA-65 leg both sign the same bytes. This is the machine-class
+    /// analogue of `WalletService::sign_data` — the node verifies the
+    /// pair instead of reconstructing FROST shares to mint it.
+    pub fn sign_hybrid(&self, message: &[u8]) -> SealedAgentHybridSignature {
+        let classical = self.sign(message).to_bytes().to_vec();
+        let pq = self.pq_signing_key.sign(message);
+        SealedAgentHybridSignature { classical, pq }
+    }
+
+    /// Mint a hybrid signature over a 32-byte prehash — the machine-class
+    /// analogue of `WalletService::sign_transaction`, which signs
+    /// `Transaction::hash()`. Both legs sign the 32 prehash bytes.
+    pub fn sign_prehash_hybrid(&self, prehash: &[u8; 32]) -> SealedAgentHybridSignature {
+        self.sign_hybrid(prehash.as_slice())
     }
 }
 
@@ -253,12 +324,32 @@ pub(crate) fn handle_from_ikm(
     let verifying = signing.verifying_key();
     drop(signing);
 
+    // PQ leg — a second 32-byte HKDF expansion under a distinct info
+    // string, off the same TEE root. ML-DSA-65 accepts any 32-byte seed
+    // ξ (FIPS 204), so there is no rejection path here either.
+    let mut pq_seed = Zeroizing::new([0u8; 32]);
+    hk.expand(HKDF_INFO_PQ, pq_seed.as_mut())
+        .map_err(|e| TeeError::CryptoError(format!("HKDF expand (pq) failed: {}", e)))?;
+    let pq_signing_key = MlDsaSigningKey::from_seed(pq_seed.as_slice())
+        .map_err(|e| TeeError::CryptoError(format!("ML-DSA-65 from_seed failed: {}", e)))?;
+
+    // BLS leg — a third 32-byte HKDF expansion under its own info string.
+    // The BLS `KeyGen` reduces the IKM into the scalar field, so any
+    // 32-byte string is a valid seed.
+    let mut bls_ikm = Zeroizing::new([0u8; 32]);
+    hk.expand(HKDF_INFO_BLS, bls_ikm.as_mut())
+        .map_err(|e| TeeError::CryptoError(format!("HKDF expand (bls) failed: {}", e)))?;
+    let bls_key = BlsKeyPair::from_ikm(bls_ikm.as_slice())
+        .map_err(|e| TeeError::CryptoError(format!("BLS12-381 from_ikm failed: {}", e)))?;
+
     Ok(AgentKeyHandle {
         agent_did: agent_did.to_string(),
         epoch,
         measurement,
         verifying_key: verifying,
         secret_scalar: Arc::new(scalar),
+        pq_signing_key: Arc::new(pq_signing_key),
+        bls_key: Arc::new(bls_key),
     })
 }
 
@@ -531,6 +622,78 @@ mod tests {
         let packet = vec![0x55u8; 72];
         let packed = pack_user_data_for_vendor(TeeVendor::AWSNitro, &packet);
         assert_eq!(packed, packet);
+    }
+
+    #[test]
+    fn pq_verifying_key_is_deterministic_and_sized() {
+        let a = fixed_handle("did:tenzro:machine:alice", 0);
+        let b = fixed_handle("did:tenzro:machine:alice", 0);
+        assert_eq!(a.pq_verifying_key(), b.pq_verifying_key());
+        // FIPS 204 §4 Table 2: ML-DSA-65 verifying key is 1952 bytes.
+        assert_eq!(a.pq_verifying_key().len(), 1952);
+    }
+
+    #[test]
+    fn bls_verifying_key_is_deterministic_and_sized() {
+        let a = fixed_handle("did:tenzro:machine:alice", 0);
+        let b = fixed_handle("did:tenzro:machine:alice", 0);
+        assert_eq!(a.bls_verifying_key(), b.bls_verifying_key());
+        // BLS12-381 G1-compressed (min_pk) verifying key is 48 bytes.
+        assert_eq!(a.bls_verifying_key().len(), 48);
+    }
+
+    #[test]
+    fn three_legs_are_independent() {
+        // Distinct HKDF info strings → three unrelated public keys.
+        let h = fixed_handle("did:tenzro:machine:alice", 0);
+        let ed = h.pubkey().to_vec();
+        let pq = h.pq_verifying_key();
+        let bls = h.bls_verifying_key();
+        assert_ne!(ed.as_slice(), &pq[..ed.len()]);
+        assert_ne!(ed.as_slice(), &bls[..ed.len().min(bls.len())]);
+        assert_ne!(&pq[..bls.len()], bls.as_slice());
+    }
+
+    #[test]
+    fn pq_leg_is_independent_of_classical_leg() {
+        // The two legs derive under distinct HKDF info strings, so the
+        // 32-byte Ed25519 secret and the 32-byte ML-DSA seed must differ.
+        let handle = fixed_handle("did:tenzro:machine:alice", 0);
+        let classical_secret = handle.secret_scalar.as_slice().to_vec();
+        // Reach the PQ seed via the public verifying key instead of the
+        // secret: two independent secrets yield unrelated pubkeys, and the
+        // Ed25519 pubkey (32B) is not a prefix of the ML-DSA vk (1952B).
+        assert_ne!(&handle.pq_verifying_key()[..32], classical_secret.as_slice());
+    }
+
+    #[test]
+    fn hybrid_sign_verifies_on_both_legs() {
+        use ed25519_dalek::Verifier;
+        let handle = fixed_handle("did:tenzro:machine:alice", 0);
+        let msg = b"machine wallet payload";
+        let sig = handle.sign_hybrid(msg);
+        // Classical leg: 64-byte Ed25519 over msg.
+        assert_eq!(sig.classical.len(), 64);
+        let ed_sig = Ed25519Signature::from_slice(&sig.classical).unwrap();
+        handle
+            .verifying_key()
+            .verify(msg, &ed_sig)
+            .expect("classical leg verifies");
+        // PQ leg: 3309-byte ML-DSA-65 over the same msg.
+        assert_eq!(sig.pq.len(), 3309);
+        tenzro_crypto::ml_dsa_verify(&handle.pq_verifying_key(), msg, &sig.pq)
+            .expect("pq leg verifies");
+    }
+
+    #[test]
+    fn sign_prehash_hybrid_signs_the_prehash_bytes() {
+        let handle = fixed_handle("did:tenzro:machine:alice", 0);
+        let prehash = [0x22u8; 32];
+        let via_prehash = handle.sign_prehash_hybrid(&prehash);
+        // Ed25519 is deterministic; the classical leg over the prehash
+        // must equal a direct hybrid-sign over the same 32 bytes.
+        let via_msg = handle.sign_hybrid(prehash.as_slice());
+        assert_eq!(via_prehash.classical, via_msg.classical);
     }
 
     #[test]

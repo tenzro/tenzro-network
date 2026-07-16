@@ -110,7 +110,7 @@ pub use mpc_signing::{MpcSigner, TransactionSigner};
 pub use nonce::NonceManager;
 pub use provisioning::{ProvisioningConfig, WalletProvisioner};
 pub use service::{TenzroWalletService, WalletServiceConfig};
-pub use signing::HybridSignatureBytes;
+pub use signing::{HybridSignatureBytes, HybridSigner};
 pub use state_sync::{ChainStateProvider, LocalStateProvider, WalletStateSync};
 pub use traits::WalletService;
 pub use userop::{

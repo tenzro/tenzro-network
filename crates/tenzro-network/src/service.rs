@@ -3628,10 +3628,34 @@ async fn handle_swarm_event(
                         .protocols
                         .iter()
                         .any(|p| *p == libp2p::relay::HOP_PROTOCOL_NAME);
+                    // Bootstrap peers are the validator-class relay-serving
+                    // nodes by convention. If the peer connected via one of
+                    // our configured boot addresses, treat it as a relay
+                    // candidate even if its identify `protocols` field
+                    // didn't advertise HOP explicitly — the deployed
+                    // validator image runs `enable_relay: true` per role
+                    // config so relay-server is up. This is the fallback
+                    // for the case where identify's protocol-list
+                    // serialization drops HOP (observed empty in the
+                    // 2026-07-15 verification run against a healthy fleet).
+                    let peer_is_bootstrap = state
+                        .bootstrap_peers
+                        .iter()
+                        .any(|(pid, _)| *pid == peer_id);
+                    let peer_looks_relayable = peer_speaks_hop || peer_is_bootstrap;
                     let already_attempted =
                         state.attempted_relay_reservations.contains(&peer_id);
+                    tracing::debug!(
+                        %peer_id,
+                        our_tier = %our_tier.as_str(),
+                        peer_speaks_hop,
+                        peer_is_bootstrap,
+                        already_attempted,
+                        proto_count = info.protocols.len(),
+                        "Identify: evaluating relay-reservation candidacy"
+                    );
                     if our_tier != ReachabilityTier::Direct
-                        && peer_speaks_hop
+                        && peer_looks_relayable
                         && !already_attempted
                     {
                         // Pick a reachable listen address for the relay
@@ -4190,77 +4214,19 @@ async fn handle_swarm_event(
                     }
                 }
 
-                // Eager Circuit-Relay v2 reservation on the first accepting
-                // publicly-reachable peer. Bootstrap peers are the natural
-                // candidates (they run `enable_relay: true` on validator
-                // class) but our configured DNS multiaddrs have NO
-                // `/p2p/<peer_id>` suffix, so `bootstrap_peers` (peer-keyed)
-                // is empty — we can only recognize a boot peer once it
-                // actually connects. Solution: try a reservation on any
-                // freshly-connected peer we've dialed OUTBOUND with a
-                // globally-routable remote address. If the peer doesn't
-                // support HOP the reservation errors and we move on;
-                // idempotency prevents retries on the same peer.
-                //
-                // Gated on: (a) we're NAT'd (not Direct), (b) the connection
-                // is outbound (we dialed them, i.e. they're a public peer we
-                // trust to relay via), (c) globally-routable remote, (d)
-                // haven't already tried this peer.
-                use crate::reachability::ReachabilityTier;
-                let our_tier = state.reachability.tier();
-                let is_outbound =
-                    matches!(&endpoint, libp2p::core::ConnectedPoint::Dialer { .. });
-                let is_routable = is_globally_routable(&remote_addr)
-                    || remote_addr.iter().any(|p| {
-                        matches!(
-                            p,
-                            libp2p::multiaddr::Protocol::Dns(_)
-                                | libp2p::multiaddr::Protocol::Dns4(_)
-                                | libp2p::multiaddr::Protocol::Dns6(_)
-                                | libp2p::multiaddr::Protocol::Dnsaddr(_)
-                        )
-                    });
-                let already_attempted =
-                    state.attempted_relay_reservations.contains(&peer_id);
-                if our_tier != ReachabilityTier::Direct
-                    && is_outbound
-                    && is_routable
-                    && !already_attempted
-                {
-                    // Reservation target: the address we just dialed, minus
-                    // any trailing /p2p/... suffix (we add it ourselves), then
-                    // /p2p/<pid>/p2p-circuit. libp2p relay-client resolves
-                    // this against the existing connection to `peer_id`.
-                    let mut circuit_addr = remote_addr
-                        .iter()
-                        .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
-                        .collect::<Multiaddr>();
-                    circuit_addr =
-                        circuit_addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
-                    circuit_addr =
-                        circuit_addr.with(libp2p::multiaddr::Protocol::P2pCircuit);
-                    match state.swarm.listen_on(circuit_addr.clone()) {
-                        Ok(listener_id) => {
-                            tracing::info!(
-                                %peer_id,
-                                our_tier = %our_tier.as_str(),
-                                ?listener_id,
-                                circuit = %circuit_addr,
-                                "Requesting Circuit-Relay v2 reservation \
-                                 (eager, on outbound connect)"
-                            );
-                            state.attempted_relay_reservations.insert(peer_id);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                %peer_id,
-                                error = %e,
-                                circuit = %circuit_addr,
-                                "Eager relay reservation failed"
-                            );
-                        }
-                    }
-                }
+                // NOTE: the on-connect eager reservation trigger was removed
+                // 2026-07-16. It raced with libp2p 0.21's relay-client
+                // handler installation: `listen_on(<relay>/p2p-circuit)`
+                // synchronously enqueues a Reserve message via the transport
+                // channel, but at connection-established time the
+                // ConnectionHandler that would consume that message on the
+                // relay's ConnectionId hasn't been installed yet, so the
+                // message drops silently — no reservation event, no error,
+                // no `NewListenAddr`. The IDENTIFY-time trigger (see the
+                // `identify::Event::Received` handler) fires ~200 ms later
+                // once the connection is fully set up and we've confirmed
+                // the peer speaks HOP, which is when reservations actually
+                // succeed.
             }
         }
         SwarmEvent::ConnectionClosed {

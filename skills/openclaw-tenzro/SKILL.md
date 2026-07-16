@@ -1821,8 +1821,9 @@ Falls back to `tenzro_participate` on older nodes.
 1. Call `tenzro_registerIdentity` with a display name
 2. Call `tenzro_createWallet` to provision the MPC wallet
 3. Call `POST /faucet` for testnet tokens
-4. Call `tenzro_signAndSendTransaction` (or `eth_sendRawTransaction` for
-   pre-signed payloads) to send TNZO
+4. Call `tenzro_signAndSendTransaction` (server-custodial) or, for self-custody,
+   sign both legs (Ed25519 + ML-DSA-65) locally and submit via
+   `eth_sendRawTransaction` — the node never holds the secret
 
 ### 3. Create agent with delegation scope
 
@@ -1924,7 +1925,8 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 **Wallet & Ledger:**
 - `get_balance` — Query TNZO balance by address
 - `create_wallet` — Provision a self-custody Tenzro 2-of-3 MPC wallet (32-byte address)
-- `send_transaction` — Send a TNZO transfer
+- `send_transaction` — Send a TNZO transfer (server-custodial path)
+- `send_self_custody_transaction` — Submit a self-custody transfer: the caller signs both legs (Ed25519 + ML-DSA-65) locally and passes the pre-signed hex material (`signature`, `public_key`, `pq_signature`, `pq_public_key`, `timestamp`); the tool forwards to `eth_sendRawTransaction` and the node never holds the secret
 - `request_faucet` — Request testnet tokens (100 TNZO, 24h cooldown)
 - `get_block` — Get block by height from storage
 - `get_block_range` — Batch-fetch a contiguous range of blocks for catch-up sync (max 256/call; returns `nextHeight` + `moreAvailable` for pagination across pruning gaps)

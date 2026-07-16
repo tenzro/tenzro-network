@@ -91,6 +91,43 @@ class TestWallet(unittest.TestCase):
         # Server returns the bare 64-char hex tx hash.
         self.assertEqual(len(result), 64)
 
+    @patch("tenzro_rpc.requests.post")
+    def test_send_self_custody_transaction(self, mock_post):
+        # Self-custody path: nonce + chain_id fixed at signing time, so only
+        # one RPC fires (eth_sendRawTransaction) carrying the pre-signed
+        # Ed25519 + ML-DSA-65 material. The node never sees the secret.
+        mock_post.side_effect = [
+            _mock_rpc_response(
+                "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+            ),
+        ]
+        result = tenzro_rpc.send_self_custody_transaction(
+            from_addr="0xfrom",
+            to_addr="0xto",
+            value=10**18,
+            signature="0xedsig",
+            public_key="0xedpub",
+            pq_signature="0xpqsig",
+            pq_public_key="0xpqpub",
+            timestamp=1_700_000_000_000,
+            nonce=4,
+            chain_id=1337,
+        )
+        self.assertEqual(len(result), 64)
+        sent = mock_post.call_args.kwargs["json"]
+        self.assertEqual(sent["method"], "eth_sendRawTransaction")
+        params = sent["params"]
+        self.assertEqual(params["from"], "0xfrom")
+        self.assertEqual(params["value"], str(10**18))
+        self.assertEqual(params["nonce"], 4)
+        self.assertEqual(params["chain_id"], 1337)
+        self.assertEqual(params["timestamp"], 1_700_000_000_000)
+        self.assertEqual(params["public_key"], "0xedpub")
+        self.assertEqual(params["signature"], "0xedsig")
+        self.assertEqual(params["pq_public_key"], "0xpqpub")
+        self.assertEqual(params["pq_signature"], "0xpqsig")
+
+
 class TestFaucet(unittest.TestCase):
     @patch("tenzro_rpc.requests.post")
     def test_request_faucet(self, mock_post):

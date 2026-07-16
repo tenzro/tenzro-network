@@ -65,6 +65,65 @@ async def handle_wallet(text: str, metadata: dict = None) -> str:
             f"  Threshold: {result['threshold']}-of-{result['total_shares']}"
         )
 
+    op = (metadata or {}).get("op")
+    if op == "send_self_custody":
+        # Self-custody submit: the runner holds its Ed25519 + ML-DSA-65 key
+        # locally, builds the canonical Transaction::hash() preimage, and
+        # signs both legs itself — the node never sees the secret. This
+        # branch forwards the already-signed hex material to
+        # eth_sendRawTransaction; it cannot be expressed in free text so it
+        # requires a structured metadata payload. Preimage covered by the
+        # signatures: chain_id.le || from(32) || to(32) || nonce.le ||
+        # gas_limit.le || gas_price.le || timestamp.le ||
+        # {"Transfer":{"amount":<value>}} || pq_len.u32.le || pq_public_key,
+        # hashed with SHA-256. `timestamp` (ms epoch) MUST match signing time.
+        md = metadata or {}
+        required = (
+            "from", "to", "value", "signature", "public_key",
+            "pq_signature", "pq_public_key", "timestamp",
+        )
+        if not all(md.get(k) is not None and md.get(k) != "" for k in required):
+            return (
+                "Self-custody send requires a structured metadata payload "
+                "with: from (32-byte hex), to (32-byte hex), value (wei "
+                "decimal string), signature (64-byte hex Ed25519), "
+                "public_key (32-byte hex Ed25519), pq_signature (3309-byte "
+                "hex ML-DSA-65), pq_public_key (1952-byte hex ML-DSA-65), "
+                "timestamp (ms epoch used at signing time). Optional: "
+                "nonce, chain_id, gas_limit, gas_price. The signatures are "
+                "produced offline by the local hybrid signer over the "
+                "canonical Transaction::hash() preimage."
+            )
+        from_addr = md["from"]
+        nonce = md.get("nonce")
+        if nonce is None:
+            nonce_hex = await rpc_call("eth_getTransactionCount", [from_addr, "latest"])
+            nonce = int(nonce_hex, 16) if nonce_hex else 0
+        chain_id = md.get("chain_id")
+        if chain_id is None:
+            chain_id_hex = await rpc_call("eth_chainId", [])
+            chain_id = int(chain_id_hex, 16) if chain_id_hex else 1337
+        result = await rpc_call("eth_sendRawTransaction", {
+            "from": from_addr,
+            "to": md["to"],
+            "value": str(md["value"]),
+            "gas_limit": md.get("gas_limit", 21000),
+            "gas_price": md.get("gas_price", 10**9),
+            "nonce": nonce,
+            "chain_id": chain_id,
+            "timestamp": md["timestamp"],
+            "public_key": md["public_key"],
+            "signature": md["signature"],
+            "pq_public_key": md["pq_public_key"],
+            "pq_signature": md["pq_signature"],
+        })
+        return (
+            f"Self-custody transaction submitted.\n"
+            f"  Hash: {result}\n"
+            f"  From: {from_addr}\n"
+            f"  To: {md['to']}"
+        )
+
     if ("send" in t or "transfer" in t) and addr:
         # Try to find a second address and amount
         addresses = re.findall(r"0x[a-fA-F0-9]+", text)

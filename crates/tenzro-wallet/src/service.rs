@@ -12,7 +12,7 @@ use crate::keystore::Keystore;
 use crate::mpc_signing::TransactionSigner;
 use crate::nonce::NonceManager;
 use crate::provisioning::{ProvisioningConfig, WalletProvisioner};
-use crate::signing::HybridSignatureBytes;
+use crate::signing::{HybridSignatureBytes, HybridSigner};
 use crate::state_sync::{ChainStateProvider, WalletStateSync};
 use crate::traits::WalletService;
 use crate::validation::{TransactionValidator, ValidationConfig};
@@ -118,6 +118,14 @@ pub struct TenzroWalletService {
     contacts: Arc<AddressBook>,
     /// State sync manager
     state_sync: Arc<WalletStateSync>,
+    /// Per-wallet external hybrid-signing backends (custody seam).
+    ///
+    /// When a wallet id is present here, `sign_transaction` / `sign_data`
+    /// delegate both legs to the registered [`HybridSigner`] — the secret
+    /// never enters node memory. Autonomous-machine wallets bind their
+    /// TEE-sealed agent key here; absent an entry, signing falls back to
+    /// the server-custodial FROST + ML-DSA path.
+    hybrid_signers: Arc<DashMap<WalletId, Arc<dyn HybridSigner>>>,
 }
 
 impl TenzroWalletService {
@@ -157,6 +165,7 @@ impl TenzroWalletService {
             history,
             contacts,
             state_sync,
+            hybrid_signers: Arc::new(DashMap::new()),
         })
     }
 
@@ -188,6 +197,72 @@ impl TenzroWalletService {
     /// Get the state sync manager
     pub fn state_sync(&self) -> Arc<WalletStateSync> {
         self.state_sync.clone()
+    }
+
+    /// Bind an external hybrid-signing backend to a wallet.
+    ///
+    /// After this call, `sign_transaction` / `sign_data` for `wallet_id`
+    /// delegate both signature legs to `signer` — the wallet's secret
+    /// never enters node memory. This is the custody seam autonomous-machine
+    /// wallets use to route through their TEE-sealed agent key
+    /// (`SealedAgentWalletSigner`) instead of server-side FROST + ML-DSA
+    /// reconstruction.
+    pub fn set_hybrid_signer(&self, wallet_id: WalletId, signer: Arc<dyn HybridSigner>) {
+        self.hybrid_signers.insert(wallet_id, signer);
+    }
+
+    /// Whether `wallet_id` has an external hybrid-signing backend bound.
+    pub fn has_hybrid_signer(&self, wallet_id: &WalletId) -> bool {
+        self.hybrid_signers.contains_key(wallet_id)
+    }
+
+    /// Provision a watch-only wallet whose public keys mirror an external
+    /// custody backend (a TEE-sealed agent key), then bind that backend as
+    /// the wallet's [`HybridSigner`].
+    ///
+    /// The wallet holds no secret: `signer.classical_public_key()`,
+    /// `signer.pq_verifying_key()`, and `bls_verifying_key` become the
+    /// wallet's public identity, and all signatures are minted by `signer`.
+    /// This is the autonomous-machine custody path — the node never
+    /// reconstructs a signing key.
+    ///
+    /// `classical_key_type` selects how the address is derived from
+    /// `signer.classical_public_key()` (Ed25519 → SHA-256 prefix,
+    /// Secp256k1 → Keccak tail). Autonomous machines use Ed25519.
+    pub async fn provision_watch_only_wallet(
+        &self,
+        signer: Arc<dyn HybridSigner>,
+        classical_key_type: tenzro_crypto::KeyType,
+        bls_verifying_key: Vec<u8>,
+    ) -> Result<MpcWallet> {
+        let public_key = tenzro_crypto::PublicKey::new(
+            classical_key_type,
+            signer.classical_public_key(),
+        );
+        let pq_verifying_key = signer.pq_verifying_key();
+
+        let wallet_id = WalletId::new();
+        let wallet = MpcWallet::new_watch_only(
+            wallet_id.clone(),
+            public_key,
+            pq_verifying_key,
+            bls_verifying_key,
+        )?;
+
+        self.wallets.insert(wallet_id.clone(), wallet.clone());
+        self.hybrid_signers.insert(wallet_id.clone(), signer);
+
+        for asset_id in &wallet.supported_assets {
+            self.balances
+                .set_balance(&wallet.address, asset_id, Balance::zero());
+        }
+
+        info!(
+            "Provisioned watch-only wallet {} (external hybrid signer bound)",
+            wallet_id
+        );
+
+        Ok(wallet)
     }
 
     /// Connect a chain state provider for on-chain synchronization.
@@ -467,11 +542,24 @@ impl WalletService for TenzroWalletService {
         // Hash the transaction for signing
         let tx_hash = tx.hash();
 
-        // Classical leg — threshold MPC signature with post-signing verification.
-        let classical = TransactionSigner::sign_transaction(&wallet, tx_hash.as_bytes())?;
-
-        // Post-quantum leg — ML-DSA-65 signature over the same hash.
-        let pq = wallet.pq_signing_key()?.sign(tx_hash.as_bytes());
+        // Custody seam: if an external hybrid signer is bound to this wallet
+        // (autonomous-machine TEE-sealed key), delegate both legs to it — the
+        // secret never enters node memory. Otherwise fall back to the
+        // server-custodial FROST + ML-DSA path below.
+        let external_signer = self
+            .hybrid_signers
+            .get(wallet_id)
+            .map(|r| r.value().clone());
+        let HybridSignatureBytes { classical, pq } =
+            if let Some(signer) = external_signer {
+                signer.sign_hybrid(tx_hash.as_bytes()).await?
+            } else {
+                // Classical leg — threshold MPC signature with post-signing verification.
+                let classical = TransactionSigner::sign_transaction(&wallet, tx_hash.as_bytes())?;
+                // Post-quantum leg — ML-DSA-65 signature over the same hash.
+                let pq = wallet.pq_signing_key()?.sign(tx_hash.as_bytes());
+                HybridSignatureBytes::new(classical, pq)
+            };
 
         // Record in history
         let record = TxRecord::new_outgoing(
@@ -491,7 +579,7 @@ impl WalletService for TenzroWalletService {
             wallet_id
         );
 
-        Ok(HybridSignatureBytes::new(classical, pq))
+        Ok(HybridSignatureBytes { classical, pq })
     }
 
     async fn sign_data(
@@ -499,6 +587,14 @@ impl WalletService for TenzroWalletService {
         wallet_id: &WalletId,
         data: &[u8],
     ) -> Result<HybridSignatureBytes> {
+        let external_signer = self
+            .hybrid_signers
+            .get(wallet_id)
+            .map(|r| r.value().clone());
+        if let Some(signer) = external_signer {
+            return signer.sign_hybrid(data).await;
+        }
+
         let wallet = self
             .get_wallet_internal(wallet_id)
             .await?

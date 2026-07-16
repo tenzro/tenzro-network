@@ -89,6 +89,72 @@ async def test_send_transaction_hex_amount(mock_rpc):
     assert result == {"status": "accepted"}
 
 
+async def test_send_self_custody_transaction_explicit(mock_rpc):
+    # nonce + chain_id passed explicitly (fixed at signing time) → only the
+    # eth_sendRawTransaction call fires, no live nonce/chain lookup.
+    mock_rpc.return_value = "0xselfhash"
+    result = await server.send_self_custody_transaction(
+        from_addr="0xfrom",
+        to_addr="0xto",
+        value="1000",
+        signature="0xedsig",
+        public_key="0xedpub",
+        pq_signature="0xpqsig",
+        pq_public_key="0xpqpub",
+        timestamp=1_700_000_000_000,
+        nonce=7,
+        chain_id=1337,
+    )
+    mock_rpc.assert_awaited_once_with(
+        "eth_sendRawTransaction",
+        {
+            "from": "0xfrom",
+            "to": "0xto",
+            "value": "1000",
+            "gas_limit": 21000,
+            "gas_price": 1_000_000_000,
+            "nonce": 7,
+            "chain_id": 1337,
+            "timestamp": 1_700_000_000_000,
+            "public_key": "0xedpub",
+            "signature": "0xedsig",
+            "pq_public_key": "0xpqpub",
+            "pq_signature": "0xpqsig",
+        },
+    )
+    assert result == {"tx_hash": "0xselfhash"}
+
+
+async def test_send_self_custody_transaction_queries_nonce_and_chain(mock_rpc):
+    def dispatch(method, params=None):
+        return {
+            "eth_getTransactionCount": "0x3",
+            "eth_chainId": "0x539",
+            "eth_sendRawTransaction": "0xselfhash",
+        }[method]
+
+    mock_rpc.side_effect = dispatch
+    result = await server.send_self_custody_transaction(
+        from_addr="0xfrom",
+        to_addr="0xto",
+        value="500",
+        signature="0xedsig",
+        public_key="0xedpub",
+        pq_signature="0xpqsig",
+        pq_public_key="0xpqpub",
+        timestamp=1_700_000_000_000,
+    )
+    assert mock_rpc.await_args_list[:2] == [
+        call("eth_getTransactionCount", ["0xfrom", "latest"]),
+        call("eth_chainId", []),
+    ]
+    sent = mock_rpc.await_args_list[-1]
+    assert sent.args[0] == "eth_sendRawTransaction"
+    assert sent.args[1]["nonce"] == 3
+    assert sent.args[1]["chain_id"] == 1337
+    assert result == {"tx_hash": "0xselfhash"}
+
+
 async def test_request_faucet(mock_rpc):
     mock_rpc.return_value = {"granted": "100"}
     result = await server.request_faucet("0xabc")

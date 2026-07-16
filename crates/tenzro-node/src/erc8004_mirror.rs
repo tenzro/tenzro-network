@@ -51,6 +51,21 @@ pub fn did_index_key(did: &str) -> Vec<u8> {
     key
 }
 
+/// Prefix for the reverse owner-address → agentId index in `CF_IDENTITIES`.
+/// Populated from the `address indexed owner` topic of the same
+/// `Registered` event. Lets address-keyed callers (the autonomous-agent
+/// bootstrap paymaster) answer "is this smart account a registered agent?"
+/// without a DID round-trip. Values are 8-byte big-endian `u64` agent ids.
+pub const ERC8004_OWNER_INDEX_PREFIX: &[u8] = b"erc8004_owner_index:";
+
+/// Compose the RocksDB key for a given owner address (20-byte EVM address).
+pub fn owner_index_key(owner: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(ERC8004_OWNER_INDEX_PREFIX.len() + owner.len());
+    key.extend_from_slice(ERC8004_OWNER_INDEX_PREFIX);
+    key.extend_from_slice(owner);
+    key
+}
+
 /// Native adapter: dispatches TDIP machine registrations to the canonical
 /// on-chain ERC-8004 IdentityRegistry proxy via signed EIP-1559 transactions
 /// using a node-held `erc8004-system` secp256k1 key.
@@ -158,6 +173,38 @@ impl OnChainAgentRegistry for NativeErc8004Mirror {
                 None
             }
         }
+    }
+}
+
+/// Address-keyed ERC-8004 registration lookup for the autonomous-agent
+/// bootstrap paymaster.
+///
+/// Bridges [`tenzro_vm::AgentRegistryLookup`] (which asks "is this smart
+/// account a registered agent?") onto the off-chain `erc8004_owner_index:`
+/// keyspace in `CF_IDENTITIES`, populated from the `Registered` event's
+/// `address indexed owner` topic by the event listener. Presence of an
+/// index entry means the address owns a mirrored ERC-8004 agent id — i.e.
+/// the account is registered and in good standing.
+///
+/// Kept in the node layer so `tenzro-vm` does not depend on
+/// `tenzro-identity` / `tenzro-storage`.
+pub struct Erc8004OwnerRegistryLookup {
+    storage: Arc<dyn KvStore>,
+}
+
+impl Erc8004OwnerRegistryLookup {
+    pub fn new(storage: Arc<dyn KvStore>) -> Self {
+        Self { storage }
+    }
+}
+
+impl tenzro_vm::AgentRegistryLookup for Erc8004OwnerRegistryLookup {
+    fn is_registered(&self, agent_address: &[u8]) -> bool {
+        matches!(
+            self.storage
+                .get(CF_IDENTITIES, &owner_index_key(agent_address)),
+            Ok(Some(_))
+        )
     }
 }
 
