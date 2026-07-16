@@ -10,7 +10,7 @@ use crate::error::{IdentityError, Result};
 use crate::identity::{
     IdentityData, IdentityStatus, KeyPurpose, PublicKeyInfo, RevocationEntry, TenzroIdentity,
 };
-use crate::wallet_binding::WalletBinder;
+use crate::wallet_binding::{WalletBinder, WalletBinding};
 use chrono::Utc;
 use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
@@ -765,6 +765,76 @@ impl IdentityRegistry {
         })
     }
 
+    /// Registers a human identity from a client-produced [`WalletBinding`]
+    /// (device-ceremony self-custody path). Mirror of
+    /// [`Self::register_autonomous_machine_with_binding`] for the human class.
+    ///
+    /// The caller (node RPC) has already run a device ceremony — a passkey /
+    /// WebAuthn enrollment plus, on TEE-equipped hardware, a sealed key
+    /// derivation — and provisioned a watch-only [`MpcWallet`] whose address /
+    /// classical pubkey / ML-DSA-65 vk / BLS vk come from device- or
+    /// enclave-held material. No wallet is provisioned inside this method: the
+    /// binder is not invoked and no server-side share reconstruction occurs.
+    /// Signatures are minted by the client-bound signer against the same
+    /// `wallet_id`.
+    ///
+    /// This is the self-custody option for humans. Runners without a device
+    /// ceremony continue to use [`Self::register_human_via_binder`], which
+    /// server-provisions the wallet — a permanent supported tier. Both paths
+    /// coexist; the node selects per enrollment/hardware.
+    pub async fn register_human_with_binding(
+        &self,
+        did: TenzroDid,
+        display_name: String,
+        kyc_tier: KycTier,
+        binding: WalletBinding,
+    ) -> Result<RegistrationResult> {
+        let did_string = did.to_string();
+
+        let identity = TenzroIdentity {
+            did,
+            public_keys: vec![PublicKeyInfo {
+                key_id: "key-1".to_string(),
+                key_type: binding.key_type.clone(),
+                public_key: binding.public_key.clone(),
+                purposes: vec![KeyPurpose::Authentication, KeyPurpose::AssertionMethod],
+            }],
+            identity_data: IdentityData::Human {
+                display_name: display_name.clone(),
+                kyc_tier,
+                controlled_machines: Vec::new(),
+            },
+            status: IdentityStatus::Active,
+            wallet_address: binding.address,
+            wallet_id: binding.wallet_id,
+            pq_verifying_key: binding.pq_verifying_key,
+            bls_verifying_key: binding.bls_verifying_key,
+            credentials: Vec::new(),
+            services: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: HashMap::new(),
+            username: None,
+        };
+
+        let fee_required = self.fee_schedule.human_identity_registration;
+
+        info!(
+            "Registered human identity (device-ceremony self-custody): {} (name: {}, kyc: {:?}, fee: {} TNZO)",
+            did_string,
+            display_name,
+            kyc_tier,
+            fee_required / 1_000_000_000_000_000_000
+        );
+
+        self.persist_identity(&did_string, &identity);
+        self.identities.insert(did_string, identity.clone());
+        Ok(RegistrationResult {
+            identity,
+            fee_required,
+        })
+    }
+
     /// Registers a machine identity by provisioning the wallet through the
     /// configured `WalletBinder`. The binder-provisioned wallet's classical
     /// public key becomes the identity's `public_keys[0]`, and the binder's
@@ -1183,6 +1253,79 @@ impl IdentityRegistry {
         // Dispatch the ERC-8004 mirror as a detached signed-tx submission.
         // The allocated `agentId` is NOT available synchronously — see the
         // companion mirror calls earlier in this file for the rationale.
+        self.mirror_to_erc8004(&did_string, &identity);
+
+        self.persist_identity(&did_string, &identity);
+        self.identities.insert(did_string, identity.clone());
+        Ok(RegistrationResult {
+            identity,
+            fee_required,
+        })
+    }
+
+    /// Registers an autonomous machine identity from a **pre-provisioned
+    /// watch-only wallet binding** whose keys were sealed inside a TEE.
+    ///
+    /// This is the self-custodial machine path: the node layer seals an
+    /// `AgentKeyHandle` against the calling enclave, provisions a
+    /// watch-only [`MpcWallet`] (no FROST shares, no PQ seed held) whose
+    /// address / Ed25519 pubkey / ML-DSA-65 vk / BLS vk all come from the
+    /// sealed handle, then passes the resulting [`WalletBinding`] here.
+    /// The registry stores those keys as the identity's public material.
+    /// No wallet is provisioned inside this method — the binder is not
+    /// invoked and no server-side share reconstruction ever occurs for
+    /// this machine. Signatures are minted by the sealed
+    /// `SealedAgentWalletSigner` bound to the same `wallet_id`.
+    ///
+    /// `did_seed` is the DID the sealed handle was derived against, so the
+    /// registered identity's DID matches the handle's `agent_did`.
+    pub async fn register_autonomous_machine_with_binding(
+        &self,
+        did: TenzroDid,
+        binding: WalletBinding,
+        capabilities: Vec<String>,
+    ) -> Result<RegistrationResult> {
+        let did_string = did.to_string();
+
+        let identity = TenzroIdentity {
+            did,
+            public_keys: vec![PublicKeyInfo {
+                key_id: "key-1".to_string(),
+                key_type: binding.key_type.clone(),
+                public_key: binding.public_key.clone(),
+                purposes: vec![KeyPurpose::Authentication, KeyPurpose::AssertionMethod],
+            }],
+            identity_data: IdentityData::Machine {
+                capabilities: capabilities.clone(),
+                delegation_scope: DelegationScope::unrestricted(),
+                controller_did: None,
+                reputation: 0,
+                tenzro_agent_id: None,
+                erc8004_agent_id: None,
+                is_seed_agent: false,
+            },
+            status: IdentityStatus::Active,
+            wallet_address: binding.address,
+            wallet_id: binding.wallet_id,
+            pq_verifying_key: binding.pq_verifying_key,
+            bls_verifying_key: binding.bls_verifying_key,
+            credentials: Vec::new(),
+            services: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: HashMap::new(),
+            username: None,
+        };
+
+        let fee_required = self.fee_schedule.machine_identity_registration;
+
+        info!(
+            "Registered autonomous machine identity (TEE-sealed self-custody): {} with capabilities: {:?}, fee: {} TNZO",
+            did_string,
+            capabilities,
+            fee_required / 1_000_000_000_000_000_000
+        );
+
         self.mirror_to_erc8004(&did_string, &identity);
 
         self.persist_identity(&did_string, &identity);

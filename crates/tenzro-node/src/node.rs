@@ -1678,6 +1678,18 @@ pub struct TenzroNode {
     /// receipts to `CF_AGENTS` under the `aa/nonce/` and `aa/receipt/`
     /// prefixes. Backed by the same `RocksDbStore` as the rest of the node.
     aa_entry_point: Option<Arc<tenzro_vm::EntryPoint>>,
+    /// TEE-key oracle for autonomous-machine custody. Resolves a smart
+    /// account to its enrolled `TeeBoundAccountKey` (enclave vendor +
+    /// measurement + signing pubkey). Backed by `TeeEnrollmentKvStore`
+    /// (CF_VALIDATOR_MODULES under `erc7579/tee_enrollment/`), hydrated on
+    /// boot. Consulted by the `TeeBoundValidator` (module 0x1021) and the
+    /// `TnzoBootstrapPaymaster`; populated by `tenzro_enrollTeeKey`.
+    tee_key_oracle: Option<Arc<tenzro_vm::InMemoryTeeKeyOracle>>,
+    /// TEE-bound validator (ERC-7579 module 0x1021) for autonomous-machine
+    /// custody. Gates every UserOp on a fresh key-bound TEE attestation
+    /// resolved via `tee_key_oracle`. Installed per autonomous-machine smart
+    /// account as the single point of signing enforcement.
+    tee_bound_validator: Option<Arc<tenzro_vm::TeeBoundValidator>>,
     /// BurnQuota singleton (Agent-Swarm Spec 3). Tracks the
     /// protocol-side TNZO budget the stablecoin paymaster will draw from
     /// once the dual-rail-gas paymaster + oracle + AMM swap loop lands.
@@ -2448,6 +2460,8 @@ impl TenzroNode {
             recovery_pending: None,
             identity_scope_oracle: None,
             aa_entry_point: None,
+            tee_key_oracle: None,
+            tee_bound_validator: None,
             burn_quota_manager: None,
             burn_rate_manager: None,
             seed_agent_manager: None,
@@ -3280,6 +3294,8 @@ impl TenzroNode {
         self.agent_runtime = None;
         self.aa_validator_registry = None;
         self.aa_entry_point = None;
+        self.tee_key_oracle = None;
+        self.tee_bound_validator = None;
         self.identity_scope_oracle = None;
         self.inference_router = None;
         self.provider_manager = None;
@@ -8667,6 +8683,22 @@ impl TenzroNode {
                 tenzro_vm::aa_validators::ValidatorRegistry::new(),
             );
 
+            // Autonomous-machine custody: TEE-key oracle. Resolves a smart
+            // account to its enrolled `TeeBoundAccountKey`. Backed by
+            // `TeeEnrollmentKvStore` (CF_VALIDATOR_MODULES under
+            // `erc7579/tee_enrollment/`) so enrollments survive restart;
+            // hydrated on construction. Shared by the `TeeBoundValidator`
+            // (module 0x1021) and the `TnzoBootstrapPaymaster`.
+            let tee_key_oracle = if let Some(ref storage) = self.storage {
+                let store = Arc::new(crate::passkey_rpc::TeeEnrollmentKvStore::new(
+                    storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                ));
+                Arc::new(tenzro_vm::InMemoryTeeKeyOracle::with_store(store))
+            } else {
+                Arc::new(tenzro_vm::InMemoryTeeKeyOracle::new())
+            };
+            self.tee_key_oracle = Some(tee_key_oracle.clone());
+
             // Seed the ERC-7484 attestation gate for our `DelegationScopeValidator`
             // module address. Without this, every `aa_registry.install(...)` for
             // the validator would fail with `ModuleNotAttested`. The attester
@@ -8808,13 +8840,36 @@ impl TenzroNode {
             }
             self.hardware_signer_validators = Some(hardware_validators);
 
-            // Attest the four ERC-7579 modules + the five hardware-validator
+            // Autonomous-machine custody: TEE-bound validator (module 0x1021).
+            // Gates every UserOp on a fresh, key-bound TEE attestation resolved
+            // via the shared `tee_key_oracle`. Shares one `AttestationVerifier`
+            // with the bootstrap paymaster so both apply the same vendor
+            // root-CA + measurement-binding chain. The validator holds no
+            // per-account state of its own (the oracle is the source of
+            // truth), so no `with_storage` variant is needed.
+            let tee_attestation_verifier =
+                Arc::new(tenzro_tee::AttestationVerifier::new());
+            let tee_bound_module_addr = {
+                let mut a = [0u8; 20];
+                a[18] = 0x10; a[19] = 0x21;
+                a
+            };
+            let tee_bound_validator = Arc::new(tenzro_vm::TeeBoundValidator::new(
+                tee_bound_module_addr,
+                tee_key_oracle.clone() as Arc<dyn tenzro_vm::TeeKeyOracle>,
+                tee_attestation_verifier.clone(),
+            ));
+            self.tee_bound_validator = Some(tee_bound_validator.clone());
+
+            // Attest the ERC-7579 modules (WebAuthn / social / session /
+            // spending) + the TEE-bound validator + the hardware-validator
             // slots so the registry accepts installs against them.
             let mut to_attest = vec![
                 webauthn_module_addr,
                 social_module_addr,
                 session_module_addr,
                 spending_module_addr,
+                tee_bound_module_addr,
             ];
             to_attest.extend_from_slice(&hardware_module_addrs);
             for module_addr in to_attest {
@@ -8890,6 +8945,54 @@ impl TenzroNode {
                         ),
                     }
                 }
+
+                // Autonomous-machine custody: bootstrap paymaster. Sponsors an
+                // agent's FIRST UserOp (the account-creation `factory` call)
+                // iff the sender is (a) enrolled in the TEE-key oracle, (b)
+                // ERC-8004-registered, and (c) accompanied by a fresh
+                // attestation binding the enclave key + measurement to the
+                // enrolled account key. One-shot per agent — the
+                // `TeeBoundValidator` (0x1021) enforces every op thereafter.
+                //
+                // The paymaster is only wired when storage is present (so the
+                // ERC-8004 owner-index it reads is durable). Initial balance
+                // comes from `TENZRO_BOOTSTRAP_PAYMASTER_BALANCE` (base units);
+                // absent/zero means unfunded — `sponsor()` fails closed until
+                // the operator tops it up via the treasury.
+                if let Some(ref storage) = self.storage {
+                    let paymaster_address = {
+                        let mut a = [0u8; 20];
+                        a[18] = 0x04; a[19] = 0x02; // 0x0000...0402
+                        a.to_vec()
+                    };
+                    let initial_balance: u128 =
+                        std::env::var("TENZRO_BOOTSTRAP_PAYMASTER_BALANCE")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                    let registry_lookup =
+                        Arc::new(crate::erc8004_mirror::Erc8004OwnerRegistryLookup::new(
+                            storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                        ));
+                    let bootstrap_paymaster =
+                        tenzro_vm::TnzoBootstrapPaymaster::new(
+                            paymaster_address,
+                            initial_balance,
+                            tee_key_oracle.clone() as Arc<dyn tenzro_vm::TeeKeyOracle>,
+                            registry_lookup as Arc<dyn tenzro_vm::AgentRegistryLookup>,
+                            tee_attestation_verifier.clone(),
+                        );
+                    entry_point = entry_point.with_bootstrap_paymaster(Arc::new(
+                        parking_lot::RwLock::new(bootstrap_paymaster),
+                    ));
+                    info!(
+                        paymaster_addr = "0x0000...0402",
+                        initial_balance,
+                        "Autonomous-machine bootstrap paymaster wired to EntryPoint \
+                         (TEE-gated one-shot first-op sponsorship)"
+                    );
+                }
+
                 self.aa_entry_point = Some(Arc::new(entry_point));
                 info!(
                     chain_id = chain_id,
@@ -11300,6 +11403,21 @@ impl TenzroNode {
     /// `eth_supportedEntryPoints` JSON-RPC handlers.
     pub fn aa_entry_point(&self) -> Option<&Arc<tenzro_vm::EntryPoint>> {
         self.aa_entry_point.as_ref()
+    }
+
+    /// Returns the TEE-key oracle for autonomous-machine custody if
+    /// initialized. Consulted by the `TeeBoundValidator` (module 0x1021) and
+    /// the `TnzoBootstrapPaymaster`; populated by the `tenzro_enrollTeeKey`
+    /// RPC handler.
+    pub fn tee_key_oracle(&self) -> Option<&Arc<tenzro_vm::InMemoryTeeKeyOracle>> {
+        self.tee_key_oracle.as_ref()
+    }
+
+    /// Returns the TEE-bound validator (ERC-7579 module 0x1021) if
+    /// initialized. Installed per autonomous-machine smart account so every
+    /// UserOp is gated on a fresh key-bound TEE attestation.
+    pub fn tee_bound_validator(&self) -> Option<&Arc<tenzro_vm::TeeBoundValidator>> {
+        self.tee_bound_validator.as_ref()
     }
 
     /// Returns the shared `IdentityScopeOracle` if initialized

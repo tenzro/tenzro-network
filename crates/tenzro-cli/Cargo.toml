@@ -38,6 +38,7 @@ sha2 = { workspace = true }
 atty = "0.2"
 chrono = "0.4"
 rand = { workspace = true }
+argon2 = { workspace = true }
 
 [features]
 default = []

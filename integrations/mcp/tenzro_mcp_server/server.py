@@ -86,6 +86,78 @@ async def send_transaction(
 
 
 @mcp.tool
+async def send_self_custody_transaction(
+    from_addr: str,
+    to_addr: str,
+    value: str,
+    signature: str,
+    public_key: str,
+    pq_signature: str,
+    pq_public_key: str,
+    timestamp: int,
+    gas_limit: int = 21000,
+    gas_price: int = 1_000_000_000,
+    nonce: int | None = None,
+    chain_id: int | None = None,
+) -> dict:
+    """Submit a pre-signed self-custody TNZO transfer via eth_sendRawTransaction.
+
+    The self-custody runner holds its Ed25519 + ML-DSA-65 keypair locally
+    (in a TEE seal or an offline signer) and signs the canonical
+    Transaction::hash() preimage itself — the node never sees the secret.
+    This tool submits the already-signed material; it does not compute the
+    hash or sign anything, because ML-DSA-65 signing lives with the local
+    signer (CLI keystore, Rust/TypeScript SDK, or hardware enclave).
+
+    The preimage that ``signature`` and ``pq_signature`` must cover is
+    ``chain_id.le ‖ from(32) ‖ to(32) ‖ nonce.le ‖ gas_limit.le ‖
+    gas_price.le ‖ timestamp.le ‖ {"Transfer":{"amount":<value>}} ‖
+    pq_len.u32.le ‖ pq_public_key`` hashed with SHA-256. ``timestamp`` is
+    the ms-epoch value used at signing time and MUST match — the node
+    rebuilds the same preimage and rejects a mismatch with -32003.
+
+    Args:
+        from_addr: 32-byte hex Ed25519 public key (the account address).
+        to_addr: 32-byte hex recipient address.
+        value: Amount in wei (decimal string, full u128 range).
+        signature: 64-byte hex Ed25519 signature over the preimage.
+        public_key: 32-byte hex Ed25519 public key (must derive ``from_addr``).
+        pq_signature: 3309-byte hex ML-DSA-65 signature over the preimage.
+        pq_public_key: 1952-byte hex ML-DSA-65 verifying key.
+        timestamp: ms-epoch timestamp used when the preimage was built.
+        gas_limit: Gas limit used at signing time (default 21000).
+        gas_price: Gas price in wei used at signing time (default 1e9).
+        nonce: Nonce used at signing time. If omitted, queried live — pass
+            it explicitly when it must match a nonce fixed at signing.
+        chain_id: Chain id used at signing time. If omitted, queried live.
+    """
+    if nonce is None:
+        nonce_hex = await rpc_call("eth_getTransactionCount", [from_addr, "latest"])
+        nonce = int(nonce_hex, 16) if isinstance(nonce_hex, str) else 0
+    if chain_id is None:
+        chain_id_hex = await rpc_call("eth_chainId", [])
+        chain_id = int(chain_id_hex, 16) if isinstance(chain_id_hex, str) else 1337
+    result = await rpc_call(
+        "eth_sendRawTransaction",
+        {
+            "from": from_addr,
+            "to": to_addr,
+            "value": str(value),
+            "gas_limit": gas_limit,
+            "gas_price": gas_price,
+            "nonce": nonce,
+            "chain_id": chain_id,
+            "timestamp": timestamp,
+            "public_key": public_key,
+            "signature": signature,
+            "pq_public_key": pq_public_key,
+            "pq_signature": pq_signature,
+        },
+    )
+    return {"tx_hash": result} if isinstance(result, str) else result
+
+
+@mcp.tool
 async def request_faucet(address: str) -> dict:
     """Request 100 testnet TNZO tokens from the faucet (24h cooldown per address)."""
     result = await rpc_call("tenzro_faucet", {"address": address})

@@ -237,14 +237,12 @@ unsafe fn dot_q8_0_avx512_vnni(a: &[u8], b: &[u8]) -> f32 {
 #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
 unsafe fn hsum_i32x8(v: std::arch::x86_64::__m256i) -> i32 {
     use std::arch::x86_64::*;
-    unsafe {
-        let lo = _mm256_castsi256_si128(v);
-        let hi = _mm256_extracti128_si256(v, 1);
-        let s = _mm_add_epi32(lo, hi);
-        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
-        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b00_00_00_01));
-        _mm_cvtsi128_si32(s)
-    }
+    let lo = _mm256_castsi256_si128(v);
+    let hi = _mm256_extracti128_si256(v, 1);
+    let s = _mm_add_epi32(lo, hi);
+    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
+    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b00_00_00_01));
+    _mm_cvtsi128_si32(s)
 }
 
 /// Which compute backend the runtime resolved for this node.

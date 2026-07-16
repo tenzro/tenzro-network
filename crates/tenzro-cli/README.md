@@ -251,16 +251,37 @@ tenzro wallet import <seed-phrase|private-key>
 # Check balance (calls eth_getBalance)
 tenzro wallet balance --address <address>
 
-# Send tokens. The CLI calls tenzro_signAndSendTransaction; the node looks up
-# the live nonce and gas price, computes Transaction::hash() with the canonical
-# timestamp-inclusive preimage, signs with Ed25519 + ML-DSA-65, verifies both
-# legs synchronously, and returns -32003 on a bad signature. `value` and
-# `amount` are accepted aliases. Self-sends (to == from) return a
+# Send tokens (server-custodial path). The CLI calls tenzro_signAndSendTransaction;
+# the node looks up the live nonce and gas price, computes Transaction::hash() with
+# the canonical timestamp-inclusive preimage, signs with Ed25519 + ML-DSA-65,
+# verifies both legs synchronously, and returns -32003 on a bad signature. `value`
+# and `amount` are accepted aliases. Self-sends (to == from) return a
 # `cannot transfer to self` validation error.
 tenzro wallet send <to-address> <amount> --asset TNZO --private-key <hex>
 
 # List all wallets (calls tenzro_listAccounts)
 tenzro wallet list
+```
+
+#### Self-Custody (client-side hybrid signing)
+
+The node never holds the secret. A local sealed key at `~/.tenzro/hybrid_key.json`
+holds the Ed25519 + ML-DSA-65 keypair; the raw 32-byte Ed25519 public key is the
+account address. `wallet send` builds the canonical `Transaction::hash()` preimage
+(nonce + chain id fetched from the node, PQ verifying key included), signs both legs
+locally, and submits via `eth_sendRawTransaction` — the node verifies the Ed25519
+and ML-DSA-65 signatures against the hash and rejects a raw send that omits either.
+
+```bash
+# Generate a local self-custody hybrid key (prompts for a password to seal it).
+tenzro wallet create-local
+
+# Import an existing Ed25519 secret (32-byte hex); a fresh ML-DSA-65 leg is derived.
+tenzro wallet import-local <ed25519-secret-hex>
+
+# Send self-custody. --self-custody forces the local path; it is also selected
+# automatically whenever a local key exists at ~/.tenzro/hybrid_key.json.
+tenzro wallet send <to-address> <amount> --self-custody
 ```
 
 ### Model Management

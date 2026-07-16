@@ -21,6 +21,7 @@ pub fn identity_to_did_document(identity: &TenzroIdentity) -> DidDocument {
         let method_type = match key_info.key_type.as_str() {
             "Ed25519" => "Ed25519VerificationKey2020",
             "Secp256k1" => "EcdsaSecp256k1VerificationKey2019",
+            "P-256" => "EcdsaSecp256r1VerificationKey2019",
             "X25519" => "X25519KeyAgreementKey2020",
             other => other,
         };
@@ -95,6 +96,7 @@ pub fn extract_public_keys_from_document(
             let key_type = match method.method_type.as_str() {
                 "Ed25519VerificationKey2020" => "Ed25519",
                 "EcdsaSecp256k1VerificationKey2019" => "Secp256k1",
+                "EcdsaSecp256r1VerificationKey2019" => "P-256",
                 "X25519KeyAgreementKey2020" => "X25519",
                 other => other,
             };

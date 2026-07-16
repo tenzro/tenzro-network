@@ -71,7 +71,7 @@ pub const DEFAULT_MAX_ATTESTATION_AGE_SECS: u64 = 300;
 /// normalize across vendor measurement sizes (TDX RTMR is 48 B, SEV-SNP
 /// measurement is 48 B, Nitro PCR0 is 48 B). Storing the hash also means
 /// account state is fixed-size regardless of vendor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeeBoundAccountKey {
     /// Required attestation vendor (e.g. `IntelTdx`, `AmdSevSnp`, `AwsNitro`).
     pub vendor: TeeVendor,
@@ -125,23 +125,55 @@ pub trait TeeKeyOracle: Send + Sync {
     fn lookup(&self, account: &[u8]) -> Option<TeeBoundAccountKey>;
 }
 
-/// In-memory `TeeKeyOracle` for tests + bootstrap.
+/// Durable backing store for TEE enrollments.
+///
+/// Implemented at the node layer over RocksDB so `InMemoryTeeKeyOracle` can be
+/// made persistent without tenzro-vm depending on tenzro-storage. `put`/`delete`
+/// mirror an enroll/revoke; `load_all` hydrates the in-memory map on boot.
+pub trait TeeEnrollmentStore: Send + Sync {
+    fn put(&self, account: &[u8], key: &TeeBoundAccountKey);
+    fn delete(&self, account: &[u8]);
+    fn load_all(&self) -> Vec<(Vec<u8>, TeeBoundAccountKey)>;
+}
+
+/// In-memory `TeeKeyOracle` with optional write-through to a `TeeEnrollmentStore`.
 pub struct InMemoryTeeKeyOracle {
     keys: DashMap<Vec<u8>, TeeBoundAccountKey>,
+    store: Option<Arc<dyn TeeEnrollmentStore>>,
 }
 
 impl InMemoryTeeKeyOracle {
     pub fn new() -> Self {
         Self {
             keys: DashMap::new(),
+            store: None,
+        }
+    }
+
+    /// Construct an oracle backed by a durable store, hydrating existing
+    /// enrollments from it.
+    pub fn with_store(store: Arc<dyn TeeEnrollmentStore>) -> Self {
+        let keys = DashMap::new();
+        for (account, key) in store.load_all() {
+            keys.insert(account, key);
+        }
+        Self {
+            keys,
+            store: Some(store),
         }
     }
 
     pub fn enroll(&self, account: Vec<u8>, key: TeeBoundAccountKey) {
+        if let Some(store) = &self.store {
+            store.put(&account, &key);
+        }
         self.keys.insert(account, key);
     }
 
     pub fn revoke(&self, account: &[u8]) {
+        if let Some(store) = &self.store {
+            store.delete(account);
+        }
         self.keys.remove(account);
     }
 }

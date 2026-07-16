@@ -263,6 +263,100 @@ impl PendingRecoveryStore {
 }
 
 // =============================================================================
+// TeeEnrollmentKvStore — durable backing for the autonomous-agent TEE oracle
+// =============================================================================
+
+/// RocksDB-backed [`tenzro_vm::TeeEnrollmentStore`] for autonomous-machine
+/// custody. Persists each account's `TeeBoundAccountKey` under
+/// `CF_VALIDATOR_MODULES / erc7579/tee_enrollment/<account_hex>` so the
+/// `InMemoryTeeKeyOracle` hydrates on boot. Rows are MAC-tagged with the same
+/// per-process key as pending-recovery rows — an operator editing RocksDB to
+/// swap an enclave binding is detected at read time and the row is dropped.
+pub struct TeeEnrollmentKvStore {
+    storage: Arc<dyn KvStore>,
+}
+
+impl TeeEnrollmentKvStore {
+    pub fn new(storage: Arc<dyn KvStore>) -> Self {
+        Self { storage }
+    }
+
+    fn key(account: &[u8]) -> Vec<u8> {
+        let mut k = b"erc7579/tee_enrollment/".to_vec();
+        k.extend_from_slice(hex::encode(account).as_bytes());
+        k
+    }
+
+    const PREFIX: &'static [u8] = b"erc7579/tee_enrollment/";
+}
+
+impl tenzro_vm::TeeEnrollmentStore for TeeEnrollmentKvStore {
+    fn put(&self, account: &[u8], key: &tenzro_vm::TeeBoundAccountKey) {
+        let bytes = match serde_json::to_vec(key) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(error = %e, "TeeEnrollmentKvStore: serialize failed");
+                return;
+            }
+        };
+        let tagged = mac_wrap(&bytes);
+        if let Err(e) = self
+            .storage
+            .put(CF_VALIDATOR_MODULES, &Self::key(account), &tagged)
+        {
+            tracing::error!(error = %e, "TeeEnrollmentKvStore: persist failed");
+        }
+    }
+
+    fn delete(&self, account: &[u8]) {
+        let _ = self
+            .storage
+            .delete(CF_VALIDATOR_MODULES, &Self::key(account));
+    }
+
+    fn load_all(&self) -> Vec<(Vec<u8>, tenzro_vm::TeeBoundAccountKey)> {
+        let keys = match self
+            .storage
+            .get_keys_with_prefix(CF_VALIDATOR_MODULES, Self::PREFIX)
+        {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(error = %e, "TeeEnrollmentKvStore: hydrate scan failed");
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for full_key in keys {
+            let Some(account_hex) = full_key.strip_prefix(Self::PREFIX) else {
+                continue;
+            };
+            let Ok(account) = hex::decode(account_hex) else {
+                continue;
+            };
+            let Ok(Some(blob)) = self.storage.get(CF_VALIDATOR_MODULES, &full_key) else {
+                continue;
+            };
+            let payload = match mac_verify(&blob) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        account = %String::from_utf8_lossy(account_hex),
+                        error = %e,
+                        "TeeEnrollmentKvStore: dropping tampered/foreign enrollment row"
+                    );
+                    continue;
+                }
+            };
+            match serde_json::from_slice::<tenzro_vm::TeeBoundAccountKey>(payload) {
+                Ok(key) => out.push((account, key)),
+                Err(e) => tracing::warn!(error = %e, "TeeEnrollmentKvStore: deserialize failed"),
+            }
+        }
+        out
+    }
+}
+
+// =============================================================================
 // Smart-account persistence
 // =============================================================================
 //
@@ -672,21 +766,11 @@ pub(crate) async fn handle_enroll_passkey(
     })?;
     let credential_id = decode_hex(&req.credential_id_hex)?;
 
-    // 3. Register the human TDIP identity (re-uses the binder so a wallet is
-    //    NOT auto-provisioned — the passkey IS the custody).
+    // 3. Generate the human DID up front. The smart-account owner seed binds
+    //    to it (step 4), and it is the DID the passkey-custody identity carries.
     let display_name = req.display_name.unwrap_or_else(|| "Passkey User".to_string());
-    let registration = identity_registry
-        .register_human_via_binder(
-            display_name.clone(),
-            tenzro_types::identity::KycTier::Unverified,
-        )
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32603,
-            message: format!("identity registration: {}", e),
-            data: None,
-        })?;
-    let did_string = registration.identity.did_string();
+    let did = tenzro_identity::TenzroDid::new_human();
+    let did_string = did.to_string();
 
     // 4. Deploy the smart account via CREATE2. Owner bytes = SHA-256 of
     //    (passkey || credential || did) so the account address is
@@ -750,6 +834,39 @@ pub(crate) async fn handle_enroll_passkey(
     //    AND writes through to `CF_AGENTS / smart_account/<addr>` so
     //    the rotated state survives node restart.
     factory.update_account(smart_account.clone());
+
+    // 7b. Register the human TDIP identity from a device-held WalletBinding.
+    //     The passkey IS the custody: the identity's classical key is the
+    //     WebAuthn P-256 pubkey, its PQ key is the enrolled ML-DSA-65 vk, and
+    //     its custody vessel is the smart account gated by the WebAuthnValidator
+    //     — no server-side wallet is provisioned (no FROST-share reconstruction
+    //     path exists for this identity). BLS is empty: a passkey human is not a
+    //     validator and carries no HotStuff-2 vote-aggregation key.
+    let mut wallet_addr_bytes = [0u8; 32];
+    let sa_addr = smart_account.address.as_slice();
+    let sa_len = sa_addr.len().min(32);
+    wallet_addr_bytes[..sa_len].copy_from_slice(&sa_addr[..sa_len]);
+    let binding = tenzro_identity::WalletBinding {
+        wallet_id: format!("0x{}", hex::encode(&smart_account.address)),
+        address: tenzro_types::primitives::Address::new(wallet_addr_bytes),
+        public_key: p256_xy.to_vec(),
+        key_type: "P-256".to_string(),
+        pq_verifying_key: account_key.pq_pubkey.clone(),
+        bls_verifying_key: Vec::new(),
+    };
+    identity_registry
+        .register_human_with_binding(
+            did,
+            display_name,
+            tenzro_types::identity::KycTier::Unverified,
+            binding,
+        )
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("identity registration: {}", e),
+            data: None,
+        })?;
 
     // 8. Bind the smart-account address to the TDIP identity metadata for
     //    cross-reference.

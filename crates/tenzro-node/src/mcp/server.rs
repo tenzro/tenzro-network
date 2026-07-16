@@ -45,6 +45,10 @@ pub struct SendTransactionParams {
     pub signature: Option<String>,
     #[schemars(description = "Hex-encoded 32-byte Ed25519 public key (required if pre-signing)")]
     pub public_key: Option<String>,
+    #[schemars(description = "Hex-encoded ML-DSA-65 signature (3309 bytes) over the same Transaction::hash() (required if pre-signing — self-custody submits are hybrid)")]
+    pub pq_signature: Option<String>,
+    #[schemars(description = "Hex-encoded ML-DSA-65 verifying key (1952 bytes), included in the signed hash preimage (required if pre-signing)")]
+    pub pq_public_key: Option<String>,
     #[schemars(description = "Transaction timestamp in ms since Unix epoch — MUST match the timestamp used when computing the signed hash (required if pre-signing)")]
     pub timestamp: Option<u64>,
 }
@@ -4632,7 +4636,7 @@ impl TenzroMcpServer {
 
     // ─── Transactions ───
 
-    #[tool(description = "Send a TNZO transfer transaction on the Tenzro ledger. Two supported paths: (a) ambient OAuth/DPoP — omit signature/public_key/timestamp; the server will look up the wallet bound to the bearer DID and sign; (b) pre-signed — supply signature + public_key + timestamp matching the signed Transaction::hash(). The legacy private_key inline-signing path has been removed.")]
+    #[tool(description = "Send a TNZO transfer transaction on the Tenzro ledger. Two supported paths: (a) ambient OAuth/DPoP (server-custodial) — omit the signature fields; the server looks up the wallet bound to the bearer DID and signs; (b) self-custody / pre-signed — the caller signs both legs locally and supplies signature (Ed25519) + public_key (Ed25519) + pq_signature (ML-DSA-65) + pq_public_key (ML-DSA-65 verifying key) + timestamp matching the signed Transaction::hash(). The node verifies both legs and rejects a raw send that omits either.")]
     async fn send_transaction(
         &self,
         Parameters(params): Parameters<SendTransactionParams>,
@@ -4689,9 +4693,21 @@ impl TenzroMcpServer {
             ),
             data: None,
         })?;
+        let pq_sig_hex = params.pq_signature.as_deref().ok_or_else(|| ErrorData {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(
+                "Missing 'pq_signature' — self-custody submits are hybrid; the ML-DSA-65 leg is mandatory".to_string(),
+            ),
+            data: None,
+        })?;
+        let pq_pk_hex = params.pq_public_key.as_deref().ok_or_else(|| ErrorData {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from("Missing 'pq_public_key' — ML-DSA-65 verifying key is mandatory".to_string()),
+            data: None,
+        })?;
 
         // Forward to eth_sendRawTransaction, which performs synchronous
-        // Ed25519 verification against Transaction::hash() before admitting.
+        // Ed25519 + ML-DSA-65 verification against Transaction::hash() before admitting.
         let raw_params = serde_json::json!({
             "from": params.from,
             "to": params.to,
@@ -4702,6 +4718,8 @@ impl TenzroMcpServer {
             "chain_id": chain_id,
             "signature": sig_hex,
             "public_key": pk_hex,
+            "pq_signature": pq_sig_hex,
+            "pq_public_key": pq_pk_hex,
             "timestamp": ts_ms,
         });
         let result = rpc_dispatch(&self.node, "eth_sendRawTransaction", raw_params)

@@ -458,6 +458,31 @@ impl BlsKeyPair {
         })
     }
 
+    /// Derive a keypair deterministically from input key material.
+    ///
+    /// Runs the BLS12-381 `KeyGen` (RFC 9380 / EIP-2333 base) over the
+    /// supplied `ikm`, so the same `ikm` always yields the same keypair.
+    /// The caller owns key-material hygiene; `ikm` must be at least 32
+    /// bytes of high-entropy secret material. Used by the TEE-sealed
+    /// agent path to derive the machine wallet's BLS leg from the same
+    /// enclave root as its Ed25519 and ML-DSA-65 legs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlsError::InvalidSecretKey`] if `KeyGen` rejects the IKM.
+    pub fn from_ikm(ikm: &[u8]) -> Result<Self> {
+        let secret_key_inner = SecretKey::key_gen(ikm, &[])
+            .map_err(|e| BlsError::InvalidSecretKey(format!("Key generation failed: {:?}", e)))?;
+        let secret_key = BlsSecretKey {
+            inner: secret_key_inner,
+        };
+        let public_key = BlsPublicKey::from_secret_key(&secret_key);
+        Ok(Self {
+            secret_key,
+            public_key,
+        })
+    }
+
     /// Create a keypair from a secret key.
     ///
     /// Derives the public key from the provided secret key.

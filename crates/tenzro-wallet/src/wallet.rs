@@ -286,6 +286,79 @@ impl MpcWallet {
         })
     }
 
+    /// Create a watch-only wallet that holds no signing secrets.
+    ///
+    /// The classical public key, ML-DSA-65 verifying key, and BLS12-381
+    /// verifying key are supplied directly; the wallet cannot sign on its
+    /// own (`key_shares` empty, `pq_signing_key` / `bls_signing_key` /
+    /// `frost_pubkey_package` all `None`). Signatures for this wallet must
+    /// come from an external [`crate::signing::HybridSigner`] bound via
+    /// `TenzroWalletService::set_hybrid_signer`.
+    ///
+    /// This is the autonomous-machine custody shape: the address and public
+    /// keys mirror a TEE-sealed agent key the node cannot read, so no secret
+    /// is ever reconstructed in node memory.
+    ///
+    /// The address is derived from `classical_public_key` exactly as the
+    /// signing path expects (`PublicKey::to_address` widened to 32 bytes).
+    pub fn new_watch_only(
+        wallet_id: WalletId,
+        classical_public_key: PublicKey,
+        pq_verifying_key: Vec<u8>,
+        bls_verifying_key: Vec<u8>,
+    ) -> Result<Self> {
+        if pq_verifying_key.len() != 1952 {
+            return Err(WalletError::InvalidKeyShare(format!(
+                "ML-DSA-65 verifying key must be 1952 bytes, got {}",
+                pq_verifying_key.len()
+            )));
+        }
+        if bls_verifying_key.len() != 48 {
+            return Err(WalletError::InvalidKeyShare(format!(
+                "BLS12-381 verifying key must be 48 bytes, got {}",
+                bls_verifying_key.len()
+            )));
+        }
+
+        let crypto_addr = classical_public_key.to_address();
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[..20].copy_from_slice(crypto_addr.as_bytes());
+        let address = Address::new(addr_bytes);
+
+        let supported_assets = vec![
+            AssetId::tnzo(),
+            AssetId::from("USDT"),
+            AssetId::from("USDC"),
+        ];
+
+        Ok(Self {
+            wallet_id,
+            address,
+            threshold: 0,
+            total_shares: 0,
+            key_shares: Vec::new(),
+            public_key: classical_public_key,
+            frost_pubkey_package: None,
+            supported_assets,
+            created_at: Timestamp::now(),
+            last_used: None,
+            label: None,
+            pq_signing_key: None,
+            pq_verifying_key,
+            bls_signing_key: None,
+            bls_verifying_key,
+        })
+    }
+
+    /// Whether this wallet holds no signing secrets (watch-only). Such a
+    /// wallet must sign through an external
+    /// [`crate::signing::HybridSigner`].
+    pub fn is_watch_only(&self) -> bool {
+        self.key_shares.is_empty()
+            && self.pq_signing_key.is_none()
+            && self.frost_pubkey_package.is_none()
+    }
+
     /// FROST public-key package — required for round-2 signing and
     /// aggregation. Returns an error when the wallet was rehydrated from
     /// metadata-only storage and the keystore has not yet decrypted it.

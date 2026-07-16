@@ -26,6 +26,10 @@ pub enum WalletCommand {
     History(WalletHistoryCmd),
     /// Get token balance for a specific ERC-20 token
     TokenBalance(WalletTokenBalanceCmd),
+    /// Generate a local self-custody hybrid key (node never holds the secret)
+    CreateLocal(WalletCreateLocalCmd),
+    /// Import an Ed25519 secret into a local self-custody hybrid key
+    ImportLocal(WalletImportLocalCmd),
 }
 
 impl WalletCommand {
@@ -40,6 +44,8 @@ impl WalletCommand {
             Self::Faucet(cmd) => cmd.execute().await,
             Self::History(cmd) => cmd.execute().await,
             Self::TokenBalance(cmd) => cmd.execute().await,
+            Self::CreateLocal(cmd) => cmd.execute().await,
+            Self::ImportLocal(cmd) => cmd.execute().await,
         }
     }
 }
@@ -327,6 +333,11 @@ pub struct WalletSendCmd {
     #[arg(long)]
     from: Option<String>,
 
+    /// Sign locally with the self-custody hybrid key instead of the node.
+    /// Auto-enabled when a local key exists at ~/.tenzro/hybrid_key.json.
+    #[arg(long)]
+    self_custody: bool,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -342,6 +353,13 @@ impl WalletSendCmd {
         let amount_float: f64 = self.amount.parse()?;
         let decimals = 18;
         let amount_wei = (amount_float * 10f64.powi(decimals)) as u128;
+
+        // Self-custody path: sign both legs locally and submit the raw tx.
+        // Selected explicitly (--self-custody) or automatically when a local
+        // hybrid key is present. The node never sees the secret.
+        if self.self_custody || crate::keystore::has_local_key() {
+            return self.execute_self_custody(amount_wei).await;
+        }
 
         // Resolve sender address (from --from or stored config)
         let cfg = crate::config::load_config();
@@ -452,6 +470,136 @@ impl WalletSendCmd {
 
         Ok(())
     }
+
+    /// Self-custody send: unlock the local hybrid key, build the transaction
+    /// and compute `Transaction::hash()` client-side with an explicit
+    /// timestamp, sign both legs (Ed25519 + ML-DSA-65) locally, and submit
+    /// via `eth_sendRawTransaction`. The node never holds the secret.
+    async fn execute_self_custody(&self, amount_wei: u128) -> Result<()> {
+        use crate::rpc::RpcClient;
+        use tenzro_types::primitives::{Address, ChainId, Nonce};
+        use tenzro_types::transaction::{Transaction, TransactionType};
+
+        // Unlock the local key.
+        let password = dialoguer::Password::new()
+            .with_prompt("Self-custody key password")
+            .interact()?;
+        let signer = crate::keystore::unlock_local_key(&password)?;
+
+        // The native `from` is the raw 32-byte Ed25519 pubkey — the node's
+        // verifier accepts it directly via `matches_pubkey`.
+        let from_hex = signer.from_address_hex();
+        let from_bytes = signer.ed25519_public_key().to_vec();
+        let from_address = Address::from_bytes(&from_bytes)
+            .ok_or_else(|| anyhow::anyhow!("local Ed25519 pubkey is not a valid 32-byte address"))?;
+
+        // Parse the recipient (left-aligned into a 32-byte slot, matching the
+        // node's `parse_address`).
+        let to_address = parse_recipient(&self.to)?;
+
+        output::print_field("From (self-custody)", &output::format_address(&from_hex));
+        output::print_field("To", &output::format_address(&self.to));
+        output::print_field("Amount", &format!("{} {}", self.amount, self.asset));
+        output::print_field("Network Fee", "~0.001 TNZO");
+        println!();
+
+        use dialoguer::Confirm;
+        let confirmed = Confirm::new()
+            .with_prompt("Do you want to send this transaction?")
+            .default(false)
+            .interact()?;
+        if !confirmed {
+            output::print_warning("Transaction cancelled");
+            return Ok(());
+        }
+
+        let spinner = output::create_spinner("Querying nonce and chain ID...");
+        let rpc = RpcClient::new(&self.rpc);
+
+        let nonce: u64 = match rpc
+            .call::<serde_json::Value>("eth_getTransactionCount", serde_json::json!([&from_hex, "latest"]))
+            .await
+        {
+            Ok(val) => u64::from_str_radix(val.as_str().unwrap_or("0x0").trim_start_matches("0x"), 16).unwrap_or(0),
+            Err(_) => 0,
+        };
+        let chain_id: u64 = match rpc
+            .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
+            .await
+        {
+            Ok(val) => u64::from_str_radix(val.as_str().unwrap_or("0x539").trim_start_matches("0x"), 16).unwrap_or(1337),
+            Err(_) => 1337,
+        };
+
+        spinner.set_message("Signing both legs locally...");
+
+        // Build the transaction with the mandatory PQ public key. `new` fixes
+        // the timestamp to now, and that same value is echoed to the node so
+        // its recomputed hash matches ours bit-for-bit.
+        let tx = Transaction::new(
+            ChainId::new(chain_id),
+            from_address,
+            to_address,
+            Nonce::new(nonce),
+            TransactionType::Transfer { amount: amount_wei },
+            21_000,
+            1_000_000_000,
+            signer.ml_dsa_verifying_key().to_vec(),
+        );
+
+        let hash = tx.hash();
+        let (ed_sig, ml_dsa_sig) = signer.sign_hybrid(hash.as_bytes())?;
+
+        spinner.set_message("Submitting raw transaction...");
+
+        let result: serde_json::Value = rpc
+            .call(
+                "eth_sendRawTransaction",
+                serde_json::json!({
+                    "from": from_hex,
+                    "to": self.to,
+                    "value": amount_wei.to_string(),
+                    "gas_limit": 21_000u64,
+                    "gas_price": 1_000_000_000u64,
+                    "nonce": nonce,
+                    "chain_id": chain_id,
+                    "timestamp": tx.timestamp.0,
+                    "public_key": hex::encode(signer.ed25519_public_key()),
+                    "signature": hex::encode(&ed_sig),
+                    "pq_public_key": hex::encode(signer.ml_dsa_verifying_key()),
+                    "pq_signature": hex::encode(&ml_dsa_sig),
+                }),
+            )
+            .await?;
+
+        let tx_hash = result
+            .get("tx_hash")
+            .or_else(|| result.get("transaction_hash"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| result.as_str().unwrap_or("<unknown>").to_string());
+
+        spinner.finish_and_clear();
+
+        output::print_success("Transaction signed locally and sent!");
+        println!();
+        output::print_field("Transaction Hash", &tx_hash);
+
+        Ok(())
+    }
+}
+
+/// Parse a hex recipient into a 32-byte `Address`, left-aligning shorter
+/// inputs the same way the node's `parse_address` does.
+fn parse_recipient(input: &str) -> Result<tenzro_types::primitives::Address> {
+    let clean = input.strip_prefix("0x").unwrap_or(input);
+    let bytes = hex::decode(clean).map_err(|e| anyhow::anyhow!("invalid recipient hex: {}", e))?;
+    if bytes.len() > 32 {
+        return Err(anyhow::anyhow!("recipient address exceeds 32 bytes"));
+    }
+    let mut buf = [0u8; 32];
+    buf[..bytes.len()].copy_from_slice(&bytes);
+    Ok(tenzro_types::primitives::Address::new(buf))
 }
 
 /// List all wallets
@@ -683,6 +831,90 @@ impl WalletTokenBalanceCmd {
         if let Some(decimals) = result.get("decimals").and_then(|v| v.as_u64()) {
             output::print_field("Decimals", &decimals.to_string());
         }
+
+        Ok(())
+    }
+}
+
+/// Generate a local self-custody hybrid key
+#[derive(Debug, Parser)]
+pub struct WalletCreateLocalCmd {}
+
+impl WalletCreateLocalCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Create Self-Custody Hybrid Key");
+
+        if crate::keystore::has_local_key() {
+            output::print_warning(&format!(
+                "A local key already exists at {}",
+                crate::keystore::hybrid_key_path().display()
+            ));
+            use dialoguer::Confirm;
+            let overwrite = Confirm::new()
+                .with_prompt("Overwrite the existing local key?")
+                .default(false)
+                .interact()?;
+            if !overwrite {
+                output::print_warning("Cancelled");
+                return Ok(());
+            }
+        }
+
+        let password = dialoguer::Password::new()
+            .with_prompt("New key password")
+            .with_confirmation("Confirm password", "Passwords do not match")
+            .interact()?;
+
+        let address = crate::keystore::create_local_key(&password)?;
+
+        output::print_success("Self-custody hybrid key created!");
+        println!();
+        output::print_field("Address (Ed25519 pubkey)", &address);
+        output::print_field("Sealed key", &crate::keystore::hybrid_key_path().display().to_string());
+        println!();
+        output::print_warning("The node never holds this secret. `wallet send` now signs locally.");
+        output::print_warning("Back up the sealed key file — losing it loses the account.");
+
+        Ok(())
+    }
+}
+
+/// Import an Ed25519 secret into a local self-custody hybrid key
+#[derive(Debug, Parser)]
+pub struct WalletImportLocalCmd {
+    /// Ed25519 secret key (32-byte hex, with or without 0x prefix)
+    secret: String,
+}
+
+impl WalletImportLocalCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Import Self-Custody Hybrid Key");
+
+        if crate::keystore::has_local_key() {
+            use dialoguer::Confirm;
+            let overwrite = Confirm::new()
+                .with_prompt("A local key already exists. Overwrite it?")
+                .default(false)
+                .interact()?;
+            if !overwrite {
+                output::print_warning("Cancelled");
+                return Ok(());
+            }
+        }
+
+        let password = dialoguer::Password::new()
+            .with_prompt("New key password")
+            .with_confirmation("Confirm password", "Passwords do not match")
+            .interact()?;
+
+        let address = crate::keystore::import_local_key(&self.secret, &password)?;
+
+        output::print_success("Self-custody hybrid key imported!");
+        println!();
+        output::print_field("Address (Ed25519 pubkey)", &address);
+        output::print_field("Sealed key", &crate::keystore::hybrid_key_path().display().to_string());
+        println!();
+        output::print_warning("A fresh ML-DSA-65 leg was derived. The node never holds this secret.");
 
         Ok(())
     }

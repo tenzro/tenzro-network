@@ -766,6 +766,13 @@ fn requires_admin_token(method: &str) -> bool {
             | "tenzro_dvpFinalizeSaga"
             | "tenzro_nettingCompute"
             | "tenzro_nettingSettle"
+            // TEE-bound autonomous-agent custody enrollment. Binding an
+            // account to an enclave measurement + enclave signing key
+            // makes that enclave the sole authorizer of the account's
+            // UserOperations (and gates bootstrap-paymaster sponsorship).
+            // Enrolling or revoking a binding is a direct custody mutation.
+            | "tenzro_enrollTeeKey"
+            | "tenzro_revokeTeeKey"
     )
 }
 
@@ -2341,6 +2348,8 @@ async fn dispatch_request(
         "tenzro_detectTee" => handle_detect_tee(node, request.params).await,
         "tenzro_getAttestation" | "tenzro_getTeeAttestation" => handle_get_attestation_tee(node, request.params).await,
         "tenzro_verifyTeeAttestation" => handle_verify_tee_attestation(node, request.params).await,
+        "tenzro_enrollTeeKey" => handle_enroll_tee_key(node, request.params).await,
+        "tenzro_revokeTeeKey" => handle_revoke_tee_key(node, request.params).await,
         "tenzro_sealData" => handle_seal_data(node, request.params).await,
         "tenzro_unsealData" => handle_unseal_data(node, request.params).await,
         "tenzro_listTeeProviders" => handle_list_tee_providers(node, request.params).await,
@@ -15915,23 +15924,101 @@ async fn handle_register_identity(
         data: None,
     })?;
 
+    // Self-custody is available when this node runs inside a TEE and holds a
+    // wallet service: the human/autonomous branches seal a keypair against the
+    // enclave and bind a watch-only wallet, so the node never holds the
+    // signing secret. When set, any auto-generated `private_key_hex` is not the
+    // custody key and must not be echoed back.
+    let sealed_path = node.tee_provider().is_some() && node.wallet_service().is_some();
+
     // Branch on identity_type. Each branch calls the appropriate registry
     // method so the resulting DID prefix (human/machine/autonomous) matches
     // the requested type.
     let identity = match identity_type.as_str() {
-        "human" => registry
-            .register_human_with_fee(
-                public_key_bytes,
-                display_name,
-                tenzro_types::identity::KycTier::Unverified,
-            )
-            .await
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Human registration failed: {}", e),
-                data: None,
-            })?
-            .identity,
+        "human" => {
+            // Self-custody path: seal a keypair against the enclave, provision a
+            // watch-only wallet whose public identity mirrors the sealed keys,
+            // and bind the sealed signer — the node never holds the human's
+            // signing secret (no FROST-share reconstruction). Off-hardware
+            // (no TEE provider), humans keep the server-custodial
+            // `register_human_with_fee` path, a permanent supported tier.
+            if sealed_path {
+                let did = tenzro_identity::TenzroDid::new_human();
+                let did_string = did.to_string();
+
+                let provider = node.tee_provider().expect("checked above");
+                let handle = tenzro_tee::seal_agent_keypair(provider, &did_string)
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!("Sealing human identity key failed: {}", e),
+                        data: None,
+                    })?;
+                let signer = std::sync::Arc::new(
+                    crate::sealed_agent_wallet_signer::SealedAgentWalletSigner::new(
+                        std::sync::Arc::new(handle),
+                    ),
+                );
+                let bls_verifying_key = signer.bls_verifying_key();
+
+                let wallet_service = node.wallet_service().expect("checked above");
+                let wallet = wallet_service
+                    .provision_watch_only_wallet(
+                        signer.clone(),
+                        tenzro_crypto::KeyType::Ed25519,
+                        bls_verifying_key,
+                    )
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!("Watch-only wallet provisioning failed: {}", e),
+                        data: None,
+                    })?;
+
+                let mut addr_bytes = [0u8; 32];
+                let src = wallet.address.as_bytes();
+                let len = src.len().min(32);
+                addr_bytes[..len].copy_from_slice(&src[..len]);
+
+                let binding = tenzro_identity::WalletBinding {
+                    wallet_id: wallet.wallet_id.to_string(),
+                    address: tenzro_types::primitives::Address::new(addr_bytes),
+                    public_key: wallet.public_key.to_bytes(),
+                    key_type: "Ed25519".to_string(),
+                    pq_verifying_key: wallet.pq_verifying_key_bytes(),
+                    bls_verifying_key: wallet.bls_verifying_key_bytes().to_vec(),
+                };
+
+                registry
+                    .register_human_with_binding(
+                        did,
+                        display_name,
+                        tenzro_types::identity::KycTier::Unverified,
+                        binding,
+                    )
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!("Human registration failed: {}", e),
+                        data: None,
+                    })?
+                    .identity
+            } else {
+                registry
+                    .register_human_with_fee(
+                        public_key_bytes,
+                        display_name,
+                        tenzro_types::identity::KycTier::Unverified,
+                    )
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!("Human registration failed: {}", e),
+                        data: None,
+                    })?
+                    .identity
+            }
+        }
 
         "machine" => {
             let controller_did = params
@@ -15983,15 +16070,78 @@ async fn handle_register_identity(
                 })
                 .unwrap_or_default();
 
-            registry
-                .register_autonomous_machine_with_fee(public_key_bytes, capabilities)
-                .await
-                .map_err(|e| JsonRpcError {
-                    code: -32000,
-                    message: format!("Autonomous machine registration failed: {}", e),
-                    data: None,
-                })?
-                .identity
+            // Self-custody path: seal an agent keypair against the enclave,
+            // provision a watch-only wallet whose public identity mirrors the
+            // sealed keys, and bind the sealed signer. The node never holds
+            // the machine's signing secret — no FROST-share reconstruction.
+            // Off-hardware (no TEE provider) falls back to the FROST path.
+            if sealed_path {
+                let did = tenzro_identity::TenzroDid::new_autonomous_machine();
+                let did_string = did.to_string();
+
+                let provider = node.tee_provider().expect("checked above");
+                let handle = tenzro_tee::seal_agent_keypair(provider, &did_string)
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!("Sealing autonomous-machine agent key failed: {}", e),
+                        data: None,
+                    })?;
+                let signer = std::sync::Arc::new(
+                    crate::sealed_agent_wallet_signer::SealedAgentWalletSigner::new(
+                        std::sync::Arc::new(handle),
+                    ),
+                );
+                let bls_verifying_key = signer.bls_verifying_key();
+
+                let wallet_service = node.wallet_service().expect("checked above");
+                let wallet = wallet_service
+                    .provision_watch_only_wallet(
+                        signer.clone(),
+                        tenzro_crypto::KeyType::Ed25519,
+                        bls_verifying_key,
+                    )
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!("Watch-only wallet provisioning failed: {}", e),
+                        data: None,
+                    })?;
+
+                let mut addr_bytes = [0u8; 32];
+                let src = wallet.address.as_bytes();
+                let len = src.len().min(32);
+                addr_bytes[..len].copy_from_slice(&src[..len]);
+
+                let binding = tenzro_identity::WalletBinding {
+                    wallet_id: wallet.wallet_id.to_string(),
+                    address: tenzro_types::primitives::Address::new(addr_bytes),
+                    public_key: wallet.public_key.to_bytes(),
+                    key_type: "Ed25519".to_string(),
+                    pq_verifying_key: wallet.pq_verifying_key_bytes(),
+                    bls_verifying_key: wallet.bls_verifying_key_bytes().to_vec(),
+                };
+
+                registry
+                    .register_autonomous_machine_with_binding(did, binding, capabilities)
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!("Autonomous machine registration failed: {}", e),
+                        data: None,
+                    })?
+                    .identity
+            } else {
+                registry
+                    .register_autonomous_machine_with_fee(public_key_bytes, capabilities)
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: -32000,
+                        message: format!("Autonomous machine registration failed: {}", e),
+                        data: None,
+                    })?
+                    .identity
+            }
         }
 
         other => {
@@ -16095,8 +16245,14 @@ async fn handle_register_identity(
         "status": format!("{}", identity.status),
     });
 
-    if let Some(sk) = private_key_hex {
-        result["private_key"] = serde_json::json!(sk);
+    // On the sealed (self-custody) path the auto-generated keypair is not the
+    // identity's custody key — the signing secret lives in the enclave and the
+    // wallet is watch-only. Echoing the generated secret would mislead the
+    // caller into treating it as their key, so it is withheld.
+    if !sealed_path {
+        if let Some(sk) = private_key_hex {
+            result["private_key"] = serde_json::json!(sk);
+        }
     }
 
     Ok(result)
@@ -47911,6 +48067,171 @@ async fn handle_verify_tee_attestation(
     }))
 }
 
+/// Enroll a TEE-bound custody key for an autonomous-agent smart account.
+///
+/// Binds `account` (20-byte EVM address) to an enclave measurement + an
+/// Ed25519 enclave signing key by verifying a fresh attestation report the
+/// enclave produced. After enrollment, the `TeeBoundValidator` (0x1021)
+/// requires every `UserOperation` from that account to carry a fresh
+/// same-measurement attestation signed by `enclave_pubkey`, and the
+/// bootstrap paymaster will TEE-gate the account's first sponsored op.
+///
+/// The presented attestation is verified against the pinned vendor root-CA
+/// chain via `AttestationVerifier::verify_report` before anything is stored;
+/// the enrolled `measurement_hash` is taken from `report.measurement` (not a
+/// caller-supplied value) so the enrollment can only bind an enclave the
+/// caller can actually attest to. Admin-token gated (`requires_admin_token`)
+/// — enrollment is a direct custody mutation.
+///
+/// Params:
+/// - `account` — 0x-prefixed 20-byte smart-account address.
+/// - `enclave_pubkey` — 0x-prefixed 32-byte Ed25519 public key the enclave
+///   signs each op_hash with.
+/// - `report_json` — JSON-serialized `AttestationReport` produced by the
+///   enclave (same wire shape as `tenzro_verifyTeeAttestation`'s report).
+async fn handle_enroll_tee_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let oracle = node.tee_key_oracle().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "TEE key oracle not initialized (AA runtime disabled)".to_string(),
+        data: None,
+    })?;
+
+    let account_hex = params.get("account").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing account".to_string(), data: None,
+    })?;
+    let account = decode_hex_param(account_hex)?;
+    if account.len() != 20 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("account must be 20 bytes, got {}", account.len()),
+            data: None,
+        });
+    }
+
+    let pubkey_hex = params.get("enclave_pubkey").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing enclave_pubkey".to_string(), data: None,
+    })?;
+    let pubkey_bytes = decode_hex_param(pubkey_hex)?;
+    if pubkey_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("enclave_pubkey must be 32 bytes, got {}", pubkey_bytes.len()),
+            data: None,
+        });
+    }
+    let mut enclave_pubkey = [0u8; 32];
+    enclave_pubkey.copy_from_slice(&pubkey_bytes);
+
+    let report_json = params.get("report_json").ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing report_json".to_string(), data: None,
+    })?;
+    let report: tenzro_types::tee::AttestationReport =
+        serde_json::from_value(report_json.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid attestation report: {}", e),
+            data: None,
+        })?;
+
+    if report.measurement.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "attestation report has empty measurement — cannot bind an enclave".to_string(),
+            data: None,
+        });
+    }
+
+    // Verify the attestation against the pinned vendor root-CA chain before
+    // binding. A caller can only enroll an enclave it can actually attest to.
+    let verifier = tenzro_tee::AttestationVerifier::new();
+    match verifier.verify_report(&report) {
+        Ok(result) if result.valid => {}
+        Ok(_) => {
+            return Err(JsonRpcError {
+                code: -32003,
+                message: "attestation report failed verification".to_string(),
+                data: None,
+            });
+        }
+        Err(e) => {
+            return Err(JsonRpcError {
+                code: -32003,
+                message: format!("attestation verification error: {}", e),
+                data: None,
+            });
+        }
+    }
+
+    let key = tenzro_vm::TeeBoundAccountKey::new(report.vendor, &report.measurement, enclave_pubkey);
+    let measurement_hash_hex = format!("0x{}", hex::encode(key.measurement_hash));
+    oracle.enroll(account.clone(), key);
+
+    tracing::info!(
+        target: "tenzro::custody::tee",
+        account = %account_hex,
+        vendor = ?report.vendor,
+        measurement_hash = %measurement_hash_hex,
+        "TEE custody key enrolled for autonomous-agent smart account"
+    );
+
+    Ok(serde_json::json!({
+        "enrolled": true,
+        "account": format!("0x{}", hex::encode(&account)),
+        "vendor": format!("{:?}", report.vendor),
+        "measurement_hash": measurement_hash_hex,
+        "enclave_pubkey": format!("0x{}", hex::encode(enclave_pubkey)),
+    }))
+}
+
+/// Revoke a TEE-bound custody key. After this, the `TeeBoundValidator` fails
+/// closed for the account (no enrollment → every op rejected) until a new
+/// key is enrolled. Admin-token gated.
+async fn handle_revoke_tee_key(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = unwrap_params(params)?;
+
+    let oracle = node.tee_key_oracle().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "TEE key oracle not initialized (AA runtime disabled)".to_string(),
+        data: None,
+    })?;
+
+    let account_hex = params.get("account").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing account".to_string(), data: None,
+    })?;
+    let account = decode_hex_param(account_hex)?;
+    if account.len() != 20 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("account must be 20 bytes, got {}", account.len()),
+            data: None,
+        });
+    }
+
+    let was_enrolled =
+        tenzro_vm::TeeKeyOracle::lookup(oracle.as_ref(), &account).is_some();
+    oracle.revoke(&account);
+
+    tracing::info!(
+        target: "tenzro::custody::tee",
+        account = %account_hex,
+        was_enrolled,
+        "TEE custody key revoked"
+    );
+
+    Ok(serde_json::json!({
+        "revoked": true,
+        "was_enrolled": was_enrolled,
+        "account": format!("0x{}", hex::encode(&account)),
+    }))
+}
+
 async fn handle_seal_data(
     _node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -51033,5 +51354,19 @@ mod cluster_discovery_tests {
             MemberReachability::SymmetricNat
         );
         assert!(!member_reachability_from_announcement("unreachable", false).data_plane_eligible());
+    }
+}
+
+#[cfg(test)]
+mod tee_custody_gate_tests {
+    use super::requires_admin_token;
+
+    /// Enrolling/revoking a TEE-bound custody key rebinds who can authorize
+    /// an autonomous-agent account's UserOperations — a direct custody
+    /// mutation, so both must be admin-token gated.
+    #[test]
+    fn tee_key_mutations_are_admin_only() {
+        assert!(requires_admin_token("tenzro_enrollTeeKey"));
+        assert!(requires_admin_token("tenzro_revokeTeeKey"));
     }
 }

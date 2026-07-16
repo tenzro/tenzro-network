@@ -127,8 +127,8 @@ pub use aa_delegation_validator::{
     InMemoryScopeOracle, ScopeOracle, StandardExecuteDecoder,
 };
 pub use aa_tee_bound_validator::{
-    EnclaveSignedOp, InMemoryTeeKeyOracle, TeeBoundAccountKey, TeeBoundValidator, TeeKeyOracle,
-    DEFAULT_MAX_ATTESTATION_AGE_SECS,
+    EnclaveSignedOp, InMemoryTeeKeyOracle, TeeBoundAccountKey, TeeBoundValidator,
+    TeeEnrollmentStore, TeeKeyOracle, DEFAULT_MAX_ATTESTATION_AGE_SECS,
 };
 pub use aa_bootstrap_paymaster::{
     AgentRegistryLookup, BootstrapPaymasterError, TnzoBootstrapPaymaster,
