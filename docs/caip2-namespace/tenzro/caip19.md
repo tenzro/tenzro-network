@@ -64,16 +64,16 @@ asset_id := chain_id "/" asset_namespace ":" asset_reference [ "/" token_id ]
 
 ```
 # Tenzro Testnet — native TNZO coin (registered SLIP-44 index)
-tenzro:92bd27db9713293097f0e63476e3911e/slip44:1414421071
+tenzro:bd7db8168a4fb61538147696bc857270/slip44:1414421071
 
 # Tenzro Testnet — native TNZO coin (pre-registration form, accepted until slips#2015 merges)
-tenzro:92bd27db9713293097f0e63476e3911e/slip44:tenzro
+tenzro:bd7db8168a4fb61538147696bc857270/slip44:tenzro
 
 # Tenzro Testnet — fungible token (e.g. an ERC-20 deployed via TOKEN_FACTORY)
-tenzro:92bd27db9713293097f0e63476e3911e/token:7a4bcb13a6b2b384c284b5caa6e5ef3126527f93000000000000000000000000
+tenzro:bd7db8168a4fb61538147696bc857270/token:7a4bcb13a6b2b384c284b5caa6e5ef3126527f93000000000000000000000000
 
 # Tenzro Testnet — NFT (collection_id / token_id)
-tenzro:92bd27db9713293097f0e63476e3911e/nft:a1b2c3d4e5f6...64hex.../42
+tenzro:bd7db8168a4fb61538147696bc857270/nft:a1b2c3d4e5f6...64hex.../42
 ```
 
 ## Cross-VM identity

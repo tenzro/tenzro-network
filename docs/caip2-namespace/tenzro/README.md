@@ -13,7 +13,7 @@ updated: 2026-05-02
 
 ## Introduction
 
-Blockchains in the "tenzro" namespace are validated by their genesis block hash.
+Blockchains in the "tenzro" namespace are identified by their genesis state root.
 Tenzro Ledger is a network designed for AI-age applications: each chain in
 the namespace runs HotStuff-2 BFT consensus over a multi-VM execution layer
 (EVM, SVM, and Canton/DAML) with a single shared native balance per asset (the

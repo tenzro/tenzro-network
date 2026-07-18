@@ -53,17 +53,17 @@ _For context, see the [CAIP-2][] specification and `caip2.md`._
 
 | Network Name | Chain ID                             |
 | ------------ | ------------------------------------ |
-| Testnet      | tenzro:92bd27db9713293097f0e63476e3911e |
+| Testnet      | tenzro:bd7db8168a4fb61538147696bc857270 |
 | Mainnet      | TBD                                  |
 
 ## Test Cases
 
 ```
 # Tenzro Testnet — hex form (canonical)
-tenzro:92bd27db9713293097f0e63476e3911e:0x0000000000000000000000000000000000000000000000000000000000000000
+tenzro:bd7db8168a4fb61538147696bc857270:0x0000000000000000000000000000000000000000000000000000000000000000
 
 # Tenzro Testnet — base58 form (also accepted)
-tenzro:92bd27db9713293097f0e63476e3911e:11111111111111111111111111111111
+tenzro:bd7db8168a4fb61538147696bc857270:11111111111111111111111111111111
 ```
 
 ## References

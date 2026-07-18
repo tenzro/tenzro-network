@@ -29,8 +29,8 @@ all of them in lockstep.
 | Field                    | Value                                                                 |
 | :---                     | :---                                                                  |
 | Namespace identifier     | `tenzro`                                                              |
-| Testnet genesis hash     | `92bd27db9713293097f0e63476e3911e77b706c1b20f4a5e97d44fe7a8d51648`    |
-| Testnet CAIP-2 reference | `tenzro:92bd27db9713293097f0e63476e3911e` (first 16 bytes / 32 hex)   |
+| Testnet genesis state root | `bd7db8168a4fb61538147696bc8572700d644e6eb544d8c0469e816fd652036a`  |
+| Testnet CAIP-2 reference | `tenzro:bd7db8168a4fb61538147696bc857270` (first 16 bytes / 32 hex)   |
 | Testnet EVM chain ID     | `1337`                                                                |
 | Mainnet CAIP-2 reference | TBD — populated at mainnet launch                                     |
 | Address width            | 32 bytes (hex `0x` + 64 chars OR 44-char base58btc)                   |

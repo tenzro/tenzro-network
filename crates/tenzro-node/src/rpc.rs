@@ -15196,7 +15196,7 @@ const TENZRO_SLIP44_COIN_INDEX: u32 = 1_414_421_071;
 /// Read the genesis block hash from storage. Returns `None` when the
 /// node has not finished its first-boot genesis write yet. Used by the
 /// CAIP-2 RPC and any future identifier that derives from the genesis.
-async fn read_genesis_block_hash(node: &Arc<TenzroNode>) -> Option<tenzro_types::primitives::Hash> {
+async fn read_genesis_state_root(node: &Arc<TenzroNode>) -> Option<tenzro_types::primitives::Hash> {
     use tenzro_storage::BlockStore;
     use tenzro_storage::block_store::BlockStoreImpl;
 
@@ -15207,15 +15207,18 @@ async fn read_genesis_block_hash(node: &Arc<TenzroNode>) -> Option<tenzro_types:
         .await
         .ok()
         .flatten()
-        .map(|block| block.hash())
+        .map(|block| block.header.state_root)
 }
 
 /// Compute the Tenzro CAIP-2 reference per the submitted namespace spec:
-/// lowercase hex of the first 16 bytes of the genesis block hash. Returns
-/// `None` when the genesis block has not been written to storage yet.
+/// lowercase hex of the first 16 bytes of the genesis state root. The state
+/// root binds chain_id + validator set + genesis allocations and is
+/// deterministic across every node booting the same genesis, unlike the
+/// genesis block hash (which stamps a boot-time timestamp). Returns `None`
+/// when the genesis block has not been written to storage yet.
 async fn caip2_reference(node: &Arc<TenzroNode>) -> Option<String> {
-    let hash = read_genesis_block_hash(node).await?;
-    let bytes = hash.as_bytes();
+    let root = read_genesis_state_root(node).await?;
+    let bytes = root.as_bytes();
     let prefix_len = bytes.len().min(16);
     Some(hex::encode(&bytes[..prefix_len]))
 }
@@ -15223,7 +15226,7 @@ async fn caip2_reference(node: &Arc<TenzroNode>) -> Option<String> {
 /// `tenzro_caip2` — Return the canonical CAIP-2 identifier for this chain
 /// per the `tenzro` namespace spec
 /// (`ChainAgnostic/namespaces/blob/main/tenzro/caip2.md`):
-/// `tenzro:<lowercase hex of genesis_hash[0..16]>`.
+/// `tenzro:<lowercase hex of genesis_state_root[0..16]>`.
 ///
 /// The integer chain id (`eth_chainId`) is **not** the CAIP-2 reference
 /// but is surfaced alongside as `evm_chain_id` so EVM tooling can read
