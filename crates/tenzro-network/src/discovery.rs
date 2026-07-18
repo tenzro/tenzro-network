@@ -178,38 +178,28 @@ impl BootstrapConfig {
         }
     }
 
-    /// Creates a testnet bootstrap config.
+    /// Builds a bootstrap config from the environment.
     ///
-    /// Ships BOTH DNS entries and raw IP fallbacks so a DNS outage cannot
-    /// partition new joiners. The DNS entries currently resolve to the same
-    /// IP, so the fallback list also carries every fleet validator's public
-    /// IP — any single one being reachable is enough to enter the network and
-    /// learn the rest via Kademlia.
-    pub fn testnet() -> Self {
+    /// Boot nodes are read from `TENZRO_BOOT_NODES`, a comma-separated list of
+    /// multiaddrs (e.g. `/dns4/boot.example.network/tcp/9000/p2p/<peer>,/ip4/…`).
+    /// Unparseable entries are skipped. No addresses are baked in: the network
+    /// is permissionless, so bootstrap peers are supplied by the operator (or by
+    /// the node binary's `--boot-nodes` / `--bootstrap-dns` flags), never fixed
+    /// in the protocol. Absent the var, `boot_nodes` is empty and the node
+    /// relies on whatever the caller populates.
+    pub fn from_env() -> Self {
+        let boot_nodes = std::env::var("TENZRO_BOOT_NODES")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse::<Multiaddr>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
-            boot_nodes: vec![
-                // DNS entries (governance-controlled; convenient but censorable).
-                "/dns4/testnet-boot-1.tenzro.xyz/tcp/9000".parse().unwrap(),
-                "/dns4/testnet-boot-2.tenzro.xyz/tcp/9000".parse().unwrap(),
-                // Fleet-IP fallbacks. Rotated on each Terraform IP change;
-                // keep in sync with the validator outputs in deploy/terraform.
-                "/ip4/35.184.63.8/tcp/9000".parse().unwrap(),      // v0 us-central1-a
-                "/ip4/35.232.48.224/tcp/9000".parse().unwrap(),    // v1 us-central1-b
-                "/ip4/34.77.150.103/tcp/9000".parse().unwrap(),    // v4 europe-west1-b
-                "/ip4/34.126.119.53/tcp/9000".parse().unwrap(),    // v7 asia-southeast1-a
-            ],
-            ..Default::default()
-        }
-    }
-
-    /// Creates a mainnet bootstrap config
-    pub fn mainnet() -> Self {
-        Self {
-            boot_nodes: vec![
-                "/dns4/mainnet-boot-1.tenzro.xyz/tcp/9000".parse().unwrap(),
-                "/dns4/mainnet-boot-2.tenzro.xyz/tcp/9000".parse().unwrap(),
-                "/dns4/mainnet-boot-3.tenzro.xyz/tcp/9000".parse().unwrap(),
-            ],
+            boot_nodes,
             ..Default::default()
         }
     }
@@ -364,17 +354,31 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrap_config_testnet() {
-        let config = BootstrapConfig::testnet();
+    fn test_bootstrap_config_from_env_parses_list() {
+        // SAFETY: single-threaded test; scoped set/remove of a process env var.
+        unsafe {
+            std::env::set_var(
+                "TENZRO_BOOT_NODES",
+                "/dns4/boot.example.network/tcp/9000, /ip4/10.0.0.1/tcp/9000 , not-a-multiaddr",
+            );
+        }
+        let config = BootstrapConfig::from_env();
+        unsafe {
+            std::env::remove_var("TENZRO_BOOT_NODES");
+        }
+        // Two valid entries; the garbage entry is dropped, nothing is baked in.
         assert_eq!(config.boot_nodes.len(), 2);
         assert!(config.enable_reconnect);
     }
 
     #[test]
-    fn test_bootstrap_config_mainnet() {
-        let config = BootstrapConfig::mainnet();
-        assert_eq!(config.boot_nodes.len(), 3);
-        assert!(config.enable_reconnect);
+    fn test_bootstrap_config_from_env_absent_is_empty() {
+        // SAFETY: single-threaded test; ensure the var is unset.
+        unsafe {
+            std::env::remove_var("TENZRO_BOOT_NODES");
+        }
+        let config = BootstrapConfig::from_env();
+        assert!(config.boot_nodes.is_empty());
     }
 
     #[test]

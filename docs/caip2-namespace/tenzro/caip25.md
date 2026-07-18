@@ -36,7 +36,7 @@ that consumers of a Tenzro CAIP-25 session MUST follow.
 Tenzro authorization scopes are **always network-specific** —
 `tenzro:<chain_id>` rather than the bare namespace `tenzro`. Each
 Tenzro chain has an independent HotStuff-2 BFT validator set and its
-own genesis hash; capabilities and account permissions do not transfer
+own genesis state root; capabilities and account permissions do not transfer
 across chains. Implementations MUST NOT use a namespace-wide
 `tenzro` scope.
 
@@ -44,7 +44,7 @@ across chains. Implementations MUST NOT use a namespace-wide
 
 Tenzro sessions commonly span both a Tenzro chain and external chains
 (e.g. a wallet user authorizing a dApp to interact with both
-`tenzro:92bd27db9713293097f0e63476e3911e` and `eip155:1`). In that
+`tenzro:bd7db8168a4fb61538147696bc857270` and `eip155:1`). In that
 case implementers SHOULD use distinct [CAIP-217] authorization
 objects per chain — the Tenzro scope for Tenzro-routed methods, and a
 separate `eip155:N` scope for direct Ethereum interactions.
@@ -102,7 +102,7 @@ Example CAIP-25 Request
   "method": "provider_authorize",
   "params": {
     "sessionScopes": {
-      "tenzro:92bd27db9713293097f0e63476e3911e": {
+      "tenzro:bd7db8168a4fb61538147696bc857270": {
         "methods": [
           "eth_chainId",
           "eth_blockNumber",
@@ -117,7 +117,7 @@ Example CAIP-25 Request
         ],
         "notifications": ["accountsChanged", "chainChanged"],
         "accounts": [
-          "tenzro:92bd27db9713293097f0e63476e3911e:0x0000000000000000000000000000000000000000000000000000000000000000"
+          "tenzro:bd7db8168a4fb61538147696bc857270:0x0000000000000000000000000000000000000000000000000000000000000000"
         ]
       }
     }
@@ -133,7 +133,7 @@ Example CAIP-25 Response
   "jsonrpc": "2.0",
   "result": {
     "sessionScopes": {
-      "tenzro:92bd27db9713293097f0e63476e3911e": {
+      "tenzro:bd7db8168a4fb61538147696bc857270": {
         "methods": [
           "eth_chainId",
           "eth_blockNumber",
@@ -148,16 +148,16 @@ Example CAIP-25 Response
         ],
         "notifications": ["accountsChanged", "chainChanged"],
         "accounts": [
-          "tenzro:92bd27db9713293097f0e63476e3911e:0x0000000000000000000000000000000000000000000000000000000000000000"
+          "tenzro:bd7db8168a4fb61538147696bc857270:0x0000000000000000000000000000000000000000000000000000000000000000"
         ]
       }
     },
     "scopedProperties": {
-      "tenzro:92bd27db9713293097f0e63476e3911e": {
+      "tenzro:bd7db8168a4fb61538147696bc857270": {
         "vmFacades": ["evm", "svm"],
         "dpopBound": true,
         "evmChainId": 1337,
-        "nativeAssetCaip19": "tenzro:92bd27db9713293097f0e63476e3911e/slip44:tenzro"
+        "nativeAssetCaip19": "tenzro:bd7db8168a4fb61538147696bc857270/slip44:tenzro"
       }
     }
   }

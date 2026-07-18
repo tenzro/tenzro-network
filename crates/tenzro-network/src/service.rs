@@ -4768,13 +4768,13 @@ mod tests {
 
     #[test]
     fn extract_port_pulls_tcp_port() {
-        assert_eq!(extract_port(&ma("/ip4/35.184.63.8/tcp/9000")), Some(9000));
+        assert_eq!(extract_port(&ma("/ip4/203.0.113.10/tcp/9000")), Some(9000));
     }
 
     #[test]
     fn extract_port_pulls_udp_port_for_quic() {
         assert_eq!(
-            extract_port(&ma("/ip4/35.184.63.8/udp/9000/quic-v1")),
+            extract_port(&ma("/ip4/203.0.113.10/udp/9000/quic-v1")),
             Some(9000)
         );
     }
@@ -4790,7 +4790,7 @@ mod tests {
         // Wildcard listen on tcp/9000 — peer observes us at our public IP
         // on tcp/9000 (correct, dial-back-reachable address).
         let listen = vec![ma("/ip4/0.0.0.0/tcp/9000")];
-        let observed = ma("/ip4/35.184.63.8/tcp/9000");
+        let observed = ma("/ip4/203.0.113.10/tcp/9000");
         assert!(is_observed_port_one_of_ours(&observed, &listen));
     }
 
@@ -4801,7 +4801,7 @@ mod tests {
         // and reports `(public_ip, 39692)` in Identify. We must NOT
         // promote 39692 — nothing is listening there.
         let listen = vec![ma("/ip4/0.0.0.0/tcp/9000")];
-        let observed = ma("/ip4/35.184.63.8/tcp/39692");
+        let observed = ma("/ip4/203.0.113.10/tcp/39692");
         assert!(!is_observed_port_one_of_ours(&observed, &listen));
     }
 
@@ -4813,14 +4813,14 @@ mod tests {
         // simultaneously listens on both transports at the same port (the
         // tenzro-node universal default).
         let listen = vec![ma("/ip4/0.0.0.0/udp/9000/quic-v1")];
-        let observed = ma("/ip4/35.184.63.8/tcp/9000");
+        let observed = ma("/ip4/203.0.113.10/tcp/9000");
         assert!(is_observed_port_one_of_ours(&observed, &listen));
     }
 
     #[test]
     fn observed_port_rejected_when_no_listeners() {
         let listen: Vec<Multiaddr> = vec![];
-        let observed = ma("/ip4/35.184.63.8/tcp/9000");
+        let observed = ma("/ip4/203.0.113.10/tcp/9000");
         assert!(!is_observed_port_one_of_ours(&observed, &listen));
     }
 
@@ -4829,7 +4829,7 @@ mod tests {
         // Pathological / malformed observation with no transport port —
         // can't match anything, must reject.
         let listen = vec![ma("/ip4/0.0.0.0/tcp/9000")];
-        let observed = ma("/ip4/35.184.63.8");
+        let observed = ma("/ip4/203.0.113.10");
         assert!(!is_observed_port_one_of_ours(&observed, &listen));
     }
 }

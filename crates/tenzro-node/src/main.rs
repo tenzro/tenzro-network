@@ -164,7 +164,7 @@ struct Cli {
     /// `EndpointId` then fail with "Unable to download" because the
     /// downloader can't resolve any reachable sockaddr.
     ///
-    /// Example: `--external-iroh-addr 35.184.63.8:9001`
+    /// Example: `--external-iroh-addr 203.0.113.10:9001`
     ///
     /// Home / mobile / corporate-NAT nodes leave this unset and rely on the
     /// (forthcoming) iroh relay path.
@@ -539,7 +539,7 @@ async fn main() -> Result<()> {
             .iter()
             .find_map(|ma| {
                 let s = ma.to_string();
-                // Multiaddrs look like `/ip4/35.184.63.8/tcp/9000/p2p/...`.
+                // Multiaddrs look like `/ip4/203.0.113.10/tcp/9000/p2p/...`.
                 // Pull the first /ip4 or /ip6 component.
                 let mut parts = s.split('/').filter(|p| !p.is_empty());
                 let proto = parts.next()?;
@@ -1437,6 +1437,21 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         if !addrs.is_empty() {
             config.network.boot_nodes = addrs;
             info!("Boot nodes override: {} nodes", config.network.boot_nodes.len());
+        }
+    }
+
+    // Env-supplied boot nodes (TENZRO_BOOT_NODES, comma-separated multiaddrs)
+    // are the natural config surface for container / systemd deploys. Append
+    // to whatever --boot-nodes set so env and CLI compose rather than clobber.
+    {
+        let env_boot = tenzro_network::BootstrapConfig::from_env();
+        if !env_boot.boot_nodes.is_empty() {
+            config.network.boot_nodes.extend(env_boot.boot_nodes.iter().cloned());
+            info!(
+                "TENZRO_BOOT_NODES appended: {} nodes (total {})",
+                env_boot.boot_nodes.len(),
+                config.network.boot_nodes.len()
+            );
         }
     }
 
