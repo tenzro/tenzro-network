@@ -39,7 +39,6 @@ use tenzro_iroh::{
 use tenzro_storage::{CF_METADATA, KvStore};
 use tenzro_types::tenzro_uri::TenzroUri;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
 
 use crate::node::TenzroNode;
@@ -381,6 +380,15 @@ impl IrohIngressHandler {
         request_suffix: &str,
         head: &RequestHead,
     ) -> Vec<u8> {
+        // Static routes are read-only: anything but GET/HEAD is a method error,
+        // not a 404.
+        if head.method != "GET" && head.method != "HEAD" {
+            return http_response(
+                405,
+                "text/plain; charset=utf-8",
+                b"method not allowed for static site",
+            );
+        }
         let request_path = if request_suffix.is_empty() || request_suffix == "/" {
             manifest.index_path.clone()
         } else {
@@ -543,6 +551,7 @@ impl IrohIngressHandler {
     /// Verify a relayed payment credential for a priced function. Same
     /// two-path challenge/settle as [`enforce_payment`], keyed on a function
     /// deployment rather than a site manifest.
+    #[cfg(feature = "wasi-skills")]
     async fn enforce_function_payment(
         &self,
         deployment: &crate::functions::FunctionDeployment,

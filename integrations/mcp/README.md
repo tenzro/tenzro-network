@@ -417,12 +417,12 @@ Per-tenant analytics:
 
 ### App (6 tools)
 
-- `register_app` — Register app for custody services
-- `create_user_wallet` — Create custodial wallet for app user
-- `fund_user_wallet` — Fund user wallet from app treasury
-- `list_user_wallets` — List app's user wallets
-- `sponsor_transaction` — Sponsor transaction (app pays gas)
-- `get_usage_stats` — Get app usage statistics
+- `register_app` — Register a developer app in the on-chain app registry (developer-signed DID envelope; app wallet is the developer's own TNZO treasury)
+- `set_app_status` — Activate or deactivate a registered app
+- `get_app` — Look up a registered app by id
+- `list_apps` — List apps in the on-chain app registry
+- `settle_authorized` — Execute a developer-signed settlement authorization
+- `get_settle_authorized_outcome` — Fetch the recorded outcome for a settlement authorization
 
 ### Contract Encoding (2 tools)
 

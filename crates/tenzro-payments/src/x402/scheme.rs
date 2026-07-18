@@ -192,6 +192,33 @@ impl SchemeRegistry {
         r
     }
 
+    /// Build the default registry but route the EIP-3009 and Permit2 schemes
+    /// through a self-hosted [`LocalFacilitatorVerifier`] instead of the remote
+    /// [`CdpFacilitatorVerifier`]. This is the operator default: verification
+    /// and settlement run against the operator's own EVM RPC + relayer signer,
+    /// with no dependency on Coinbase CDP. The tenzro-hybrid, upto,
+    /// batch-settlement, and erc7710 backends are identical to
+    /// [`SchemeRegistry::with_defaults`].
+    pub fn with_local_facilitator(
+        signer: Arc<tenzro_bridge::EvmTransactionSigner>,
+        rpc_url: impl Into<String>,
+    ) -> Self {
+        let mut r = Self::with_defaults();
+
+        let local: Arc<dyn FacilitatorVerifier> = Arc::new(
+            crate::x402::local_facilitator::LocalFacilitatorVerifier::new(signer, rpc_url),
+        );
+
+        let eip3009: Arc<dyn SchemeBackend> = Arc::new(Eip3009Backend::new(Arc::clone(&local)));
+        r.register("exact-eip3009", Arc::clone(&eip3009));
+        r.register("eip3009", eip3009);
+
+        let permit2: Arc<dyn SchemeBackend> = Arc::new(Permit2Backend::new(local));
+        r.register("permit2", permit2);
+
+        r
+    }
+
     /// Register (or replace) a backend under `id`. Lookup is
     /// case-insensitive — the id is lower-cased on insert.
     pub fn register(&mut self, id: &str, backend: Arc<dyn SchemeBackend>) {
@@ -1513,6 +1540,29 @@ mod tests {
         let r = SchemeRegistry::with_defaults();
         assert!(r.get(UPTO_SCHEME).is_some());
         assert_eq!(r.get("UPTO").unwrap().name(), UPTO_SCHEME);
+    }
+
+    #[test]
+    fn with_local_facilitator_registers_self_hosted_backends() {
+        // Signer construction is offline (key derivation only); no RPC is
+        // issued until a verify/settle actually runs.
+        let key = [7u8; 32];
+        let signer = std::sync::Arc::new(
+            tenzro_bridge::EvmTransactionSigner::new(&key, 84532, "http://127.0.0.1:0".into())
+                .expect("offline signer construction"),
+        );
+        let r = SchemeRegistry::with_local_facilitator(signer, "http://127.0.0.1:0");
+
+        // The EIP-3009 / Permit2 lanes now route through the local verifier.
+        assert!(r.get("exact-eip3009").is_some());
+        assert!(r.get("eip3009").is_some());
+        assert!(r.get("permit2").is_some());
+
+        // The shared, facilitator-independent backends are still present.
+        assert!(r.get(DEFAULT_SCHEME).is_some());
+        assert!(r.get(UPTO_SCHEME).is_some());
+        assert!(r.get(BATCH_SETTLEMENT_SCHEME).is_some());
+        assert!(r.get("erc7710").is_some());
     }
 
     #[test]

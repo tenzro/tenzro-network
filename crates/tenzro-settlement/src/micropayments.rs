@@ -540,6 +540,16 @@ pub struct MicropaymentChannel {
     pub closed_at: Option<Timestamp>,
     /// Challenge period duration in milliseconds
     pub challenge_period_ms: i64,
+    /// Registered app's wallet receiving the developer-margin carve at
+    /// finalize. Snapshot taken from the on-chain `AppRegistry` at channel
+    /// open so finalize needs no registry access. `None` disables the carve
+    /// (requires `margin_bps == 0`).
+    pub app_wallet: Option<Address>,
+    /// Developer margin, in basis points, already included in the per-update
+    /// debits the payer signed. At finalize the payee credit is carved by
+    /// `payee_balance * margin_bps / (10_000 + margin_bps)` into
+    /// `app_wallet`. Bounded by `MAX_DEVELOPER_MARGIN_BPS`.
+    pub margin_bps: u32,
 }
 
 impl MicropaymentChannel {
@@ -551,6 +561,8 @@ impl MicropaymentChannel {
         asset_id: AssetId,
         expires_at: Timestamp,
         challenge_period_ms: i64,
+        app_wallet: Option<Address>,
+        margin_bps: u32,
     ) -> Self {
         let state = ChannelState::new(deposit, 0);
 
@@ -568,6 +580,8 @@ impl MicropaymentChannel {
             close_initiated_at: None,
             closed_at: None,
             challenge_period_ms,
+            app_wallet,
+            margin_bps,
         }
     }
 
@@ -733,7 +747,12 @@ impl ChannelManager {
             .unwrap_or(0)
     }
 
-    /// Opens a new micropayment channel with initial deposit
+    /// Opens a new micropayment channel with initial deposit.
+    ///
+    /// `app_wallet` + `margin_bps` are the developer-margin attribution
+    /// snapshot (resolved from the on-chain `AppRegistry` by the caller at
+    /// open time). Pass `None, 0` for an unattributed channel — byte-identical
+    /// behavior to a channel without app attribution.
     pub fn open_channel(
         &self,
         payer: Address,
@@ -741,10 +760,25 @@ impl ChannelManager {
         deposit: u128,
         asset_id: AssetId,
         expires_at: Timestamp,
+        app_wallet: Option<Address>,
+        margin_bps: u32,
     ) -> Result<MicropaymentChannel> {
         if deposit == 0 {
             return Err(SettlementError::InvalidAmount(
                 "Deposit must be greater than zero".to_string(),
+            ));
+        }
+
+        if margin_bps > tenzro_types::fees::MAX_DEVELOPER_MARGIN_BPS {
+            return Err(SettlementError::InvalidAmount(format!(
+                "margin_bps {} exceeds cap {}",
+                margin_bps,
+                tenzro_types::fees::MAX_DEVELOPER_MARGIN_BPS
+            )));
+        }
+        if margin_bps > 0 && app_wallet.is_none() {
+            return Err(SettlementError::InvalidAmount(
+                "margin_bps > 0 requires app_wallet".to_string(),
             ));
         }
 
@@ -774,6 +808,8 @@ impl ChannelManager {
             asset_id,
             expires_at,
             self.default_challenge_period_ms,
+            app_wallet,
+            margin_bps,
         );
 
         let channel_id = channel.channel_id.clone();
@@ -913,6 +949,55 @@ impl ChannelManager {
         Ok(())
     }
 
+    /// Credits the payee's accumulated channel balance into the internal
+    /// balance map, carving the developer margin
+    /// (`payee_balance * margin_bps / (10_000 + margin_bps)`) into the app
+    /// wallet when the channel carries attribution. Floor rounding always
+    /// favors the payee: the payee receives at least the network-cost
+    /// portion of the accumulated balance. Only touches `self.balances` —
+    /// safe to call while holding a `self.channels` guard.
+    fn settle_payee_with_margin(
+        &self,
+        channel: &MicropaymentChannel,
+        payee_key: (Address, AssetId),
+    ) -> Result<()> {
+        if channel.state.payee_balance == 0 {
+            return Ok(());
+        }
+
+        let margin = match (&channel.app_wallet, channel.margin_bps) {
+            (Some(_), bps) if bps > 0 => {
+                channel
+                    .state
+                    .payee_balance
+                    .checked_mul(bps as u128)
+                    .ok_or_else(|| {
+                        SettlementError::ArithmeticOverflow("Channel margin overflow".to_string())
+                    })?
+                    / (10_000u128 + bps as u128)
+            }
+            _ => 0,
+        };
+        let payee_credit = channel.state.payee_balance - margin;
+
+        {
+            let mut payee_entry = self.balances.entry(payee_key).or_insert(0);
+            *payee_entry = payee_entry.checked_add(payee_credit).ok_or_else(|| {
+                SettlementError::ArithmeticOverflow("Payee payment overflow".to_string())
+            })?;
+        }
+
+        if margin > 0 && let Some(app_wallet) = channel.app_wallet {
+            let app_key = (app_wallet, channel.asset_id.clone());
+            let mut app_entry = self.balances.entry(app_key).or_insert(0);
+            *app_entry = app_entry.checked_add(margin).ok_or_else(|| {
+                SettlementError::ArithmeticOverflow("App wallet margin overflow".to_string())
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// Finalizes channel close after challenge period
     pub fn finalize_close(&self, channel_id: &str) -> Result<()> {
         let mut channel_entry = self
@@ -949,15 +1034,9 @@ impl ChannelManager {
                 })?;
         }
 
-        // Pay accumulated balance to payee
-        if channel.state.payee_balance > 0 {
-            let mut payee_entry = self.balances.entry(payee_key).or_insert(0);
-            *payee_entry = payee_entry
-                .checked_add(channel.state.payee_balance)
-                .ok_or_else(|| {
-                    SettlementError::ArithmeticOverflow("Payee payment overflow".to_string())
-                })?;
-        }
+        // Pay accumulated balance to payee, carving the developer margin
+        // into the app wallet when the channel carries attribution.
+        self.settle_payee_with_margin(channel, payee_key)?;
 
         // Update channel status
         channel.status = ChannelStatus::Closed;
@@ -1060,15 +1139,9 @@ impl ChannelManager {
                 })?;
         }
 
-        // Pay accumulated balance to payee
-        if channel.state.payee_balance > 0 {
-            let mut payee_entry = self.balances.entry(payee_key).or_insert(0);
-            *payee_entry = payee_entry
-                .checked_add(channel.state.payee_balance)
-                .ok_or_else(|| {
-                    SettlementError::ArithmeticOverflow("Payee payment overflow".to_string())
-                })?;
-        }
+        // Pay accumulated balance to payee. The developer-margin carve
+        // applies here too — force close must not be a margin-evasion path.
+        self.settle_payee_with_margin(channel, payee_key)?;
 
         channel.status = ChannelStatus::ForceClosed;
         channel.closed_at = Some(Timestamp::now());
@@ -1679,7 +1752,7 @@ mod tests {
 
         let expires_at = Timestamp::now().as_millis() + 86400000; // 24 hours
         let channel = manager
-            .open_channel(payer, payee, 5000, asset_id.clone(), Timestamp::new(expires_at))
+            .open_channel(payer, payee, 5000, asset_id.clone(), Timestamp::new(expires_at), None, 0)
             .unwrap();
 
         assert_eq!(channel.deposit, 5000);
@@ -1707,7 +1780,7 @@ mod tests {
 
         let expires_at = Timestamp::now().as_millis() + 86400000;
         let channel = manager
-            .open_channel(payer, payee, 5000, asset_id, Timestamp::new(expires_at))
+            .open_channel(payer, payee, 5000, asset_id, Timestamp::new(expires_at), None, 0)
             .unwrap();
 
         // Build the canonical message for the *next* state (matches the
@@ -1727,6 +1800,82 @@ mod tests {
     }
 
     #[test]
+    fn test_channel_finalize_carves_developer_margin() {
+        // Channel opened with app attribution: margin_bps=1000 (10%). The
+        // payer-signed debits already include the markup (network cost 1000
+        // marked up to 1100). At settle the carve recovers exactly the
+        // margin: 1100 * 1000 / 11_000 = 100 → payee 1000, app wallet 100.
+        let (payer, payer_keypair) = make_channel_keypair();
+        let payee = Address::new([2u8; 32]);
+        let app_wallet = Address::new([3u8; 32]);
+        let asset_id = AssetId::tnzo();
+
+        let manager = ChannelManager::new();
+        manager.set_balance(&payer, &asset_id, 10000);
+
+        let expires_at = Timestamp::now().as_millis() + 86400000;
+        let channel = manager
+            .open_channel(
+                payer,
+                payee,
+                5000,
+                asset_id.clone(),
+                Timestamp::new(expires_at),
+                Some(app_wallet),
+                1000,
+            )
+            .unwrap();
+
+        let next_state = channel.state.next(3900, 1100);
+        let message = next_state.canonical_message();
+        let signer = Ed25519SignerImpl::new(payer_keypair).unwrap();
+        let sig = signer.sign(&message).unwrap();
+        manager
+            .update_channel(&channel.channel_id, 1100, sig.as_bytes().to_vec())
+            .unwrap();
+
+        // Force close settles with the current state and must apply the
+        // carve — force close is not a margin-evasion path.
+        manager.force_close(&channel.channel_id).unwrap();
+
+        assert_eq!(manager.get_balance(&payee, &asset_id), 1000, "payee net of margin");
+        assert_eq!(manager.get_balance(&app_wallet, &asset_id), 100, "app wallet margin");
+        // Payer had 10000, locked 5000, got 3900 back → 8900.
+        assert_eq!(manager.get_balance(&payer, &asset_id), 8900, "payer refund");
+    }
+
+    #[test]
+    fn test_open_channel_rejects_invalid_margin_attribution() {
+        let manager = ChannelManager::new();
+        let payer = Address::new([1u8; 32]);
+        let payee = Address::new([2u8; 32]);
+        let app_wallet = Address::new([3u8; 32]);
+        let asset_id = AssetId::tnzo();
+        manager.set_balance(&payer, &asset_id, 10000);
+        let expires_at = Timestamp::new(Timestamp::now().as_millis() + 86400000);
+
+        // margin_bps above the protocol cap
+        let err = manager
+            .open_channel(
+                payer,
+                payee,
+                5000,
+                asset_id.clone(),
+                expires_at,
+                Some(app_wallet),
+                tenzro_types::fees::MAX_DEVELOPER_MARGIN_BPS + 1,
+            )
+            .unwrap_err();
+        assert!(matches!(err, SettlementError::InvalidAmount(_)));
+
+        // margin without an app wallet
+        let err = manager
+            .open_channel(payer, payee, 5000, asset_id, expires_at, None, 100)
+            .unwrap_err();
+        assert!(matches!(err, SettlementError::InvalidAmount(_)));
+    }
+
+    #[test]
     fn test_channel_update_rejects_bogus_signature() {
         // Stub bytes used to pass under the legacy non-empty check.
         // After Phase D they must fail with `InvalidSignature` because
@@ -1740,7 +1889,7 @@ mod tests {
 
         let expires_at = Timestamp::now().as_millis() + 86400000;
         let channel = manager
-            .open_channel(payer, payee, 5000, asset_id, Timestamp::new(expires_at))
+            .open_channel(payer, payee, 5000, asset_id, Timestamp::new(expires_at), None, 0)
             .unwrap();
 
         let bogus = vec![0xAA; 64]; // 64 bytes = Ed25519 sig length, but garbage

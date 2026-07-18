@@ -33,18 +33,19 @@ pub trait ConsensusEngine: Send + Sync {
     /// `timeout_certificate` is `Some(_)` only when the leader is recovering
     /// from a view timeout — it carries 2f+1 timeout signatures from the
     /// previous view so the receiver can verify the new view was legitimately
-    /// abandoned (Jolteon `safe_to_extend`, DiemBFT v4 §3.5).
+    /// abandoned (the safe-to-extend rule of the Safety-Rules pattern).
     ///
     /// `no_endorsement_certificate` is `Some(_)` when the leader is proposing
     /// a fresh block after a view timeout for which no Prepare-QC was observed.
     /// It carries f+1 NoEndorsement signatures attesting that no validator saw
-    /// a QC for the previous view (MonadBFT NEC, arXiv:2502.20692). When the
+    /// a QC for the previous view (no-endorsement certificate tail-fork
+    /// defence). When the
     /// previous view DID have a QC, the leader must instead repropose the
     /// `high_tip` block — in which case `no_endorsement_certificate` is `None`
     /// and the proposed block hash matches the existing high-QC block.
     ///
     /// `proposer_high_qc_view` is the proposer's local highest-Prepare-QC view
-    /// at the moment of proposing (#171, Aptos SyncInfo). The receiver adopts
+    /// at the moment of proposing (#171, the SyncInfo pattern). The receiver adopts
     /// it if higher than its own (and `< proposal_view`) so a lagging replica
     /// can fast-forward on the happy path. The value is bound into the
     /// proposer signature payload, so adoption is authenticated.

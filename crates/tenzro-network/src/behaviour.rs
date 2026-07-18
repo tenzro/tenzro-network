@@ -117,8 +117,8 @@ pub struct TenzroBehaviour {
     pub allow_block_list: allow_block_list::Behaviour<allow_block_list::BlockedPeers>,
     /// Block-sync request/response protocol (`/tenzro/block-sync/1.0.0`).
     /// Used by lagging nodes to catch up to the network tip without relying on
-    /// gossipsub backfill. Modeled on Sui's `state_sync` and Aptos'
-    /// `storage-service` — see `block_sync_proto.rs` for the wire types.
+    /// gossipsub backfill. A request/response state-sync protocol — see
+    /// `block_sync_proto.rs` for the wire types.
     pub block_sync: BlockSyncBehaviour,
 
     /// Consensus-direct request/response protocol

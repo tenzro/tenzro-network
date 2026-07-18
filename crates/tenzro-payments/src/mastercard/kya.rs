@@ -46,7 +46,7 @@ impl KyaVerifier {
         // Step 1: Resolve the agent identity from the registry
         let identity = match self.identity_registry.resolve(agent_did) {
             Ok(id) => {
-                audit_trail.push(format!("✓ Agent identity found in registry"));
+                audit_trail.push("✓ Agent identity found in registry".to_string());
                 id
             }
             Err(e) => {
@@ -66,10 +66,10 @@ impl KyaVerifier {
         // Step 2: Check if the identity is active (not suspended or revoked)
         match identity.status {
             IdentityStatus::Active => {
-                audit_trail.push(format!("✓ Agent identity is active"));
+                audit_trail.push("✓ Agent identity is active".to_string());
             }
             IdentityStatus::Suspended => {
-                audit_trail.push(format!("✗ Agent identity is suspended"));
+                audit_trail.push("✗ Agent identity is suspended".to_string());
                 debug!("KYA verification failed for {}: suspended", agent_did);
                 return Ok(KyaVerification {
                     verified: false,
@@ -81,7 +81,7 @@ impl KyaVerifier {
                 });
             }
             IdentityStatus::Revoked => {
-                audit_trail.push(format!("✗ Agent identity is revoked"));
+                audit_trail.push("✗ Agent identity is revoked".to_string());
                 debug!("KYA verification failed for {}: revoked", agent_did);
                 return Ok(KyaVerification {
                     verified: false,
@@ -101,13 +101,13 @@ impl KyaVerifier {
                 delegation_scope,
                 ..
             } => {
-                audit_trail.push(format!("✓ Identity is a machine agent"));
+                audit_trail.push("✓ Identity is a machine agent".to_string());
 
                 match controller_did {
                     None => {
                         // Autonomous agent (no controller)
-                        audit_trail.push(format!("ℹ Agent is autonomous (no controller)"));
-                        audit_trail.push(format!("→ KYA Level: Basic"));
+                        audit_trail.push("ℹ Agent is autonomous (no controller)".to_string());
+                        audit_trail.push("→ KYA Level: Basic".to_string());
                         (KyaLevel::Basic, None)
                     }
                     Some(controller) => {
@@ -117,7 +117,7 @@ impl KyaVerifier {
                         match self.identity_registry.resolve(controller) {
                             Ok(controller_identity) => {
                                 if controller_identity.status == IdentityStatus::Active {
-                                    audit_trail.push(format!("✓ Controller identity is active"));
+                                    audit_trail.push("✓ Controller identity is active".to_string());
 
                                     // Check if delegation scope is configured
                                     if delegation_scope.max_transaction_value.is_some()
@@ -130,13 +130,12 @@ impl KyaVerifier {
                                             delegation_scope.allowed_operations.len(),
                                             delegation_scope.allowed_payment_protocols.len()
                                         ));
-                                        audit_trail.push(format!("→ KYA Level: Full"));
+                                        audit_trail.push("→ KYA Level: Full".to_string());
                                         (KyaLevel::Full, Some(controller.clone()))
                                     } else {
-                                        audit_trail.push(format!(
-                                            "ℹ Delegation scope not configured"
-                                        ));
-                                        audit_trail.push(format!("→ KYA Level: Enhanced"));
+                                        audit_trail
+                                            .push("ℹ Delegation scope not configured".to_string());
+                                        audit_trail.push("→ KYA Level: Enhanced".to_string());
                                         (KyaLevel::Enhanced, Some(controller.clone()))
                                     }
                                 } else {
@@ -144,14 +143,14 @@ impl KyaVerifier {
                                         "✗ Controller identity is not active: {:?}",
                                         controller_identity.status
                                     ));
-                                    audit_trail.push(format!("→ KYA Level: Basic"));
+                                    audit_trail.push("→ KYA Level: Basic".to_string());
                                     (KyaLevel::Basic, Some(controller.clone()))
                                 }
                             }
                             Err(e) => {
                                 audit_trail
                                     .push(format!("✗ Controller identity not found: {}", e));
-                                audit_trail.push(format!("→ KYA Level: Basic"));
+                                audit_trail.push("→ KYA Level: Basic".to_string());
                                 (KyaLevel::Basic, Some(controller.clone()))
                             }
                         }
@@ -160,8 +159,8 @@ impl KyaVerifier {
             }
             IdentityData::Human { .. } => {
                 // Human identities get Basic level (they can use Agent Pay as manual users)
-                audit_trail.push(format!("ℹ Identity is a human (not an agent)"));
-                audit_trail.push(format!("→ KYA Level: Basic"));
+                audit_trail.push("ℹ Identity is a human (not an agent)".to_string());
+                audit_trail.push("→ KYA Level: Basic".to_string());
                 (KyaLevel::Basic, None)
             }
             IdentityData::Institution { legal_name, lei, .. } => {
@@ -172,7 +171,7 @@ impl KyaVerifier {
                     "ℹ Identity is an institution: {} (LEI {})",
                     legal_name, lei
                 ));
-                audit_trail.push(format!("→ KYA Level: Basic"));
+                audit_trail.push("→ KYA Level: Basic".to_string());
                 (KyaLevel::Basic, None)
             }
         };
@@ -335,10 +334,12 @@ mod tests {
             .did_string();
 
         // Register controlled agent with delegation scope
-        let mut delegation_scope = DelegationScope::default();
-        delegation_scope.max_transaction_value = Some(1000);
-        delegation_scope.allowed_operations = vec!["transfer".to_string()];
-        delegation_scope.allowed_payment_protocols = vec!["mpp".to_string()];
+        let delegation_scope = DelegationScope {
+            max_transaction_value: Some(1000),
+            allowed_operations: vec!["transfer".to_string()],
+            allowed_payment_protocols: vec!["mpp".to_string()],
+            ..Default::default()
+        };
 
         let agent_did = registry
             .register_machine_with_fee(

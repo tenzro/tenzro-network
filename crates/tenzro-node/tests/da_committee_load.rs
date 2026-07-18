@@ -35,8 +35,9 @@ use async_trait::async_trait;
 use tenzro_crypto::keys::{KeyPair, KeyType};
 use tenzro_crypto::signatures::{Ed25519SignerImpl, Signer};
 use tenzro_node::da_committee::{
-    attestation_message, committee_address, CommitteeMember, CommitteeView, DaCommitteeBackend,
-    DaCommitteeError, DaCommitteeStore, DaCommitteeSurface, MemberAttestation, StoredSliver,
+    attestation_message, challenge_message, committee_address, CommitteeMember, CommitteeView,
+    DaCommitteeBackend, DaCommitteeError, DaCommitteeStore, DaCommitteeSurface, MemberAttestation,
+    PossessionProof, StoredSliver,
 };
 use tenzro_storage::da::DaBackend;
 use tenzro_storage::redstuff::{self, CommitteeShape, SliverPair};
@@ -178,6 +179,33 @@ impl DaCommitteeSurface for WireMeshSurface {
             }
             None => Ok(None),
         }
+    }
+
+    async fn challenge_sliver(
+        &self,
+        to_index: usize,
+        commitment: &Hash,
+        nonce: &[u8; 32],
+    ) -> Result<Option<PossessionProof>, DaCommitteeError> {
+        let Some(stored) = self.stores[to_index].get_sliver(commitment) else {
+            return Ok(None);
+        };
+        // Member-side wire framing, then challenger-side decode.
+        let bytes = bincode::serialize(&stored.sliver)
+            .map_err(|e| DaCommitteeError::Core(e.to_string()))?;
+        let sliver: SliverPair =
+            bincode::deserialize(&bytes).map_err(|e| DaCommitteeError::Core(e.to_string()))?;
+        let address = self.addresses[to_index];
+        let msg = challenge_message(commitment, nonce, &address);
+        let signature = self.signers[to_index]
+            .sign(&msg)
+            .map_err(|e| DaCommitteeError::Signing(e.to_string()))?;
+        Ok(Some(PossessionProof {
+            index: to_index,
+            address,
+            signature,
+            sliver,
+        }))
     }
 }
 

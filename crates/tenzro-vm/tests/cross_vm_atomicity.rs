@@ -28,9 +28,9 @@
 //! semantics are validated separately under `canton_workflows` in
 //! `workflow_tests.rs`.
 //!
-//! References:
-//! * arXiv:2603.23670 (n-VM unified ledger, Theorem 5.1 + Proposition 8.3)
-//! * arXiv:2203.06871 (Block-STM, strict serializability under MVCC)
+//! Properties under test: n-VM unified-ledger atomicity (a cross-VM transfer
+//! either commits on every VM or none), and strict serializability of the
+//! Block-STM parallel executor under MVCC.
 
 use std::sync::Arc;
 

@@ -177,7 +177,136 @@ class GradientQuantization:
 
 
 # ---------------------------------------------------------------------------
-# Sync strategy (Streaming DiLoCo)
+# Payload kind (chunked top-k) + outer-update mode
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SparseTopKParams:
+    """Mirror of ``tenzro_types::training::SparseTopKParams``.
+
+    Chunked top-k sparsification: the flattened fragment is split into
+    ``chunk_size``-coordinate chunks and the ``min(k, chunk_len)`` largest-
+    magnitude coordinates are kept per chunk. Serde serializes this as
+    ``{"chunk_size": N, "k": M}``. The byte codec lives in
+    :mod:`tenzro_trainer.gradient` and is byte-identical to the Rust
+    ``sparse`` module.
+    """
+
+    chunk_size: int = 4096
+    k: int = 64
+
+    def chunk_count(self, length: int) -> int:
+        cs = max(self.chunk_size, 1)
+        return (length + cs - 1) // cs
+
+    def kept_for_chunk(self, chunk_len: int) -> int:
+        return min(max(self.k, 1), chunk_len)
+
+    def label(self) -> str:
+        """Rust ``Display`` string: ``topk/<chunk_size>/<k>``."""
+        return f"topk/{self.chunk_size}/{self.k}"
+
+    def to_json(self) -> dict[str, Any]:
+        return {"chunk_size": self.chunk_size, "k": self.k}
+
+    @classmethod
+    def from_json(cls, j: dict[str, Any]) -> "SparseTopKParams":
+        return cls(chunk_size=int(j["chunk_size"]), k=int(j["k"]))
+
+
+@dataclass(frozen=True)
+class PayloadKind:
+    """Mirror of ``tenzro_types::training::PayloadKind``.
+
+    Serde encodes the ``Dense`` unit variant as the bare string ``"Dense"``
+    and the ``SparseTopK`` variant as ``{"SparseTopK": {"chunk_size": N,
+    "k": M}}``. The syncer dispatches decode + aggregation on this
+    discriminant; a submission whose declared kind disagrees with the task
+    spec is rejected (slashable, same class as a quantization mismatch).
+    """
+
+    kind: str = "Dense"  # "Dense" | "SparseTopK"
+    sparse: SparseTopKParams | None = None
+
+    @classmethod
+    def dense(cls) -> "PayloadKind":
+        return cls(kind="Dense", sparse=None)
+
+    @classmethod
+    def sparse_topk(cls, params: SparseTopKParams) -> "PayloadKind":
+        return cls(kind="SparseTopK", sparse=params)
+
+    @property
+    def is_dense(self) -> bool:
+        return self.kind == "Dense"
+
+    def label(self) -> str:
+        """Rust ``Display`` string: ``dense`` / ``sparse-topk/<cs>/<k>``."""
+        if self.kind == "Dense" or self.sparse is None:
+            return "dense"
+        return f"sparse-{self.sparse.label()}"
+
+    def to_json(self) -> str | dict[str, Any]:
+        if self.kind == "Dense" or self.sparse is None:
+            return "Dense"
+        return {"SparseTopK": self.sparse.to_json()}
+
+    @classmethod
+    def from_json(cls, j: str | dict[str, Any]) -> "PayloadKind":
+        if j == "Dense":
+            return cls.dense()
+        if isinstance(j, dict) and "SparseTopK" in j:
+            return cls.sparse_topk(SparseTopKParams.from_json(j["SparseTopK"]))
+        raise ValueError(f"unrecognized PayloadKind wire value: {j!r}")
+
+
+@dataclass(frozen=True)
+class OuterUpdateMode:
+    """Mirror of ``tenzro_types::training::OuterUpdateMode``.
+
+    ``Nesterov`` is the Nesterov-SGD outer optimizer (syncer holds momentum);
+    ``SparseEf`` is the sparse error-feedback update where the momentum-equivalent
+    state is the trainer-local error-feedback accumulator and the syncer holds no
+    momentum. Serde encodes each as a single-key object:
+    ``{"Nesterov": {"lr": 0.7, "momentum": 0.9}}`` /
+    ``{"SparseEf": {"lr": 0.7}}``.
+    """
+
+    kind: str = "Nesterov"  # "Nesterov" | "SparseEf"
+    lr: float = 0.7
+    momentum: float = 0.9
+
+    @classmethod
+    def nesterov(cls, lr: float = 0.7, momentum: float = 0.9) -> "OuterUpdateMode":
+        return cls(kind="Nesterov", lr=float(lr), momentum=float(momentum))
+
+    @classmethod
+    def sparse_ef(cls, lr: float = 0.7) -> "OuterUpdateMode":
+        return cls(kind="SparseEf", lr=float(lr), momentum=0.0)
+
+    @property
+    def carries_momentum(self) -> bool:
+        return self.kind == "Nesterov"
+
+    def to_json(self) -> dict[str, Any]:
+        if self.kind == "SparseEf":
+            return {"SparseEf": {"lr": self.lr}}
+        return {"Nesterov": {"lr": self.lr, "momentum": self.momentum}}
+
+    @classmethod
+    def from_json(cls, j: dict[str, Any]) -> "OuterUpdateMode":
+        if isinstance(j, dict):
+            if "SparseEf" in j:
+                return cls.sparse_ef(float(j["SparseEf"]["lr"]))
+            if "Nesterov" in j:
+                n = j["Nesterov"]
+                return cls.nesterov(float(n["lr"]), float(n["momentum"]))
+        raise ValueError(f"unrecognized OuterUpdateMode wire value: {j!r}")
+
+
+# ---------------------------------------------------------------------------
+# Sync strategy (streaming shard rotation)
 # ---------------------------------------------------------------------------
 
 
@@ -186,10 +315,9 @@ class SyncStrategy:
     """Mirror of ``tenzro_types::training::SyncStrategy``.
 
     ``num_shards is None`` means the ``Full`` unit variant (every fragment
-    syncs every round). Otherwise this is the Streaming DiLoCo
-    (arXiv 2501.18512) variant: fragments are partitioned into
-    ``num_shards`` contiguous shards and only shard ``round % num_shards``
-    syncs each round.
+    syncs every round). Otherwise this is the streaming shard-rotation
+    variant: fragments are partitioned into ``num_shards`` contiguous shards
+    and only shard ``round % num_shards`` syncs each round.
     """
 
     num_shards: int | None = None
@@ -238,13 +366,13 @@ class SyncStrategy:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline groups (DiLoCoX)
+# Pipeline groups
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """Mirror of ``tenzro_types::training::PipelineConfig`` (arXiv 2506.21263).
+    """Mirror of ``tenzro_types::training::PipelineConfig``.
 
     A group of ``num_stages`` trainers jointly holds one model replica; each
     stage owns the contiguous fragment slice
@@ -415,6 +543,8 @@ class TrainingTaskSpec:
     min_throughput: int | None
     created_at: int  # Unix millis (matches Rust Timestamp)
     objective: RlConfig | None = None  # None = Supervised
+    payload_kind: PayloadKind = field(default_factory=PayloadKind.dense)
+    outer_update: OuterUpdateMode = field(default_factory=OuterUpdateMode.nesterov)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -441,6 +571,8 @@ class TrainingTaskSpec:
             "min_throughput": self.min_throughput,
             "created_at": self.created_at,
             "objective": objective_to_json(self.objective),
+            "payload_kind": self.payload_kind.to_json(),
+            "outer_update": self.outer_update.to_json(),
             "metadata": self.metadata,
         }
 
@@ -477,6 +609,16 @@ class TrainingTaskSpec:
             ),
             created_at=int(j["created_at"]),
             objective=objective_from_json(j.get("objective")),
+            payload_kind=(
+                PayloadKind.from_json(j["payload_kind"])
+                if j.get("payload_kind") is not None
+                else PayloadKind.dense()
+            ),
+            outer_update=(
+                OuterUpdateMode.from_json(j["outer_update"])
+                if j.get("outer_update") is not None
+                else OuterUpdateMode.nesterov()
+            ),
             metadata=j.get("metadata") or {},
         )
 
@@ -630,6 +772,7 @@ class OuterGradient:
     inner_step_count: int
     submitted_at: int  # Unix millis (matches Rust Timestamp)
     signature: Signature
+    payload_kind: PayloadKind = field(default_factory=PayloadKind.dense)
     attestation: TrainingAttestation | None = None
     commitment: ActivationCommitment | None = None
 
@@ -643,6 +786,7 @@ class OuterGradient:
             "safetensors_hash": hash_to_json(self.safetensors_hash),
             "payload_bytes": self.payload_bytes,
             "quantization": self.quantization.to_json(),
+            "payload_kind": self.payload_kind.to_json(),
             "inner_step_count": self.inner_step_count,
             "submitted_at": self.submitted_at,
             "signature": self.signature.to_json(),
@@ -661,6 +805,11 @@ class OuterGradient:
             safetensors_hash=hash_from_json(j["safetensors_hash"]),
             payload_bytes=int(j["payload_bytes"]),
             quantization=GradientQuantization.from_json(j["quantization"]),
+            payload_kind=(
+                PayloadKind.from_json(j["payload_kind"])
+                if j.get("payload_kind") is not None
+                else PayloadKind.dense()
+            ),
             inner_step_count=int(j["inner_step_count"]),
             submitted_at=int(j["submitted_at"]),
             signature=Signature.from_json(j["signature"]),

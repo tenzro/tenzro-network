@@ -13,6 +13,7 @@ use crate::error::{NodeError, Result as NodeResult};
 use crate::node::TenzroNode;
 use crate::web::handlers::WebState;
 use tenzro_model::{get_model_catalog, get_model_by_id};
+use tenzro_network::NetworkService;
 use tenzro_types::primitives::{Address, Timestamp};
 use tenzro_types::settlement::{SettlementRequest, ServiceType, ServiceProof, ProofType};
 use tenzro_types::asset::AssetId;
@@ -146,6 +147,18 @@ pub struct VerifyZkProofParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FileZkFraudProofParams {
+    #[schemars(description = "Hex-encoded 32-byte ZK commitment hash (with or without 0x prefix) to challenge")]
+    pub commitment: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetZkAttestationParams {
+    #[schemars(description = "Hex-encoded 32-byte ZK commitment hash (with or without 0x prefix)")]
+    pub commitment: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct VerifyVrfProofParams {
     #[schemars(description = "Hex-encoded 32-byte VRF public key (Edwards25519 compressed point)")]
     pub pubkey: String,
@@ -267,6 +280,8 @@ pub struct CreatePaymentChallengeParams {
     pub asset: String,
     #[schemars(description = "Hex-encoded recipient address")]
     pub recipient: String,
+    #[schemars(description = "Registered app_id for developer-margin attribution. The amount is marked up by the app's margin and the margin is carved out to the app wallet at settlement.")]
+    pub app_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -760,6 +775,8 @@ pub struct RunAgentTemplateParams {
     pub payer_wallet: Option<String>,
     #[schemars(description = "Estimated token usage for per-token pricing. Ignored for free/per_execution/subscription pricing. Default 0.")]
     pub tokens_estimate: Option<u64>,
+    #[schemars(description = "Registered app_id for developer-margin attribution. The payer is additionally charged the app's margin, routed to the app wallet in the same settlement.")]
+    pub app_id: Option<String>,
 }
 
 // ─── MicroNode Join parameter struct ───
@@ -1066,6 +1083,8 @@ pub struct OpenPaymentChannelParams {
     #[schemars(description = "Initial deposit amount in wei (1 TNZO = 10^18 wei). Accepts u64 number or decimal string.", with = "String")]
     #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub deposit_wei: u128,
+    #[schemars(description = "Registered app_id for developer-margin attribution. The channel snapshots the app's wallet and margin at open; the margin is carved out of the payee credit at channel finalize.")]
+    pub app_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2295,7 +2314,7 @@ pub struct GetInferenceChallengeParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListInferenceChallengesParams {
     #[serde(default)]
-    #[schemars(description = "Optional status filter: filed, upheld, or dismissed.")]
+    #[schemars(description = "Optional status filter: voting_commit, voting_reveal, upheld, or dismissed.")]
     pub status: Option<String>,
     #[serde(default)]
     #[schemars(description = "Optional provider filter (announce-signer pubkey hex).")]
@@ -2303,18 +2322,34 @@ pub struct ListInferenceChallengesParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ResolveInferenceChallengeParams {
-    #[schemars(description = "Challenge id (UUID) to resolve.")]
+pub struct CommitChallengeVoteParams {
+    #[schemars(description = "Challenge id (UUID) being voted on.")]
+    pub challenge_id: String,
+    #[schemars(description = "Committee-member identity (validator address, hex). Must be a drawn committee seat.")]
+    pub voter: String,
+    #[schemars(description = "Vote commitment hash (hex) = compute_vote_commit(verdict, salt, challenge_id, voter).")]
+    pub commit_hash: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RevealChallengeVoteParams {
+    #[schemars(description = "Challenge id (UUID) being revealed.")]
+    pub challenge_id: String,
+    #[schemars(description = "Committee-member identity (validator address, hex). Must match the earlier commit.")]
+    pub voter: String,
+    #[schemars(description = "Revealed verdict: true = commitment did not verify (upholds), false = dismisses.")]
+    pub verdict: bool,
+    #[schemars(description = "Reveal salt (hex) — must reproduce the earlier commit hash.")]
+    pub salt: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FinalizeChallengeParams {
+    #[schemars(description = "Challenge id (UUID) to finalize by tallying revealed committee votes.")]
     pub challenge_id: String,
     #[serde(default)]
-    #[schemars(description = "Re-execute this prompt locally to decide the verdict — a failing verification upholds the challenge. Mutually exclusive with `upheld`.")]
-    pub prompt: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Explicit verdict when no prompt is supplied: true upholds the challenge (provider penalized), false dismisses it.")]
-    pub upheld: Option<bool>,
-    #[serde(default)]
-    #[schemars(description = "Optional compute-bond provider DID; skips the bond-registry address scan when recording the bond failure.")]
-    pub provider_did: Option<String>,
+    #[schemars(description = "Close the challenge after the reveal window even without an uphold quorum (provider prevails). Default false.")]
+    pub force: Option<bool>,
 }
 
 // ─── Crypto Params ───
@@ -2521,54 +2556,75 @@ pub struct RevokeSessionParams {
     pub session_id: String,
 }
 
-// ─── App / Paymaster Params ───
+// ─── App registry + settlement-authorization params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RegisterAppParams {
-    #[schemars(description = "Application name")]
-    pub name: String,
-    #[schemars(description = "Hex-encoded master wallet address that funds user operations")]
-    pub master_wallet_address: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CreateUserWalletParams {
-    #[schemars(description = "Application ID (UUID) the wallet belongs to")]
+    #[schemars(description = "App identifier, unique network-wide (1-128 bytes)")]
     pub app_id: String,
-    #[schemars(description = "Human-readable label for the user wallet")]
-    pub label: String,
-    #[schemars(description = "Optional initial funding in wei as a decimal string (1 TNZO = 10^18 wei). Example: '10000000000000000000' for 10 TNZO.")]
-    pub initial_funding_wei: Option<String>,
+    #[schemars(description = "Developer DID that owns the app (e.g. did:tenzro:... or did:key:z6Mk...)")]
+    pub developer_did: String,
+    #[schemars(description = "Hex-encoded app wallet address — the developer's own TNZO treasury for this app")]
+    pub app_wallet: String,
+    #[schemars(description = "Settlement signing keys. Each: {key_id, public_key (hex Ed25519), daily_limit_tnzo (optional decimal string)}.")]
+    pub signing_pubkeys: Vec<serde_json::Value>,
+    #[schemars(description = "Developer margin in basis points (max 2000)")]
+    pub margin_bps: u32,
+    #[schemars(description = "Optional minimum app-wallet balance hint in smallest TNZO units (decimal string)")]
+    pub min_balance: Option<String>,
+    #[schemars(description = "Whether the app is active on registration (default true)")]
+    pub active: Option<bool>,
+    #[schemars(description = "Developer-signed DID envelope (hex header value) authorizing tenzro_registerApp over the canonical registration params")]
+    pub envelope: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct FundUserWalletParams {
-    #[schemars(description = "Hex-encoded master wallet address (source of funds)")]
-    pub master_address: String,
-    #[schemars(description = "Hex-encoded user wallet address (destination)")]
-    pub user_address: String,
-    #[schemars(description = "Amount in wei as a decimal string (1 TNZO = 10^18 wei). Example: '5000000000000000000' for 5 TNZO.")]
-    pub amount_wei: String,
+pub struct SetAppStatusParams {
+    #[schemars(description = "App identifier")]
+    pub app_id: String,
+    #[schemars(description = "New active status")]
+    pub active: bool,
+    #[schemars(description = "Developer-signed DID envelope (hex header value) authorizing tenzro_setAppStatus over the canonical status params of (app_id, active)")]
+    pub envelope: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListUserWalletsParams {
-    #[schemars(description = "Application ID (UUID) to list wallets for")]
+pub struct GetAppParams {
+    #[schemars(description = "App identifier to look up")]
     pub app_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SponsorTransactionParams {
-    #[schemars(description = "Hex-encoded master/paymaster address that sponsors the gas")]
-    pub master_address: String,
-    #[schemars(description = "User transaction object to sponsor. Must include `gas_limit` and `gas_price` (and any other tx fields). The master pays gas_limit * gas_price out of its TNZO balance.")]
-    pub user_tx: serde_json::Value,
+pub struct ListAppsParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SettleAuthorizedParams {
+    #[schemars(description = "App identifier in the on-chain app registry")]
+    pub app_id: String,
+    #[schemars(description = "Chain id the authorization is valid on")]
+    pub chain_id: u64,
+    #[schemars(description = "Payer DID that receives the TNZO")]
+    pub payer_did: String,
+    #[schemars(description = "TNZO amount in smallest units (decimal string)")]
+    pub amount_tnzo: String,
+    #[schemars(description = "Developer's payment-provider reference (idempotency key per app)")]
+    pub external_ref: String,
+    #[schemars(description = "32-byte hex nonce chosen by the signer")]
+    pub nonce: String,
+    #[schemars(description = "Expiry in unix milliseconds (short quote-lock window)")]
+    pub expiry: u64,
+    #[schemars(description = "Registered signing key id that produced the signature")]
+    pub key_id: String,
+    #[schemars(description = "Hex Ed25519 signature over the authorization's signing hash")]
+    pub signature: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct GetUsageStatsParams {
-    #[schemars(description = "Application ID (UUID) to get usage stats for")]
+pub struct GetSettleAuthorizedOutcomeParams {
+    #[schemars(description = "App identifier")]
     pub app_id: String,
+    #[schemars(description = "Payment-provider reference used at settlement time")]
+    pub external_ref: String,
 }
 
 // ─── Contract ABI Params ───
@@ -3815,15 +3871,15 @@ async fn rpc_dispatch(node: &Arc<TenzroNode>, method: &str, params: serde_json::
     // gate's error message verbatim to MCP callers via
     // `ErrorData::internal_error` so tool consumers can react to the
     // same failure modes (missing/wrong header, fail-closed operator).
-    if let Some(err) = crate::rpc::gate_admin_token(node, &request, h.x_tenzro_admin_token.as_deref()) {
-        if let Some(e) = err.error {
-            return Err(ErrorData::internal_error(e.message, None));
-        }
+    if let Some(err) = crate::rpc::gate_admin_token(node, &request, h.x_tenzro_admin_token.as_deref())
+        && let Some(e) = err.error
+    {
+        return Err(ErrorData::internal_error(e.message, None));
     }
-    if let Some(err) = crate::rpc::gate_api_key(node, &request, h.x_tenzro_api_key.as_deref()) {
-        if let Some(e) = err.error {
-            return Err(ErrorData::internal_error(e.message, None));
-        }
+    if let Some(err) = crate::rpc::gate_api_key(node, &request, h.x_tenzro_api_key.as_deref())
+        && let Some(e) = err.error
+    {
+        return Err(ErrorData::internal_error(e.message, None));
     }
 
     let response = crate::rpc::handle_request(
@@ -5288,7 +5344,7 @@ impl TenzroMcpServer {
             .node
             .identity_registry()
             .ok_or_else(|| err_internal("identity registry not initialized"))?;
-        let out = match tenzro_identity::envelope::verify_envelope(&env, &**registry) {
+        let out = match tenzro_identity::envelope::verify_envelope(&env, registry) {
             Ok(()) => serde_json::json!({ "valid": true, "did": env.did, "method": env.method }),
             Err(e) => serde_json::json!({ "valid": false, "did": env.did, "error": e.to_string() }),
         };
@@ -5716,16 +5772,69 @@ impl TenzroMcpServer {
 
         use tenzro_payments::traits::PaymentGateway;
 
-        let challenge = gateway
+        // Developer-margin attribution: mirror `handle_create_payment_challenge`
+        // — resolve the registered app, mark the payer-facing amount up by its
+        // margin, and stamp the snapshot into `challenge.extra` so settlement
+        // carves the margin to the app wallet.
+        let app = match params.app_id.as_deref() {
+            None => None,
+            Some(app_id) => {
+                let registry = self
+                    .node
+                    .app_registry()
+                    .ok_or_else(|| err_internal("App registry unavailable on this node"))?;
+                let record = registry.get(app_id).ok_or_else(|| ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Unknown app_id '{app_id}'")),
+                    data: None,
+                })?;
+                if !record.active {
+                    return Err(ErrorData {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!("App '{app_id}' is deactivated")),
+                        data: None,
+                    });
+                }
+                Some(record)
+            }
+        };
+        let amount = match &app {
+            Some(record) => {
+                tenzro_types::fees::apply_developer_margin(params.amount, record.margin_bps)
+                    .ok_or_else(|| {
+                        err_internal(format!(
+                            "App '{}' has an invalid margin_bps ({}) or the marked-up amount overflows",
+                            record.app_id, record.margin_bps
+                        ))
+                    })?
+            }
+            None => params.amount,
+        };
+
+        let mut challenge = gateway
             .create_challenge(
                 &params.protocol,
                 &params.resource,
-                params.amount,
+                amount,
                 &params.asset,
                 &params.recipient,
             )
             .await
             .map_err(|e| err_internal(format!("Failed to create payment challenge: {}", e)))?;
+
+        if let Some(record) = &app {
+            challenge.extra.insert(
+                "app_id".to_string(),
+                serde_json::Value::String(record.app_id.clone()),
+            );
+            challenge.extra.insert(
+                "app_wallet".to_string(),
+                serde_json::Value::String(format!("0x{}", hex::encode(record.app_wallet.0))),
+            );
+            challenge
+                .extra
+                .insert("margin_bps".to_string(), serde_json::json!(record.margin_bps));
+        }
 
         // Store the challenge in the gateway's challenge store for later verification
         let store = gateway.challenge_store();
@@ -5740,6 +5849,8 @@ impl TenzroMcpServer {
             "recipient": challenge.recipient,
             "chain": challenge.chain,
             "expires_at": challenge.expires_at.to_rfc3339(),
+            "app_id": app.as_ref().map(|r| r.app_id.clone()),
+            "margin_bps": app.as_ref().map(|r| r.margin_bps).unwrap_or(0),
             "note": match params.protocol.as_str() {
                 "mpp" => "MPP challenge created. The agent should generate credentials and submit payment within the validity window. Supports session-based streaming for per-token billing.",
                 "x402" => "x402 challenge created. Pay the exact amount on-chain, then retry the request with a PAYMENT-SIGNATURE header containing tx_hash, chain, payer, and signature.",
@@ -7427,7 +7538,55 @@ impl TenzroMcpServer {
 
         match verify_result {
             Ok(()) => {
-                let newly_attested = self.node.zk_commitment_registry().attest(commitment);
+                // A commitment is admitted to the `ZK_VERIFY` precompile registry
+                // only after a 2f+1 stake-weight quorum of validators has each
+                // independently re-run `verify_proof_envelope` and co-signed the
+                // commitment. This MCP surface routes through the same quorum
+                // plane as the JSON-RPC handler: publish the proof to the DA
+                // layer, co-sign it, broadcast a claim so peers can re-verify and
+                // reply, and record this node's own co-signature. It never calls
+                // the registry's `attest()` directly — the quorum gate cannot be
+                // bypassed through the MCP tool.
+                let newly_attested = if self.node.zk_quorum_store().is_some() {
+                    match self.node.publish_zk_proof_for_quorum(&envelope).await {
+                        Some(proof_locator) => {
+                            let store = self
+                                .node
+                                .zk_quorum_store()
+                                .expect("quorum store present (checked above)");
+                            let cosign = store.cosign(commitment);
+                            if let Some(network) = self.node.network() {
+                                let msg = tenzro_consensus::ZkQuorumMsg::Claim {
+                                    claim: tenzro_consensus::ZkCommitmentClaim {
+                                        circuit_id: circuit_id.clone(),
+                                        commitment,
+                                        proof_locator: proof_locator.clone(),
+                                    },
+                                    cosign: cosign.clone(),
+                                };
+                                if let Ok(data) = bincode::serialize(&msg) {
+                                    let net_msg = tenzro_network::NetworkMessage::new(
+                                        tenzro_network::MessagePayload::Custom {
+                                            topic: tenzro_consensus::ZK_QUORUM_TOPIC.to_string(),
+                                            data,
+                                        },
+                                    );
+                                    let _ = network
+                                        .broadcast(tenzro_consensus::ZK_QUORUM_TOPIC, net_msg)
+                                        .await;
+                                }
+                            }
+                            self.node.record_zk_cosign_and_maybe_attest(
+                                &circuit_id,
+                                cosign,
+                                &proof_locator,
+                            )
+                        }
+                        None => false,
+                    }
+                } else {
+                    false
+                };
                 json_result(serde_json::json!({
                     "valid": true,
                     "circuit_id": circuit_id,
@@ -7437,6 +7596,13 @@ impl TenzroMcpServer {
                     "verified_at": chrono::Utc::now().to_rfc3339(),
                     "commitment_hex": format!("0x{}", hex::encode(commitment)),
                     "newly_attested": newly_attested,
+                    "attestation_model": "quorum",
+                    "attestation_note": "A commitment is admitted to the ZK_VERIFY \
+                        precompile registry only under a 2f+1 stake-weight quorum \
+                        certificate (each co-signer independently re-verifies the \
+                        proof), then held accountable for FRAUD_WINDOW_BLOCKS. \
+                        newly_attested=false with valid=true means this node \
+                        verified the proof but quorum is still being collected.",
                 }))
             },
             Err(e) => {
@@ -7461,6 +7627,109 @@ impl TenzroMcpServer {
                     "verified_at": chrono::Utc::now().to_rfc3339(),
                 }))
             }
+        }
+    }
+
+    #[tool(description = "File a fraud proof against an attested ZK commitment inside its fraud window. This node fetches the proof from the commitment's DA locator, re-runs the Plonky3 verifier deterministically, and adjudicates: 'unfounded' (proof re-verified, commitment stands, challenger bond forfeit) or 'upheld' (proof failed, commitment retracted from the ZK_VERIFY registry, every co-signer on the certificate slashed for a consensus offence). Any staked party may file.")]
+    async fn file_zk_fraud_proof(
+        &self,
+        Parameters(params): Parameters<FileZkFraudProofParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let hex_str = params.commitment.strip_prefix("0x").unwrap_or(&params.commitment);
+        let raw = match hex::decode(hex_str) {
+            Ok(b) => b,
+            Err(e) => return json_result(serde_json::json!({
+                "error": format!("Invalid commitment hex: {}", e),
+            })),
+        };
+        if raw.len() != 32 {
+            return json_result(serde_json::json!({
+                "error": format!("commitment must be 32 bytes, got {}", raw.len()),
+            }));
+        }
+        let mut commitment = [0u8; 32];
+        commitment.copy_from_slice(&raw);
+
+        match self.node.resolve_zk_fraud_proof(&commitment).await {
+            Ok(outcome) => {
+                let (outcome_str, upheld) = match outcome {
+                    tenzro_consensus::FraudOutcome::Upheld => ("upheld", true),
+                    tenzro_consensus::FraudOutcome::Unfounded => ("unfounded", false),
+                };
+                json_result(serde_json::json!({
+                    "commitment_hex": format!("0x{}", hex::encode(commitment)),
+                    "outcome": outcome_str,
+                    "upheld": upheld,
+                    "note": if upheld {
+                        "Commitment retracted from the ZK_VERIFY registry; every \
+                         co-signer named on the certificate was slashed for a \
+                         consensus offence."
+                    } else {
+                        "Commitment re-verified successfully and stands; the \
+                         challenger's bond is forfeit."
+                    },
+                }))
+            }
+            Err(e) => json_result(serde_json::json!({
+                "error": format!("fraud proof could not be adjudicated: {}", e),
+            })),
+        }
+    }
+
+    #[tool(description = "Read the fraud-window record for a ZK commitment: certificate voting power, the DA locator co-signers use to re-verify, the height the fraud window opened at, whether that window is still open at the current finalized height, and whether the commitment is admitted to the on-chain ZK_VERIFY registry.")]
+    async fn get_zk_attestation(
+        &self,
+        Parameters(params): Parameters<GetZkAttestationParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let hex_str = params.commitment.strip_prefix("0x").unwrap_or(&params.commitment);
+        let raw = match hex::decode(hex_str) {
+            Ok(b) => b,
+            Err(e) => return json_result(serde_json::json!({
+                "error": format!("Invalid commitment hex: {}", e),
+            })),
+        };
+        if raw.len() != 32 {
+            return json_result(serde_json::json!({
+                "error": format!("commitment must be 32 bytes, got {}", raw.len()),
+            }));
+        }
+        let mut commitment = [0u8; 32];
+        commitment.copy_from_slice(&raw);
+
+        let store = match self.node.zk_quorum_store() {
+            Some(s) => s,
+            None => return json_result(serde_json::json!({
+                "error": "node holds no ZK quorum store",
+            })),
+        };
+        let on_chain = self.node.zk_commitment_registry().is_attested(&commitment);
+        match store.attested(&commitment) {
+            Some(record) => {
+                let height = self
+                    .node
+                    .consensus()
+                    .map(|c| c.current_finalized_height().0)
+                    .unwrap_or(0);
+                let window_open = record.in_fraud_window(height);
+                json_result(serde_json::json!({
+                    "commitment_hex": format!("0x{}", hex::encode(commitment)),
+                    "circuit_id": record.certificate.circuit_id,
+                    "voting_power": record.certificate.voting_power.to_string(),
+                    "attested_at_height": record.attested_at_height,
+                    "fraud_window_closes_at":
+                        record.attested_at_height + tenzro_consensus::FRAUD_WINDOW_BLOCKS,
+                    "fraud_window_open": window_open,
+                    "proof_locator": record.proof_locator,
+                    "on_chain_attested": on_chain,
+                }))
+            }
+            None => json_result(serde_json::json!({
+                "commitment_hex": format!("0x{}", hex::encode(commitment)),
+                "attested": false,
+                "on_chain_attested": on_chain,
+                "note": "No open fraud window for this commitment (never attested, \
+                         or its window has already closed).",
+            })),
         }
     }
 
@@ -7892,10 +8161,10 @@ impl TenzroMcpServer {
                             continue;
                         }
                     }
-                    if let Some(max_wei) = params.max_price_wei {
-                        if task.max_price > max_wei {
-                            continue;
-                        }
+                    if let Some(max_wei) = params.max_price_wei
+                        && task.max_price > max_wei
+                    {
+                        continue;
                     }
 
                     tasks.push(serde_json::json!({
@@ -8244,13 +8513,40 @@ impl TenzroMcpServer {
         let mut payer_hex: Option<String> = None;
         let mut creator_hex: Option<String> = None;
         let mut treasury_hex: Option<String> = None;
+        let mut margin_amount: u128 = 0;
+        let mut margin_bps: u32 = 0;
+        let mut receipt_app_id: Option<String> = None;
+        let mut app_wallet_hex: Option<String> = None;
 
         if !dry_run {
+            let app = match params.app_id.as_deref() {
+                None => None,
+                Some(app_id) => {
+                    let registry = self
+                        .node
+                        .app_registry()
+                        .ok_or_else(|| err_internal("App registry unavailable on this node"))?;
+                    let record = registry.get(app_id).ok_or_else(|| ErrorData {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!("Unknown app_id '{app_id}'")),
+                        data: None,
+                    })?;
+                    if !record.active {
+                        return Err(ErrorData {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(format!("App '{app_id}' is deactivated")),
+                            data: None,
+                        });
+                    }
+                    Some(record)
+                }
+            };
             let receipt = settle_invocation_fee(
                 &template,
                 fee,
                 params.payer_wallet.as_deref(),
                 self.node.token().map(|t| &**t),
+                app.as_ref(),
                 |s| parse_address(s).map_err(|e| e.message.to_string()),
             )
             .map_err(|e| match e {
@@ -8262,6 +8558,7 @@ impl TenzroMcpServer {
                 CommissionError::MissingCreatorWallet
                 | CommissionError::TokenUnavailable
                 | CommissionError::TreasuryUnavailable
+                | CommissionError::MarginRejected(_)
                 | CommissionError::TransferFailed(_) => err_internal(e.to_string()),
             })?;
 
@@ -8271,6 +8568,10 @@ impl TenzroMcpServer {
                 payer_hex = Some(format!("0x{}", hex::encode(r.payer.0)));
                 creator_hex = Some(format!("0x{}", hex::encode(r.creator_wallet.0)));
                 treasury_hex = Some(format!("0x{}", hex::encode(r.treasury.0)));
+                margin_amount = r.margin_amount;
+                margin_bps = r.margin_bps;
+                receipt_app_id = r.app_id;
+                app_wallet_hex = r.app_wallet.map(|w| format!("0x{}", hex::encode(w.0)));
             }
         }
 
@@ -8327,6 +8628,10 @@ impl TenzroMcpServer {
             "payer_wallet": payer_hex,
             "creator_wallet": creator_hex,
             "treasury": treasury_hex,
+            "margin_bps": margin_bps,
+            "developer_margin": margin_amount.to_string(),
+            "app_id": receipt_app_id,
+            "app_wallet": app_wallet_hex,
             "invocation_count": template.invocation_count,
             "total_revenue": template.total_revenue.to_string(),
             "results": results,
@@ -8921,15 +9226,48 @@ impl TenzroMcpServer {
         let deposit_wei = params.deposit_wei;
         let chan_mgr = self.node.channel_manager()
             .ok_or_else(|| err_internal("Channel manager not available"))?;
+
+        // Developer-margin attribution: snapshot the app's wallet + margin
+        // into the channel record at open so finalize needs no registry
+        // access.
+        let app = match params.app_id.as_deref() {
+            None => None,
+            Some(app_id) => {
+                let registry = self
+                    .node
+                    .app_registry()
+                    .ok_or_else(|| err_internal("App registry unavailable on this node"))?;
+                let record = registry.get(app_id).ok_or_else(|| ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Unknown app_id '{app_id}'")),
+                    data: None,
+                })?;
+                if !record.active {
+                    return Err(ErrorData {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!("App '{app_id}' is deactivated")),
+                        data: None,
+                    });
+                }
+                Some(record)
+            }
+        };
+        let (app_wallet, margin_bps) = match &app {
+            Some(record) => (Some(record.app_wallet), record.margin_bps),
+            None => (None, 0),
+        };
+
         let expires_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() + 86400;
-        let channel = chan_mgr.open_channel(sender, recipient, deposit_wei, AssetId::tnzo(), Timestamp(expires_at as i64))
+        let channel = chan_mgr.open_channel(sender, recipient, deposit_wei, AssetId::tnzo(), Timestamp(expires_at as i64), app_wallet, margin_bps)
             .map_err(|e| err_internal(format!("open_payment_channel failed: {}", e)))?;
         json_result(serde_json::json!({
             "channel_id": channel.channel_id,
             "status": "open",
             "deposit_wei": deposit_wei.to_string(),
             "expires_at": expires_at,
+            "app_id": app.as_ref().map(|r| r.app_id.clone()),
+            "margin_bps": channel.margin_bps,
         }))
     }
 
@@ -9922,7 +10260,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Ask the Tenzro Train syncer for its round decision. Returns `{decision: \"wait\", remaining_ms}` while the DiLoCo grace window is open, `{decision: \"finalize\", round}` once a witness quorum endorses the round, or `{decision: \"no_quorum\", round}` when the window elapses without a quorum (the run advances, carrying the prior state root forward). Returns JSON-RPC -32602 when the run is unknown. Read-only — safe for monitoring agents.")]
+    #[tool(description = "Ask the Tenzro Train syncer for its round decision. Returns `{decision: \"wait\", remaining_ms}` while the grace window is open, `{decision: \"finalize\", round}` once a witness quorum endorses the round, or `{decision: \"no_quorum\", round}` when the window elapses without a quorum (the run advances, carrying the prior state root forward). Returns JSON-RPC -32602 when the run is unknown. Read-only — safe for monitoring agents.")]
     async fn training_decide_round(
         &self,
         Parameters(params): Parameters<TrainingTaskIdParams>,
@@ -13201,7 +13539,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "List inference challenges, optionally filtered by status (filed/upheld/dismissed) and provider. Returns {count, challenges: [...]} sorted newest first. Mirrors tenzro_listInferenceChallenges.")]
+    #[tool(description = "List inference challenges, optionally filtered by status (voting_commit/voting_reveal/upheld/dismissed) and provider. Returns {count, challenges: [...]} sorted newest first. Mirrors tenzro_listInferenceChallenges.")]
     async fn list_inference_challenges(
         &self,
         Parameters(params): Parameters<ListInferenceChallengesParams>,
@@ -13219,35 +13557,60 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Resolve an inference challenge (operator only — requires X-Tenzro-Admin-Token). Provide `prompt` for local re-execution (a failing verification upholds the challenge) or an explicit `upheld` verdict. Upheld verdicts decrement the provider's reputation and record a compute-bond failure; the response carries reputation_penalized + bond_failure_recorded booleans. Mirrors tenzro_resolveInferenceChallenge.")]
-    async fn resolve_inference_challenge(
+    #[tool(description = "Commit a committee vote on an inference challenge. Open to drawn committee seats only. `commit_hash` = compute_vote_commit(verdict, salt, challenge_id, voter); the verdict stays hidden until reveal. When committed stake reaches the 2f+1 threshold the challenge advances to the reveal phase. Mirrors tenzro_commitChallengeVote.")]
+    async fn commit_challenge_vote(
         &self,
-        Parameters(params): Parameters<ResolveInferenceChallengeParams>,
+        Parameters(params): Parameters<CommitChallengeVoteParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let mut req = serde_json::Map::new();
-        req.insert(
-            "challenge_id".to_string(),
-            serde_json::Value::String(params.challenge_id),
-        );
-        if let Some(prompt) = params.prompt {
-            req.insert("prompt".to_string(), serde_json::Value::String(prompt));
-        } else if let Some(upheld) = params.upheld {
-            req.insert("upheld".to_string(), serde_json::Value::Bool(upheld));
-        } else {
-            return Err(err_internal(
-                "Provide either prompt (local re-execution) or upheld (explicit verdict)".to_string(),
-            ));
-        }
-        if let Some(did) = params.provider_did {
-            req.insert("provider_did".to_string(), serde_json::Value::String(did));
-        }
         let result = rpc_dispatch(
             &self.node,
-            "tenzro_resolveInferenceChallenge",
-            serde_json::Value::Object(req),
+            "tenzro_commitChallengeVote",
+            serde_json::json!({
+                "challenge_id": params.challenge_id,
+                "voter": params.voter,
+                "commit_hash": params.commit_hash,
+            }),
         )
         .await
-        .map_err(|e| err_internal(format!("resolveInferenceChallenge failed: {}", e)))?;
+        .map_err(|e| err_internal(format!("commitChallengeVote failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Reveal a previously committed committee vote. `(verdict, salt)` must reproduce the earlier commit hash. verdict=true means the commitment did not verify (upholds the challenge). Mirrors tenzro_revealChallengeVote.")]
+    async fn reveal_challenge_vote(
+        &self,
+        Parameters(params): Parameters<RevealChallengeVoteParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_revealChallengeVote",
+            serde_json::json!({
+                "challenge_id": params.challenge_id,
+                "voter": params.voter,
+                "verdict": params.verdict,
+                "salt": params.salt,
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("revealChallengeVote failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Finalize an inference challenge by tallying revealed committee votes weighted by stake. No admin token — the verdict is the committee's. Idempotent: a decided challenge returns unchanged. An upheld verdict decrements the provider's reputation and records a compute-bond failure (response carries reputation_penalized + bond_failure_recorded). Pass force=true to close a challenge after the reveal window with no uphold quorum. Mirrors tenzro_finalizeChallenge.")]
+    async fn finalize_challenge(
+        &self,
+        Parameters(params): Parameters<FinalizeChallengeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_finalizeChallenge",
+            serde_json::json!({
+                "challenge_id": params.challenge_id,
+                "force": params.force.unwrap_or(false),
+            }),
+        )
+        .await
+        .map_err(|e| err_internal(format!("finalizeChallenge failed: {}", e)))?;
         json_result(result)
     }
 
@@ -13650,81 +14013,88 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    // ─── App / Paymaster Tools ───
+    // ─── App Registry Tools (non-custodial developer payments) ───
 
-    #[tool(description = "Register a new application on the Tenzro Network. The master wallet address will sponsor gas for user operations. Returns the app ID and API key.")]
+    #[tool(description = "Register a developer app in the on-chain app registry. Permissionless and first-writer-wins: the developer signs a DID envelope with their own key; the app wallet is the developer's own TNZO treasury (the network never holds custody). Provide a developer-signed `envelope` (hex header value) bound to the canonical registration params.")]
     async fn register_app(
         &self,
         Parameters(params): Parameters<RegisterAppParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node,"tenzro_registerApp", serde_json::json!({
-            "name": params.name,
-            "master_wallet_address": params.master_wallet_address,
+            "app_id": params.app_id,
+            "developer_did": params.developer_did,
+            "app_wallet": params.app_wallet,
+            "signing_pubkeys": params.signing_pubkeys,
+            "margin_bps": params.margin_bps,
+            "min_balance": params.min_balance,
+            "active": params.active,
+            "envelope": params.envelope,
         })).await.map_err(|e| err_internal(format!("registerApp failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Create a new user wallet under an application. Optionally fund it with an initial TNZO amount from the app's master wallet.")]
-    async fn create_user_wallet(
+    #[tool(description = "Activate or deactivate a registered app. Requires a developer-signed DID envelope (hex header value) authorizing tenzro_setAppStatus over the canonical status params of (app_id, active). A deactivated app rejects new settlement authorizations.")]
+    async fn set_app_status(
         &self,
-        Parameters(params): Parameters<CreateUserWalletParams>,
+        Parameters(params): Parameters<SetAppStatusParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_createUserWallet", serde_json::json!({
+        let result = rpc_dispatch(&self.node,"tenzro_setAppStatus", serde_json::json!({
             "app_id": params.app_id,
-            "label": params.label,
-            "initial_funding": params.initial_funding_wei.unwrap_or_else(|| "0".to_string()),
-        })).await.map_err(|e| err_internal(format!("createUserWallet failed: {}", e)))?;
+            "active": params.active,
+            "envelope": params.envelope,
+        })).await.map_err(|e| err_internal(format!("setAppStatus failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Fund a user wallet from the app's master wallet. Transfers TNZO (wei) from the master address to the user address.")]
-    async fn fund_user_wallet(
+    #[tool(description = "Look up a registered app by id. Returns the developer DID, app wallet, registered signing keys, developer margin, and active status.")]
+    async fn get_app(
         &self,
-        Parameters(params): Parameters<FundUserWalletParams>,
+        Parameters(params): Parameters<GetAppParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        // Validate wei amount before dispatch
-        let _: u128 = params.amount_wei.parse().map_err(|_| err_internal(
-            "amount_wei must be a wei decimal string (e.g. '5000000000000000000' for 5 TNZO)"
-        ))?;
-        let result = rpc_dispatch(&self.node,"tenzro_fundUserWallet", serde_json::json!({
-            "master_address": params.master_address,
-            "user_address": params.user_address,
-            "amount": params.amount_wei,
-        })).await.map_err(|e| err_internal(format!("fundUserWallet failed: {}", e)))?;
-        json_result(result)
-    }
-
-    #[tool(description = "List all user wallets belonging to an application. Returns wallet addresses, labels, and current balances.")]
-    async fn list_user_wallets(
-        &self,
-        Parameters(params): Parameters<ListUserWalletsParams>,
-    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_listUserWallets", serde_json::json!({
+        let result = rpc_dispatch(&self.node,"tenzro_getApp", serde_json::json!({
             "app_id": params.app_id,
-        })).await.map_err(|e| err_internal(format!("listUserWallets failed: {}", e)))?;
+        })).await.map_err(|e| err_internal(format!("getApp failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Sponsor a transaction using the master/paymaster wallet. The gas cost is paid by the master address while the transaction is sent on behalf of the user. Uses ERC-4337 account abstraction.")]
-    async fn sponsor_transaction(
+    #[tool(description = "List all apps registered in the on-chain app registry, sorted by app id.")]
+    async fn list_apps(
         &self,
-        Parameters(params): Parameters<SponsorTransactionParams>,
+        Parameters(_params): Parameters<ListAppsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_sponsorTransaction", serde_json::json!({
-            "master_address": params.master_address,
-            "user_tx": params.user_tx,
-        })).await.map_err(|e| err_internal(format!("sponsorTransaction failed: {}", e)))?;
+        let result = rpc_dispatch(&self.node,"tenzro_listApps", serde_json::json!({}))
+            .await.map_err(|e| err_internal(format!("listApps failed: {}", e)))?;
         json_result(result)
     }
 
-    #[tool(description = "Get usage statistics for an application. Returns total transactions, gas spent, active users, and wallet count.")]
-    async fn get_usage_stats(
+    #[tool(description = "Execute a developer-signed settlement authorization. The developer already charged the end user in fiat on their own payment-provider account; this moves TNZO from the app wallet to the payer, minus the network commission. Idempotent per (app_id, external_ref): a replay returns the recorded outcome with duplicate=true. The signature must be from one of the app's registered signing keys.")]
+    async fn settle_authorized(
         &self,
-        Parameters(params): Parameters<GetUsageStatsParams>,
+        Parameters(params): Parameters<SettleAuthorizedParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let result = rpc_dispatch(&self.node,"tenzro_getUsageStats", serde_json::json!({
+        let result = rpc_dispatch(&self.node,"tenzro_settleAuthorized", serde_json::json!({
             "app_id": params.app_id,
-        })).await.map_err(|e| err_internal(format!("getUsageStats failed: {}", e)))?;
+            "chain_id": params.chain_id,
+            "payer_did": params.payer_did,
+            "amount_tnzo": params.amount_tnzo,
+            "external_ref": params.external_ref,
+            "nonce": params.nonce,
+            "expiry": params.expiry,
+            "key_id": params.key_id,
+            "signature": params.signature,
+        })).await.map_err(|e| err_internal(format!("settleAuthorized failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch the recorded outcome for a settlement authorization by (app_id, external_ref). Returns the amount, payer net, commission, and success/failure detail, or an error if no settlement was recorded for that reference.")]
+    async fn get_settle_authorized_outcome(
+        &self,
+        Parameters(params): Parameters<GetSettleAuthorizedOutcomeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node,"tenzro_getSettleAuthorizedOutcome", serde_json::json!({
+            "app_id": params.app_id,
+            "external_ref": params.external_ref,
+        })).await.map_err(|e| err_internal(format!("getSettleAuthorizedOutcome failed: {}", e)))?;
         json_result(result)
     }
 
@@ -15665,10 +16035,10 @@ impl TenzroMcpServer {
             "layer": params.layer,
             "include_gate": params.include_gate.unwrap_or(true),
         });
-        if let Some(experts) = params.experts {
-            if !experts.is_empty() {
-                payload["experts"] = serde_json::json!(experts);
-            }
+        if let Some(experts) = params.experts
+            && !experts.is_empty()
+        {
+            payload["experts"] = serde_json::json!(experts);
         }
         if let Some(quant) = params.quant {
             payload["quant"] = quant;
@@ -16206,10 +16576,12 @@ impl ServerHandler for TenzroMcpServer {
              Verifiable Inference (TOPLOC):\n\
              • get_inference_commitment — Fetch a stored top-k logit commitment by hash\n\
              • verify_inference_commitment — Re-execute a prompt and compare per-step logits\n\
-             • file_inference_challenge — Dispute a stored commitment\n\
+             • file_inference_challenge — Dispute a stored commitment (draws a stake-weighted committee)\n\
              • get_inference_challenge — Fetch a challenge by id\n\
              • list_inference_challenges — List challenges (status/provider filters)\n\
-             • resolve_inference_challenge — Operator verdict; upheld penalizes the provider\n\n\
+             • commit_challenge_vote — Committee member commits a hidden vote\n\
+             • reveal_challenge_vote — Committee member reveals (verdict, salt)\n\
+             • finalize_challenge — Tally revealed votes; upheld penalizes the provider\n\n\
              Model Lifecycle:\n\
              • download_model — Download a model from HuggingFace Hub\n\
              • serve_model_mcp — Start serving a downloaded model\n\
@@ -16591,13 +16963,13 @@ mod tests {
         let _schema = schemars::schema_for!(GetSpendingLimitsParams);
         let _schema = schemars::schema_for!(AuthorizeSessionParams);
         let _schema = schemars::schema_for!(RevokeSessionParams);
-        // App/Paymaster params
+        // App registry + settlement-authorization params
         let _schema = schemars::schema_for!(RegisterAppParams);
-        let _schema = schemars::schema_for!(CreateUserWalletParams);
-        let _schema = schemars::schema_for!(FundUserWalletParams);
-        let _schema = schemars::schema_for!(ListUserWalletsParams);
-        let _schema = schemars::schema_for!(SponsorTransactionParams);
-        let _schema = schemars::schema_for!(GetUsageStatsParams);
+        let _schema = schemars::schema_for!(SetAppStatusParams);
+        let _schema = schemars::schema_for!(GetAppParams);
+        let _schema = schemars::schema_for!(ListAppsParams);
+        let _schema = schemars::schema_for!(SettleAuthorizedParams);
+        let _schema = schemars::schema_for!(GetSettleAuthorizedOutcomeParams);
         // Contract ABI params
         let _schema = schemars::schema_for!(EncodeFunctionParams);
         let _schema = schemars::schema_for!(DecodeResultParams);

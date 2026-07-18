@@ -124,6 +124,8 @@
 //!     10000,
 //!     AssetId::tnzo(),
 //!     Timestamp::new(expires_at),
+//!     None, // app_wallet — no developer-margin attribution
+//!     0,    // margin_bps
 //! )?;
 //!
 //! // Each update is a real Ed25519 signature by the payer over the

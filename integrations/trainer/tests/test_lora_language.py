@@ -5,7 +5,7 @@ parameter names mimic PEFT's ``...lora_A.<adapter>.weight`` /
 ``...lora_B.<adapter>.weight`` convention:
 
 * ``lora_factor_names`` splits trainable params into A / B factor lists.
-* ``set_round`` performs the ADF-LoRA alternating freeze — B trains on even
+* ``set_round`` performs the alternating low-rank freeze — B trains on even
   rounds, A on odd — so each round's transmitted delta is a single factor.
 """
 

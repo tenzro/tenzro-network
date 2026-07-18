@@ -1,4 +1,4 @@
-//! Aptos-style LeaderReputation proposer election for HotStuff-2.
+//! Reputation-weighted proposer election for HotStuff-2.
 //!
 //! # Why this exists
 //!
@@ -10,7 +10,7 @@
 //! flaky pod loses too many consecutive views' worth of votes from peers,
 //! the chain stalls outright.
 //!
-//! Aptos LeaderReputation replaces this with a stake-weighted draw whose
+//! Reputation-weighted proposer election replaces this with a stake-weighted draw whose
 //! per-validator weight is multiplied by an *observed-behaviour* term:
 //! validators that recently produced QCs win an `active_weight` boost (×1000
 //! over baseline), validators that participated as voters but never proposed
@@ -21,9 +21,8 @@
 //!
 //! # Design parameters
 //!
-//! Verified against Aptos production source code (consensus/src/liveness/
-//! leader_reputation.rs) — these are the constants the Aptos mainnet runs
-//! with at ~150 validators:
+//! These are the constants production reputation-weighted BFT deployments
+//! run with at ~150 validators:
 //!
 //! - `FAILED_WEIGHT`   = 1
 //! - `INACTIVE_WEIGHT` = 10
@@ -38,7 +37,7 @@
 //! history are *excluded* from the reputation calculation. Without it, a
 //! validator could see the next round's anti-grinding seed before the QC
 //! certifying its own most-recent proposal had finalized, opening a brief
-//! grinding window. Aptos pinned 20 as the minimum buffer that closes this
+//! grinding window. 20 is the minimum buffer that closes this
 //! against the maximum plausible reorder depth at HotStuff-2 finality.
 //!
 //! # Anti-grinding seed
@@ -55,8 +54,8 @@
 //! `prev_block_id` is the hash of the most recently finalized block at the
 //! time of the draw. Using a finalized hash (rather than `view - 1`'s
 //! tentative parent) means the seed is fixed by an adversary's block at
-//! least one full QC ago — not by the current proposer. This is the same
-//! anti-grinding pattern Aptos uses; the domain tag prevents replay against
+//! least one full QC ago — not by the current proposer. This is a standard
+//! anti-grinding pattern; the domain tag prevents replay against
 //! any other Tenzro hash that happens to share the structural inputs.
 //!
 //! # Capability multiplier
@@ -80,11 +79,9 @@
 //! the same bound the earlier binary TEE multiplier used, now reached by a
 //! continuous class-plus-attestation curve rather than a hard on/off boost.
 //!
-//! References:
-//! - Aptos LeaderReputation: `aptos-core/consensus/src/liveness/leader_reputation.rs`
-//! - Aptos research blog: "Leader Reputation for Practical BFT Liveness" (2021)
-//! - DiemBFT v4 §4.4 (proposer election rationale)
-//! - MonadBFT (arXiv:2502.20692, Nov 2025) — production HotStuff-2 deployment
+//! Background: reputation-weighted proposer election and the no-endorsement
+//! certificate tail-fork defence are standard mechanisms in production
+//! HotStuff-family BFT deployments.
 
 use crate::error::{ConsensusError, Result};
 use crate::validator::{ValidatorInfo, ValidatorSet};
@@ -113,8 +110,8 @@ pub const INACTIVE_WEIGHT: u128 = 10;
 pub const ACTIVE_WEIGHT: u128 = 1000;
 
 /// Percentage of a validator's recent proposals that may have failed before
-/// the validator drops from `INACTIVE_WEIGHT` to `FAILED_WEIGHT`. With Aptos
-/// pinning this at 10, a validator that fails ≥10% of its proposer window
+/// the validator drops from `INACTIVE_WEIGHT` to `FAILED_WEIGHT`. Pinned at
+/// 10, so a validator that fails ≥10% of its proposer window
 /// gets the punitive weight.
 pub const FAILURE_THRESHOLD_PERCENT: u32 = 10;
 

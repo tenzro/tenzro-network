@@ -1384,14 +1384,14 @@ impl AccountFactory {
     }
 
     fn persist(&self, account: &SmartAccount) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = bincode::serialize(account) {
-                let _ = storage.put(
-                    tenzro_storage::CF_AGENTS,
-                    &Self::persist_key(&account.address),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = bincode::serialize(account)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_AGENTS,
+                &Self::persist_key(&account.address),
+                &bytes,
+            );
         }
     }
 
@@ -2872,7 +2872,7 @@ mod tests {
     }
 
     fn encode_execute_calldata(to: &[u8; 20], value: u128, data: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(132 + ((data.len() + 31) / 32) * 32);
+        let mut out = Vec::with_capacity(132 + data.len().div_ceil(32) * 32);
         out.extend_from_slice(&EXECUTE_SELECTOR);
         // slot 1: to (32 bytes, left-padded)
         out.extend_from_slice(&[0u8; 12]);
@@ -2891,7 +2891,7 @@ mod tests {
         // data + zero-pad to 32
         out.extend_from_slice(data);
         let pad = (32 - data.len() % 32) % 32;
-        out.extend(std::iter::repeat(0u8).take(pad));
+        out.extend(std::iter::repeat_n(0u8, pad));
         out
     }
 
@@ -3044,19 +3044,20 @@ mod tests {
         );
 
         // Paymaster balance must have moved.
-        let pm_after = bootstrap_handle.read();
-        assert!(
-            pm_after.balance() < initial_balance,
-            "bootstrap paymaster must have debited some gas (balance: {} → {})",
-            initial_balance,
-            pm_after.balance()
-        );
-        assert_eq!(pm_after.sponsored_ops(), 1);
-        assert!(
-            pm_after.has_consumed(&sender),
-            "one-shot consumption ledger must record the sender"
-        );
-        drop(pm_after);
+        {
+            let pm_after = bootstrap_handle.read();
+            assert!(
+                pm_after.balance() < initial_balance,
+                "bootstrap paymaster must have debited some gas (balance: {} → {})",
+                initial_balance,
+                pm_after.balance()
+            );
+            assert_eq!(pm_after.sponsored_ops(), 1);
+            assert!(
+                pm_after.has_consumed(&sender),
+                "one-shot consumption ledger must record the sender"
+            );
+        }
 
         // Second attempt for the same sender must fail (one-shot exhausted).
         let mut op2 = op;

@@ -93,11 +93,9 @@ fn bench_hardware_install_from_init_data(c: &mut Criterion) {
             let mut account = vec![0u8; 20];
             account[0..8].copy_from_slice(&counter.to_le_bytes());
             counter = counter.wrapping_add(1);
-            black_box(
-                validator
-                    .install_from_init_data(account, black_box(&init_bytes))
-                    .unwrap(),
-            );
+            validator
+                .install_from_init_data(account, black_box(&init_bytes))
+                .unwrap();
         });
     });
 }

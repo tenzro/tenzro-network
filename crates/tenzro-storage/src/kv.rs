@@ -383,25 +383,25 @@ impl RocksDbStore {
         // guarantees live WAL data is persisted) recovers the accumulated bloat
         // in one shot. Best-effort: failures here must never block startup.
         let archive_dir = config.db_path.join("archive");
-        if archive_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&archive_dir) {
-                let mut freed = 0u64;
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.extension().and_then(|e| e.to_str()) == Some("log") {
-                        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                        if std::fs::remove_file(&p).is_ok() {
-                            freed += len;
-                        }
+        if archive_dir.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&archive_dir)
+        {
+            let mut freed = 0u64;
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) == Some("log") {
+                    let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    if std::fs::remove_file(&p).is_ok() {
+                        freed += len;
                     }
                 }
-                if freed > 0 {
-                    tracing::info!(
-                        "reclaimed {} MiB of dead archived WAL from {:?}",
-                        freed / (1024 * 1024),
-                        archive_dir
-                    );
-                }
+            }
+            if freed > 0 {
+                tracing::info!(
+                    "reclaimed {} MiB of dead archived WAL from {:?}",
+                    freed / (1024 * 1024),
+                    archive_dir
+                );
             }
         }
 

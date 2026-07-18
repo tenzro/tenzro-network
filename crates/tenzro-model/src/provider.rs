@@ -157,9 +157,10 @@ impl ProviderMetrics {
 
     /// Updates average latency
     fn update_avg_latency(&mut self) {
-        if self.successful_requests > 0 {
-            self.avg_latency_ms = self.total_latency_ms / self.successful_requests;
-        }
+        self.avg_latency_ms = self
+            .total_latency_ms
+            .checked_div(self.successful_requests)
+            .unwrap_or(self.avg_latency_ms);
     }
 
     /// Current p95 latency estimate in milliseconds, or `None` before the
@@ -228,7 +229,7 @@ impl ProviderWithMetrics {
     /// observed behavior corrects it. The correction mirrors the resource-
     /// matching-then-measured-throughput loop used by volunteer-compute
     /// schedulers (BOINC) and decentralized-inference dispatchers (Petals
-    /// per-device block assignment, Prime Intellect swarm scheduling),
+    /// per-device block assignment),
     /// where a device's declared capacity seeds assignment and its
     /// realized service rate continuously reweights it.
     pub fn observed_factor(&self) -> f64 {
@@ -303,6 +304,7 @@ fn apply_advertised_capacity(
     capacity.moe_holdings = advertised.moe_holdings.clone();
     capacity.moe_roles = advertised.moe_roles.clone();
     capacity.moe_gpu = advertised.moe_gpu;
+    capacity.prefix_cache = advertised.prefix_cache.clone();
 }
 
 /// Manager for inference providers
@@ -1134,11 +1136,10 @@ impl ProviderManager {
             metrics.total_requests = metrics.successful_requests + metrics.failed_requests;
             metrics.total_latency_ms =
                 (metrics.total_latency_ms as f64 * decay_factor).round() as u64;
-            metrics.avg_latency_ms = if metrics.successful_requests > 0 {
-                metrics.total_latency_ms / metrics.successful_requests
-            } else {
-                0
-            };
+            metrics.avg_latency_ms = metrics
+                .total_latency_ms
+                .checked_div(metrics.successful_requests)
+                .unwrap_or(0);
             metrics.last_decay = Some(now);
         }
     }
@@ -1235,7 +1236,7 @@ mod tests {
         let manager_call = ProviderManager::new();
         let mut p_call = create_test_provider();
         p_call.reputation = 100;
-        let addr_call = p_call.address.clone();
+        let addr_call = p_call.address;
         manager_call.register_provider(p_call, false).unwrap();
         manager_call.record_call_failure(&addr_call);
         let rep_after_call = manager_call.get_reputation(&addr_call).unwrap();
@@ -1243,7 +1244,7 @@ mod tests {
         let manager_stream = ProviderManager::new();
         let mut p_stream = create_test_provider();
         p_stream.reputation = 100;
-        let addr_stream = p_stream.address.clone();
+        let addr_stream = p_stream.address;
         manager_stream.register_provider(p_stream, false).unwrap();
         manager_stream.record_stream_failure(&addr_stream);
         let rep_after_stream = manager_stream.get_reputation(&addr_stream).unwrap();

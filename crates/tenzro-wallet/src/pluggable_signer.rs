@@ -65,6 +65,8 @@ impl HardwareDeviceKind {
         }
     }
 
+    // Inherent constructor returning Option; not the FromStr trait (which requires Result<Self, Err>).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "ledger" => Some(Self::Ledger),

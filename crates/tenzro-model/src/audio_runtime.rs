@@ -143,11 +143,11 @@ mod preprocessing {
     /// container and dispatches the right codec.
     pub fn decode_to_mono_16k(bytes: &[u8]) -> Result<Vec<f32>> {
         // Try WAV first via hound (faster, simpler, no probe).
-        if looks_like_wav(bytes) {
-            if let Ok(samples) = decode_wav(bytes) {
-                return Ok(samples);
-            }
-            // Fall through to symphonia on hound failure.
+        // Fall through to symphonia on hound failure.
+        if looks_like_wav(bytes)
+            && let Ok(samples) = decode_wav(bytes)
+        {
+            return Ok(samples);
         }
         decode_symphonia(bytes)
     }
@@ -590,7 +590,6 @@ mod onnx_backend {
     }
 
     /// ───────────────────────── Moonshine ─────────────────────────────
-
     /// ORT-backed transcriber for Moonshine v2 (tiny / base).
     ///
     /// Moonshine consumes raw 16 kHz f32 mono audio (`input_values`,
@@ -756,7 +755,6 @@ mod onnx_backend {
     }
 
     /// ───────────────────────── Whisper family ─────────────────────────
-
     /// ORT-backed transcriber for Whisper / Distil-Whisper variants.
     ///
     /// Encoder consumes log-mel spectrogram `[1, n_mels, N_FRAMES]`
@@ -951,7 +949,6 @@ mod onnx_backend {
     }
 
     /// ───────────────────────── Parakeet TDT ──────────────────────────
-
     /// Vocabulary parsed from a NeMo `vocab.txt`.
     ///
     /// Lines are `token id` (single space). Tokens contain the
@@ -1528,7 +1525,6 @@ mod onnx_backend {
     }
 
     /// ───────────────────────── Canary ────────────────────────────────
-
     /// Vocabulary parser for NVIDIA Canary-1B-Flash, an attention
     /// encoder-decoder (AED) NeMo Conformer ASR with 5249 vocab entries
     /// served as `token id` per line. Unlike Parakeet (TDT, RNN-T joint),
@@ -1919,8 +1915,8 @@ mod onnx_backend {
 
             // Encoder mask: `[1, S]` bool, true for usable frames.
             let mut enc_mask: Vec<bool> = vec![false; s_dim];
-            for i in 0..usable_s {
-                enc_mask[i] = true;
+            for slot in enc_mask.iter_mut().take(usable_s) {
+                *slot = true;
             }
 
             // ── 3. AED autoregressive decoding ───────────────────────
@@ -1977,7 +1973,9 @@ mod onnx_backend {
                 })?;
 
                 let mems_buf = if mems_l_kv == 0 {
-                    vec![0.0_f32; self.decoder_num_layers * 1 * 0 * self.decoder_hidden_dim]
+                    // First decode step: KV-cache is empty, shape is
+                    // [decoder_num_layers, 1, 0, decoder_hidden_dim].
+                    Vec::<f32>::new()
                 } else {
                     mems.clone()
                 };
@@ -2344,10 +2342,10 @@ mod onnx_backend {
             // verbatim every step; self-attn KVs grow.
             let mut present_outputs = present_outputs;
             for (i, binding) in kv_bindings.iter().enumerate() {
-                if let Some(p) = present_outputs[i].take() {
-                    if !binding.is_encoder_cross || past_kv[i].is_none() {
-                        past_kv[i] = Some(p);
-                    }
+                if let Some(p) = present_outputs[i].take()
+                    && (!binding.is_encoder_cross || past_kv[i].is_none())
+                {
+                    past_kv[i] = Some(p);
                 }
             }
 

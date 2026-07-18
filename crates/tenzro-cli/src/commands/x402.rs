@@ -8,7 +8,10 @@
 //!
 //! - `tenzro_listX402Schemes` — enumerate scheme adapters (e.g.
 //!   `tenzro-hybrid`, `permit2`, `upto`, `batch-settlement`) registered
-//!   with the facilitator.
+//!   with the facilitator. The response also carries `facilitator_mode`:
+//!   `self-hosted` when the operator verifies + settles EIP-3009 / Permit2
+//!   against their own EVM relayer, or `cdp` when those lanes defer to the
+//!   remote Coinbase facilitator.
 //! - `tenzro_payX402` — submit a payment payload against a challenge.
 //! - `tenzro_x402RegisterResource` / `tenzro_x402DiscoverResources` /
 //!   `tenzro_x402DeregisterResource` — the Bazaar discovery surface, so

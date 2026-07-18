@@ -117,6 +117,10 @@ fn unix_now_secs() -> u64 {
 pub const VALIDATOR_ONLY_TOPICS: &[&str] = &[
     "consensus",
     "attestations",
+    // Batch availability certificates carry validator BLS acks; only validators
+    // produce/ack batches. Non-validators may subscribe to fetch batch bodies
+    // for execution and chain sync, but cannot publish on this topic.
+    "batches",
 ];
 
 /// Peer information tracked by the manager
@@ -1086,14 +1090,16 @@ mod tests {
         assert!(manager.authorize_peer_for_topic(&validator, "tenzro/blocks"));
         assert!(manager.authorize_peer_for_topic(&validator, "tenzro/consensus"));
         assert!(manager.authorize_peer_for_topic(&validator, "tenzro/attestations"));
+        assert!(manager.authorize_peer_for_topic(&validator, "tenzro/batches"));
         assert!(manager.authorize_peer_for_topic(&validator, "tenzro/transactions"));
 
-        // Non-validator should be blocked on validator-only topics (consensus, attestations)
+        // Non-validator should be blocked on validator-only topics (consensus, attestations, batches)
         // NOTE: "tenzro/blocks" is intentionally open to all peers so that
         // RPC nodes and model providers can receive block gossip for chain sync.
         assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/blocks"));
         assert!(!manager.authorize_peer_for_topic(&non_validator, "tenzro/consensus"));
         assert!(!manager.authorize_peer_for_topic(&non_validator, "tenzro/attestations"));
+        assert!(!manager.authorize_peer_for_topic(&non_validator, "tenzro/batches"));
 
         // Non-validator should be allowed on open topics
         assert!(manager.authorize_peer_for_topic(&non_validator, "tenzro/transactions"));

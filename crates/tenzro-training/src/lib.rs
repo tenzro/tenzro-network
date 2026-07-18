@@ -1,5 +1,5 @@
 //! Tenzro Train — protocol-only Rust crate for decentralized verifiable
-//! foundation-model training (Decoupled DiLoCo).
+//! foundation-model training with decoupled outer aggregation.
 //!
 //! # Architecture
 //!
@@ -55,6 +55,7 @@ pub mod payload_store;
 pub mod quantization;
 pub mod runtime;
 pub mod slashing;
+pub mod sparse;
 
 pub use activation::{
     top_k_delta_probes, validate_activation_commitment, verify_activation_commitment,
@@ -83,25 +84,30 @@ pub use gossip::{
     TrainingGossipMessage, TRAINING_SYNCER_TOPIC, TRAINING_TOPIC,
 };
 pub use outer_optimizer::{
-    gradient_agreement, AdaptiveLrConfig, NesterovSgdConfig, NesterovSgdState,
+    gradient_agreement, sparse_ef_step, AdaptiveLrConfig, NesterovSgdConfig, NesterovSgdState,
 };
 pub use payload_store::{
     compute_payload_hash, verify_payload, GradientPayloadStore, InMemoryGradientStore,
 };
 pub use quantization::{dequantize, encoded_len, quantize};
 pub use runtime::{
-    min_tier_for_rule, validate_aggregation_for_tier, validate_objective, FragmentBuffer,
-    RoundDecision, SyncerState, TrainingRuntime,
+    min_tier_for_rule, validate_aggregation_for_tier, validate_objective, validate_payload_kind,
+    FragmentBuffer, RoundDecision, SyncerState, TrainingRuntime,
 };
 pub use slashing::{eviction_decisions, EvictionReason, TrainerSlashingCallback};
+pub use sparse::{
+    select_transmitted, sparse_decode, sparse_encode, sparse_encoded_len, ErrorFeedback,
+    SparseDecoded,
+};
 
 // Re-export the protocol-level types from `tenzro-types` for convenience —
 // downstream crates can `use tenzro_training::TrainingTaskSpec` instead of
 // `use tenzro_types::training::TrainingTaskSpec`.
 pub use tenzro_types::training::{
     ActivationCommitment, AggregationRule, ArchitectureSpec, DeltaProbe, FragmentQuorumStatus,
-    GradientQuantization, OuterGradient, PipelineAssignment, PipelineConfig, RlConfig,
-    SealedDatasetManifest, SealedShardEnvelope, SyncRound, SyncStrategy, TrainingAttestation,
+    GradientQuantization, OuterGradient, OuterUpdateMode, PayloadKind, PipelineAssignment,
+    PipelineConfig, RlConfig, SealedDatasetManifest, SealedShardEnvelope, SparseTopKParams,
+    SyncRound, SyncStrategy, TrainingAttestation,
     TrainingModality, TrainingObjective, TrainingReceipt, TrainingRun, TrainingRunStatus,
     TrainingTaskSpec, TrainingTier, ACTIVATION_COMMITMENT_DOMAIN_TAG, DEFAULT_PROBE_K,
     MAX_PROBE_K,

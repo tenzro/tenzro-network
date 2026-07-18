@@ -109,7 +109,7 @@ impl CpuCompute {
         #[cfg(target_arch = "x86_64")]
         if self.tier == CpuSimd::Avx512Vnni
             && q.kind() == QuantKind::Q8_0
-            && cols % crate::moe_quant::QK8_0 == 0
+            && cols.is_multiple_of(crate::moe_quant::QK8_0)
         {
             // Quantize each activation row to Q8_0 once, then integer-dot it
             // against every weight row's blocks. This is the grouped-GEMM

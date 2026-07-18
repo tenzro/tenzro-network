@@ -68,6 +68,8 @@ use crate::mpc::transport::{MpcPhase, MpcRoundMessage, Transport, TransportError
 /// the enum into the opaque transport payload; the receiving driver
 /// deserializes and dispatches on the discriminant.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Wire-format enum; variants are always heap-allocated in transit, boxing gains nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum SigningRoundPayload {
     /// Phase 1 → 2 point-to-point: one `TransmitPhase1to2` from sender to
     /// receiver. Both `from_index` and `to_index` are 1-based DKLS23 party
@@ -395,15 +397,15 @@ where
     /// and hand it to the installed reporter (if any). Always returns the
     /// abort so the caller can convert to `SignError::ProtocolAbort`.
     fn emit_abort_evidence(&self, abort: Abort) -> Abort {
-        if let Some(reporter) = &self.abort_reporter {
-            if let Some(evidence) = MpcAbortEvidence::from_protocol_abort(
+        if let Some(reporter) = &self.abort_reporter
+            && let Some(evidence) = MpcAbortEvidence::from_protocol_abort(
                 &abort,
-                self.cfg.instance_id.clone(),
-                self.cfg.parameters.clone(),
+                self.cfg.instance_id,
+                self.cfg.parameters,
                 |pi| self.did_for_party(pi),
-            ) {
-                reporter.report_local_observation(evidence);
-            }
+            )
+        {
+            reporter.report_local_observation(evidence);
         }
         abort
     }

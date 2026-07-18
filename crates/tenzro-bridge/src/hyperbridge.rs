@@ -270,15 +270,15 @@ impl HyperbridgeAdapter {
         let destination_module = destination_module.into();
         self.check_mint_control(&body)?;
 
-        if let Some(ref t) = asset_transfer {
-            if let Some(limit) = self.config.liquidity_limits.get(&t.asset).copied() {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO)
-                    .as_secs();
-                self.liquidity
-                    .check_and_record(&t.asset, t.amount, limit, now)?;
-            }
+        if let Some(ref t) = asset_transfer
+            && let Some(limit) = self.config.liquidity_limits.get(&t.asset).copied()
+        {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs();
+            self.liquidity
+                .check_and_record(&t.asset, t.amount, limit, now)?;
         }
 
         let id = Self::message_id(

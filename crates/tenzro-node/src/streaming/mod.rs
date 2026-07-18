@@ -15,16 +15,21 @@
 //! level (TTL eviction), memory-bounded at the per-stream level
 //! (`MAX_BUFFERED_CHUNKS`).
 //!
+//! When the drop is on the *provider* leg — the `/v1/chat/completions`
+//! handler is proxying to a remote provider and that provider dies
+//! mid-generation — [`failover::SamplingState`] captures the sampling
+//! parameters and the assistant text emitted so far so a different provider
+//! deterministically re-prefills the emitted prefix and continues the same
+//! SSE without a visible restart. No KV-cache bytes cross the wire; the
+//! receiving provider re-computes the prefix from the emitted text.
+//!
 //! Out of scope:
 //! - KV-cache resume on the model side — the cursor stores text only,
 //!   which is enough for client message-reconstruction but not for
 //!   skipping regeneration cost on long completions.
-//! - Cross-node provider proxy resume — the `/v1/chat/completions`
-//!   handler that proxies to a remote provider currently
-//!   passes the upstream SSE stream through verbatim. Resume on that
-//!   leg is a follow-up.
 
 pub mod cursor;
+pub mod failover;
 pub mod heartbeat;
 pub mod sla_metrics;
 
@@ -32,6 +37,7 @@ pub use cursor::{
     parse_last_event_id, BackpressureSignal, StreamCursor, StreamCursorStore,
     DEFAULT_TTL, MAX_BUFFERED_CHUNKS,
 };
+pub use failover::{extract_delta_content, ChatTurn, SamplingState};
 pub use heartbeat::{
     with_heartbeat, HeartbeatConfig, HeartbeatedChunk, DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MISSED_THRESHOLD,

@@ -15,6 +15,10 @@ pub enum ZkCommand {
     Verify(ZkVerifyCmd),
     /// List available ZK circuits
     Circuits(ZkCircuitsCmd),
+    /// File a fraud proof against an attested commitment
+    FileFraudProof(ZkFileFraudProofCmd),
+    /// Read the fraud-window record for a commitment
+    Attestation(ZkAttestationCmd),
 }
 
 impl ZkCommand {
@@ -23,6 +27,8 @@ impl ZkCommand {
             Self::Prove(cmd) => cmd.execute().await,
             Self::Verify(cmd) => cmd.execute().await,
             Self::Circuits(cmd) => cmd.execute().await,
+            Self::FileFraudProof(cmd) => cmd.execute().await,
+            Self::Attestation(cmd) => cmd.execute().await,
         }
     }
 }
@@ -115,12 +121,122 @@ impl ZkVerifyCmd {
         let valid = result.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
         if valid {
             output::print_success("Proof is valid!");
+            if let Some(commitment) = result.get("commitment_hex").and_then(|v| v.as_str()) {
+                output::print_field("Commitment", commitment);
+            }
+            let newly = result.get("newly_attested").and_then(|v| v.as_bool()).unwrap_or(false);
+            output::print_field(
+                "Attested",
+                if newly {
+                    "yes (2f+1 quorum reached)"
+                } else {
+                    "not yet (quorum still collecting across the validator set)"
+                },
+            );
         } else {
             output::print_error("Proof verification failed.");
             if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
                 output::print_field("Error", err);
             }
         }
+
+        Ok(())
+    }
+}
+
+/// File a fraud proof against an attested ZK commitment.
+///
+/// The node fetches the proof from the commitment's DA locator, re-runs the
+/// Plonky3 verifier deterministically, and adjudicates. If the proof fails
+/// re-verification the commitment is retracted and every co-signer on the
+/// certificate is slashed; if it re-verifies the commitment stands.
+#[derive(Debug, Parser)]
+pub struct ZkFileFraudProofCmd {
+    /// Hex-encoded 32-byte commitment hash (with or without 0x prefix).
+    #[arg(long)]
+    commitment: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ZkFileFraudProofCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("File ZK Fraud Proof");
+        let spinner = output::create_spinner("Re-verifying proof...");
+        let rpc = RpcClient::new(&self.rpc);
+
+        let result: serde_json::Value = rpc.call("tenzro_fileZkFraudProof", serde_json::json!({
+            "commitment": self.commitment,
+        })).await?;
+
+        spinner.finish_and_clear();
+
+        let upheld = result.get("upheld").and_then(|v| v.as_bool()).unwrap_or(false);
+        if upheld {
+            output::print_success("Fraud proof upheld — commitment retracted, co-signers slashed.");
+        } else {
+            output::print_info("Fraud proof unfounded — commitment re-verified and stands.");
+        }
+        if let Some(note) = result.get("note").and_then(|v| v.as_str()) {
+            output::print_field("Note", note);
+        }
+
+        Ok(())
+    }
+}
+
+/// Read the fraud-window record for a ZK commitment.
+#[derive(Debug, Parser)]
+pub struct ZkAttestationCmd {
+    /// Hex-encoded 32-byte commitment hash (with or without 0x prefix).
+    #[arg(long)]
+    commitment: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ZkAttestationCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("ZK Attestation");
+        let rpc = RpcClient::new(&self.rpc);
+
+        let result: serde_json::Value = rpc.call("tenzro_getZkAttestation", serde_json::json!({
+            "commitment": self.commitment,
+        })).await?;
+
+        let attested_present = result.get("circuit_id").is_some();
+        if !attested_present {
+            output::print_info("No open fraud window for this commitment.");
+            let on_chain = result.get("on_chain_attested").and_then(|v| v.as_bool()).unwrap_or(false);
+            output::print_field("On-chain attested", if on_chain { "yes" } else { "no" });
+            return Ok(());
+        }
+
+        if let Some(circuit) = result.get("circuit_id").and_then(|v| v.as_str()) {
+            output::print_field("Circuit", circuit);
+        }
+        if let Some(power) = result.get("voting_power").and_then(|v| v.as_str()) {
+            output::print_field("Voting power", power);
+        }
+        if let Some(h) = result.get("attested_at_height").and_then(|v| v.as_u64()) {
+            output::print_field("Attested at height", &h.to_string());
+        }
+        if let Some(h) = result.get("fraud_window_closes_at").and_then(|v| v.as_u64()) {
+            output::print_field("Fraud window closes at", &h.to_string());
+        }
+        let open = result.get("fraud_window_open").and_then(|v| v.as_bool()).unwrap_or(false);
+        output::print_field("Fraud window", if open { "open" } else { "closed" });
+        if let Some(loc) = result.get("proof_locator").and_then(|v| v.as_str()) {
+            output::print_field("Proof locator", loc);
+        }
+        let on_chain = result.get("on_chain_attested").and_then(|v| v.as_bool()).unwrap_or(false);
+        output::print_field("On-chain attested", if on_chain { "yes" } else { "no" });
 
         Ok(())
     }

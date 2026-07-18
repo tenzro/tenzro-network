@@ -201,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sort opportunities by APY descending so we route capital to the most
     // attractive yield first.
     let mut sorted = opportunities;
-    sorted.sort_by(|a, b| b.apy_bps.cmp(&a.apy_bps));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.apy_bps));
 
     let mut total_bridged = 0u128;
     let mut leg_count = 0;

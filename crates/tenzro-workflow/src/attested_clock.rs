@@ -158,11 +158,7 @@ impl AttestedTimestamp {
     /// Default tolerance for institutional workflows is 30_000 ms (30s)
     /// per Canton 3.5 timestamp-drift guidance.
     pub fn check_drift(&self, local_wall_ms: u64, tolerance_ms: u64) -> Result<()> {
-        let diff = if self.wall_ms > local_wall_ms {
-            self.wall_ms - local_wall_ms
-        } else {
-            local_wall_ms - self.wall_ms
-        };
+        let diff = self.wall_ms.abs_diff(local_wall_ms);
         if diff > tolerance_ms {
             return Err(WorkflowError::InvalidWorkflow(format!(
                 "attested-clock drift exceeded: wall_ms={} local={} diff={} tolerance={}",

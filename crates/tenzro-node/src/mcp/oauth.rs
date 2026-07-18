@@ -798,7 +798,7 @@ const PUBLIC_MCP_TOOLS: &[&str] = &[
     // Payment info
     "list_payment_protocols",
     // Verification
-    "verify_zk_proof",
+    "verify_zk_proof", "get_zk_attestation",
     // Identity resolution
     "resolve_did",
 ];

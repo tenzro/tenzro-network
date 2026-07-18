@@ -364,7 +364,7 @@ impl IrohBackedResolver {
             builder = builder.accept(ALPN_HTTP, HttpForwardProtocol::new(handler));
         }
         let router = builder.spawn();
-        let downloader = Downloader::new(&*store, &endpoint);
+        let downloader = Downloader::new(&store, &endpoint);
         Ok(Arc::new(Self {
             endpoint,
             store,

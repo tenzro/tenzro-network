@@ -114,7 +114,7 @@ fn encode_three_arg(
     // dynamic bytes payload (right-padded to 32 if non-empty)
     out.extend_from_slice(dyn_bytes);
     let pad = (32 - (dyn_bytes.len() % 32)) % 32;
-    out.extend(std::iter::repeat(0u8).take(pad));
+    out.extend(std::iter::repeat_n(0u8, pad));
 
     out
 }

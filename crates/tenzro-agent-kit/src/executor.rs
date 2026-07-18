@@ -690,7 +690,7 @@ impl Executor {
         // beats the node default. We never silently fall through to 1337
         // here — if neither is set we omit the field and let the node fill
         // in its genesis chain_id.
-        let chain_id_resolved = run_opts.chain_id_override.or_else(|| match &spec.backend {
+        let chain_id_resolved = run_opts.chain_id_override.or(match &spec.backend {
             ExecutionBackend::Evm { chain_id } => Some(*chain_id),
             _ => None,
         });

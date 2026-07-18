@@ -347,19 +347,18 @@ pub fn verify_envelope_with_key(
 pub fn ed25519_from_did_document(doc: &serde_json::Value) -> Option<[u8; 32]> {
     let vms = doc.get("verificationMethod")?.as_array()?;
     for vm in vms {
-        if let Some(mb) = vm.get("publicKeyMultibase").and_then(|v| v.as_str()) {
-            if let Some(k) = resolve_did_key_ed25519(&format!("did:key:{mb}")) {
-                return Some(k);
-            }
+        if let Some(mb) = vm.get("publicKeyMultibase").and_then(|v| v.as_str())
+            && let Some(k) = resolve_did_key_ed25519(&format!("did:key:{mb}"))
+        {
+            return Some(k);
         }
-        if let Some(b58) = vm.get("publicKeyBase58").and_then(|v| v.as_str()) {
-            if let Ok(bytes) = bs58::decode(b58).into_vec() {
-                if bytes.len() == 32 {
-                    let mut key = [0u8; 32];
-                    key.copy_from_slice(&bytes);
-                    return Some(key);
-                }
-            }
+        if let Some(b58) = vm.get("publicKeyBase58").and_then(|v| v.as_str())
+            && let Ok(bytes) = bs58::decode(b58).into_vec()
+            && bytes.len() == 32
+        {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            return Some(key);
         }
     }
     None

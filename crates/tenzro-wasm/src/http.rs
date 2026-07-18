@@ -164,13 +164,13 @@ impl HttpComponent {
             .pre
             .instantiate_async(&mut store)
             .await
-            .map_err(|e| Self::classify_trap(e))?;
+            .map_err(Self::classify_trap)?;
 
         proxy
             .wasi_http_incoming_handler()
             .call_handle(&mut store, req_resource, out_resource)
             .await
-            .map_err(|e| Self::classify_trap(e))?;
+            .map_err(Self::classify_trap)?;
 
         // The handler resolves the outparam with either a response or an
         // error code. `rx` errors only if the guest dropped the outparam

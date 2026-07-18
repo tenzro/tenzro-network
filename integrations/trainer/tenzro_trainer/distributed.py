@@ -72,7 +72,7 @@ def shard_model_fsdp2(model: nn.Module, ctx: DistContext) -> nn.Module:
     Shards each block of the largest ``nn.ModuleList`` (the decoder stack)
     individually so prefetch overlaps compute, then shards the root module
     for everything outside the stack. Parameters are held in bf16 for
-    compute with fp32 gradient reduction, matching the DiLoCo reference
+    compute with fp32 gradient reduction, matching the reference
     configuration.
 
     Must run before the optimizer is constructed — FSDP2 swaps parameters

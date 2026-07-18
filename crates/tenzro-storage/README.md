@@ -1,6 +1,6 @@
 # tenzro-storage
 
-State storage layer for Tenzro Network. Provides persistent storage for Tenzro Ledger (the L1 settlement layer).
+State storage layer for Tenzro Network. Provides persistent storage for Tenzro Ledger (the settlement layer).
 
 ## Overview
 

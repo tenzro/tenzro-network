@@ -847,7 +847,7 @@ impl NetworkTreasury {
         let balances = self.balances.read();
         let mut failures = Vec::new();
 
-        for (asset_id, _) in balances.iter() {
+        for asset_id in balances.keys() {
             if let Err(e) = self.audit_supply(asset_id) {
                 failures.push((asset_id.clone(), e.to_string()));
             }

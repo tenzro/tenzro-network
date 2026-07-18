@@ -1,7 +1,7 @@
 """Language trainer adapter — Qwen 3 family.
 
 This is the real inner-loop driver for decoder-only LM training under
-Decoupled DiLoCo. The default backbone is **Qwen 3 0.6B**, which matches
+decoupled outer aggregation. The default backbone is **Qwen 3 0.6B**, which matches
 the entries in the Tenzro model catalog at
 ``crates/tenzro-model/src/catalog.rs`` — the same family that the network
 serves via llama.cpp at inference time, so trained outer-gradient roots
@@ -104,7 +104,7 @@ def lora_factor_names(model: "nn.Module") -> tuple[list[str], list[str]]:
     """Split a PEFT-wrapped model's trainable params into ``(a_names, b_names)``.
 
     PEFT names LoRA matrices ``...lora_A.<adapter>.weight`` and
-    ``...lora_B.<adapter>.weight``. Under ADF-LoRA alternating aggregation we
+    ``...lora_B.<adapter>.weight``. Under alternating low-rank aggregation we
     freeze one factor per round; this split tells :meth:`set_round` which
     parameters to toggle.
     """
@@ -154,7 +154,7 @@ class LanguageAdapter:
         return self._optimizer
 
     def set_round(self, round_index: int) -> None:
-        """ADF-LoRA alternating freeze: sync B on even rounds, A on odd rounds.
+        """Alternating low-rank freeze: sync B on even rounds, A on odd rounds.
 
         No-op unless ``lora_alternating`` is on. On an even round we freeze the
         A factors (``requires_grad=False``) and leave B trainable, so only B is
@@ -406,7 +406,7 @@ def build_adapter(
       "gate_proj","up_proj","down_proj"]`` — the attention + MLP projections
       shared across the catalog decoder families)
     * ``quantize`` (``"nf4"`` for QLoRA 4-bit base, else full-precision base)
-    * ``alternating`` (default ``True`` — ADF-LoRA per-round factor freeze,
+    * ``alternating`` (default ``True`` — alternating low-rank per-round factor freeze,
       matching :class:`AggregationRule::LoraAlternating` on the syncer side)
     """
     if torch is None:

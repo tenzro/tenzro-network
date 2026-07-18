@@ -139,11 +139,10 @@ impl PeerStatusTracker {
             .filter(|entry| {
                 let s = entry.value();
                 s.tee_capable
-                    && vendor.map_or(true, |v| s.tee_vendor == Some(v))
+                    && vendor.is_none_or(|v| s.tee_vendor == Some(v))
                     && now
                         .checked_duration_since(s.last_seen)
-                        .map(|d| d <= self.freshness)
-                        .unwrap_or(true)
+                        .is_none_or(|d| d <= self.freshness)
             })
             .map(|entry| (*entry.key(), *entry.value()))
             .collect()

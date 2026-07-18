@@ -65,6 +65,9 @@ impl LatencyMatrix {
     /// The harness ensures symmetry by averaging `f(i,j)` and `f(j,i)`.
     fn from_fn(n: usize, mut f: impl FnMut(usize, usize) -> u64) -> Self {
         let mut latencies = vec![vec![0u64; n]; n];
+        // i and j both index latencies, and the symmetric fill writes the
+        // mirror cell latencies[j][i], so enumerate() can't express the loop.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..n {
             for j in 0..n {
                 if i == j {
@@ -323,6 +326,9 @@ async fn run_cluster(
                             ConsensusOutMessage::NoEndorsement(n) => {
                                 let _ = engine.on_no_endorsement_msg(&n).await;
                             }
+                            ConsensusOutMessage::Batch(_)
+                            | ConsensusOutMessage::BatchAck { .. }
+                            | ConsensusOutMessage::BatchCertificate(_) => {}
                         }
                     });
                 }

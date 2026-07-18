@@ -12,6 +12,7 @@ use crate::registry::TokenRegistry;
 use crate::tnzo::TnzoToken;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use tenzro_types::primitives::Address;
@@ -558,7 +559,7 @@ impl CrosschainTokenManager {
             .iter()
             .map(|e| e.value().clone())
             .collect();
-        events.sort_by(|a, b| b.nonce.cmp(&a.nonce));
+        events.sort_by_key(|e| Reverse(e.nonce));
         events
     }
 
@@ -569,7 +570,7 @@ impl CrosschainTokenManager {
             .iter()
             .map(|e| e.value().clone())
             .collect();
-        events.sort_by(|a, b| b.nonce.cmp(&a.nonce));
+        events.sort_by_key(|e| Reverse(e.nonce));
         events
     }
 

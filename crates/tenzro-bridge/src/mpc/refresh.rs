@@ -387,15 +387,15 @@ where
     /// locally (if a reporter is attached). The returned `Abort` is the
     /// unmodified input — callers wrap it back into the session error type.
     fn emit_abort_evidence(&self, abort: Abort) -> Abort {
-        if let Some(reporter) = &self.abort_reporter {
-            if let Some(evidence) = MpcAbortEvidence::from_protocol_abort(
+        if let Some(reporter) = &self.abort_reporter
+            && let Some(evidence) = MpcAbortEvidence::from_protocol_abort(
                 &abort,
                 self.cfg.instance_id,
                 self.cfg.parameters,
                 |pi| self.did_for_party(pi),
-            ) {
-                reporter.report_local_observation(evidence);
-            }
+            )
+        {
+            reporter.report_local_observation(evidence);
         }
         abort
     }

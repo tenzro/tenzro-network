@@ -31,9 +31,10 @@ use std::sync::Arc;
 use tenzro_storage::{KvStore, CF_TRAINING_RECEIPTS, CF_TRAINING_RUNS};
 use tenzro_types::primitives::{Hash, Timestamp};
 use tenzro_types::training::{
-    AggregationRule, FragmentQuorumStatus, OuterGradient, PipelineAssignment,
-    SealedDatasetManifest, SyncRound, TrainingAttestation, TrainingModality, TrainingObjective,
-    TrainingReceipt, TrainingRun, TrainingRunStatus, TrainingTaskSpec, TrainingTier,
+    AggregationRule, FragmentQuorumStatus, OuterGradient, OuterUpdateMode, PayloadKind,
+    PipelineAssignment, SealedDatasetManifest, SyncRound, TrainingAttestation, TrainingModality,
+    TrainingObjective, TrainingReceipt, TrainingRun, TrainingRunStatus, TrainingTaskSpec,
+    TrainingTier,
 };
 
 /// Tier × aggregation-rule policy.
@@ -78,6 +79,23 @@ pub fn validate_aggregation_for_tier(spec: &TrainingTaskSpec) -> Result<()> {
             rule: spec.aggregation,
             required,
             actual: spec.tier,
+        });
+    }
+    Ok(())
+}
+
+/// Reject a task spec whose outer-update mode is incompatible with its payload
+/// kind. `SparseEf` presupposes a `SparseTopK` payload — its momentum-equivalent
+/// state is the trainer-side error-feedback accumulator, which only exists on
+/// the sparse path. A `Dense` task must use `Nesterov` (the syncer carries the
+/// momentum buffer). `Nesterov` over a sparse payload is permitted: the
+/// densified zero-filled contributions feed the momentum buffer unchanged.
+pub fn validate_payload_kind(spec: &TrainingTaskSpec) -> Result<()> {
+    if matches!(spec.outer_update, OuterUpdateMode::SparseEf { .. })
+        && !matches!(spec.payload_kind, PayloadKind::SparseTopK(_))
+    {
+        return Err(TrainingError::OuterUpdateRequiresSparse {
+            mode: "sparse-ef",
         });
     }
     Ok(())
@@ -245,7 +263,7 @@ impl SyncerState {
         if run.trainers.contains(&trainer_did) {
             return Err(TrainingError::AlreadyEnrolled(trainer_did));
         }
-        // DiLoCoX pipeline-parallel groups: enrollment order determines the
+        // Pipeline-parallel groups: enrollment order determines the
         // (group, stage) slot. Group g is complete once all num_stages slots
         // are filled; each complete group acts as one logical trainer for
         // quorum purposes.
@@ -309,8 +327,17 @@ impl SyncerState {
                 got: gradient.quantization,
             });
         }
-        // Streaming DiLoCo: only fragments in the round's active shard sync
-        // this round; submissions for inactive shards are rejected so the
+        // Payload kind must match the task spec's policy — Dense and SparseTopK
+        // decode through entirely different wire formats, so a mismatched
+        // submission would decode to garbage tensors.
+        if gradient.payload_kind != self.task_spec.payload_kind {
+            return Err(TrainingError::PayloadKindMismatch {
+                expected: self.task_spec.payload_kind,
+                got: gradient.payload_kind,
+            });
+        }
+        // Streaming shard rotation: only fragments in the round's active shard
+        // sync this round; submissions for inactive shards are rejected so the
         // per-fragment quorum accounting stays scoped to the active shard.
         let strategy = self.task_spec.sync_strategy;
         if !strategy.fragment_active(gradient.fragment, frag_count, gradient.round) {
@@ -321,7 +348,7 @@ impl SyncerState {
                 round: gradient.round,
             });
         }
-        // DiLoCoX pipeline groups: a trainer may only submit gradients for
+        // Pipeline groups: a trainer may only submit gradients for
         // fragments owned by its assigned pipeline stage.
         if let Some(pipeline) = &self.task_spec.pipeline {
             let run = self.run.read();
@@ -658,7 +685,7 @@ impl SyncerState {
     }
 
     /// Decide the outcome of the current round once the adaptive grace
-    /// window has elapsed, per the DiLoCo straggler model: a round is bound
+    /// window has elapsed, per the straggler model: a round is bound
     /// by wall-clock time, not by waiting for every enrolled trainer. Slow
     /// or dead trainers are soft-timed-out — their absence never stalls the
     /// run.
@@ -968,6 +995,7 @@ impl TrainingRuntime {
     pub fn register_run(&self, state: Arc<SyncerState>) -> Result<()> {
         validate_aggregation_for_tier(&state.task_spec)?;
         validate_objective(&state.task_spec)?;
+        validate_payload_kind(&state.task_spec)?;
         if state.task_spec.tier == TrainingTier::Confidential
             && crate::confidential::parse_tee_dataset_ref(&state.task_spec.dataset_ref).is_none()
         {
@@ -1184,6 +1212,7 @@ mod tests {
             safetensors_hash: Hash::from_bytes(&[3u8; 32]).unwrap(),
             payload_bytes: 1024,
             quantization: spec.quantization,
+            payload_kind: spec.payload_kind,
             inner_step_count: 100,
             submitted_at: Timestamp::now(),
             signature: tenzro_types::primitives::Signature::default(),
@@ -1217,6 +1246,8 @@ mod tests {
             clip_l2_norm: None,
             sync_strategy: SyncStrategy::Full,
             quantization: GradientQuantization::None,
+            payload_kind: PayloadKind::Dense,
+            outer_update: OuterUpdateMode::default(),
             delayed_apply: false,
             pipeline: None,
             trainer_count: 4,

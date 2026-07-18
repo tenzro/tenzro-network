@@ -1134,13 +1134,13 @@ impl MessageRouter {
             }
         }
 
-        if let Some(storage) = &self.storage {
-            if let Err(e) = self.persist_message_receipt(agent_id, &message, storage) {
-                warn!(
-                    "Failed to persist agent-message receipt for {} / msg {}: {}",
-                    agent_id, message.message_id, e
-                );
-            }
+        if let Some(storage) = &self.storage
+            && let Err(e) = self.persist_message_receipt(agent_id, &message, storage)
+        {
+            warn!(
+                "Failed to persist agent-message receipt for {} / msg {}: {}",
+                agent_id, message.message_id, e
+            );
         }
     }
 

@@ -410,14 +410,14 @@ impl PaymentProtocol for VisaTapServer {
             "sig1=(\"@authority\" \"@path\" \"content-type\");created={};nonce=\"{}\";keyid=\"{}\";alg=\"ed25519\"",
             Utc::now().timestamp(),
             uuid::Uuid::new_v4(),
-            hex::encode(&public_key.to_bytes())
+            hex::encode(public_key.to_bytes())
         );
-        let signature_b64 = BASE64.encode(&signature.to_bytes());
+        let signature_b64 = BASE64.encode(signature.to_bytes());
 
         let mut extra = HashMap::new();
         extra.insert("signature_input".to_string(), serde_json::json!(signature_input));
         extra.insert("signature".to_string(), serde_json::json!(signature_b64));
-        extra.insert("public_key".to_string(), serde_json::json!(hex::encode(&public_key.to_bytes())));
+        extra.insert("public_key".to_string(), serde_json::json!(hex::encode(public_key.to_bytes())));
         extra.insert("method".to_string(), serde_json::json!("GET"));
         extra.insert("authority".to_string(), serde_json::json!(self.domain));
         extra.insert("path".to_string(), serde_json::json!(challenge.resource));
@@ -436,7 +436,7 @@ impl PaymentProtocol for VisaTapServer {
             challenge_id: challenge.challenge_id.clone(),
             protocol: "visa-tap".to_string(),
             payer_did: payer_did.to_string(),
-            payer_address: hex::encode(&public_key.to_bytes()),
+            payer_address: hex::encode(public_key.to_bytes()),
             amount: challenge.amount,
             asset: challenge.asset.clone(),
             signature: signature.to_bytes(),

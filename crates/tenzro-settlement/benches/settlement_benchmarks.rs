@@ -240,7 +240,7 @@ fn bench_micropayment_channel(c: &mut Criterion) {
 
             // Open channel
             let channel = manager
-                .open_channel(payer, payee, 100_000, asset, future_timestamp())
+                .open_channel(payer, payee, 100_000, asset, future_timestamp(), None, 0)
                 .unwrap();
 
             // 100 off-chain updates. Each iteration signs the next state

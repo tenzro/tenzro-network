@@ -106,6 +106,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | `top_p` | float | no | 0.9 | Nucleus sampling. |
 | `repeat_penalty` | float | no | 1.1 | Repetition penalty. |
 | `draft_n` | uint | no | — | Multi-Token-Prediction draft count (1–6). Requires a drafter paired with the target model. |
+| `seed` | uint | no | 42 | Sampling seed. Pins the generator so a streaming completion can be deterministically re-prefilled by a different provider if the serving one drops mid-stream — see [Streaming failover](#streaming-failover). |
 | `require_signed` | bool | no | false | Verified-response mode: the response must carry a `tenzro_provenance` manifest that verifies against the provider's registered signing key, otherwise the call fails with `-32022`. Off by default — unsigned providers are fully routable. |
 | `verifiable` | bool | no | false | Request a TOPLOC top-k logit commitment with the response. See [Verifiable inference](#verifiable-inference-toploc-commitments-and-challenges). Non-streaming, local single-token path only. |
 | `caller_address` | string | no | — | TNZO address billed for the inference. If absent, no on-chain billing. |
@@ -192,14 +193,18 @@ Provenance signing proves *who* served a response; a TOPLOC commitment proves *w
 |--------|--------|-------|
 | `tenzro_getInferenceCommitment` | `{commitment_hash}` | Full stored envelope `{commitment_hash, model_id, provider, created_at, commitment}`, or `null`. |
 | `tenzro_verifyInferenceCommitment` | `{commitment_hash, prompt}` | Re-executes locally; requires the model loaded in serial mode. Returns `{pass, steps_total, steps_passed, failing_steps}` plus serving context. |
-| `tenzro_fileInferenceChallenge` | `{commitment_hash, challenger, reason?}` | Open to any caller. Model and provider are read from the stored envelope, so filings cannot misattribute. |
-| `tenzro_getInferenceChallenge` | `{challenge_id}` | Full challenge record or `null`. |
-| `tenzro_listInferenceChallenges` | `{status?, provider?}` | `{count, challenges}` sorted newest first. Status ∈ `filed`, `upheld`, `dismissed`. |
-| `tenzro_resolveInferenceChallenge` | `{challenge_id, prompt? \| upheld?, provider_did?}` | **Operator only** (`X-Tenzro-Admin-Token`). With `prompt`, the node re-executes and a failing verification upholds the challenge; otherwise the explicit `upheld` verdict applies. |
+| `tenzro_fileInferenceChallenge` | `{commitment_hash, challenger, reason?}` | Open to any caller. Model and provider are read from the stored envelope, so filings cannot misattribute. Draws a stake-weighted committee seeded by the finalized-block hash. |
+| `tenzro_getInferenceChallenge` | `{challenge_id}` | Full challenge record (committee, votes, tally) or `null`. |
+| `tenzro_listInferenceChallenges` | `{status?, provider?}` | `{count, challenges}` sorted newest first. Status ∈ `voting_commit`, `voting_reveal`, `upheld`, `dismissed`. |
+| `tenzro_commitChallengeVote` | `{challenge_id, voter, commit_hash}` | Committee seat only. `commit_hash` = `H(verdict ‖ salt ‖ challenge_id ‖ voter)`; the verdict stays hidden. When committed stake reaches `2f+1` the challenge advances to the reveal phase. |
+| `tenzro_revealChallengeVote` | `{challenge_id, voter, verdict, salt}` | Discloses the sealed vote; `(verdict, salt)` must reproduce the commit. `verdict = true` upholds. `salt` is hex. |
+| `tenzro_finalizeChallenge` | `{challenge_id, force?}` | Tallies revealed votes by committee stake weight. A `2f+1` stake-weighted majority to uphold upholds; otherwise dismissed. Idempotent. `force = true` closes a challenge past the reveal window with no uphold quorum. |
 
-**Penalties on an upheld challenge.** The provider's routing reputation is decremented through the same path as a failed call (−5), and a failure is recorded against its compute bond. The resolution response carries `reputation_penalized` and `bond_failure_recorded` booleans reporting which penalty paths actually fired. Reputation only ever increases through settled payments, so a provider cannot recover by challenging itself.
+**Committee & quorum.** No admin token gates the verdict — the outcome is whatever the drawn, stake-weighted committee reveals. The committee is selected deterministically per dispute from the active validator set, seeded by the finalized-block hash (grinding-resistant). The quorum threshold is `2f+1` stake, computed overflow-safe as `(total_committee_stake / 3) * 2 + 1`.
 
-**Wrappers.** CLI `tenzro inference {get-commitment, verify-commitment, file-challenge, get-challenge, list-challenges, resolve-challenge}`; MCP tools `get_inference_commitment`, `verify_inference_commitment`, `file_inference_challenge`, `get_inference_challenge`, `list_inference_challenges`, `resolve_inference_challenge`.
+**Penalties on an upheld challenge.** The provider's routing reputation is decremented through the same path as a failed call (−5), and a failure is recorded against its compute bond. The finalize response carries `reputation_penalized` and `bond_failure_recorded` booleans reporting which penalty paths actually fired. Reputation only ever increases through settled payments, so a provider cannot recover by challenging itself.
+
+**Wrappers.** CLI `tenzro inference {get-commitment, verify-commitment, file-challenge, get-challenge, list-challenges, commit-vote, reveal-vote, finalize-challenge}`; MCP tools `get_inference_commitment`, `verify_inference_commitment`, `file_inference_challenge`, `get_inference_challenge`, `list_inference_challenges`, `commit_challenge_vote`, `reveal_challenge_vote`, `finalize_challenge`.
 
 ---
 
@@ -553,6 +558,14 @@ When the request targets a network model, the node proxies the upstream SSE byte
 
 Streams support reconnection via the SSE `Last-Event-ID` header. Every event's `id` is `<completion_id>:<seq>`; a reconnecting client sends `Last-Event-ID: <completion_id>:<seq>` and the node replays buffered chunks with a higher sequence number, synthesizing `[DONE]` if the stream already finished. The buffer is in-memory and expires per `data_policy.stream_resume_buffer_secs`.
 
+### Streaming failover
+
+The `Last-Event-ID` resume above covers a dropped *client* connection. When the drop is on the *provider* leg — the gateway is proxying a network model and the serving provider dies mid-generation — the gateway continues the stream on a different provider without a visible restart.
+
+The gateway captures the sampling state as it forwards tokens: the original messages, the sampling parameters (`seed`, `temperature`, `top_p`, `max_tokens`), and the assistant text emitted so far. On a mid-stream drop or stall it selects another provider serving the same model, re-sends the request with the emitted text appended as a trailing assistant prefix and `continue_final_message: true`, and streams the continuation into the same SSE. Because the seed and parameters travel with the request, the new provider re-prefills the identical prefix and resumes sampling from the same distribution.
+
+No KV-cache bytes cross the wire — the receiving provider re-computes the prefix from the emitted text. Failover is a bounded single retry: if the continuation provider also drops, the gateway penalizes it and ends the stream. Pin `seed` in the request for byte-identical continuation; without it the runtime default seed is used and captured.
+
 ---
 
 ## Universal model compatibility
@@ -561,7 +574,7 @@ Models in the catalog are tagged by capability. The chat handler maps the on-wir
 
 | Family | Tool calls | Thinking | Vision | Native template | Notes |
 |--------|------------|----------|--------|-----------------|-------|
-| Qwen3 (0.6B – 14B) | yes | yes (`<think>` tags) | no | ChatML + Hermes tools | Tool calls expressed as `<tool_call>{...}</tool_call>` JSON; mapped to `tool_use` blocks. |
+| Qwen3 (0.6B – 14B) | yes | yes (`<think>` tags) | no | ChatML + `<tool_call>` JSON | Tool calls expressed as `<tool_call>{...}</tool_call>` JSON; mapped to `tool_use` blocks. |
 | Llama 3.1+ (8B, 70B) | yes | no | no | Llama-3 chat | Tool calls in `<|python_tag|>` envelope. |
 | Mistral Nemo / Large 2 | yes | no | no | Mistral V3 tools | `[TOOL_CALLS]` prefix. |
 | DeepSeek V3 | yes | yes | no | DeepSeek-V3 | Native tool calls; thinking via `<think>` like Qwen. |

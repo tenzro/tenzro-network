@@ -83,7 +83,7 @@ pub struct ConsensusConfig {
 
     /// Proposer election strategy.
     ///
-    /// Default is [`ProposerElectionKind::Reputation`] (Aptos LeaderReputation),
+    /// Default is [`ProposerElectionKind::Reputation`] (reputation-weighted proposer election),
     /// which prevents the chain from stalling when a single validator becomes
     /// unresponsive. [`ProposerElectionKind::RoundRobin`] is retained for
     /// tests and replay benchmarks.
@@ -101,11 +101,11 @@ pub struct ConsensusConfig {
     /// signal so they can distinguish "idle" from "dead leader" without
     /// waiting on the view-change timer.
     ///
-    /// This mirrors CometBFT's `create_empty_blocks = false` +
-    /// `create_empty_blocks_interval`. Set to 0 to disable suppression and
+    /// This follows the standard `create_empty_blocks = false` +
+    /// `create_empty_blocks_interval` pattern. Set to 0 to disable suppression and
     /// restore always-on block production (every beat mints a block).
     ///
-    /// Default: 30000ms — the conservative end of CometBFT's
+    /// Default: 30000ms — the conservative end of the
     /// `create_empty_blocks_interval` range for production chains. An idle
     /// chain mints ~2,880 keepalive headers/day instead of ~17,280 at 5s.
     /// The heartbeat is decoupled from liveness — followers detect a dead
@@ -274,8 +274,8 @@ impl BftThreshold {
 pub enum ProposerElectionKind {
     /// Naïve `view % N` round-robin. Tests and very small validator sets only.
     RoundRobin,
-    /// Aptos LeaderReputation: stake-weighted seeded draw with observed-
-    /// behaviour multipliers. Default and recommended for production.
+    /// Reputation-weighted proposer election: stake-weighted seeded draw with
+    /// observed-behaviour multipliers. Default and recommended for production.
     Reputation,
 }
 

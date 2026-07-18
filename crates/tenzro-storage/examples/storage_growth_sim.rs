@@ -245,7 +245,7 @@ fn main() {
         for name in cfs() {
             if !["blocks", "state", "metadata", "audit"].contains(&name.as_str()) {
                 let h = db.cf_handle(&name).unwrap();
-                seed.put_cf(&h, b"seed", &vec![7u8; 64]);
+                seed.put_cf(&h, b"seed", [7u8; 64]);
             }
         }
         db.write_opt(seed, &wopts).unwrap();
@@ -281,7 +281,8 @@ fn main() {
             let handle = db.cf_handle(cf).unwrap();
             let key = format!("blk:{append_counter}");
             append_counter += 1;
-            batch.put_cf(&handle, key.as_bytes(), &vec![1u8; *vsize]);
+            let val = vec![1u8; *vsize];
+            batch.put_cf(&handle, key.as_bytes(), val);
         }
 
         db.write_opt(batch, &wopts).unwrap();

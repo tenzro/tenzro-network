@@ -145,10 +145,10 @@ impl CantonAnalyticsManager {
                 )
             });
 
-            if entry.canton_user_id.is_none() {
-                if let Some(uid) = canton_user_id {
-                    entry.canton_user_id = Some(uid.to_string());
-                }
+            if entry.canton_user_id.is_none()
+                && let Some(uid) = canton_user_id
+            {
+                entry.canton_user_id = Some(uid.to_string());
             }
 
             if entry.first_seen_at.is_none() {

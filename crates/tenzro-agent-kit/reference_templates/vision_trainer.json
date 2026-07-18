@@ -1,7 +1,7 @@
 {
   "template_id": "ref-vision-trainer-v1",
   "name": "Vision Foundation Model Trainer",
-  "description": "Trains vision encoders (ViT, ConvNeXt) and diffusion U-Nets over Decoupled DiLoCo. Enrolls in a Tenzro Train task, runs H inner SGD steps locally, and submits outer gradients to the syncer. Phase 1: Open trust tier, Mean aggregation. Inner training loop runs in the Python reference trainer (PyTorch FSDP2 + Hivemind).",
+  "description": "Trains vision encoders (ViT, ConvNeXt) and diffusion U-Nets with decoupled outer aggregation. Enrolls in a Tenzro Train task, runs H inner SGD steps locally, and submits outer gradients to the syncer. Phase 1: Open trust tier, Mean aggregation. Inner training loop runs in the Python reference trainer (PyTorch FSDP2 + Hivemind).",
   "template_type": "specialist",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   "version": "1.0.0",
@@ -12,7 +12,7 @@
     {
       "id": "vision_training",
       "name": "Vision Model Training",
-      "description": "Run inner SGD steps on an image shard and emit outer gradients per Decoupled DiLoCo",
+      "description": "Run inner SGD steps on an image shard and emit outer gradients per the decoupled outer-aggregation round",
       "input_schema": "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"trainer_did\":{\"type\":\"string\"},\"shard_uri\":{\"type\":\"string\"}}}",
       "output_schema": "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"round\":{\"type\":\"integer\"},\"fragment\":{\"type\":\"integer\"},\"safetensors_hash\":{\"type\":\"string\"}}}"
     }
@@ -34,7 +34,7 @@
       "expected_output": "Enrolled. Round 0 complete. Submitted gradient for fragment 3 (sha256:cdef...)."
     }
   ],
-  "tags": ["training", "vision", "tenzro-train", "diloco", "vit", "convnext", "diffusion"],
+  "tags": ["training", "vision", "tenzro-train", "vit", "convnext", "diffusion"],
   "download_count": 0,
   "rating": 0,
   "content_hash": null,

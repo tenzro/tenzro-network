@@ -211,13 +211,11 @@ impl FeeRouteRegistry {
 
     pub fn remove(&self, id: &FeeRouteId) -> Result<Option<FeeRoute>> {
         let prev = self.routes.remove(id).map(|(_, v)| v);
-        if prev.is_some() {
-            if let Some(s) = &self.storage {
-                s.write_batch_sync(vec![WriteOp::Delete {
-                    cf: CF_SETTLEMENTS.to_string(),
-                    key: key_for(id),
-                }])?;
-            }
+        if prev.is_some() && let Some(s) = &self.storage {
+            s.write_batch_sync(vec![WriteOp::Delete {
+                cf: CF_SETTLEMENTS.to_string(),
+                key: key_for(id),
+            }])?;
         }
         Ok(prev)
     }

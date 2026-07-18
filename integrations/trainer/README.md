@@ -1,7 +1,7 @@
 # tenzro-trainer
 
 **Tenzro Train reference trainer.** Python implementation of the inner
-training loop for Decoupled DiLoCo, paired with the Rust protocol layer in
+training loop with decoupled outer aggregation, paired with the Rust protocol layer in
 [`crates/tenzro-training/`](../../crates/tenzro-training).
 
 ## Architecture

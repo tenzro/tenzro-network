@@ -218,7 +218,7 @@ fn merkle_tree(leaves: &[Hash]) -> (Hash, Vec<Vec<Hash>>) {
 fn merkle_root_from_proof(leaf: Hash, mut index: usize, proof: &[Hash]) -> Hash {
     let mut acc = leaf;
     for sibling in proof {
-        acc = if index % 2 == 0 {
+        acc = if index.is_multiple_of(2) {
             hash_node(&acc, sibling)
         } else {
             hash_node(sibling, &acc)

@@ -121,6 +121,17 @@ pub enum ModelError {
     #[error("Multi-Token Prediction unavailable: {reason}")]
     MtpUnavailable { reason: String },
 
+    /// A model's license tier is not admitted by the operator's acceptance
+    /// policy. NonCommercial models require `--accept-non-commercial`;
+    /// CommercialCustom models require `--accept-license <id>` for their
+    /// specific license id.
+    #[error("license not accepted for model '{model_id}': tier {tier:?}, license id {license_id:?}")]
+    LicenseNotAccepted {
+        model_id: String,
+        tier: tenzro_types::model::LicenseTier,
+        license_id: Option<String>,
+    },
+
     /// Runtime / catch-all error
     #[error("{0}")]
     Other(String),

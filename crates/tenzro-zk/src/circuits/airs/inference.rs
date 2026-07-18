@@ -200,11 +200,12 @@ pub fn generate_inference_trace(
     values[COL_COMPUTED_OUTPUT] = computed_output;
     // Populate the full DIGEST_LEN of each digest; the AIR constrains
     // every cell against its public-input slot.
-    for k in 0..DIGEST_LEN {
-        values[COL_MODEL_HASH_BASE + k] = model_digest[k];
-        values[COL_INPUT_HASH_BASE + k] = input_digest[k];
-        values[COL_OUTPUT_HASH_BASE + k] = output_digest[k];
-    }
+    values[COL_MODEL_HASH_BASE..COL_MODEL_HASH_BASE + DIGEST_LEN]
+        .copy_from_slice(&model_digest[..DIGEST_LEN]);
+    values[COL_INPUT_HASH_BASE..COL_INPUT_HASH_BASE + DIGEST_LEN]
+        .copy_from_slice(&input_digest[..DIGEST_LEN]);
+    values[COL_OUTPUT_HASH_BASE..COL_OUTPUT_HASH_BASE + DIGEST_LEN]
+        .copy_from_slice(&output_digest[..DIGEST_LEN]);
 
     // Rows 1.. are zero-padding. Constraints are guarded by when_first_row
     // so they remain trivially satisfied on the padding rows.

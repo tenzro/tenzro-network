@@ -9,6 +9,7 @@ pub mod facilitator_server;
 pub mod server;
 pub mod client;
 pub mod coinbase;
+pub mod local_facilitator;
 pub mod receipt;
 pub mod scheme;
 pub mod bazaar;
@@ -24,6 +25,7 @@ pub use facilitator_server::{
 pub use server::X402PaymentServer;
 pub use client::X402Client;
 pub use coinbase::CdpFacilitatorClient;
+pub use local_facilitator::LocalFacilitatorVerifier;
 pub use receipt::{
     compute_settlement_commitment, validate_network_format, SettlementCommitmentInput,
     TenzroNetwork, X402SettlementReceiptBody, X402_RECEIPT_COMMITMENT_LEN, X402_RECEIPT_DOMAIN,

@@ -138,6 +138,10 @@ wasi-skills = ["dep:tenzro-wasm"]
 # get / remove RPCs work) but never runs a microVM — ingress answers a machine
 # request with 501.
 firecracker = []
+# Embed Anza's solana-svm for real SBF program execution in the SVM VM. Off by
+# default; forwards to tenzro-vm. Without it the SVM SBF path returns
+# VmError::SvmFullFeatureRequired.
+svm-full = ["tenzro-vm/svm-full"]
 
 [dev-dependencies]
 tempfile = "3"

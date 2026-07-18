@@ -14,10 +14,10 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use tenzro_zk::plonky3::{encode_proof, encode_public_inputs};
 use tenzro_zk::{
-    generate_identity_trace, generate_inference_trace, generate_settlement_trace,
-    identity_public_inputs, inference_public_inputs, settlement_public_inputs,
-    verify_proof_envelope, IdentityAir, InferenceAir, Plonky3Prover, Plonky3Verifier, Proof,
-    SettlementAir,
+    generate_identity_trace, generate_inference_trace, generate_pq_qc_trace,
+    generate_settlement_trace, identity_public_inputs, inference_public_inputs,
+    pq_qc_public_inputs, settlement_public_inputs, verify_proof_envelope, IdentityAir,
+    InferenceAir, Plonky3Prover, Plonky3Verifier, PqQcAggregationAir, Proof, SettlementAir,
 };
 
 const TRACE_HEIGHT: usize = 1 << 3;
@@ -204,6 +204,88 @@ fn bench_verify_envelope(c: &mut Criterion) {
     group.finish();
 }
 
+// --------------------------- PQ QC aggregation ------------------------------
+//
+// G11 go/no-go inputs: proving time and proof size for a certificate over
+// N ∈ {4, 16, 64} signer seats. This AIR binds aggregation *structure* — the
+// bitmap↔verification coupling, popcount, and message digest — with each
+// `verified[i]` witnessed from an off-circuit native ML-DSA-65 verification.
+// It does NOT fold the lattice verification equation into constraints; these
+// numbers are the baseline against which an in-circuit variant would be judged.
+
+const PQ_QC_SIZES: [usize; 3] = [4, 16, 64];
+
+fn build_pq_qc_witness(n: usize) -> (RowMajorMatrix<KoalaBear>, Vec<KoalaBear>) {
+    // Every seat present and verified — the widest trace for a given N.
+    let bitmap: Vec<bool> = (0..n).map(|_| true).collect();
+    let verified = bitmap.clone();
+    let message = b"tenzro/qc/bench";
+    let trace = generate_pq_qc_trace(&bitmap, &verified, message, TRACE_HEIGHT);
+    let pis = pq_qc_public_inputs(&bitmap, message);
+    (trace, pis)
+}
+
+fn bench_pq_qc_prove(c: &mut Criterion) {
+    let mut group = c.benchmark_group("plonky3_prove");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(20));
+    for &n in &PQ_QC_SIZES {
+        let air = PqQcAggregationAir::new(n);
+        let prover = Plonky3Prover::<PqQcAggregationAir>::new();
+        group.bench_function(format!("pq_qc_air_n{n}"), |b| {
+            b.iter_batched(
+                || build_pq_qc_witness(n),
+                |(trace, pis)| {
+                    black_box(prover.prove_air(&air, trace, &pis));
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_pq_qc_verify(c: &mut Criterion) {
+    let mut group = c.benchmark_group("plonky3_verify");
+    for &n in &PQ_QC_SIZES {
+        let air = PqQcAggregationAir::new(n);
+        let prover = Plonky3Prover::<PqQcAggregationAir>::new();
+        let verifier = Plonky3Verifier::<PqQcAggregationAir>::new();
+        let (trace, pis) = build_pq_qc_witness(n);
+        let proof = prover.prove_air(&air, trace, &pis);
+        group.bench_function(format!("pq_qc_air_n{n}"), |b| {
+            b.iter(|| {
+                verifier
+                    .verify_air(&air, black_box(&proof), black_box(&pis))
+                    .expect("valid proof must verify");
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Not a timing bench — reports the encoded proof size (bytes) for each N so
+/// the go/no-go report has a size column alongside the proving-time column.
+/// Criterion runs the body once per iteration; the size is emitted via the
+/// group id which shows in the summary line.
+fn bench_pq_qc_proof_size(c: &mut Criterion) {
+    let mut group = c.benchmark_group("plonky3_pq_qc_proof_size_bytes");
+    group.sample_size(10);
+    for &n in &PQ_QC_SIZES {
+        let air = PqQcAggregationAir::new(n);
+        let prover = Plonky3Prover::<PqQcAggregationAir>::new();
+        let (trace, pis) = build_pq_qc_witness(n);
+        let proof = prover.prove_air(&air, trace, &pis);
+        let encoded = encode_proof(&proof).expect("encode proof");
+        let bytes = encoded.len();
+        // Encode the measured size in the bench name so it lands in the report.
+        group.bench_function(format!("n{n}_bytes{bytes}"), |b| {
+            b.iter(|| black_box(encoded.len()));
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_inference_prove,
@@ -213,5 +295,8 @@ criterion_group!(
     bench_identity_prove,
     bench_identity_verify,
     bench_verify_envelope,
+    bench_pq_qc_prove,
+    bench_pq_qc_verify,
+    bench_pq_qc_proof_size,
 );
 criterion_main!(benches);

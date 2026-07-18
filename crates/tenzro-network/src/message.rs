@@ -63,6 +63,9 @@ impl NetworkMessage {
 /// does not support — receivers reject every gossip message with
 /// "Bincode does not support Deserializer::deserialize_identifier", stalling
 /// consensus. See bincode-org/bincode#272 and #548.
+// Boxing the large `Block` variant would alter every cross-crate
+// construction/match site of this wire type; the size disparity is inherent.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessagePayload {
     /// New block announcement
@@ -123,6 +126,28 @@ pub enum MessagePayload {
     /// the object across independent providers.
     ShardReplication(ShardReplicationMessage),
 
+    /// Batch availability broadcast — a batch producer fans out the batch body
+    /// so validators can store it and return availability acks. Carries the
+    /// bincode-serialized `tenzro_consensus::batch_cert::Batch` as an opaque
+    /// blob (the network crate does not depend on the consensus crate, so the
+    /// consensus layer decodes it — same seam as `timeout_certificate`). The
+    /// batch's integrity is self-checked by the consensus layer via
+    /// `Batch::verify_id` (domain-tagged SHA-256 over the tx set).
+    BatchBody(Vec<u8>),
+
+    /// Batch availability certificate broadcast — once a producer collects a
+    /// k-of-N BLS-aggregated availability certificate, it disseminates the
+    /// certificate so the ordering path can reference only its 32-byte hash.
+    /// Carries the bincode-serialized
+    /// `tenzro_consensus::batch_cert::BatchAvailabilityCertificate` as an opaque
+    /// blob, verified by the consensus layer via `verify` against the
+    /// active `ValidatorSet`.
+    BatchAvailability(Vec<u8>),
+
+    /// Batch body request by 32-byte batch id — a node that ordered a batch
+    /// cert hash but lacks the body fetches it on demand before execution.
+    BatchBodyRequest(Hash),
+
     /// Peer status update
     Status(StatusMessage),
 
@@ -151,6 +176,9 @@ impl MessagePayload {
             Self::ProviderAnnouncement(_) => "tenzro/providers",
             Self::DatabaseAnnouncement(_) => "tenzro/databases",
             Self::BlobAnnouncement(_) | Self::ShardReplication(_) => "tenzro/blobs",
+            Self::BatchBody(_) | Self::BatchAvailability(_) | Self::BatchBodyRequest(_) => {
+                "tenzro/batches"
+            }
             Self::Status(_) | Self::Ping | Self::Pong => "tenzro/status",
             Self::Custom { topic, .. } => topic,
         }
@@ -170,10 +198,10 @@ pub enum ConsensusMessage {
     /// from a view timeout — it carries the bincode-serialized
     /// `tenzro_consensus::timeout::TimeoutCertificate` (2f+1 timeout signatures
     /// from the previous view) so peers can verify the new view was
-    /// legitimately abandoned (Jolteon `safe_to_extend`, DiemBFT v4 §3.5).
+    /// legitimately abandoned (the safe-to-extend rule of the Safety-Rules pattern).
     ///
     /// `high_qc_view` is the proposer's local highest-Prepare-QC view at the
-    /// moment of proposing (#171, Aptos SyncInfo pattern). Receivers adopt it
+    /// moment of proposing (#171, the SyncInfo pattern). Receivers adopt it
     /// if higher than their own to fast-forward the lagging-replica case.
     /// Must satisfy `high_qc_view < block.header.view`.
     Proposal {
@@ -187,7 +215,7 @@ pub enum ConsensusMessage {
         /// bincode-serialized
         /// `tenzro_consensus::timeout::NoEndorsementCertificate`. Carries f+1
         /// no-endorsement signatures attesting that no Prepare-QC formed at
-        /// the timed-out view (MonadBFT, arXiv:2502.20692). `Some(_)` is
+        /// the timed-out view (the NEC tail-fork defence). `Some(_)` is
         /// required when the leader is proposing a fresh block after a TC
         /// — receivers reject an unaccompanied fresh block. `None` for the
         /// steady-state happy path AND when the leader is reproposing the
@@ -211,7 +239,7 @@ pub enum ConsensusMessage {
     /// `tenzro_crypto::composite`.
     ///
     /// `high_qc_view` is the voter's local highest-Prepare-QC view at the
-    /// moment of voting (#171, Aptos SyncInfo). Bound into the vote's signing
+    /// moment of voting (#171, the SyncInfo pattern). Bound into the vote's signing
     /// payload — must match the bound on the inner `Vote` or signature
     /// verification fails.
     Vote {
@@ -236,12 +264,12 @@ pub enum ConsensusMessage {
         block_hash: Hash,
         signatures: Vec<Vec<u8>>,
     },
-    /// Pacemaker timeout broadcast (DiemBFT v4 §3.5).
+    /// Pacemaker timeout broadcast.
     ///
     /// Sent on local view-timer expiry. Receivers at a strictly lower view
     /// adopt `view` after verifying the sender's hybrid signature — the
-    /// signature is the cryptographic gate (DiemBFT v4 §3.5
-    /// `process_remote_timeout`); no numeric jump cap is applied, since
+    /// signature is the cryptographic gate (the
+    /// `process_remote_timeout` rule); no numeric jump cap is applied, since
     /// stuck replicas may legitimately need to sync forward by many
     /// thousands of views. This is the backward-sync channel that
     /// prevents two honest replicas from drifting apart under partial
@@ -256,7 +284,7 @@ pub enum ConsensusMessage {
         view: u64,
         /// Highest Prepare-QC view this voter has observed (≤ `view - 1`).
         /// Aggregated by the receiver into the TC's `max_high_qc_view()` so
-        /// the next leader can compute the Jolteon `safe_to_extend` predicate.
+        /// the next leader can compute the `safe_to_extend` predicate.
         high_qc_view: u64,
         /// The sender's highest finalized block height. Part of the signed
         /// payload. Receivers behind this height engage block-sync — the heal
@@ -269,7 +297,7 @@ pub enum ConsensusMessage {
         /// bincode-serialized `tenzro_crypto::composite::CompositePublicKey`
         public_key: Vec<u8>,
     },
-    /// MonadBFT no-endorsement attestation broadcast (arXiv:2502.20692).
+    /// No-endorsement attestation broadcast (the NEC tail-fork defence).
     ///
     /// Sent on local view-timer expiry alongside the Timeout broadcast.
     /// Aggregated by the receiver into a `NoEndorsementCertificate` (f+1

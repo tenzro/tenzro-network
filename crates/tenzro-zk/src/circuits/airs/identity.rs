@@ -154,11 +154,9 @@ pub fn generate_identity_trace(
     let pkh_base: usize = 5;
     let comm_base: usize = 5 + DIGEST_LEN;
     let pk_base: usize = 5 + 2 * DIGEST_LEN;
-    for k in 0..DIGEST_LEN {
-        values[pkh_base + k] = pk_hash_digest[k];
-        values[comm_base + k] = commitment_digest[k];
-        values[pk_base + k] = pk_digest[k];
-    }
+    values[pkh_base..pkh_base + DIGEST_LEN].copy_from_slice(&pk_hash_digest[..DIGEST_LEN]);
+    values[comm_base..comm_base + DIGEST_LEN].copy_from_slice(&commitment_digest[..DIGEST_LEN]);
+    values[pk_base..pk_base + DIGEST_LEN].copy_from_slice(&pk_digest[..DIGEST_LEN]);
 
     RowMajorMatrix::new(values, NUM_IDENTITY_COLS)
 }

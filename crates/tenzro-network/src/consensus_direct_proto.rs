@@ -9,7 +9,7 @@
 //!
 //! ## Design
 //!
-//! Modeled on Sui's `quorum-driver` and Aptos' `consensus-network` patterns:
+//! A quorum-driver / consensus-network direct-dispatch pattern:
 //! a single `libp2p::request_response::cbor::Behaviour` carries one
 //! request-per-message with an `Ack`/`Error` response. The request body is a
 //! `ConsensusMessage` lifted directly from the gossipsub wire type so the

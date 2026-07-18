@@ -4,7 +4,7 @@
 //! flows on Tenzro's three execution backends:
 //!
 //!   * EVM   (revm)         — full bytecode execution, storage, logs
-//!   * SVM   (solana_rbpf)  — dispatch-level routing for non-ELF payloads
+//!   * SVM   (solana-svm)   — dispatch-level routing for non-ELF payloads
 //!   * Canton (DAML / gRPC) — gated on a live participant
 //!
 //! Run it with:
@@ -65,7 +65,8 @@ const AUTOMATION_RUNTIME_CODE: &[u8] = &[
 
 /// Minimal non-ELF "program" stub installed at SVM target addresses.
 /// `SvmExecutor` requires program bytes to exist at the call target;
-/// non-ELF payloads exercise the dispatch path without invoking rbpf.
+/// non-ELF payloads exercise the dispatch path without invoking the SBF
+/// processor.
 const NON_ELF_PROGRAM_STUB: &[u8] = &[0x00, 0x61, 0x73, 0x6D];
 
 /// 10 TNZO seed balance (10 * 10^18 base units).

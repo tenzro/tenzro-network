@@ -37,7 +37,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     }
 
     let mut inner_hasher = Sha256::new();
-    inner_hasher.update(&inner_key);
+    inner_hasher.update(inner_key);
     inner_hasher.update(message);
     let inner_hash = inner_hasher.finalize();
 
@@ -48,8 +48,8 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     }
 
     let mut outer_hasher = Sha256::new();
-    outer_hasher.update(&outer_key);
-    outer_hasher.update(&inner_hash);
+    outer_hasher.update(outer_key);
+    outer_hasher.update(inner_hash);
     let result = outer_hasher.finalize();
 
     let mut out = [0u8; 32];

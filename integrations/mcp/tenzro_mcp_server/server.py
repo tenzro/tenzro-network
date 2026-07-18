@@ -2605,53 +2605,113 @@ async def revoke_session(address: str, session_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# App (6 tools)
+# App registry + settlement authorization (6 tools)
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool
-async def register_app(name: str, description: str, callback_url: str = None) -> dict:
-    """Register an application to use Tenzro custody and wallet services."""
-    params = {"name": name, "description": description}
-    if callback_url:
-        params["callback_url"] = callback_url
-    result = await rpc_call("tenzro_registerApp", params)
-    return result
+async def register_app(
+    app_id: str,
+    developer_did: str,
+    app_wallet: str,
+    signing_pubkeys: list,
+    margin_bps: int,
+    envelope: str,
+    min_balance: str = None,
+    active: bool = True,
+) -> dict:
+    """Register a developer app in the on-chain app registry.
+
+    Permissionless and first-writer-wins: the developer signs a DID envelope with
+    their own key; the app wallet is the developer's own TNZO treasury (the network
+    never holds custody). `signing_pubkeys` is a list of {key_id, public_key (hex
+    Ed25519), daily_limit_tnzo (optional decimal string)}. `envelope` is the
+    developer-signed DID envelope (hex header value) bound to the canonical
+    registration params.
+    """
+    params = {
+        "app_id": app_id,
+        "developer_did": developer_did,
+        "app_wallet": app_wallet,
+        "signing_pubkeys": signing_pubkeys,
+        "margin_bps": margin_bps,
+        "active": active,
+        "envelope": envelope,
+    }
+    if min_balance is not None:
+        params["min_balance"] = min_balance
+    return await rpc_call("tenzro_registerApp", params)
 
 
 @mcp.tool
-async def create_user_wallet(app_id: str, user_id: str) -> dict:
-    """Create a custodial FROST-Ed25519 (RFC 9591) wallet for an app user. The app manages the key shares."""
-    result = await rpc_call("tenzro_createUserWallet", {"app_id": app_id, "user_id": user_id})
-    return result
+async def set_app_status(app_id: str, active: bool, envelope: str) -> dict:
+    """Activate or deactivate a registered app.
+
+    Requires a developer-signed DID envelope (hex header value) authorizing
+    tenzro_setAppStatus over the canonical status params of (app_id, active).
+    A deactivated app rejects new settlement authorizations.
+    """
+    return await rpc_call(
+        "tenzro_setAppStatus",
+        {"app_id": app_id, "active": active, "envelope": envelope},
+    )
 
 
 @mcp.tool
-async def fund_user_wallet(app_id: str, user_id: str, amount: str) -> dict:
-    """Fund a user wallet from the app treasury."""
-    result = await rpc_call("tenzro_fundUserWallet", {"app_id": app_id, "user_id": user_id, "amount": amount})
-    return result
+async def get_app(app_id: str) -> dict:
+    """Look up a registered app by id (developer DID, app wallet, signing keys, margin, status)."""
+    return await rpc_call("tenzro_getApp", {"app_id": app_id})
 
 
 @mcp.tool
-async def list_user_wallets(app_id: str) -> dict:
-    """List all user wallets managed by an application."""
-    result = await rpc_call("tenzro_listUserWallets", {"app_id": app_id})
-    return result
+async def list_apps() -> dict:
+    """List all apps registered in the on-chain app registry, sorted by app id."""
+    return await rpc_call("tenzro_listApps", {})
 
 
 @mcp.tool
-async def sponsor_transaction(app_id: str, user_address: str, tx_data: str) -> dict:
-    """Sponsor a transaction for a user (app pays gas via paymaster)."""
-    result = await rpc_call("tenzro_sponsorTransaction", {"app_id": app_id, "user_address": user_address, "tx_data": tx_data})
-    return result
+async def settle_authorized(
+    app_id: str,
+    chain_id: int,
+    payer_did: str,
+    amount_tnzo: str,
+    external_ref: str,
+    nonce: str,
+    expiry: int,
+    key_id: str,
+    signature: str,
+) -> dict:
+    """Execute a developer-signed settlement authorization.
+
+    The developer already charged the end user in fiat on their own payment-provider
+    account; this moves TNZO from the app wallet to the payer, minus the network
+    commission. Idempotent per (app_id, external_ref): a replay returns the recorded
+    outcome with duplicate=true. `signature` (hex Ed25519 over the authorization
+    signing hash) must be from one of the app's registered signing keys.
+    """
+    return await rpc_call(
+        "tenzro_settleAuthorized",
+        {
+            "app_id": app_id,
+            "chain_id": chain_id,
+            "payer_did": payer_did,
+            "amount_tnzo": amount_tnzo,
+            "external_ref": external_ref,
+            "nonce": nonce,
+            "expiry": expiry,
+            "key_id": key_id,
+            "signature": signature,
+        },
+    )
 
 
 @mcp.tool
-async def get_usage_stats(app_id: str) -> dict:
-    """Get usage statistics for an application (wallets, transactions, gas spent)."""
-    result = await rpc_call("tenzro_getUsageStats", {"app_id": app_id})
-    return result
+async def get_settle_authorized_outcome(app_id: str, external_ref: str) -> dict:
+    """Fetch the recorded outcome for a settlement authorization by (app_id, external_ref)."""
+    return await rpc_call(
+        "tenzro_getSettleAuthorizedOutcome",
+        {"app_id": app_id, "external_ref": external_ref},
+    )
 
 
 # ---------------------------------------------------------------------------

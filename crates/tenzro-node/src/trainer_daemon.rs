@@ -205,11 +205,11 @@ impl TrainerDaemon {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                if let Some(gate) = &self.tick_authority {
-                    if !(gate)() {
-                        debug!("Trainer daemon: not leader this tick, skipping reconcile");
-                        continue;
-                    }
+                if let Some(gate) = &self.tick_authority
+                    && !(gate)()
+                {
+                    debug!("Trainer daemon: not leader this tick, skipping reconcile");
+                    continue;
                 }
                 self.reconcile().await;
             }
@@ -305,10 +305,10 @@ impl TrainerDaemon {
                         if slot.restarts >= self.config.max_restarts {
                             continue; // gave up on this run
                         }
-                        if let Some(at) = slot.next_spawn_at {
-                            if now < at {
-                                continue; // still in backoff
-                            }
+                        if let Some(at) = slot.next_spawn_at
+                            && now < at
+                        {
+                            continue; // still in backoff
                         }
                     }
                     None => {}
@@ -482,12 +482,7 @@ fn resolve_python(config: &TrainingConfig) -> Option<String> {
     candidates.push("python3".to_string());
     candidates.push("python".to_string());
 
-    for cand in candidates {
-        if python_has_trainer(&cand) {
-            return Some(cand);
-        }
-    }
-    None
+    candidates.into_iter().find(|cand| python_has_trainer(cand))
 }
 
 /// Verify `python -c "import tenzro_trainer"` succeeds (blocking — runs

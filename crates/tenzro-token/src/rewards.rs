@@ -34,6 +34,7 @@ use crate::error::{Result, TokenError};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tenzro_storage::{KvStore, WriteOp, CF_TOKENS};
@@ -391,7 +392,7 @@ impl RewardEngine {
             .filter(|e| &e.value().address == address)
             .map(|e| e.value().clone())
             .collect();
-        out.sort_by(|a, b| b.epoch.cmp(&a.epoch));
+        out.sort_by_key(|c| Reverse(c.epoch));
         out
     }
 
@@ -494,12 +495,12 @@ impl RewardEngine {
         }
         {
             let state = self.state.read();
-            if let Some(last) = state.last_closed_epoch {
-                if epoch <= last {
-                    return Err(TokenError::InvalidParameter(format!(
-                        "epoch {epoch} already closed (last closed {last})"
-                    )));
-                }
+            if let Some(last) = state.last_closed_epoch
+                && epoch <= last
+            {
+                return Err(TokenError::InvalidParameter(format!(
+                    "epoch {epoch} already closed (last closed {last})"
+                )));
             }
         }
 
@@ -711,10 +712,10 @@ impl RewardEngine {
             }
             state.liquid_bps
         };
-        if let Some(storage) = &self.storage {
-            if !ops.is_empty() {
-                storage.write_batch_sync(ops)?;
-            }
+        if let Some(storage) = &self.storage
+            && !ops.is_empty()
+        {
+            storage.write_batch_sync(ops)?;
         }
 
         if total == 0 {
@@ -745,12 +746,12 @@ impl RewardEngine {
     }
 
     fn check_epoch_open(&self, epoch: u64) -> Result<()> {
-        if let Some(last) = self.state.read().last_closed_epoch {
-            if epoch <= last {
-                return Err(TokenError::InvalidParameter(format!(
-                    "epoch {epoch} is closed (last closed {last})"
-                )));
-            }
+        if let Some(last) = self.state.read().last_closed_epoch
+            && epoch <= last
+        {
+            return Err(TokenError::InvalidParameter(format!(
+                "epoch {epoch} is closed (last closed {last})"
+            )));
         }
         Ok(())
     }

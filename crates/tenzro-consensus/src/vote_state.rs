@@ -1,7 +1,7 @@
 //! Persistent vote state for double-sign protection.
 //!
-//! Mirrors CometBFT's `FilePVLastSignState` (`privval/file.go:206-243`) and
-//! Aptos' `PersistentSafetyStorage` (`consensus/safety-rules`): a validator
+//! Follows the persistent Safety-Rules pattern used by production BFT
+//! implementations: a validator
 //! must record `(view, height, step, block_hash, signature)` durably **before**
 //! its vote leaves the wire. On startup, the engine refuses to sign any
 //! `(view, height, step) ≤ last_persisted` — so a crash between broadcast and
@@ -11,9 +11,9 @@
 //! # Why this lives in `tenzro-consensus`
 //!
 //! Persistence is layer-pure file I/O (`std::fs`) — no RocksDB, no other
-//! crate. CometBFT does the same: `privval/file.go` is plain JSON with an
-//! atomic `tempfile.WriteFileAtomic` rename. Keeping it in-crate avoids a
-//! circular dep with `tenzro-storage` and matches the upstream pattern.
+//! crate. Production BFT implementations do the same: the last-sign-state file
+//! is plain JSON written via an atomic tempfile rename. Keeping it in-crate
+//! avoids a circular dep with `tenzro-storage` and matches that pattern.
 //!
 //! # Atomic write protocol
 //!
@@ -23,7 +23,7 @@
 //! 3. Rename `<path>.tmp` → `<path>` (POSIX rename is atomic)
 //! 4. fsync the parent directory so the rename is durable across crash
 //!
-//! Step 4 is critical and is the most-missed step in non-CometBFT
+//! Step 4 is critical and is the most-missed step in naive
 //! implementations (POSIX guarantees rename atomicity but not durability of
 //! the directory entry without an explicit fsync of the dir).
 
@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tenzro_types::primitives::Hash;
 
-/// Step within a (view, height) — matches CometBFT's `step int8`.
+/// Step within a (view, height) — an `int8`-style step marker.
 ///
 /// Order is significant: `Prepare < Commit < Decide`. `check_vrs` uses
 /// lexicographic ordering on `(view, height, step)` so a validator that has
@@ -59,8 +59,8 @@ impl VoteStep {
 
 /// Last sign state — durable across crashes.
 ///
-/// Field order intentionally mirrors CometBFT's `FilePVLastSignState` so the
-/// schema is recognizable to operators familiar with that ecosystem.
+/// Field order follows the conventional last-sign-state schema used by
+/// production BFT implementations so it is recognizable to operators.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LastSignState {
     /// Format version. Bump on incompatible schema changes.
@@ -83,7 +83,7 @@ pub struct LastSignState {
     pub block_hash: Option<Hash>,
 
     /// Signature bytes of the last vote (composite-signature wire format).
-    /// CometBFT stores this so an in-flight retry of the *same* (h,r,s,hash)
+    /// Stored so an in-flight retry of the *same* (h,r,s,hash)
     /// returns the same signature bytes instead of re-signing — preventing a
     /// stuck-validator scenario where a transient panic between sign and
     /// broadcast leaves us unable to re-emit our own vote.
@@ -154,7 +154,7 @@ pub trait VoteStateStore: Send + Sync {
 
     /// Checks whether `(view, height, step)` for `block_hash` is safe to sign.
     ///
-    /// Default implementation enforces the canonical CometBFT `CheckHRS` rule:
+    /// Default implementation enforces the canonical height-round-step rule:
     /// strictly after the last persisted tuple. An override can implement the
     /// idempotent-reuse path if the block hash matches.
     fn check_vrs(
@@ -338,7 +338,7 @@ impl FileVoteStateStore {
         })?;
 
         // Step 4: fsync the parent directory so the rename is durable.
-        // CometBFT does this; without it, a crash between the rename and the
+        // Without it, a crash between the rename and the
         // dir-entry hitting disk can lose the new state.
         if let Ok(dir) = std::fs::File::open(&self.parent_dir) {
             // Best-effort: not all filesystems require this (NTFS, APFS-on-mac

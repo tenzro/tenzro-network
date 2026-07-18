@@ -8,6 +8,58 @@ use crate::primitives::{Address, Hash, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// License tier for a model, governing whether it may be registered/loaded
+/// without operator acknowledgement.
+///
+/// Enforced centrally in `ModelRegistry::register_model()` against the
+/// registry's [`crate::model::AcceptancePolicy`]:
+///
+/// - `Permissive` (Apache-2.0, MIT, BSD-2/3): loaded by default, no friction.
+/// - `Attribution` (CC-BY-4.0): loaded by default; the attribution string is
+///   surfaced so operators stay compliant with the BY clause.
+/// - `CommercialCustom`: bespoke commercial-OK licenses with non-standard
+///   terms (DINOv3 License, SAM License, Gemma Terms). Requires the model's
+///   `license_id` to be in the policy's accepted set.
+/// - `NonCommercial` (CC-BY-NC, OpenRAIL-M, …): refused unless the policy has
+///   `accept_non_commercial` set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LicenseTier {
+    #[default]
+    Permissive,
+    Attribution,
+    CommercialCustom,
+    NonCommercial,
+}
+
+/// Operator-set acceptance policy consulted by the model registry when a
+/// model is registered. Absent an explicit acknowledgement, `NonCommercial`
+/// and unaccepted `CommercialCustom` models are refused at registration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptancePolicy {
+    /// When true, `NonCommercial` models may be registered (the operator has
+    /// asserted a non-commercial deployment). Maps to `--accept-non-commercial`.
+    pub accept_non_commercial: bool,
+    /// The set of `CommercialCustom` license IDs the operator has accepted
+    /// (e.g. "dinov3", "meta-sam", "gemma"). Maps to repeated
+    /// `--accept-license <id>` flags.
+    pub accepted_license_ids: Vec<String>,
+}
+
+impl AcceptancePolicy {
+    /// Returns whether a model with the given tier + license id is admissible.
+    pub fn admits(&self, tier: LicenseTier, license_id: Option<&str>) -> bool {
+        match tier {
+            LicenseTier::Permissive | LicenseTier::Attribution => true,
+            LicenseTier::CommercialCustom => match license_id {
+                Some(id) => self.accepted_license_ids.iter().any(|a| a == id),
+                None => false,
+            },
+            LicenseTier::NonCommercial => self.accept_non_commercial,
+        }
+    }
+}
+
 /// Information about an AI model on Tenzro Network
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -64,6 +116,21 @@ pub struct ModelInfo {
     /// Populated for `Video` modality.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoParameters>,
+    /// License tier, gating registration against the registry's
+    /// `AcceptancePolicy`. Defaults to `Permissive` for models registered
+    /// without an explicit tier (e.g. operator-uploaded custom models the
+    /// operator is responsible for).
+    #[serde(default)]
+    pub license_tier: LicenseTier,
+    /// Human-readable license name (e.g. "Apache 2.0", "CC-BY-NC-4.0",
+    /// "DINOv3 License"). Surfaced for attribution/audit.
+    #[serde(default)]
+    pub license: String,
+    /// Stable license identifier used to match against
+    /// `AcceptancePolicy::accepted_license_ids` for `CommercialCustom` tiers
+    /// (e.g. "dinov3", "meta-sam", "gemma"). `None` for permissive models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_id: Option<String>,
 }
 
 impl ModelInfo {
@@ -94,7 +161,25 @@ impl ModelInfo {
             vision: None,
             audio: None,
             video: None,
+            license_tier: LicenseTier::Permissive,
+            license: String::new(),
+            license_id: None,
         }
+    }
+
+    /// Attach license metadata (tier, human-readable name, and stable id used
+    /// for `CommercialCustom` acceptance matching). Set from the catalog entry
+    /// when a curated model is registered.
+    pub fn with_license(
+        mut self,
+        tier: LicenseTier,
+        license: impl Into<String>,
+        license_id: Option<String>,
+    ) -> Self {
+        self.license_tier = tier;
+        self.license = license.into();
+        self.license_id = license_id;
+        self
     }
 
     /// Declares the model as a Mixture-of-Experts architecture and
@@ -835,7 +920,7 @@ pub struct ProviderCapacity {
     /// Multi-Token Prediction availability. Set by the provider at
     /// `tenzro_registerProvider` time when their serving runtime has
     /// the target's paired drafter co-loaded (`HfModelEntry.drafter_id`
-    /// + `mtp_kind == DraftMtp` or `Generic`). When true, the
+    /// with `mtp_kind == DraftMtp` or `Generic`). When true, the
     /// `InferenceRouter` may route MTP-eligible requests preferentially
     /// to this provider; when false, it falls back to standard
     /// autoregressive providers.
@@ -882,6 +967,14 @@ pub struct ProviderCapacity {
     /// CPU holder still serves correctly, just slower.
     #[serde(default)]
     pub moe_gpu: bool,
+    /// Radix-tree summary of the prompt prefixes this provider holds warm in
+    /// its KV cache. The router prefers the provider whose warm prefix best
+    /// matches an incoming prompt (a warm prefix skips re-prefill, cutting
+    /// time-to-first-token). Only prefix fingerprints ride the announcement —
+    /// never KV bytes. Empty means the provider advertises no warm prefixes
+    /// and competes on the other capacity/observed signals alone.
+    #[serde(default)]
+    pub prefix_cache: PrefixCacheSummary,
     /// Iroh endpoint id of this provider. Used by the MoE router to
     /// dispatch batched expert calls over QUIC directly to the holder
     /// peer without going through the OpenAI-compatible HTTP endpoint.
@@ -954,6 +1047,12 @@ pub struct AdvertisedCapacity {
     /// Whether this provider's MoE expert compute runs on a GPU backend.
     #[serde(default)]
     pub moe_gpu: bool,
+    /// Radix-tree summary of the prompt prefixes this provider holds warm in
+    /// its KV cache. Router peers score an incoming prompt against this to
+    /// prefer a provider that can skip re-prefill. Fingerprints only, never
+    /// KV bytes.
+    #[serde(default)]
+    pub prefix_cache: PrefixCacheSummary,
 }
 
 impl ProviderCapacity {
@@ -970,6 +1069,7 @@ impl ProviderCapacity {
             moe_holdings: self.moe_holdings.clone(),
             moe_roles: self.moe_roles.clone(),
             moe_gpu: self.moe_gpu,
+            prefix_cache: self.prefix_cache.clone(),
         }
     }
 }
@@ -1108,6 +1208,180 @@ pub enum MoeProviderRole {
     PipelineStage,
 }
 
+/// A compact radix-tree summary of the prompt prefixes a provider currently
+/// holds warm in its KV cache. Providers advertise this on the provider
+/// announcement so router peers can bias a request toward the provider whose
+/// warm prefix best matches the incoming prompt — a warm prefix means the
+/// provider skips re-prefilling those tokens, cutting time-to-first-token.
+///
+/// Only prefix *fingerprints* ride the gossip, never KV bytes: a 4k-token
+/// prefix is over a gigabyte of KV state, so shipping it over the WAN is a
+/// non-starter. Each [`PrefixCacheNode`] carries a rolling 64-bit hash of a
+/// token run plus that run's length, so a router can walk the incoming
+/// prompt's own rolling hashes against the advertised tree and score the
+/// longest common warm prefix without ever seeing the underlying tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PrefixCacheSummary {
+    /// Radix-tree nodes, each a hashed run of prompt tokens the provider
+    /// holds warm. Ordering is root-first; a child extends its parent's
+    /// prefix. Empty means the provider advertises no warm prefixes.
+    #[serde(default)]
+    pub nodes: Vec<PrefixCacheNode>,
+    /// Total tokens across all advertised warm prefixes. Router peers use
+    /// this only as a coarse tie-breaker (a provider holding more warm
+    /// context is likelier to still hold a given prefix on arrival); the
+    /// per-node match is what drives selection.
+    #[serde(default)]
+    pub warm_token_total: u32,
+}
+
+/// One node in a provider's [`PrefixCacheSummary`] radix tree: a hashed run
+/// of consecutive prompt tokens the provider holds warm, addressed relative
+/// to its parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixCacheNode {
+    /// Index of the parent node in [`PrefixCacheSummary::nodes`]. `None`
+    /// marks a root run (a prefix that starts at token 0 of some prompt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
+    /// Rolling 64-bit hash of this run's tokens chained onto the parent's
+    /// hash — the same rolling scheme the router applies to an incoming
+    /// prompt, so equal hashes at equal depth mean the prompts share that
+    /// prefix run. Never the raw tokens.
+    pub run_hash: u64,
+    /// Number of tokens in this run. The router sums run lengths along a
+    /// matched path to compute the warm-prefix match length.
+    pub run_len: u32,
+}
+
+/// Byte length of one prefix run. The router and the advertising provider
+/// both chunk a prompt into fixed runs of this many bytes before rolling-
+/// hashing, so equal runs at equal depth hash equal on both sides. Chosen at
+/// a coarse 512 bytes (~128 tokens) so a warm-prefix advertisement is a
+/// handful of hashes even for a multi-thousand-token system prompt, keeping
+/// the announcement compact.
+pub const PREFIX_RUN_BYTES: usize = 512;
+
+/// Chunk `prompt` into fixed [`PREFIX_RUN_BYTES`] runs and return the chained
+/// rolling 64-bit hash of each run, root-first. Run `i`'s hash folds run
+/// `i-1`'s hash into it (FNV-1a over the previous hash's bytes followed by
+/// the run bytes), so the sequence is position-dependent: two prompts that
+/// diverge at run `k` share hashes `0..k` and differ from `k` on. A trailing
+/// partial run (shorter than [`PREFIX_RUN_BYTES`]) is not emitted — only
+/// whole runs are advertised and matched, so the warm-prefix boundary is
+/// always run-aligned on both sides.
+///
+/// This is the single source of truth for the rolling scheme: a provider
+/// builds its [`PrefixCacheSummary`] by running its warm prompts through this
+/// function, and the router walks an incoming prompt's output of this same
+/// function against the advertised tree via
+/// [`PrefixCacheSummary::longest_match_len`].
+pub fn prefix_run_hashes(prompt: &[u8]) -> Vec<u64> {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut out = Vec::with_capacity(prompt.len() / PREFIX_RUN_BYTES);
+    let mut chained: u64 = FNV_OFFSET;
+    for run in prompt.chunks(PREFIX_RUN_BYTES) {
+        if run.len() < PREFIX_RUN_BYTES {
+            break; // only whole runs
+        }
+        // Fold the running chain state, then the run bytes, so each hash is
+        // conditioned on the entire prefix before it (position-dependent).
+        for b in chained.to_le_bytes() {
+            chained ^= b as u64;
+            chained = chained.wrapping_mul(FNV_PRIME);
+        }
+        for b in run {
+            chained ^= *b as u64;
+            chained = chained.wrapping_mul(FNV_PRIME);
+        }
+        out.push(chained);
+    }
+    out
+}
+
+impl PrefixCacheSummary {
+    /// Build a single-branch summary from one warm prompt: chain its
+    /// [`prefix_run_hashes`] into a linear radix path (each run a child of the
+    /// previous), with `run_len` in bytes. A provider serving several distinct
+    /// warm prompts merges their paths by shared prefix; this constructor
+    /// covers the common single-hot-prompt case (one large shared system
+    /// prompt) directly.
+    pub fn from_warm_prompt(prompt: &[u8]) -> Self {
+        let hashes = prefix_run_hashes(prompt);
+        let mut nodes = Vec::with_capacity(hashes.len());
+        for (i, h) in hashes.iter().enumerate() {
+            nodes.push(PrefixCacheNode {
+                parent: if i == 0 { None } else { Some((i - 1) as u32) },
+                run_hash: *h,
+                run_len: PREFIX_RUN_BYTES as u32,
+            });
+        }
+        let warm_token_total = (hashes.len() * PREFIX_RUN_BYTES) as u32;
+        Self { nodes, warm_token_total }
+    }
+
+    /// Merge another warm prompt's run path into this summary, sharing the
+    /// common prefix and branching where they diverge. Idempotent for a
+    /// prompt already fully covered. Keeps the tree a true radix trie so a
+    /// provider advertising many prompts stays compact.
+    pub fn insert_warm_prompt(&mut self, prompt: &[u8]) {
+        let hashes = prefix_run_hashes(prompt);
+        let mut parent: Option<u32> = None;
+        for h in &hashes {
+            // Follow an existing child with this hash under `parent`.
+            let existing = self
+                .nodes
+                .iter()
+                .position(|n| n.parent == parent && n.run_hash == *h);
+            match existing {
+                Some(idx) => parent = Some(idx as u32),
+                None => {
+                    let idx = self.nodes.len() as u32;
+                    self.nodes.push(PrefixCacheNode {
+                        parent,
+                        run_hash: *h,
+                        run_len: PREFIX_RUN_BYTES as u32,
+                    });
+                    parent = Some(idx);
+                    self.warm_token_total =
+                        self.warm_token_total.saturating_add(PREFIX_RUN_BYTES as u32);
+                }
+            }
+        }
+    }
+
+    /// Longest warm-prefix match length (in tokens) between this summary and
+    /// a sequence of the incoming prompt's rolling run hashes. Walks the tree
+    /// root-first, following the child whose `run_hash` equals the next
+    /// expected prompt hash, summing `run_len` along the matched path.
+    ///
+    /// `prompt_run_hashes` is the incoming prompt hashed under the identical
+    /// rolling scheme (root run first). Returns 0 when nothing matches.
+    pub fn longest_match_len(&self, prompt_run_hashes: &[u64]) -> u32 {
+        if self.nodes.is_empty() || prompt_run_hashes.is_empty() {
+            return 0;
+        }
+        let mut matched: u32 = 0;
+        // Current parent constraint: `None` at the root, then the index of
+        // the last matched node.
+        let mut parent: Option<u32> = None;
+        for expected in prompt_run_hashes {
+            let hit = self.nodes.iter().enumerate().find(|(_, n)| {
+                n.parent == parent && n.run_hash == *expected
+            });
+            match hit {
+                Some((idx, node)) => {
+                    matched = matched.saturating_add(node.run_len);
+                    parent = Some(idx as u32);
+                }
+                None => break,
+            }
+        }
+        matched
+    }
+}
+
 impl Default for ProviderCapacity {
     fn default() -> Self {
         Self {
@@ -1121,6 +1395,7 @@ impl Default for ProviderCapacity {
             moe_holdings: Vec::new(),
             moe_roles: Vec::new(),
             moe_gpu: false,
+            prefix_cache: PrefixCacheSummary::default(),
             iroh_endpoint_id: None,
             lan_cluster: None,
             hardware: HardwareCapabilities::default(),

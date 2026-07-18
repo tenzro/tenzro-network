@@ -1,7 +1,7 @@
 {
   "template_id": "ref-timeseries-trainer-v1",
   "name": "Timeseries Foundation Model Trainer",
-  "description": "Trains timeseries foundation models (TimesFM, Chronos, Moirai) over Decoupled DiLoCo. Enrolls in a Tenzro Train task, runs H inner SGD steps locally, and submits outer gradients to the syncer. Phase 1: Open trust tier, Mean aggregation. Inner training loop runs in the Python reference trainer (PyTorch FSDP2 + Hivemind).",
+  "description": "Trains timeseries foundation models (TimesFM, Chronos, Moirai) with decoupled outer aggregation. Enrolls in a Tenzro Train task, runs H inner SGD steps locally, and submits outer gradients to the syncer. Phase 1: Open trust tier, Mean aggregation. Inner training loop runs in the Python reference trainer (PyTorch FSDP2 + Hivemind).",
   "template_type": "specialist",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   "version": "1.0.0",
@@ -12,7 +12,7 @@
     {
       "id": "timeseries_training",
       "name": "Timeseries Training",
-      "description": "Run inner SGD steps on a timeseries dataset shard and emit outer gradients per Decoupled DiLoCo",
+      "description": "Run inner SGD steps on a timeseries dataset shard and emit outer gradients per the decoupled outer-aggregation round",
       "input_schema": "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"trainer_did\":{\"type\":\"string\"},\"shard_uri\":{\"type\":\"string\"}}}",
       "output_schema": "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"round\":{\"type\":\"integer\"},\"fragment\":{\"type\":\"integer\"},\"safetensors_hash\":{\"type\":\"string\"}}}"
     }
@@ -34,7 +34,7 @@
       "expected_output": "Enrolled. Round 0 complete. Submitted gradient for fragment 2 (sha256:abcd...)."
     }
   ],
-  "tags": ["training", "timeseries", "tenzro-train", "diloco", "timesfm", "chronos"],
+  "tags": ["training", "timeseries", "tenzro-train", "timesfm", "chronos"],
   "download_count": 0,
   "rating": 0,
   "content_hash": null,

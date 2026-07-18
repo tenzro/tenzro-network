@@ -186,10 +186,10 @@ impl DelegationRegistry {
     }
 
     fn persist(&self, authority: &[u8; 20], pointer: &DelegationPointer) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(pointer) {
-                let _ = storage.put(tenzro_storage::CF_STATE, &Self::key(authority), &bytes);
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(pointer)
+        {
+            let _ = storage.put(tenzro_storage::CF_STATE, &Self::key(authority), &bytes);
         }
     }
 

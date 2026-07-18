@@ -286,15 +286,15 @@ impl MultiVmRuntime {
 
         // EIP-7702: Process authorization list if present in tx data
         // Check for EIP-7702 marker prefix (0x04 followed by CBOR-encoded auth list)
-        if tx.data.first() == Some(&EIP_7702_TX_TYPE) && tx.data.len() > 1 {
-            if let Ok(authorizations) =
+        // Per EIP-7702 the designator is persistent — once installed
+        // it survives the transaction (success or revert) and only
+        // changes when a subsequent authorization is consumed.
+        if tx.data.first() == Some(&EIP_7702_TX_TYPE)
+            && tx.data.len() > 1
+            && let Ok(authorizations) =
                 serde_json::from_slice::<Vec<Eip7702Authorization>>(&tx.data[1..])
-            {
-                // Per EIP-7702 the designator is persistent — once installed
-                // it survives the transaction (success or revert) and only
-                // changes when a subsequent authorization is consumed.
-                process_7702_authorizations(&authorizations, self.config.chain_id, state)?;
-            }
+        {
+            process_7702_authorizations(&authorizations, self.config.chain_id, state)?;
         }
 
         // Get the appropriate executor

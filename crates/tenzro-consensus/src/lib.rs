@@ -104,6 +104,7 @@
 //! ```
 
 pub mod admission;
+pub mod batch_cert;
 pub mod config;
 pub mod epoch_manager;
 pub mod error;
@@ -117,11 +118,16 @@ pub mod traits;
 pub mod validator;
 pub mod vote_state;
 pub mod voter;
+pub mod zk_quorum;
 
 // Re-export commonly used types
 pub use admission::{
     AdmissionConfig, AdmissionController, AdmissionDecision, BucketSnapshot,
     DefaultLaneResolver, Lane, LaneResolver, LaneStats,
+};
+pub use batch_cert::{
+    agree_prefix, erasure_activation_threshold, Batch, BatchAck,
+    BatchAvailabilityCertificate, BatchCertStore, ErasurePlan, ERASURE_ACTIVATION_N,
 };
 pub use config::{BftThreshold, ConsensusConfig, ProposerElectionKind};
 pub use epoch_manager::{Epoch, EpochManager, EpochStateStore, EpochStats};
@@ -155,6 +161,10 @@ pub use vote_state::{
     VoteStateStore, VoteStep, VrsDecision,
 };
 pub use voter::{bls_payload_for_vote, QuorumCertificate, Vote, VoteCollector, VoteType};
+pub use zk_quorum::{
+    AttestedCommitment, FraudOutcome, ZkCommitmentClaim, ZkCosign, ZkQuorumCertificate,
+    ZkQuorumMsg, ZkQuorumStore, FRAUD_WINDOW_BLOCKS, ZK_QUORUM_TOPIC,
+};
 
 #[cfg(test)]
 mod tests {

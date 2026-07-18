@@ -224,14 +224,14 @@ impl StableAssetRegistry {
     }
 
     fn persist(&self, policy: &StableAssetPolicy) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(policy) {
-                let _ = storage.put(
-                    tenzro_storage::CF_TOKENS,
-                    &policy_key(&policy.issuer, &policy.unit_token),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(policy)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_TOKENS,
+                &policy_key(&policy.issuer, &policy.unit_token),
+                &bytes,
+            );
         }
     }
 

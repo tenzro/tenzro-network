@@ -268,9 +268,11 @@ mod tests {
     ) -> InferenceProvider {
         let mut p = InferenceProvider::new(Address::new([addr; 32]), format!("p{}", addr));
         p.status = ProviderStatus::Active;
-        let mut capacity = ProviderCapacity::default();
-        capacity.moe_roles = vec![MoeProviderRole::ExpertHolder];
-        capacity.iroh_endpoint_id = Some(format!("ep-{}", addr));
+        let mut capacity = ProviderCapacity {
+            moe_roles: vec![MoeProviderRole::ExpertHolder],
+            iroh_endpoint_id: Some(format!("ep-{}", addr)),
+            ..Default::default()
+        };
         for &(layer, expert, residency, tps) in experts {
             capacity.moe_holdings.push(MoeExpertHolding {
                 model_id: "qwen".into(),

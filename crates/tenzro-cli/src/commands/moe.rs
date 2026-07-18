@@ -458,12 +458,12 @@ impl ForwardCmd {
                 }),
             )
             .await?;
-        if let Some(out) = &self.out_file {
-            if let Some(b64) = v.get("outputs").and_then(|o| o.as_str()) {
-                let decoded = base64::engine::general_purpose::STANDARD.decode(b64)?;
-                std::fs::write(out, &decoded)?;
-                v["outputs"] = serde_json::json!(format!("written to {out} ({} bytes)", decoded.len()));
-            }
+        if let Some(out) = &self.out_file
+            && let Some(b64) = v.get("outputs").and_then(|o| o.as_str())
+        {
+            let decoded = base64::engine::general_purpose::STANDARD.decode(b64)?;
+            std::fs::write(out, &decoded)?;
+            v["outputs"] = serde_json::json!(format!("written to {out} ({} bytes)", decoded.len()));
         }
         println!("{}", serde_json::to_string_pretty(&v)?);
         Ok(())

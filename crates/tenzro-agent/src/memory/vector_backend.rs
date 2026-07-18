@@ -288,7 +288,7 @@ impl LanceVectorBackend {
         tbl.delete(&predicate)
             .await
             .map_err(|e| MemoryError::Vector(format!("delete: {}", e)))?;
-        let batch = self.records_to_batch(std::slice::from_ref(&record_after_archive))?;
+        let batch = self.records_to_batch(std::slice::from_ref(record_after_archive))?;
         tbl.add(vec![batch])
             .execute()
             .await
@@ -320,7 +320,7 @@ impl LanceVectorBackend {
             out.extend(self.batch_to_records(b)?);
         }
         // Sort newest first (Lance scan order is unspecified).
-        out.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        out.sort_by_key(|r| std::cmp::Reverse(r.created_at_ms));
         out.truncate(limit.max(1));
         Ok(out)
     }

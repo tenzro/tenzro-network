@@ -306,7 +306,7 @@ impl SkillRuntime {
         let instance = linker
             .instantiate_async(&mut store, &wasm_component)
             .await
-            .map_err(|e| classify_wasmtime_error(e))?;
+            .map_err(classify_wasmtime_error)?;
 
         // Resolve the exported `tenzro:skill/skill@1.0.0#invoke` function.
         // `function` selects the export name inside that interface;
@@ -327,7 +327,7 @@ impl SkillRuntime {
                 ))
             })?;
         let invoke: TypedFunc<(String,), (Result<String, String>,)> = instance
-            .get_typed_func(&mut store, &func_index)
+            .get_typed_func(&mut store, func_index)
             .map_err(|e| {
                 WasmError::HostContractViolation(format!(
                     "export {function} has the wrong signature (want (string) -> result<string,string>): {e:#}"

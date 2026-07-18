@@ -217,10 +217,10 @@ pub fn verify_response_manifest(
             requested: model_id.to_string(),
         });
     }
-    if let Some(registered) = registered_pubkey {
-        if manifest.signer_public_key != registered {
-            return Err(ProvenanceError::KeyMismatch);
-        }
+    if let Some(registered) = registered_pubkey
+        && manifest.signer_public_key != registered
+    {
+        return Err(ProvenanceError::KeyMismatch);
     }
     verify_manifest(manifest)
 }

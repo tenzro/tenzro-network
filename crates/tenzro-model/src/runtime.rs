@@ -253,6 +253,12 @@ const MODEL_LOAD_HEADROOM_DEN: u64 = 100;
 /// unbounded and time every caller out under a thundering herd.
 const MAX_INFLIGHT_PER_MODEL: usize = 64;
 
+/// Node bound on a model's warm-prefix radix tree. Once a model's advertised
+/// [`tenzro_types::PrefixCacheSummary`] reaches this many nodes the tree is
+/// reset to the latest prompt's path, so the summary tracks recent traffic
+/// and the announcement stays compact instead of accreting stale prefixes.
+const MAX_WARM_PREFIX_NODES: usize = 256;
+
 /// Internal representation of a loaded model
 struct LoadedModel {
     model: LlamaModel,
@@ -331,6 +337,12 @@ pub struct ModelRuntime {
     /// model mutex. Gates admission at [`MAX_INFLIGHT_PER_MODEL`] so an
     /// overloaded model sheds load instead of queueing unboundedly.
     inflight: Arc<DashMap<String, Arc<AtomicUsize>>>,
+    /// Radix-tree summary of the prompt prefixes each loaded model currently
+    /// holds warm in its KV cache, built from recently-served prompts. The
+    /// node projects this onto the provider announcement's
+    /// [`tenzro_types::PrefixCacheSummary`] so prefix-affinity routing can
+    /// prefer this provider for a matching prompt. Keyed by `model_id`.
+    warm_prefixes: Arc<DashMap<String, tenzro_types::PrefixCacheSummary>>,
     backend: Arc<LlamaBackend>,
     hardware: HardwareInfo,
 }
@@ -378,9 +390,68 @@ impl ModelRuntime {
             loaded_drafters: Arc::new(DashMap::new()),
             external_engines: Arc::new(DashMap::new()),
             inflight: Arc::new(DashMap::new()),
+            warm_prefixes: Arc::new(DashMap::new()),
             backend,
             hardware,
         }
+    }
+
+    /// Record that `model_id` just served `prompt`, folding its prefix runs
+    /// into the model's warm-prefix radix tree. The KV cache holds the most
+    /// recent prompts warm; this records the shared prefix so the node can
+    /// advertise it. Bounded per model by [`MAX_WARM_PREFIX_NODES`]: once the
+    /// tree reaches the bound it is reset to just this prompt's path, so the
+    /// summary tracks recent traffic rather than growing without limit.
+    pub fn record_warm_prompt(&self, model_id: &str, prompt: &[u8]) {
+        let mut entry = self
+            .warm_prefixes
+            .entry(model_id.to_string())
+            .or_default();
+        if entry.nodes.len() >= MAX_WARM_PREFIX_NODES {
+            *entry.value_mut() = tenzro_types::PrefixCacheSummary::from_warm_prompt(prompt);
+        } else {
+            entry.insert_warm_prompt(prompt);
+        }
+    }
+
+    /// Current warm-prefix summary for `model_id`, or an empty summary when
+    /// the model has served nothing yet. The node reads this each heartbeat
+    /// to refresh the advertised [`tenzro_types::PrefixCacheSummary`].
+    pub fn warm_prefix_summary(&self, model_id: &str) -> tenzro_types::PrefixCacheSummary {
+        self.warm_prefixes
+            .get(model_id)
+            .map(|e| e.value().clone())
+            .unwrap_or_default()
+    }
+
+    /// Merge every loaded model's warm-prefix summary into one, so a single
+    /// provider entry (which serves under one address across its models) can
+    /// advertise the union of prefixes it holds warm. Each model's tree is
+    /// concatenated with its `parent` indices remapped into the merged index
+    /// space, so the combined tree stays a valid multi-root radix forest that
+    /// the router walks from `parent == None` down. Distinct models rarely
+    /// share prompt prefixes, so in practice this is a set of independent
+    /// roots — one per model's hot prompt.
+    pub fn merged_warm_prefix_summary(&self) -> tenzro_types::PrefixCacheSummary {
+        let mut merged = tenzro_types::PrefixCacheSummary::default();
+        for entry in self.warm_prefixes.iter() {
+            let base = merged.nodes.len() as u32;
+            for node in &entry.value().nodes {
+                merged.nodes.push(tenzro_types::PrefixCacheNode {
+                    parent: node.parent.map(|p| p + base),
+                    run_hash: node.run_hash,
+                    run_len: node.run_len,
+                });
+            }
+            merged.warm_token_total = merged
+                .warm_token_total
+                .saturating_add(entry.value().warm_token_total);
+            if merged.nodes.len() >= MAX_WARM_PREFIX_NODES {
+                merged.nodes.truncate(MAX_WARM_PREFIX_NODES);
+                break;
+            }
+        }
+        merged
     }
 
     /// Reserve an in-flight slot for `model_id`, returning an RAII guard that
@@ -1178,6 +1249,12 @@ impl ModelRuntime {
             .value()
             .clone();
 
+        // Record the served prompt as warm — its prefix stays in the KV cache
+        // and is now advertisable for prefix-affinity routing. Hashed over the
+        // same user-content bytes the requesting router hashes from
+        // `InferenceRequest.input`, so both sides agree on the prefix.
+        self.record_warm_prompt(model_id, &warm_prompt_bytes(messages));
+
         let _guard = self.acquire_inflight(model_id)?;
 
         match entry.as_ref() {
@@ -1342,6 +1419,10 @@ impl ModelRuntime {
             .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
             .value()
             .clone();
+
+        // Record the served prompt as warm for prefix-affinity advertisement,
+        // same as the non-streaming chat path.
+        self.record_warm_prompt(model_id, &warm_prompt_bytes(messages));
 
         let _guard = self.acquire_inflight(model_id)?;
 
@@ -1676,18 +1757,18 @@ impl ModelRuntime {
     /// `mtp-gemma-4-12B-it.gguf`).
     ///
     /// Loop shape per llama.cpp `common_speculative` semantics:
-    ///   1. Tokenize prompt and prefill the target context.
-    ///   2. Initialize `MtpSpeculative::begin(prompt)`.
-    ///   3. Sample one token from the target to seed `id_last`.
-    ///   4. Loop:
-    ///        a. Ask the drafter for up to `n_max` candidate tokens
-    ///           after `id_last`.
-    ///        b. Batch-decode the candidates on the target.
-    ///        c. Compare each candidate against the target's sample
-    ///           and accept the longest matching prefix.
-    ///        d. Notify the drafter how many were accepted.
-    ///        e. Emit accepted tokens (+ the next target token) and
-    ///           update `n_past` / `id_last`.
+    /// 1. Tokenize prompt and prefill the target context.
+    /// 2. Initialize `MtpSpeculative::begin(prompt)`.
+    /// 3. Sample one token from the target to seed `id_last`.
+    /// 4. Loop:
+    ///    a. Ask the drafter for up to `n_max` candidate tokens
+    ///    after `id_last`.
+    ///    b. Batch-decode the candidates on the target.
+    ///    c. Compare each candidate against the target's sample
+    ///    and accept the longest matching prefix.
+    ///    d. Notify the drafter how many were accepted.
+    ///    e. Emit accepted tokens (+ the next target token) and
+    ///    update `n_past` / `id_last`.
     ///
     /// Generation stops on EOG or `max_tokens`. Errors surface as
     /// `ModelError::MtpUnavailable` so the caller can degrade to
@@ -2018,6 +2099,25 @@ impl ModelRuntime {
     }
 }
 
+/// Flatten a chat message list into the byte sequence used to fingerprint a
+/// warm prefix. This is the user-visible prompt content in message order
+/// (`content` fields joined by newline), NOT the model's rendered chat
+/// template — the requesting router hashes the same content bytes from
+/// `InferenceRequest.input`, so hashing the content (not the template) is what
+/// lets the two sides agree on a shared prefix regardless of model family.
+/// For the common single-user-message forward path this equals
+/// `InferenceRequest.input` exactly.
+fn warm_prompt_bytes(messages: &[ChatMessage]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        if i > 0 {
+            out.push(b'\n');
+        }
+        out.extend_from_slice(m.content.as_bytes());
+    }
+    out
+}
+
 /// Apply the model's chat template to a message list, producing the flat
 /// prompt string the serial generation path decodes. Mirrors the batched
 /// scheduler's `render_prompt` so both serving modes template identically.
@@ -2037,13 +2137,13 @@ fn render_chat_prompt(model: &LlamaModel, messages: &[ChatMessage]) -> Result<St
     // with a zero-length body. An empty prompt tokenizes to zero tokens
     // and `llama_decode` then fails with `n_tokens == 0`. Treat an
     // empty/whitespace render as a miss and fall back to ChatML.
-    if let Ok(tmpl) = model.chat_template(None) {
-        if let Ok(rendered) = model.apply_chat_template(&tmpl, &llama_messages, true) {
-            if !rendered.trim().is_empty() {
-                return Ok(rendered);
-            }
-            warn!("GGUF chat template rendered empty; falling back to ChatML");
+    if let Ok(tmpl) = model.chat_template(None)
+        && let Ok(rendered) = model.apply_chat_template(&tmpl, &llama_messages, true)
+    {
+        if !rendered.trim().is_empty() {
+            return Ok(rendered);
         }
+        warn!("GGUF chat template rendered empty; falling back to ChatML");
     }
 
     Ok(render_chatml_prompt(messages))
@@ -2112,10 +2212,7 @@ pub(crate) fn extract_tool_calls(raw: &str) -> (String, Vec<ToolCall>) {
     let mut text = raw.to_string();
 
     // ── Qwen 3 / canonical: <tool_call>...</tool_call> ────────────────
-    loop {
-        let Some(start) = text.find("<tool_call>") else {
-            break;
-        };
+    while let Some(start) = text.find("<tool_call>") {
         let after_open = start + "<tool_call>".len();
         let Some(rel_end) = text[after_open..].find("</tool_call>") else {
             break;
@@ -2131,10 +2228,7 @@ pub(crate) fn extract_tool_calls(raw: &str) -> (String, Vec<ToolCall>) {
     }
 
     // ── Llama 3.x: <|python_tag|>{json}(<|eom_id|>|<|eot_id|>|EOS) ────
-    loop {
-        let Some(start) = text.find("<|python_tag|>") else {
-            break;
-        };
+    while let Some(start) = text.find("<|python_tag|>") {
         let after_open = start + "<|python_tag|>".len();
         // Terminate at the next Llama special token or end-of-string.
         let candidates = ["<|eom_id|>", "<|eot_id|>"];

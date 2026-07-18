@@ -27,7 +27,8 @@
 //!     - `event_log?: base64`
 //!     - `token_signing_alg?: "PS384" | "RS256"`
 //!     - `policy_must_match?: bool`
-//!   → `{token: "<JWT>"}`
+//!
+//!   The response is `{token: "<JWT>"}`.
 //!
 //! Required headers on both: `x-api-key: <key>`, `Accept: application/json`,
 //! plus `Content-Type: application/json` on POST. Per ITA docs, regional URLs
@@ -607,13 +608,13 @@ pub fn claims_to_attestation_result(claims: &TiberClaims) -> Result<AttestationR
     if let Some(svn) = claims.tdx_seamsvn {
         details.insert("tdx_seamsvn".to_string(), svn.to_string());
     }
-    if let Some(advisories) = &claims.attester_advisory_ids {
-        if !advisories.is_empty() {
-            details.insert(
-                "attester_advisory_ids".to_string(),
-                advisories.join(","),
-            );
-        }
+    if let Some(advisories) = &claims.attester_advisory_ids
+        && !advisories.is_empty()
+    {
+        details.insert(
+            "attester_advisory_ids".to_string(),
+            advisories.join(","),
+        );
     }
 
     Ok(AttestationResult {

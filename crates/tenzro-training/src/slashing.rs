@@ -13,8 +13,8 @@
 //!    with the aggregate below an agreement floor (per-trainer cosine similarity
 //!    from [`gradient_agreement`](crate::outer_optimizer::gradient_agreement)).
 //!
-//! This mirrors the INTELLECT-2 (Prime Intellect, May 2025) slash-eviction
-//! discipline: a contribution that fails verification or falls outside the
+//! The slash-eviction discipline is terminal: a contribution that fails
+//! verification or falls outside the
 //! agreement band is slashed and the trainer is evicted from the run, rather
 //! than folded in with a down-weighted reputation score. Eviction is the
 //! terminal action; there is no rehabilitation within a run.

@@ -389,21 +389,21 @@ impl CantonSubmitCmd {
         if let Some(choice) = result.get("choice").and_then(|v| v.as_str()) {
             output::print_field("Choice", choice);
         }
-        if let Some(payload) = result.get("payload") {
-            if !payload.is_null() {
-                output::print_field(
-                    "Payload",
-                    &serde_json::to_string_pretty(payload).unwrap_or_default(),
-                );
-            }
+        if let Some(payload) = result.get("payload")
+            && !payload.is_null()
+        {
+            output::print_field(
+                "Payload",
+                &serde_json::to_string_pretty(payload).unwrap_or_default(),
+            );
         }
-        if let Some(er) = result.get("exercise_result") {
-            if !er.is_null() {
-                output::print_field(
-                    "Exercise Result",
-                    &serde_json::to_string_pretty(er).unwrap_or_default(),
-                );
-            }
+        if let Some(er) = result.get("exercise_result")
+            && !er.is_null()
+        {
+            output::print_field(
+                "Exercise Result",
+                &serde_json::to_string_pretty(er).unwrap_or_default(),
+            );
         }
 
         Ok(())

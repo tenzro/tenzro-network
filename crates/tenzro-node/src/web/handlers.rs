@@ -16,6 +16,7 @@ use tenzro_types::primitives::{Address, BlockHeight, Timestamp};
 use tenzro_storage::KvStore;
 use tenzro_types::tee::{AttestationReport, TeeVendor};
 use tenzro_tee::AttestationVerifier;
+use tenzro_network::NetworkService;
 use tenzro_zk::{Proof, VerifyEnvelopeError, verify_proof_envelope};
 use tenzro_crypto::keys::{KeyType, PublicKey};
 use tenzro_crypto::signatures::Signature as CryptoSignature;
@@ -261,7 +262,7 @@ pub async fn verify_did_envelope(
         }
     };
 
-    match tenzro_identity::envelope::verify_envelope(&envelope, &**registry) {
+    match tenzro_identity::envelope::verify_envelope(&envelope, registry) {
         Ok(()) => Json(VerificationResponse {
             valid: true,
             details: serde_json::json!({ "did": envelope.did, "method": envelope.method }),
@@ -350,10 +351,54 @@ pub async fn verify_zk_proof(
 
     match verify_result {
         Ok(()) => {
-            let newly_attested = state
-                .node
-                .as_ref()
-                .map(|n| n.zk_commitment_registry().attest(commitment));
+            // A commitment is admitted to the on-chain ZK_VERIFY registry only
+            // under a 2f+1 stake-weight quorum certificate (each co-signer
+            // re-verifies) — never a single node's direct attest. Route through
+            // the same quorum plane as the JSON-RPC + MCP surfaces: publish the
+            // proof to DA, co-sign, broadcast a claim, record the co-signature.
+            let newly_attested = if let Some(node) = state.node.as_ref() {
+                if node.zk_quorum_store().is_some() {
+                    match node.publish_zk_proof_for_quorum(&envelope).await {
+                        Some(proof_locator) => {
+                            let store = node
+                                .zk_quorum_store()
+                                .expect("quorum store present (checked above)");
+                            let cosign = store.cosign(commitment);
+                            if let Some(network) = node.network() {
+                                let msg = tenzro_consensus::ZkQuorumMsg::Claim {
+                                    claim: tenzro_consensus::ZkCommitmentClaim {
+                                        circuit_id: circuit_id.clone(),
+                                        commitment,
+                                        proof_locator: proof_locator.clone(),
+                                    },
+                                    cosign: cosign.clone(),
+                                };
+                                if let Ok(data) = bincode::serialize(&msg) {
+                                    let net_msg = tenzro_network::NetworkMessage::new(
+                                        tenzro_network::MessagePayload::Custom {
+                                            topic: tenzro_consensus::ZK_QUORUM_TOPIC.to_string(),
+                                            data,
+                                        },
+                                    );
+                                    let _ = network
+                                        .broadcast(tenzro_consensus::ZK_QUORUM_TOPIC, net_msg)
+                                        .await;
+                                }
+                            }
+                            Some(node.record_zk_cosign_and_maybe_attest(
+                                &circuit_id,
+                                cosign,
+                                &proof_locator,
+                            ))
+                        }
+                        None => Some(false),
+                    }
+                } else {
+                    Some(false)
+                }
+            } else {
+                None
+            };
             Json(VerificationResponse {
                 valid: true,
                 details: serde_json::json!({
@@ -364,6 +409,7 @@ pub async fn verify_zk_proof(
                     "status": "plonky3_verified",
                     "commitment_hex": format!("0x{}", hex::encode(commitment)),
                     "newly_attested": newly_attested,
+                    "attestation_model": "quorum",
                 }),
                 verified_at: now(),
             })
@@ -919,7 +965,7 @@ pub async fn health(
 /// Returns HTTP 200 with `ready: true` only when this node has caught up
 /// to the network on both block height and consensus view. Returns HTTP
 /// 503 with `ready: false` and a `reason` string otherwise — matches the
-/// CometBFT / Solana / Aptos pattern of separating liveness (`/health`)
+/// standard pattern of separating liveness (`/health`)
 /// from production-traffic readiness (`/ready`).
 ///
 /// Tolerances:

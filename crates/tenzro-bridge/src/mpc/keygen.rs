@@ -330,15 +330,15 @@ where
     /// abort so the caller can convert to `KeygenError::ProtocolAbort` and
     /// surface it.
     fn emit_abort_evidence(&self, abort: Abort) -> Abort {
-        if let Some(reporter) = &self.abort_reporter {
-            if let Some(evidence) = MpcAbortEvidence::from_protocol_abort(
+        if let Some(reporter) = &self.abort_reporter
+            && let Some(evidence) = MpcAbortEvidence::from_protocol_abort(
                 &abort,
-                self.cfg.instance_id.clone(),
-                self.cfg.parameters.clone(),
+                self.cfg.instance_id,
+                self.cfg.parameters,
                 |pi| self.did_for_party(pi),
-            ) {
-                reporter.report_local_observation(evidence);
-            }
+            )
+        {
+            reporter.report_local_observation(evidence);
         }
         abort
     }

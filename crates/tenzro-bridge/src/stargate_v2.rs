@@ -237,14 +237,14 @@ fn encode_send_param(send: &StargateSendParam, out: &mut Vec<u8>) {
     out.extend_from_slice(&send.extra_options);
     // pad to 32-byte multiple
     let pad = (32 - send.extra_options.len() % 32) % 32;
-    out.extend(std::iter::repeat(0u8).take(pad));
+    out.extend(std::iter::repeat_n(0u8, pad));
     // compose_msg
     let mut len2 = [0u8; 32];
     len2[24..].copy_from_slice(&(send.compose_msg.len() as u64).to_be_bytes());
     out.extend_from_slice(&len2);
     out.extend_from_slice(&send.compose_msg);
     let pad2 = (32 - send.compose_msg.len() % 32) % 32;
-    out.extend(std::iter::repeat(0u8).take(pad2));
+    out.extend(std::iter::repeat_n(0u8, pad2));
 }
 
 /// Well-known production pools.

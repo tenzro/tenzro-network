@@ -752,6 +752,69 @@ pub struct PaymentsConfig {
     /// malformed entries are logged and skipped at startup.
     #[serde(default)]
     pub tempo_stablecoins: std::collections::HashMap<String, String>,
+
+    /// Self-hosted x402 facilitation for the EIP-3009 / Permit2 schemes.
+    ///
+    /// When set, the node runs the eight exact/EVM verification checks against
+    /// `evm_rpc_url` itself and settles `transferWithAuthorization` through a
+    /// relayer signer keyed by `evm_relayer_key` — no dependency on a remote
+    /// Coinbase CDP facilitator. Absent this block, the EIP-3009 / Permit2
+    /// backends resolve through the remote CDP verifier.
+    #[serde(default)]
+    pub x402_facilitator: Option<X402FacilitatorConfig>,
+}
+
+/// Operator config for self-hosted x402 (EIP-3009 / Permit2) facilitation.
+///
+/// The relayer settles the buyer's signed `transferWithAuthorization` on the
+/// external EVM chain where the stablecoin lives (e.g. Base Sepolia for the
+/// USDC-testnet round-trip). The buyer never pays gas; the operator's relayer
+/// broadcasts the meta-transaction and is reimbursed out of band.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct X402FacilitatorConfig {
+    /// EVM JSON-RPC endpoint used for the read checks (nonce state, balance,
+    /// transfer simulation) and the settlement broadcast.
+    pub evm_rpc_url: String,
+
+    /// EVM chain id the relayer signs for (e.g. `84532` for Base Sepolia).
+    pub chain_id: u64,
+
+    /// Relayer private key (32-byte hex, optional `0x` prefix). Read from the
+    /// `TENZRO_X402_RELAYER_KEY` environment variable when this field is unset
+    /// so the secret need not live in a config file.
+    ///
+    /// `#[serde(skip_serializing)]` keeps the key out of any config written
+    /// back by `NodeConfig::save_to_file`.
+    #[serde(default, skip_serializing)]
+    pub evm_relayer_key: Option<String>,
+}
+
+impl X402FacilitatorConfig {
+    /// Resolve the relayer key from the config field or the
+    /// `TENZRO_X402_RELAYER_KEY` env var. Returns `None` when neither is set.
+    pub fn resolve_relayer_key(&self) -> Option<String> {
+        self.evm_relayer_key
+            .clone()
+            .filter(|k| !k.trim().is_empty())
+            .or_else(|| {
+                std::env::var("TENZRO_X402_RELAYER_KEY")
+                    .ok()
+                    .filter(|k| !k.trim().is_empty())
+            })
+    }
+}
+
+impl std::fmt::Debug for X402FacilitatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("X402FacilitatorConfig")
+            .field("evm_rpc_url", &self.evm_rpc_url)
+            .field("chain_id", &self.chain_id)
+            .field(
+                "evm_relayer_key",
+                &if self.resolve_relayer_key().is_some() { "<redacted>" } else { "<unset>" },
+            )
+            .finish()
+    }
 }
 
 impl Default for PaymentsConfig {
@@ -766,6 +829,7 @@ impl Default for PaymentsConfig {
             stripe_api_key: None,
             stripe_api_base: None,
             tempo_stablecoins: std::collections::HashMap::new(),
+            x402_facilitator: None,
         }
     }
 }
@@ -787,6 +851,7 @@ impl std::fmt::Debug for PaymentsConfig {
             )
             .field("stripe_api_base", &self.stripe_api_base)
             .field("tempo_stablecoins", &self.tempo_stablecoins)
+            .field("x402_facilitator", &self.x402_facilitator)
             .finish()
     }
 }
@@ -989,6 +1054,7 @@ impl CantonConfig {
     ///      `CANTON_OAUTH_CLIENT_SECRET` + `CANTON_OAUTH_AUDIENCE`
     ///      (+ optional `CANTON_OAUTH_SCOPE`), OR
     ///    - `CANTON_JWT_TOKEN` (long-lived bearer).
+    ///
     ///    `CANTON_TLS=true` for HTTPS upstream.
     ///
     /// 3. **Local unauth** — `CANTON_ENABLED=true` with no auth env vars.
@@ -1113,11 +1179,12 @@ impl CantonIdentityProvidersConfig {
 /// Only the async DA consumers (agent-memory archival) honor `IrohBlobs`; the
 /// settlement-channel receipt path is a synchronous storage trait and always
 /// uses the in-process inline store regardless of this setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaBackendSelector {
     /// Use the iroh-blobs backend when the iroh resolver is bound, otherwise
     /// fall back to the in-process inline store. This is the default.
+    #[default]
     Auto,
     /// Force the in-process inline store even when iroh is available. Useful
     /// for minimal single-node operators who do not want blobs advertised on
@@ -1132,12 +1199,6 @@ pub enum DaBackendSelector {
     /// startup fails if the committee backend is not bound (non-validator
     /// roles, or consensus not initialized).
     Committee,
-}
-
-impl Default for DaBackendSelector {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Node configuration
@@ -1333,6 +1394,16 @@ pub struct NodeConfig {
     /// domain it terminates TLS for (e.g. its own `apps.<operator>.tld`).
     #[serde(default)]
     pub hosting: HostingConfig,
+
+    /// Operator model-license acceptance policy. Governs which catalog models
+    /// this node will register/serve: Permissive and Attribution tiers are
+    /// always admitted; NonCommercial requires `accept_non_commercial`;
+    /// CommercialCustom requires the model's license id to be listed in
+    /// `accepted_license_ids`. Set from `--accept-non-commercial` and
+    /// `--accept-license <id>` (repeatable). Default admits open-weight
+    /// (permissive/attribution) models only.
+    #[serde(default)]
+    pub model_licensing: tenzro_types::model::AcceptancePolicy,
 }
 
 /// Application-hosting edge configuration.
@@ -1530,6 +1601,7 @@ impl NodeConfig {
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
+            model_licensing: tenzro_types::model::AcceptancePolicy::default(),
         }
     }
 
@@ -1572,6 +1644,7 @@ impl NodeConfig {
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
+            model_licensing: tenzro_types::model::AcceptancePolicy::default(),
         }
     }
 
@@ -1614,6 +1687,7 @@ impl NodeConfig {
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
+            model_licensing: tenzro_types::model::AcceptancePolicy::default(),
         }
     }
 
@@ -1656,6 +1730,7 @@ impl NodeConfig {
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
+            model_licensing: tenzro_types::model::AcceptancePolicy::default(),
         }
     }
 

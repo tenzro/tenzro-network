@@ -1,8 +1,8 @@
 //! Blockwise symmetric quantization for outer-gradient payloads.
 //!
-//! Streaming DiLoCo (arXiv 2501.18512) shows outer gradients tolerate 4-bit
-//! quantization with no convergence loss — they are momentum-smoothed deltas,
-//! not raw activations. This module is the Rust side of the wire format; the
+//! Outer gradients tolerate 4-bit quantization with no convergence loss —
+//! they are momentum-smoothed deltas, not raw activations. This module is the
+//! Rust side of the wire format; the
 //! Python reference trainer (`tenzro_trainer.quantization`) implements the
 //! byte-identical encoder/decoder.
 //!
@@ -66,8 +66,7 @@ pub fn quantize(values: &[f32], quantization: GradientQuantization) -> Vec<u8> {
                 let scale = max_abs / 7.0;
                 out.extend_from_slice(&scale.to_le_bytes());
                 let mut iter = chunk.iter();
-                loop {
-                    let Some(lo) = iter.next() else { break };
+                while let Some(lo) = iter.next() {
                     let hi = iter.next();
                     let lo_code = encode_nibble(*lo, scale);
                     let hi_code = hi.map(|v| encode_nibble(*v, scale)).unwrap_or(0);

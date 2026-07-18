@@ -37,7 +37,7 @@ tags:
 
 # TenzroClaw
 
-You can interact with the Tenzro blockchain network using its JSON-RPC, Web API, and MCP endpoints. Tenzro is an L1 blockchain designed for the AI age, providing identity, settlement, TEE security, and ZK proof verification.
+You can interact with the Tenzro blockchain network using its JSON-RPC, Web API, and MCP endpoints. Tenzro is a settlement layer designed for the AI age, providing identity, settlement, TEE security, and ZK proof verification.
 
 ## Endpoints
 

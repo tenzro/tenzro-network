@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde::{Serialize, Deserialize};
 
 use crate::traits::VmState;
+use crate::parallel::BaseState;
 use tenzro_types::Hash;
 use tenzro_storage::{KvStore, MerklePatriciaTrie, WriteOp, CF_ACCOUNTS, CF_STATE};
 
@@ -463,6 +464,112 @@ impl StateAdapter {
                 Hash::zero()
             }
         }
+    }
+
+    /// Warm the balance / nonce / code / storage caches for the accounts and
+    /// slots a block is statically known to touch, before the Block-STM loop
+    /// runs.
+    ///
+    /// Each `read_through_*` call below already populates the corresponding
+    /// cache on a RocksDB hit, so a plain read is the warm. Deltas fold onto
+    /// the pre-block base read here, and the parallel executor's per-tx reads
+    /// then hit the cache instead of RocksDB — moving the I/O off the
+    /// execution critical path.
+    ///
+    /// The keys come from static transaction fields (`from` / `to`) plus any
+    /// caller-supplied access-list slots (`PrefetchKeys::storage`). There is no
+    /// correctness coupling: prefetching an account that is never read, or
+    /// missing one that is, only changes cache-hit rates, never results. A cold
+    /// read during execution still falls through to RocksDB.
+    pub fn prefetch(&self, keys: &PrefetchKeys) {
+        // No backend → caches are the only tier; nothing to warm.
+        if self.storage.is_none() {
+            return;
+        }
+        for addr in &keys.accounts {
+            // Reads that miss the cache populate it from CF_ACCOUNTS / CF_STATE.
+            let _ = self.get_balance(addr);
+            let _ = self.get_nonce(addr);
+            let _ = self.get_code(addr);
+        }
+        for (addr, key) in &keys.storage {
+            let _ = self.get_storage(addr, key);
+        }
+    }
+
+    /// Warm the caches on a background pool so the block's execution thread is
+    /// not blocked on RocksDB I/O. Clones the `Arc`-backed cache handles into a
+    /// detached task; the caches are shared, so warming there is visible to the
+    /// executor. Requires a Tokio runtime context (the node always has one).
+    ///
+    /// Returns immediately. Any slot the task has not finished warming by the
+    /// time the executor reaches it simply takes the RocksDB fall-through path —
+    /// no correctness coupling, only a cache-hit-rate effect.
+    pub fn prefetch_async(self: &Arc<Self>, keys: PrefetchKeys) {
+        let adapter = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            adapter.prefetch(&keys);
+        });
+    }
+}
+
+/// Static set of accounts and storage slots a block is known to touch, used to
+/// warm the [`StateAdapter`] caches ahead of Block-STM execution.
+///
+/// Built from transaction `from` / `to` fields and any EVM access-list slots
+/// the caller can supply. Purely an I/O hint — see [`StateAdapter::prefetch`].
+#[derive(Debug, Clone, Default)]
+pub struct PrefetchKeys {
+    /// Account addresses to warm (balance + nonce + code).
+    pub accounts: Vec<Vec<u8>>,
+    /// Storage slots to warm: `(address, key)`.
+    pub storage: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl PrefetchKeys {
+    /// Empty prefetch set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add an account address to warm.
+    pub fn add_account(&mut self, address: &[u8]) {
+        self.accounts.push(address.to_vec());
+    }
+
+    /// Add a storage slot to warm.
+    pub fn add_storage(&mut self, address: &[u8], key: &[u8]) {
+        self.storage.push((address.to_vec(), key.to_vec()));
+    }
+
+    /// Collect the statically-known touched accounts from a batch of VM
+    /// transactions — each tx contributes its `from` and (when present) `to`.
+    /// This is the reliable static hint for the EVM/SVM (bytecode-decided
+    /// write sets are not knowable pre-execution); callers with an EVM
+    /// access-list add those slots via [`Self::add_storage`].
+    pub fn from_transactions(txs: &[crate::types::VmTransaction]) -> Self {
+        let mut keys = Self::new();
+        for tx in txs {
+            keys.add_account(&tx.from);
+            if let Some(to) = &tx.to {
+                keys.add_account(to);
+            }
+        }
+        keys
+    }
+}
+
+/// The `StateAdapter` is the pre-block base a commutative delta lane folds onto.
+/// `base_balance` / `base_storage` read through the cache (warmed by
+/// [`StateAdapter::prefetch`]) then RocksDB — the exact values the block started
+/// from, before any in-block delta or write.
+impl BaseState for StateAdapter {
+    fn base_balance(&self, address: &[u8]) -> u128 {
+        self.get_balance(address)
+    }
+
+    fn base_storage(&self, address: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+        self.get_storage(address, key)
     }
 }
 
@@ -976,6 +1083,85 @@ mod tests {
             expected_value[31] = i * 10;
             assert_eq!(adapter.get_storage(&contract, &key), Some(expected_value));
         }
+    }
+
+    #[test]
+    fn test_prefetch_warms_caches_from_rocksdb() {
+        let store = Arc::new(MemoryStore::new());
+        let adapter = StateAdapter::with_storage(store.clone());
+
+        let addr = vec![7u8; 20];
+        // Seed the backend directly, bypassing the adapter, so the only way
+        // the cache gets the value is via a read-through.
+        let balance_key = format!("balance:{}", hex::encode(&addr));
+        let balance: u128 = 42_000;
+        store
+            .put(CF_STATE, balance_key.as_bytes(), &balance.to_le_bytes())
+            .unwrap();
+
+        // Cold: not yet cached.
+        assert!(!adapter.balance_cache.contains_key(&addr));
+
+        let mut keys = PrefetchKeys::new();
+        keys.add_account(&addr);
+        adapter.prefetch(&keys);
+
+        // Warm: the balance is now resident, so execution reads hit the cache.
+        assert!(adapter.balance_cache.contains_key(&addr));
+        assert_eq!(adapter.get_balance(&addr), 42_000);
+    }
+
+    #[test]
+    fn test_prefetch_keys_from_transactions() {
+        use crate::types::VmTransaction;
+        use crate::VmType;
+
+        let from = vec![1u8; 20];
+        let to = vec![2u8; 20];
+        let tx = VmTransaction {
+            from: from.clone(),
+            to: Some(to.clone()),
+            value: 0,
+            data: Vec::new(),
+            gas_limit: 21_000,
+            gas_price: 1,
+            nonce: 0,
+            vm_type: VmType::Evm,
+            chain_id: 1337,
+            signature: None,
+            public_key: None,
+            signing_digest: None,
+            block_timestamp_ms: None,
+        };
+
+        let keys = PrefetchKeys::from_transactions(std::slice::from_ref(&tx));
+        assert!(keys.accounts.contains(&from));
+        assert!(keys.accounts.contains(&to));
+    }
+
+    #[test]
+    fn test_state_adapter_is_base_state() {
+        let store = Arc::new(MemoryStore::new());
+        let mut adapter = StateAdapter::with_storage(store);
+
+        let addr = vec![9u8; 20];
+        let key = vec![3u8; 32];
+        adapter.set_balance(&addr, 1234);
+        adapter.set_storage(&addr, &key, vec![5, 6, 7]);
+
+        // BaseState reads the pre-block values a delta lane folds onto.
+        assert_eq!(BaseState::base_balance(&adapter, &addr), 1234);
+        assert_eq!(BaseState::base_storage(&adapter, &addr, &key), Some(vec![5, 6, 7]));
+    }
+
+    #[test]
+    fn test_prefetch_no_storage_is_noop() {
+        // No backend → prefetch does nothing and must not panic.
+        let adapter = StateAdapter::new();
+        let mut keys = PrefetchKeys::new();
+        keys.add_account(&[1u8; 20]);
+        keys.add_storage(&[1u8; 20], &[0u8; 32]);
+        adapter.prefetch(&keys);
     }
 
     #[test]

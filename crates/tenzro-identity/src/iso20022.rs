@@ -388,13 +388,13 @@ impl Pacs008Document {
         envelope: &Ivms101Envelope,
         details: TransferDetails,
     ) -> Result<Self, Iso20022Error> {
-        if let Some(bound) = &envelope.transfer.iso20022_message_id {
-            if bound != &details.message_id {
-                return Err(Iso20022Error::Mapping(format!(
-                    "envelope already bound to ISO message id `{bound}`, got `{}`",
-                    details.message_id
-                )));
-            }
+        if let Some(bound) = &envelope.transfer.iso20022_message_id
+            && bound != &details.message_id
+        {
+            return Err(Iso20022Error::Mapping(format!(
+                "envelope already bound to ISO message id `{bound}`, got `{}`",
+                details.message_id
+            )));
         }
         let originator_person = envelope
             .originator

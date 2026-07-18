@@ -108,6 +108,15 @@ pub enum VmError {
     #[error("Canton error: {0}")]
     CantonError(String),
 
+    /// SBF/BPF program execution attempted without the `svm-full` feature.
+    ///
+    /// The SPL Token adapter, the `tenzro_cross_vm` native program, and PDA
+    /// derivation run regardless of build features. Executing a stored SBF ELF
+    /// program requires the embedded Anza `solana-svm` processor, which is
+    /// compiled in only under the `svm-full` cargo feature.
+    #[error("SVM full execution requires the `svm-full` feature")]
+    SvmFullFeatureRequired,
+
     /// Storage error
     #[error("Storage error: {0}")]
     Storage(#[from] tenzro_storage::StorageError),

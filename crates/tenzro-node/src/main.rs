@@ -214,6 +214,22 @@ struct Cli {
     #[arg(long, value_name = "HEIGHT", requires = "state_sync_anchor")]
     state_sync_height: Option<u64>,
 
+    /// Admit NonCommercial-tier models. Off by default: a node refuses to
+    /// load any model whose license forbids commercial use unless the
+    /// operator opts in with this flag. Serving inference is a commercial
+    /// act on a paid network, so the default is fail-closed.
+    #[arg(long, default_value_t = false)]
+    accept_non_commercial: bool,
+
+    /// Admit a CommercialCustom-tier model family by its license id
+    /// (repeatable / comma-separated), e.g. `--accept-license gemma
+    /// --accept-license dinov3`. Custom-license families (Gemma Terms,
+    /// DINOv3, Meta SAM) require the operator to have read and accepted the
+    /// upstream terms; the node refuses to load them until their id appears
+    /// here.
+    #[arg(long, value_name = "ID", value_delimiter = ',')]
+    accept_license: Vec<String>,
+
     /// Optional subcommand. When omitted, the binary runs as a full node
     /// using the top-level flags above. Subcommands are administrative
     /// helpers that talk to a *running* node over its JSON-RPC and exit.
@@ -234,10 +250,9 @@ enum Command {
     /// is universal in 2026 production BFT: silent daemon-side
     /// auto-keygen on a misconfigured / empty / re-mounted volume
     /// silently forks a fresh validator identity, after which any
-    /// bonded stake is bonded to a dead pubkey. Aptos, Sui, Cosmos /
-    /// CometBFT, Solana, Monad, Ethereum CL clients (Lighthouse /
-    /// Prysm / Teku), Celestia, Babylon, and Berachain all require
-    /// an explicit operator-invoked keygen step for this reason.
+    /// bonded stake is bonded to a dead pubkey. Established production
+    /// BFT stacks all require an explicit operator-invoked keygen step
+    /// for this reason.
     ///
     /// `init` writes three files under `--data-dir`, each `0o600` on
     /// Unix: `validator_key`, `validator_pq_key`, `validator_bls_key`.
@@ -1313,6 +1328,21 @@ async fn apply_cli_overrides(config: &mut NodeConfig, cli: &Cli) -> Result<()> {
         config.data_dir = data_dir.clone();
     }
 
+    // Model-license acceptance. CLI flags are additive on top of any policy
+    // set in the config file: `--accept-non-commercial` turns the flag on,
+    // and each `--accept-license <id>` appends to the accepted set. Neither
+    // flag can *revoke* a config-file acceptance — the operator drops those
+    // by editing the config, not by omitting a flag.
+    if cli.accept_non_commercial {
+        config.model_licensing.accept_non_commercial = true;
+    }
+    for id in &cli.accept_license {
+        let id = id.trim();
+        if !id.is_empty() && !config.model_licensing.accepted_license_ids.iter().any(|a| a == id) {
+            config.model_licensing.accepted_license_ids.push(id.to_string());
+        }
+    }
+
     if let Some(roles_str) = &cli.roles {
         config.roles = parse_roles(roles_str)?;
         // Auto-create consensus config for validators if not already set
@@ -1614,6 +1644,16 @@ fn print_node_info(config: &NodeConfig) {
 
     if config.roles.serves_ai() {
         println!("  Models Dir:   {:?}", config.effective_models_dir());
+        let lic = &config.model_licensing;
+        let custom = if lic.accepted_license_ids.is_empty() {
+            "none".to_string()
+        } else {
+            lic.accepted_license_ids.join(", ")
+        };
+        println!(
+            "  Licenses:     open-weight always; non-commercial={}; custom=[{}]",
+            lic.accept_non_commercial, custom
+        );
     }
 
     println!("{}\n", "=".repeat(60));

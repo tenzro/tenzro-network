@@ -705,11 +705,6 @@ fn requires_admin_token(method: &str) -> bool {
             // Delegation scope tweaks alter spend ceilings for
             // identities — must be operator-controlled or signed.
             | "tenzro_setDelegationScope"
-            // Inference-challenge resolution fires the provider penalty
-            // paths (reputation decrement + compute-bond failure count),
-            // so the verdict is operator-only. Filing and verification
-            // stay open to any caller.
-            | "tenzro_resolveInferenceChallenge"
             // Treasury multisig configuration: withdrawer-set and
             // threshold mutations define who can sign withdrawals.
             // Approvals + execution are NOT gated — the approver
@@ -1284,6 +1279,16 @@ async fn dispatch_request(
         "tenzro_getEscrow" => handle_get_escrow(node, request.params).await,
         "tenzro_listEscrowsByPayer" => handle_list_escrows_by_payer(node, request.params).await,
         "tenzro_listEscrowsByPayee" => handle_list_escrows_by_payee(node, request.params).await,
+        // Permissionless developer app registry (non-custodial fiat <-> TNZO
+        // settlement). Writes are developer-DID-envelope-signed; reads are open.
+        "tenzro_registerApp" => handle_register_app(node, request.params).await,
+        "tenzro_setAppStatus" => handle_set_app_status(node, request.params).await,
+        "tenzro_getApp" => handle_get_app(node, request.params).await,
+        "tenzro_listApps" => handle_list_apps(node).await,
+        "tenzro_settleAuthorized" => handle_settle_authorized(node, request.params).await,
+        "tenzro_getSettleAuthorizedOutcome" => {
+            handle_get_settle_authorized_outcome(node, request.params).await
+        }
         // Committee-DA possession challenges + availability scoring (Task #92).
         // Validators audit each other's sliver custody with nonce-bound signed
         // proofs; every resolution feeds the target's rolling availability score.
@@ -1539,7 +1544,9 @@ async fn dispatch_request(
         "tenzro_fileInferenceChallenge" => handle_file_inference_challenge(node, request.params).await,
         "tenzro_getInferenceChallenge" => handle_get_inference_challenge(node, request.params).await,
         "tenzro_listInferenceChallenges" => handle_list_inference_challenges(node, request.params).await,
-        "tenzro_resolveInferenceChallenge" => handle_resolve_inference_challenge(node, request.params).await,
+        "tenzro_commitChallengeVote" => handle_commit_challenge_vote(node, request.params).await,
+        "tenzro_revealChallengeVote" => handle_reveal_challenge_vote(node, request.params).await,
+        "tenzro_finalizeChallenge" => handle_finalize_challenge(node, request.params).await,
 
         // Agent methods
         "tenzro_registerAgent" => handle_register_agent(node, request.params).await,
@@ -2058,8 +2065,8 @@ async fn dispatch_request(
         "tenzro_canton_getMyAnalytics" => handle_canton_get_my_analytics(node, api_key).await,
         "tenzro_canton_listApiKeyAnalytics" => handle_canton_list_api_key_analytics(node, request.params).await,
         "tenzro_canton_aggregateAnalytics" => handle_canton_aggregate_analytics(node, request.params).await,
-        "tenzro_canton_watchParty" => handle_canton_watch_party(node, request.params, api_key.as_deref()).await,
-        "tenzro_canton_submitWithMandate" => handle_canton_submit_with_mandate(node, request.params, api_key.as_deref()).await,
+        "tenzro_canton_watchParty" => handle_canton_watch_party(node, request.params, api_key).await,
+        "tenzro_canton_submitWithMandate" => handle_canton_submit_with_mandate(node, request.params, api_key).await,
         "tenzro_canton_createIdp" => handle_canton_create_idp(node, request.params).await,
         "tenzro_canton_listIdps" => handle_canton_list_idps(node).await,
         "tenzro_canton_deleteIdp" => handle_canton_delete_idp(node, request.params).await,
@@ -2210,29 +2217,29 @@ async fn dispatch_request(
         "tenzro_registerTool" => handle_register_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_listTools" => handle_list_tools(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_searchTools" => handle_search_tools(node.clone(), request.params.clone().unwrap_or_default()).await,
-        "tenzro_useTool" => handle_use_tool(node.clone(), request.params.clone().unwrap_or_default(), api_key.as_deref()).await,
+        "tenzro_useTool" => handle_use_tool(node.clone(), request.params.clone().unwrap_or_default(), api_key).await,
         "tenzro_getTool" => handle_get_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
 
         // Knowledge registry (CF_KNOWLEDGE)
         "tenzro_registerKnowledge" => handle_register_knowledge(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_listKnowledge" | "tenzro_searchKnowledge" => handle_list_knowledge(node.clone(), request.params.clone().unwrap_or_default()).await,
-        "tenzro_useKnowledge" => handle_use_knowledge(node.clone(), request.params.clone().unwrap_or_default(), api_key.as_deref()).await,
+        "tenzro_useKnowledge" => handle_use_knowledge(node.clone(), request.params.clone().unwrap_or_default(), api_key).await,
         "tenzro_getKnowledge" => handle_get_knowledge(node.clone(), request.params.clone().unwrap_or_default()).await,
 
         // Workflow template catalog (CF_WORKFLOW_TEMPLATES)
         "tenzro_registerWorkflowTemplate" => handle_register_workflow_template(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_listWorkflowTemplates" => handle_list_workflow_templates(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_getWorkflowTemplate" => handle_get_workflow_template(node.clone(), request.params.clone().unwrap_or_default()).await,
-        "tenzro_instantiateWorkflow" => handle_instantiate_workflow(node.clone(), request.params.clone().unwrap_or_default(), api_key.as_deref()).await,
+        "tenzro_instantiateWorkflow" => handle_instantiate_workflow(node.clone(), request.params.clone().unwrap_or_default(), api_key).await,
 
         // Unified resource discovery + invocation (cross-registry)
         "tenzro_listResources" => handle_list_resources(node.clone(), request.params.clone().unwrap_or_default()).await,
-        "tenzro_useResource" => handle_use_resource(node.clone(), request.params.clone().unwrap_or_default(), api_key.as_deref()).await,
+        "tenzro_useResource" => handle_use_resource(node.clone(), request.params.clone().unwrap_or_default(), api_key).await,
 
         // Child-agent atomic spawn — TDIP identity + MPC wallet +
         // parent-funded TNZO budget + spending policy + delegation
         // scope, all in one call. Composes existing primitives.
-        "tenzro_spawnChildAgent" => handle_spawn_child_agent(&node, request.params.clone()).await,
+        "tenzro_spawnChildAgent" => handle_spawn_child_agent(node, request.params.clone()).await,
         "tenzro_updateTool" => handle_update_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_heartbeatTool" => handle_heartbeat_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_heartbeatAgentTemplate" => handle_heartbeat_agent_template(node.clone(), request.params.clone().unwrap_or_default()).await,
@@ -2324,6 +2331,8 @@ async fn dispatch_request(
         "tenzro_setDelegationScope" => handle_set_delegation_scope(node, request.params).await,
         "tenzro_listPaymentProtocols" => handle_list_payment_protocols(node).await,
         "tenzro_verifyZkProof" => handle_verify_zk_proof(node, request.params).await,
+        "tenzro_fileZkFraudProof" => handle_file_zk_fraud_proof(node, request.params).await,
+        "tenzro_getZkAttestation" => handle_get_zk_attestation(node, request.params).await,
         "tenzro_verifyVrfProof" => handle_verify_vrf_proof(node, request.params).await,
         "tenzro_generateVrfProof" => handle_generate_vrf_proof(node, request.params).await,
         "tenzro_vrfGenerateKeyPair" | "tenzro_generateVrfKeyPair" => handle_vrf_generate_keypair(node).await,
@@ -2372,14 +2381,6 @@ async fn dispatch_request(
         "tenzro_getSpendingLimits" => handle_get_spending_limits(node, request.params).await,
         "tenzro_authorizeSession" => handle_authorize_session(node, request.params).await,
         "tenzro_revokeSession" => handle_revoke_session(node, request.params).await,
-
-        // App/Paymaster methods (SDK)
-        "tenzro_registerApp" => handle_register_app(node, request.params).await,
-        "tenzro_createUserWallet" => handle_create_user_wallet(node, request.params).await,
-        "tenzro_fundUserWallet" => handle_fund_user_wallet(node, request.params).await,
-        "tenzro_listUserWallets" => handle_list_user_wallets(node, request.params).await,
-        "tenzro_sponsorTransaction" => handle_sponsor_transaction(node, request.params).await,
-        "tenzro_getUsageStats" => handle_get_usage_stats(node, request.params).await,
 
         // Contract ABI methods (SDK)
         "tenzro_encodeFunction" => handle_encode_function(node, request.params).await,
@@ -3611,8 +3612,15 @@ async fn handle_list_models(node: &Arc<TenzroNode>) -> std::result::Result<Value
 /// callers can distinguish "paid" from "nothing to pay" without parsing logs.
 enum SettlementOutcome {
     /// Payment cleared. `via` is "channel" (micropayment channel debit) or
-    /// "transfer" (direct on-chain token transfer).
-    Settled { via: &'static str },
+    /// "transfer" (direct on-chain token transfer). `margin_wei` is the
+    /// developer margin routed to `app_id`'s app wallet on top of the
+    /// network cost (zero on unattributed calls and channel debits —
+    /// channel margin is carved at finalize, not per-update).
+    Settled {
+        via: &'static str,
+        margin_wei: u128,
+        app_id: Option<String>,
+    },
     /// No settlement was attempted: zero cost, anonymous caller, or the
     /// serving node has no token layer / billing wallet configured.
     NotApplicable,
@@ -3621,15 +3629,51 @@ enum SettlementOutcome {
 impl SettlementOutcome {
     fn to_json(&self) -> Value {
         match self {
-            SettlementOutcome::Settled { via } => serde_json::json!({
+            SettlementOutcome::Settled { via, margin_wei, app_id } => serde_json::json!({
                 "status": "settled",
                 "via": via,
+                "margin_wei": margin_wei.to_string(),
+                "app_id": app_id,
             }),
             SettlementOutcome::NotApplicable => serde_json::json!({
                 "status": "not_applicable",
             }),
         }
     }
+}
+
+/// Resolves the optional `app_id` request parameter into the developer's
+/// [`AppRecord`](crate::app_registry::AppRecord) for margin attribution.
+///
+/// Absent `app_id` → `Ok(None)` (unattributed, margin 0). A present
+/// `app_id` fails loudly rather than silently dropping the developer's
+/// margin: registry unavailable → -32000, unknown or inactive app →
+/// -32602.
+fn resolve_app_attribution(
+    node: &Arc<TenzroNode>,
+    params: &Value,
+) -> std::result::Result<Option<crate::app_registry::AppRecord>, JsonRpcError> {
+    let Some(app_id) = params.get("app_id").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let registry = node.app_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "App registry unavailable on this node".to_string(),
+        data: None,
+    })?;
+    let record = registry.get(app_id).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("Unknown app_id '{app_id}'"),
+        data: None,
+    })?;
+    if !record.active {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("App '{app_id}' is deactivated"),
+            data: None,
+        });
+    }
+    Ok(Some(record))
 }
 
 /// Resolves the wallet address this node bills inference to (the node
@@ -3697,12 +3741,19 @@ fn record_unpaid_settlement(
 ///      authorization over the next cumulative state, so a failure means the
 ///      caller did NOT authorize any other debit — no fallback to a direct
 ///      transfer.
-///   2. Direct: single-shot on-chain `token.transfer`.
+///   2. Direct: single-shot on-chain `token.transfer`. When the call is
+///      attributed to an app (`app_id` resolved via
+///      [`resolve_app_attribution`]), the caller is additionally debited
+///      the developer margin (`cost × margin_bps/10000`), routed to the
+///      app wallet in the same settlement. The channel path never
+///      applies margin per-update — the payer signed the exact debit —
+///      margin for channel-billed apps is carved at channel finalize.
 fn settle_inference_cost(
     node: &Arc<TenzroNode>,
     caller_address: Option<&str>,
     channel_id: Option<&str>,
     channel_update_sig: Option<&str>,
+    app: Option<&crate::app_registry::AppRecord>,
     model_id: &str,
     cost_wei: u128,
 ) -> std::result::Result<SettlementOutcome, JsonRpcError> {
@@ -3733,7 +3784,11 @@ fn settle_inference_cost(
         return match mgr.update_channel(cid, cost_wei, sig) {
             Ok(_) => {
                 debug!(channel = %cid, cost_wei = %cost_wei, "Inference settled via micropayment channel");
-                Ok(SettlementOutcome::Settled { via: "channel" })
+                Ok(SettlementOutcome::Settled {
+                    via: "channel",
+                    margin_wei: 0,
+                    app_id: None,
+                })
             }
             Err(e) => {
                 let unpaid_key = record_unpaid_settlement(
@@ -3762,8 +3817,85 @@ fn settle_inference_cost(
     let Some(provider_addr) = provider_billing_address(node) else {
         return Ok(SettlementOutcome::NotApplicable);
     };
+
+    // Developer-margin attribution (direct path only). Registration caps
+    // margin_bps, so a rejection here means a corrupt record or overflow.
+    let (margin_wei, app_id, app_wallet) = match app {
+        Some(record) => {
+            let user_pays = tenzro_types::fees::apply_developer_margin(cost_wei, record.margin_bps)
+                .ok_or_else(|| JsonRpcError {
+                    code: -32603,
+                    message: format!(
+                        "Developer margin rejected for app '{}': margin_bps {} exceeds protocol cap or overflows",
+                        record.app_id, record.margin_bps
+                    ),
+                    data: None,
+                })?;
+            (
+                user_pays - cost_wei,
+                Some(record.app_id.clone()),
+                Some(record.app_wallet),
+            )
+        }
+        None => (0u128, None, None),
+    };
+
+    // Pre-check the full debit so the provider transfer never succeeds
+    // while the margin transfer would bounce on balance.
+    if margin_wei > 0 && token.balance_of(&caller_addr) < cost_wei.saturating_add(margin_wei) {
+        let unpaid_key = record_unpaid_settlement(
+            node,
+            &caller_addr,
+            Some(&provider_addr),
+            model_id,
+            cost_wei.saturating_add(margin_wei),
+            "insufficient balance for cost + developer margin",
+        );
+        return Err(JsonRpcError {
+            code: -32023,
+            message: "Settlement failed: insufficient balance for cost + developer margin"
+                .to_string(),
+            data: Some(serde_json::json!({
+                "cost_wei": cost_wei.to_string(),
+                "margin_wei": margin_wei.to_string(),
+                "unpaid_key": unpaid_key,
+            })),
+        });
+    }
+
     match token.transfer(&caller_addr, &provider_addr, cost_wei) {
-        Ok(_) => Ok(SettlementOutcome::Settled { via: "transfer" }),
+        Ok(_) => {
+            if margin_wei > 0 {
+                let wallet = app_wallet.expect("margin_wei > 0 implies an attributed app");
+                if let Err(e) = token.transfer(&caller_addr, &wallet, margin_wei) {
+                    let unpaid_key = record_unpaid_settlement(
+                        node,
+                        &caller_addr,
+                        Some(&wallet),
+                        model_id,
+                        margin_wei,
+                        &format!("developer margin transfer failed: {}", e),
+                    );
+                    return Err(JsonRpcError {
+                        code: -32023,
+                        message: format!(
+                            "Settlement failed: developer margin transfer rejected: {}",
+                            e
+                        ),
+                        data: Some(serde_json::json!({
+                            "cost_wei": cost_wei.to_string(),
+                            "margin_wei": margin_wei.to_string(),
+                            "unpaid_key": unpaid_key,
+                        })),
+                    });
+                }
+            }
+            Ok(SettlementOutcome::Settled {
+                via: "transfer",
+                margin_wei,
+                app_id,
+            })
+        }
         Err(e) => {
             let unpaid_key = record_unpaid_settlement(
                 node,
@@ -3879,11 +4011,13 @@ async fn handle_inference_request(
                             .saturating_mul(pricing.output_price_per_token_wei),
                     );
                 drop(pricing);
+                let app = resolve_app_attribution(node, &params)?;
                 let settlement = settle_inference_cost(
                     node,
                     params.get("caller_address").and_then(|v| v.as_str()),
                     params.get("channel_id").and_then(|v| v.as_str()),
                     params.get("channel_update_sig").and_then(|v| v.as_str()),
+                    app.as_ref(),
                     model_id,
                     cost_wei,
                 )?;
@@ -6075,26 +6209,26 @@ async fn handle_faucet(
             .unwrap_or(address_str)
             .to_lowercase();
         let faucet_key = format!("faucet_request:{}", addr_key_lower);
-        if let Ok(Some(bytes)) = storage.get("metadata", faucet_key.as_bytes()) {
-            if bytes.len() == 8 {
-                let arr: [u8; 8] = bytes.as_slice().try_into().unwrap_or([0; 8]);
-                let last_ts = i64::from_le_bytes(arr);
-                let elapsed = now_ts - last_ts;
-                if elapsed < cooldown_secs {
-                    let remaining = cooldown_secs - elapsed;
-                    return Err(JsonRpcError {
-                        code: -32004,
-                        message: format!(
-                            "Faucet cooldown active for address. Try again in {} seconds.",
-                            remaining
-                        ),
-                        data: Some(serde_json::json!({
-                            "cooldown_seconds": cooldown_secs,
-                            "elapsed_seconds": elapsed,
-                            "remaining_seconds": remaining,
-                        })),
-                    });
-                }
+        if let Ok(Some(bytes)) = storage.get("metadata", faucet_key.as_bytes())
+            && bytes.len() == 8
+        {
+            let arr: [u8; 8] = bytes.as_slice().try_into().unwrap_or([0; 8]);
+            let last_ts = i64::from_le_bytes(arr);
+            let elapsed = now_ts - last_ts;
+            if elapsed < cooldown_secs {
+                let remaining = cooldown_secs - elapsed;
+                return Err(JsonRpcError {
+                    code: -32004,
+                    message: format!(
+                        "Faucet cooldown active for address. Try again in {} seconds.",
+                        remaining
+                    ),
+                    data: Some(serde_json::json!({
+                        "cooldown_seconds": cooldown_secs,
+                        "elapsed_seconds": elapsed,
+                        "remaining_seconds": remaining,
+                    })),
+                });
             }
         }
     }
@@ -7584,7 +7718,7 @@ async fn require_did_owner(
         message: "Identity registry not initialized".to_string(),
         data: None,
     })?;
-    tenzro_identity::envelope::verify_envelope(&env, &**registry).map_err(|e| JsonRpcError {
+    tenzro_identity::envelope::verify_envelope(&env, registry).map_err(|e| JsonRpcError {
         code: -32001,
         message: format!("did_envelope for {} failed verification: {e}", env.did),
         data: None,
@@ -13442,6 +13576,14 @@ async fn handle_open_payment_channel(
         data: None,
     })?;
 
+    // Developer-margin attribution: snapshot the app's wallet + margin into
+    // the channel record at open so finalize needs no registry access.
+    let app = resolve_app_attribution(node, &params)?;
+    let (app_wallet, margin_bps) = match &app {
+        Some(record) => (Some(record.app_wallet), record.margin_bps),
+        None => (None, 0),
+    };
+
     use tenzro_types::asset::AssetId;
 
     let channel = channel_manager.open_channel(
@@ -13452,6 +13594,8 @@ async fn handle_open_payment_channel(
         tenzro_types::primitives::Timestamp::new(
             tenzro_types::primitives::Timestamp::now().as_millis() + 86400 * 30 * 1000
         ), // 30 day expiry
+        app_wallet,
+        margin_bps,
     ).map_err(|e| JsonRpcError {
         code: -32000,
         message: format!("Failed to open payment channel: {}", e),
@@ -13465,6 +13609,8 @@ async fn handle_open_payment_channel(
         "deposit": channel.deposit.to_string(),
         "spent": channel.spent.to_string(),
         "status": format!("{:?}", channel.status),
+        "app_id": app.as_ref().map(|r| r.app_id.clone()),
+        "margin_bps": channel.margin_bps,
     }))
 }
 
@@ -15463,19 +15609,17 @@ async fn handle_graceful_exit(
     let started = std::time::Instant::now();
     let max_wait = std::time::Duration::from_secs(max_wait_secs);
 
-    if !force {
-        if let Some(c) = consensus {
-            while c.is_leader_in_next_views(lookahead_views) {
-                if started.elapsed() >= max_wait {
-                    tracing::warn!(
-                        elapsed_secs = started.elapsed().as_secs(),
-                        max_wait_secs,
-                        "graceful_exit: timeout waiting for leader rotation, proceeding anyway"
-                    );
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    if !force && let Some(c) = consensus {
+        while c.is_leader_in_next_views(lookahead_views) {
+            if started.elapsed() >= max_wait {
+                tracing::warn!(
+                    elapsed_secs = started.elapsed().as_secs(),
+                    max_wait_secs,
+                    "graceful_exit: timeout waiting for leader rotation, proceeding anyway"
+                );
+                break;
             }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
 
@@ -15516,7 +15660,7 @@ async fn handle_graceful_exit(
 // Snapshot ABCI handlers
 // ============================================================================
 //
-// Four-method Cosmos/CometBFT-style surface for fast state-sync of fresh /
+// Four-method surface for fast state-sync of fresh /
 // wedged validators. See `crate::snapshot` for the on-wire format.
 
 /// `tenzro_listSnapshots` — return all snapshot summaries available locally,
@@ -16188,52 +16332,51 @@ async fn handle_register_identity(
     // authenticator is a `NoOpValidator` placeholder that accepts any
     // non-empty signature — the AA pipeline lands a real Ed25519 / WebAuthn /
     // FROST authenticator in #165, alongside the EVM EntryPoint route.
-    if matches!(identity_type.as_str(), "machine" | "autonomous" | "autonomous_machine") {
-        if let (Some(aa_registry), Some(scope_oracle)) =
+    if matches!(identity_type.as_str(), "machine" | "autonomous" | "autonomous_machine")
+        && let (Some(aa_registry), Some(scope_oracle)) =
             (node.aa_validator_registry(), node.identity_scope_oracle())
-        {
-            let wallet_bytes = identity.wallet_address.as_bytes();
-            if wallet_bytes.len() >= 20 {
-                let mut evm_account = [0u8; 20];
-                evm_account.copy_from_slice(&wallet_bytes[wallet_bytes.len() - 20..]);
+    {
+        let wallet_bytes = identity.wallet_address.as_bytes();
+        if wallet_bytes.len() >= 20 {
+            let mut evm_account = [0u8; 20];
+            evm_account.copy_from_slice(&wallet_bytes[wallet_bytes.len() - 20..]);
 
-                let dsv_address =
-                    crate::delegation_scope_oracle::delegation_scope_validator_module_address();
-                let inner: std::sync::Arc<dyn tenzro_vm::aa_validators::IValidator> =
-                    std::sync::Arc::new(tenzro_vm::aa_validators::NoOpValidator::new(dsv_address));
-                let dsv = std::sync::Arc::new(tenzro_vm::aa_delegation_validator::DelegationScopeValidator::new(
-                    dsv_address,
-                    inner,
-                    scope_oracle.clone() as std::sync::Arc<dyn tenzro_vm::ScopeOracle>,
-                ));
+            let dsv_address =
+                crate::delegation_scope_oracle::delegation_scope_validator_module_address();
+            let inner: std::sync::Arc<dyn tenzro_vm::aa_validators::IValidator> =
+                std::sync::Arc::new(tenzro_vm::aa_validators::NoOpValidator::new(dsv_address));
+            let dsv = std::sync::Arc::new(tenzro_vm::aa_delegation_validator::DelegationScopeValidator::new(
+                dsv_address,
+                inner,
+                scope_oracle.clone() as std::sync::Arc<dyn tenzro_vm::ScopeOracle>,
+            ));
 
-                match aa_registry.install(
-                    evm_account.to_vec(),
-                    tenzro_vm::aa_validators::ModuleType::Validator,
-                    dsv,
-                    100, // priority — runs early, fails fast on out-of-scope intents
-                    Vec::new(),
-                ) {
-                    Ok(()) => {
-                        info!(
-                            did = %identity.did_string(),
-                            evm_account = %hex::encode(evm_account),
-                            "Installed DelegationScopeValidator for machine identity (Phase B B.3.5)"
-                        );
-                    }
-                    // Re-registering the same identity is fine — keep going.
-                    Err(tenzro_vm::aa_validators::ValidatorError::ModuleAlreadyInstalled { .. }) => {}
-                    Err(e) => {
-                        // Don't fail the whole registration — the identity is
-                        // already on disk. Surface a warning so the operator
-                        // notices the AA pipeline didn't take.
-                        warn!(
-                            did = %identity.did_string(),
-                            evm_account = %hex::encode(evm_account),
-                            error = %e,
-                            "DelegationScopeValidator install failed"
-                        );
-                    }
+            match aa_registry.install(
+                evm_account.to_vec(),
+                tenzro_vm::aa_validators::ModuleType::Validator,
+                dsv,
+                100, // priority — runs early, fails fast on out-of-scope intents
+                Vec::new(),
+            ) {
+                Ok(()) => {
+                    info!(
+                        did = %identity.did_string(),
+                        evm_account = %hex::encode(evm_account),
+                        "Installed DelegationScopeValidator for machine identity (Phase B B.3.5)"
+                    );
+                }
+                // Re-registering the same identity is fine — keep going.
+                Err(tenzro_vm::aa_validators::ValidatorError::ModuleAlreadyInstalled { .. }) => {}
+                Err(e) => {
+                    // Don't fail the whole registration — the identity is
+                    // already on disk. Surface a warning so the operator
+                    // notices the AA pipeline didn't take.
+                    warn!(
+                        did = %identity.did_string(),
+                        evm_account = %hex::encode(evm_account),
+                        error = %e,
+                        "DelegationScopeValidator install failed"
+                    );
                 }
             }
         }
@@ -16249,10 +16392,8 @@ async fn handle_register_identity(
     // identity's custody key — the signing secret lives in the enclave and the
     // wallet is watch-only. Echoing the generated secret would mislead the
     // caller into treating it as their key, so it is withheld.
-    if !sealed_path {
-        if let Some(sk) = private_key_hex {
-            result["private_key"] = serde_json::json!(sk);
-        }
+    if !sealed_path && let Some(sk) = private_key_hex {
+        result["private_key"] = serde_json::json!(sk);
     }
 
     Ok(result)
@@ -20241,7 +20382,7 @@ async fn handle_download_model(
             )
             .join(".tenzro/models");
         // Check flat file: ~/.tenzro/models/<model_id>.gguf (where CLI downloads)
-        let flat_path = home_models.join(format!("{}.gguf", &model_id));
+        let flat_path = home_models.join(format!("{}.gguf", model_id));
         if flat_path.exists() {
             Some(std::fs::metadata(&flat_path).ok().map(|m| m.len()).unwrap_or(0))
         } else {
@@ -21232,51 +21373,51 @@ fn adjudicate_db_access(
     // Resolve whether the caller holds a matching AAP capability. Only relevant
     // for CapabilityRequired; DID-only policies pass `false`.
     let mut has_capability = false;
-    if let Some(action) = needed_action {
-        if let Some(token) = capability {
-            match node.auth_engine() {
-                Some(engine) => match engine.validate_jwt(token, None) {
-                    Ok(claims) => {
-                        // The token's subject must be the caller it is presented for.
-                        if claims.sub != caller_did {
-                            return DbAuthDecision {
-                                authorized: false,
-                                reason: format!(
-                                    "capability subject {:?} does not match caller {:?}",
-                                    claims.sub, caller_did
-                                ),
-                            };
-                        }
-                        has_capability = claims
-                            .aap_capabilities
-                            .as_ref()
-                            .map(|caps| {
-                                caps.iter().any(|c| {
-                                    c.action == action
-                                        && tenzro_auth::AapConstraints::from_value(&c.constraints)
-                                            .allowed_resources
-                                            .as_ref()
-                                            .map(|res| {
-                                                res.iter().any(|r| r == &desc.database_id)
-                                            })
-                                            .unwrap_or(false)
-                                })
-                            })
-                            .unwrap_or(false);
-                    }
-                    Err(e) => {
+    if let Some(action) = needed_action
+        && let Some(token) = capability
+    {
+        match node.auth_engine() {
+            Some(engine) => match engine.validate_jwt(token, None) {
+                Ok(claims) => {
+                    // The token's subject must be the caller it is presented for.
+                    if claims.sub != caller_did {
                         return DbAuthDecision {
                             authorized: false,
-                            reason: format!("capability rejected: {e}"),
+                            reason: format!(
+                                "capability subject {:?} does not match caller {:?}",
+                                claims.sub, caller_did
+                            ),
                         };
                     }
-                },
-                None => {
+                    has_capability = claims
+                        .aap_capabilities
+                        .as_ref()
+                        .map(|caps| {
+                            caps.iter().any(|c| {
+                                c.action == action
+                                    && tenzro_auth::AapConstraints::from_value(&c.constraints)
+                                        .allowed_resources
+                                        .as_ref()
+                                        .map(|res| {
+                                            res.iter().any(|r| r == &desc.database_id)
+                                        })
+                                        .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+                }
+                Err(e) => {
                     return DbAuthDecision {
                         authorized: false,
-                        reason: "capability presented but node has no auth engine".to_string(),
+                        reason: format!("capability rejected: {e}"),
                     };
                 }
+            },
+            None => {
+                return DbAuthDecision {
+                    authorized: false,
+                    reason: "capability presented but node has no auth engine".to_string(),
+                };
             }
         }
     }
@@ -21655,19 +21796,19 @@ async fn settle_database_query_payment(
         });
     }
     let owner_did = desc.access_policy.owner_did();
-    if let Some(registry) = node.identity_registry() {
-        if let Ok(owner) = registry.resolve(owner_did) {
-            let recipient = format!("0x{}", hex::encode(owner.wallet_address.as_bytes()));
-            if challenge.recipient != recipient {
-                return Err(JsonRpcError {
-                    code: -32001,
-                    message: format!(
-                        "payment challenge recipient {:?} is not the database owner's wallet",
-                        challenge.recipient
-                    ),
-                    data: None,
-                });
-            }
+    if let Some(registry) = node.identity_registry()
+        && let Ok(owner) = registry.resolve(owner_did)
+    {
+        let recipient = format!("0x{}", hex::encode(owner.wallet_address.as_bytes()));
+        if challenge.recipient != recipient {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: format!(
+                    "payment challenge recipient {:?} is not the database owner's wallet",
+                    challenge.recipient
+                ),
+                data: None,
+            });
         }
     }
 
@@ -21757,7 +21898,7 @@ async fn authenticate_db_caller(
             message: "Identity registry not initialized".to_string(),
             data: None,
         })?;
-        tenzro_identity::envelope::verify_envelope(&env, &**registry).map_err(|e| {
+        tenzro_identity::envelope::verify_envelope(&env, registry).map_err(|e| {
             JsonRpcError {
                 code: -32001,
                 message: format!("envelope verification failed: {e}"),
@@ -22525,10 +22666,10 @@ async fn handle_serve_model(
                 "upstream_model": upstream_model,
                 "api_key": api_key,
             });
-            if let Ok(bytes) = serde_json::to_vec(&record) {
-                if let Err(e) = storage.put(CF_MODELS, model_id.as_bytes(), &bytes) {
-                    tracing::warn!(model_id = %model_id, error = %e, "Failed to persist external-engine model to RocksDB");
-                }
+            if let Ok(bytes) = serde_json::to_vec(&record)
+                && let Err(e) = storage.put(CF_MODELS, model_id.as_bytes(), &bytes)
+            {
+                tracing::warn!(model_id = %model_id, error = %e, "Failed to persist external-engine model to RocksDB");
             }
         }
 
@@ -22625,101 +22766,101 @@ async fn handle_serve_model(
             .unwrap_or("network")
             .to_string();
 
-        if visibility == "network" {
-            if let Some(network) = node.network() {
-                let network = network.clone();
-                let (msg_schedule, per_token) = {
-                    let pricing = node.provider_pricing.read();
-                    let schedule = node.provider_schedule.read();
-                    let msg_schedule = if schedule.enabled {
-                        let days: Vec<u8> = schedule
-                            .days_of_week
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, &enabled)| if enabled { Some(i as u8) } else { None })
-                            .collect();
-                        Some(tenzro_network::ModelSchedule {
-                            enabled: true,
-                            start_hour: schedule.start_hour,
-                            end_hour: schedule.end_hour,
-                            timezone: schedule.timezone.clone(),
-                            days_of_week: days,
-                        })
-                    } else {
-                        None
-                    };
-                    let per_token =
-                        pricing.input_price_per_token_wei.min(u64::MAX as u128) as u64;
-                    (msg_schedule, per_token)
+        if visibility == "network"
+            && let Some(network) = node.network()
+        {
+            let network = network.clone();
+            let (msg_schedule, per_token) = {
+                let pricing = node.provider_pricing.read();
+                let schedule = node.provider_schedule.read();
+                let msg_schedule = if schedule.enabled {
+                    let days: Vec<u8> = schedule
+                        .days_of_week
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, &enabled)| if enabled { Some(i as u8) } else { None })
+                        .collect();
+                    Some(tenzro_network::ModelSchedule {
+                        enabled: true,
+                        start_hour: schedule.start_hour,
+                        end_hour: schedule.end_hour,
+                        timezone: schedule.timezone.clone(),
+                        days_of_week: days,
+                    })
+                } else {
+                    None
                 };
-                let provider_address = node
-                    .identity_registry()
-                    .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
-                    .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
-                    .unwrap_or_default();
-                let peer_id = network
-                    .local_peer_id()
-                    .await
-                    .ok()
-                    .map(|p| p.to_string())
-                    .unwrap_or_default();
-                let signer = node.announce_signer().cloned();
-                let name = entry.name.clone();
-                let description = entry.description.clone();
-                let category = entry.family.clone();
-                let parameters = entry.parameters.clone();
-                let context_length = entry.context_length;
-                let api_endpoint_c = api_endpoint.clone();
-                let model_id_c = model_id.to_string();
-                let visibility_c = visibility.clone();
-                let iroh_endpoint_id_c = node
-                    .iroh_resolver
-                    .as_ref()
-                    .map(|r| r.endpoint_id().to_string())
-                    .unwrap_or_default();
-                tokio::spawn(async move {
-                    // No local weights to hash for an external engine; peers
-                    // route to the upstream via the node's RPC, integrity is
-                    // the upstream's contract.
-                    let mut reg = tenzro_network::ModelRegistrationMessage {
-                        model_id: model_id_c,
-                        name,
-                        description,
-                        modality: "text".to_string(),
-                        category,
-                        parameters,
-                        context_length,
-                        provider: provider_address,
-                        peer_id,
-                        pricing: tenzro_network::PricingInfo {
-                            per_request: 0,
-                            per_token: Some(per_token),
-                        },
-                        schedule: msg_schedule,
-                        visibility: visibility_c,
-                        ttl_secs: 120,
-                        timestamp: chrono::Utc::now().timestamp_millis(),
-                        withdrawn: false,
-                        rpc_endpoint: api_endpoint_c,
-                        iroh_endpoint_id: iroh_endpoint_id_c,
-                        weights_sha256: String::new(),
-                        ..Default::default()
-                    };
-                    let Some(signer) = signer else {
-                        tracing::warn!("Skipping model announcement: announce signer unavailable");
-                        return;
-                    };
-                    if let Err(e) = reg.sign(signer.as_ref()) {
-                        tracing::warn!(error = %e, "Skipping model announcement: signing failed");
-                        return;
-                    }
-                    let broadcast_msg =
-                        NetworkMessage::new(MessagePayload::ModelRegistration(reg));
-                    if let Err(e) = network.broadcast("tenzro/models", broadcast_msg).await {
-                        tracing::warn!(error = %e, "Failed to broadcast external model announcement");
-                    }
-                });
-            }
+                let per_token =
+                    pricing.input_price_per_token_wei.min(u64::MAX as u128) as u64;
+                (msg_schedule, per_token)
+            };
+            let provider_address = node
+                .identity_registry()
+                .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+                .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
+                .unwrap_or_default();
+            let peer_id = network
+                .local_peer_id()
+                .await
+                .ok()
+                .map(|p| p.to_string())
+                .unwrap_or_default();
+            let signer = node.announce_signer().cloned();
+            let name = entry.name.clone();
+            let description = entry.description.clone();
+            let category = entry.family.clone();
+            let parameters = entry.parameters.clone();
+            let context_length = entry.context_length;
+            let api_endpoint_c = api_endpoint.clone();
+            let model_id_c = model_id.to_string();
+            let visibility_c = visibility.clone();
+            let iroh_endpoint_id_c = node
+                .iroh_resolver
+                .as_ref()
+                .map(|r| r.endpoint_id().to_string())
+                .unwrap_or_default();
+            tokio::spawn(async move {
+                // No local weights to hash for an external engine; peers
+                // route to the upstream via the node's RPC, integrity is
+                // the upstream's contract.
+                let mut reg = tenzro_network::ModelRegistrationMessage {
+                    model_id: model_id_c,
+                    name,
+                    description,
+                    modality: "text".to_string(),
+                    category,
+                    parameters,
+                    context_length,
+                    provider: provider_address,
+                    peer_id,
+                    pricing: tenzro_network::PricingInfo {
+                        per_request: 0,
+                        per_token: Some(per_token),
+                    },
+                    schedule: msg_schedule,
+                    visibility: visibility_c,
+                    ttl_secs: 120,
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    withdrawn: false,
+                    rpc_endpoint: api_endpoint_c,
+                    iroh_endpoint_id: iroh_endpoint_id_c,
+                    weights_sha256: String::new(),
+                    ..Default::default()
+                };
+                let Some(signer) = signer else {
+                    tracing::warn!("Skipping model announcement: announce signer unavailable");
+                    return;
+                };
+                if let Err(e) = reg.sign(signer.as_ref()) {
+                    tracing::warn!(error = %e, "Skipping model announcement: signing failed");
+                    return;
+                }
+                let broadcast_msg =
+                    NetworkMessage::new(MessagePayload::ModelRegistration(reg));
+                if let Err(e) = network.broadcast("tenzro/models", broadcast_msg).await {
+                    tracing::warn!(error = %e, "Failed to broadcast external model announcement");
+                }
+            });
         }
 
         tracing::info!(
@@ -23226,10 +23367,10 @@ async fn handle_stop_model(
     // Flip the ModelRegistry row to Inactive so routing stops considering
     // this model. Best-effort: absent rows (model was never published, e.g.
     // hashing failed at serve time) are not an error.
-    if let Some(registry) = node.model_registry() {
-        if let Err(e) = registry.deactivate_model(model_id) {
-            tracing::debug!(model_id = %model_id, error = %e, "No ModelRegistry row to deactivate");
-        }
+    if let Some(registry) = node.model_registry()
+        && let Err(e) = registry.deactivate_model(model_id)
+    {
+        tracing::debug!(model_id = %model_id, error = %e, "No ModelRegistry row to deactivate");
     }
 
     // Publish gossipsub withdrawal so peers remove this model. The withdrawal
@@ -23658,6 +23799,12 @@ async fn handle_load_vision_model(
                 message: format!("Unknown catalog_id '{}'", catalog_id),
                 data: None,
             })?;
+            node.check_model_license(
+                catalog_id,
+                entry.license_tier,
+                tenzro_model::custom_license_id(&entry.license).as_deref(),
+            )
+            .map_err(|m| JsonRpcError { code: -32010, message: m, data: None })?;
             (
                 entry.input_size,
                 entry.embedding_dim,
@@ -23843,10 +23990,10 @@ async fn handle_load_text_embedding_model(
 
     // Path 1: catalog download — no explicit local path, and model_id names a
     // curated catalog entry.
-    if explicit_path.is_none() {
-        if let Some(entry) = get_text_embedding_model_by_id(&model_id) {
-            return download_and_load_text_embedding(node, entry).await;
-        }
+    if explicit_path.is_none()
+        && let Some(entry) = get_text_embedding_model_by_id(&model_id)
+    {
+        return download_and_load_text_embedding(node, entry).await;
     }
 
     // Path 2: explicit local files.
@@ -23857,6 +24004,12 @@ async fn handle_load_text_embedding_model(
     let (embedding_dim, max_sequence_length) = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
         let e = get_text_embedding_model_by_id(cid)
             .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Unknown catalog_id '{cid}'"), data: None })?;
+        node.check_model_license(
+            cid,
+            e.license_tier,
+            tenzro_model::custom_license_id(&e.license).as_deref(),
+        )
+        .map_err(|m| JsonRpcError { code: -32010, message: m, data: None })?;
         (e.embedding_dim as usize, e.max_sequence_length as usize)
     } else {
         let ed = p.get("embedding_dim").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("embedding_dim"))? as usize;
@@ -23885,6 +24038,12 @@ async fn download_and_load_text_embedding(
     entry: OnnxTextEmbeddingEntry,
 ) -> std::result::Result<Value, JsonRpcError> {
     let model_id = entry.id.clone();
+    node.check_model_license(
+        &model_id,
+        entry.license_tier,
+        tenzro_model::custom_license_id(&entry.license).as_deref(),
+    )
+    .map_err(|m| JsonRpcError { code: -32010, message: m, data: None })?;
     let family = text_encoder_family_for_catalog(&entry.family)?;
 
     // Weights land on the persistent data_dir volume so they survive a restart.
@@ -23945,7 +24104,7 @@ async fn download_and_load_text_embedding(
 /// Snowflake Arctic pool the CLS token; ModernBERT-embed mean-pools;
 /// EmbeddingGemma's Optimum export ships a pre-pooled `sentence_embedding`.
 fn text_encoder_family_for_catalog(family: &str) -> std::result::Result<TextEncoderFamily, JsonRpcError> {
-    match family.to_ascii_lowercase().replace('-', "_").replace(' ', "_").as_str() {
+    match family.to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
         "qwen3_embedding" => Ok(TextEncoderFamily::Qwen3),
         "bge" | "bge_m3" | "arctic" | "snowflake" => Ok(TextEncoderFamily::Cls),
         "modernbert" => Ok(TextEncoderFamily::Mean),
@@ -23957,7 +24116,7 @@ fn text_encoder_family_for_catalog(family: &str) -> std::result::Result<TextEnco
 /// Parse a text-encoder pooling family. The catalog stores a model-name family
 /// (e.g. "embeddinggemma"), so the runtime pooling kind is passed explicitly.
 fn parse_text_encoder_family(s: &str) -> std::result::Result<TextEncoderFamily, JsonRpcError> {
-    match s.to_ascii_lowercase().replace('-', "_").replace(' ', "_").as_str() {
+    match s.to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
         "qwen3" => Ok(TextEncoderFamily::Qwen3),
         "cls" => Ok(TextEncoderFamily::Cls),
         "mean" => Ok(TextEncoderFamily::Mean),
@@ -23967,7 +24126,7 @@ fn parse_text_encoder_family(s: &str) -> std::result::Result<TextEncoderFamily, 
 }
 
 fn parse_sam_family(s: &str) -> std::result::Result<SamFamily, JsonRpcError> {
-    match s.to_ascii_lowercase().replace('-', "_").replace(' ', "_").as_str() {
+    match s.to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
         "sam1" | "sam" => Ok(SamFamily::Sam1),
         "sam2" => Ok(SamFamily::Sam2),
         other => Err(JsonRpcError { code: -32602, message: format!("unknown SAM family '{other}' (sam1|sam2)"), data: None }),
@@ -23975,7 +24134,7 @@ fn parse_sam_family(s: &str) -> std::result::Result<SamFamily, JsonRpcError> {
 }
 
 fn parse_detr_family(s: &str) -> std::result::Result<DetrFamily, JsonRpcError> {
-    match s.to_ascii_lowercase().replace('-', "_").replace(' ', "_").as_str() {
+    match s.to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
         "rf_detr" | "rfdetr" => Ok(DetrFamily::RfDetr),
         "d_fine" | "dfine" => Ok(DetrFamily::DFine),
         other => Err(JsonRpcError { code: -32602, message: format!("unknown DETR family '{other}' (rf_detr|d_fine)"), data: None }),
@@ -24078,9 +24237,15 @@ async fn handle_load_segmentation_model(
     let decoder_path = p.get("decoder_path").and_then(|v| v.as_str()).ok_or_else(|| missing_param("decoder_path"))?.to_string();
     let family = parse_sam_family(p.get("family").and_then(|v| v.as_str()).ok_or_else(|| missing_param("family"))?)?;
     let input_size = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
-        get_segmentation_model_by_id(cid)
-            .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Unknown catalog_id '{cid}'"), data: None })?
-            .input_size
+        let e = get_segmentation_model_by_id(cid)
+            .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Unknown catalog_id '{cid}'"), data: None })?;
+        node.check_model_license(
+            cid,
+            e.license_tier,
+            tenzro_model::custom_license_id(&e.license).as_deref(),
+        )
+        .map_err(|m| JsonRpcError { code: -32010, message: m, data: None })?;
+        e.input_size
     } else {
         p.get("input_size").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("input_size"))? as u32
     };
@@ -24185,6 +24350,12 @@ async fn handle_load_text_segmentation_model(
         message: format!("unknown text-segmentation model_id '{}'", model_id),
         data: None,
     })?;
+    node.check_model_license(
+        &model_id,
+        entry.license_tier,
+        tenzro_model::custom_license_id(&entry.license).as_deref(),
+    )
+    .map_err(|m| JsonRpcError { code: -32010, message: m, data: None })?;
 
     // Weights land on the persistent data_dir volume (see
     // NodeConfig::effective_models_dir) so they survive a restart.
@@ -24350,6 +24521,12 @@ async fn handle_load_detection_model(
     let (input_size, num_classes) = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
         let e = get_detection_model_by_id(cid)
             .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Unknown catalog_id '{cid}'"), data: None })?;
+        node.check_model_license(
+            cid,
+            e.license_tier,
+            tenzro_model::custom_license_id(&e.license).as_deref(),
+        )
+        .map_err(|m| JsonRpcError { code: -32010, message: m, data: None })?;
         (e.input_size, e.num_classes)
     } else {
         let is = p.get("input_size").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("input_size"))? as u32;
@@ -24494,6 +24671,12 @@ async fn handle_load_audio_model(
                 message: format!("Unknown audio catalog_id '{}'", catalog_id),
                 data: None,
             })?;
+            node.check_model_license(
+                catalog_id,
+                entry.license_tier,
+                tenzro_model::custom_license_id(&entry.license).as_deref(),
+            )
+            .map_err(|m| JsonRpcError { code: -32010, message: m, data: None })?;
             let inferred_variant = match entry.id.as_str() {
                 "distil-whisper-small-en" | "distil-whisper-medium-en" => Some("distil-en"),
                 "distil-whisper-large-v3" => Some("distil-large-v3"),
@@ -25298,6 +25481,63 @@ fn challenge_to_json(c: &crate::inference_challenge::InferenceChallenge) -> Valu
     serde_json::to_value(c).unwrap_or(Value::Null)
 }
 
+/// Finalized-block hash used as the grinding-resistant seed for challenge
+/// committee selection. Reads the block at the current finalized height;
+/// falls back to genesis when no higher block is available yet.
+async fn challenge_chain_entropy(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<tenzro_types::primitives::Hash, JsonRpcError> {
+    use tenzro_storage::BlockStore;
+    use tenzro_storage::block_store::BlockStoreImpl;
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Node has no durable storage".to_string(),
+        data: None,
+    })?;
+    let block_store = BlockStoreImpl::new(storage.clone()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Block store unavailable: {e}"),
+        data: None,
+    })?;
+    let height = node
+        .consensus()
+        .map(|c| c.current_finalized_height())
+        .unwrap_or(tenzro_types::primitives::BlockHeight(0));
+    if let Ok(Some(block)) = block_store.get_block_by_height(height).await {
+        return Ok(block.hash());
+    }
+    // Fall back to genesis if the finalized block isn't materialized.
+    block_store
+        .get_block_by_height(tenzro_types::primitives::BlockHeight(0))
+        .await
+        .ok()
+        .flatten()
+        .map(|b| b.hash())
+        .ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "No finalized block available for committee entropy".to_string(),
+            data: None,
+        })
+}
+
+/// Snapshot the active validator set as `(address_hex, self_stake)` candidates
+/// for challenge-committee selection.
+fn challenge_committee_candidates(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Vec<(String, u128)>, JsonRpcError> {
+    let registry = node.validator_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "ValidatorRegistry not initialized — cannot draw a challenge committee"
+            .to_string(),
+        data: None,
+    })?;
+    Ok(registry
+        .list_active()
+        .into_iter()
+        .map(|e| (format!("0x{}", hex::encode(e.address.as_bytes())), e.self_stake))
+        .collect())
+}
+
 /// `tenzro_getInferenceCommitment` — fetch a stored TOPLOC commitment by
 /// its canonical hash. Returns the serving context plus the full top-k
 /// logit blob so an external verifier holding the weights can re-execute.
@@ -25410,8 +25650,9 @@ async fn handle_verify_inference_commitment(
 
 /// `tenzro_fileInferenceChallenge` — open a dispute against a stored
 /// commitment. Model and provider are read from the stored envelope so a
-/// filing cannot misattribute. Resolution is a separate, operator-gated
-/// step.
+/// filing cannot misattribute. Filing draws a deterministic stake-weighted
+/// committee from the active validator set (seeded by the finalized block
+/// hash) and opens the commit phase — no operator decides the verdict.
 async fn handle_file_inference_challenge(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -25443,14 +25684,149 @@ async fn handle_file_inference_challenge(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let manager = challenge_manager_or_err(node)?;
+
+    // Draw the committee: active validators, seeded by finalized-block entropy.
+    let candidates = challenge_committee_candidates(node)?;
+    if candidates.is_empty() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "No active validators to form a challenge committee".to_string(),
+            data: None,
+        });
+    }
+    let entropy = challenge_chain_entropy(node).await?;
+    // The challenge id is assigned inside `file`; seed committee selection on
+    // the commitment hash + entropy so the draw is deterministic per dispute
+    // regardless of the (random) UUID. Reuse the hash as the selection key.
+    let k = tenzro_training::recommended_committee_size(candidates.len());
+    let committee =
+        crate::inference_challenge::select_challenge_committee(hash, entropy, &candidates, k);
+    if committee.is_empty() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "Committee selection yielded no seats (all candidates unstaked)".to_string(),
+            data: None,
+        });
+    }
+
     let challenge = manager
-        .file(hash, challenger, reason)
+        .file(hash, challenger, reason, entropy, committee)
         .map_err(|e| JsonRpcError {
             code: -32602,
             message: format!("Challenge filing rejected: {e}"),
             data: None,
         })?;
     Ok(challenge_to_json(&challenge))
+}
+
+/// `tenzro_commitChallengeVote` — a committee member records a vote **commit**
+/// (`H(verdict || salt || challenge_id || voter)`) without revealing it.
+///
+/// Committee membership is enforced by the manager against the seat list drawn
+/// at filing. When committed stake reaches a 2f+1 quorum the challenge advances
+/// to the reveal phase.
+async fn handle_commit_challenge_vote(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id = params
+        .get("challenge_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing challenge_id".to_string(),
+            data: None,
+        })?;
+    let voter = params
+        .get("voter")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing voter (committee validator address)".to_string(),
+            data: None,
+        })?;
+    let commit_hash = params
+        .get("commit_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing commit_hash (H(verdict||salt||challenge_id||voter))".to_string(),
+            data: None,
+        })?;
+    let manager = challenge_manager_or_err(node)?;
+    let updated = manager
+        .commit_vote(id, voter, commit_hash)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Vote commit rejected: {e}"),
+            data: None,
+        })?;
+    Ok(challenge_to_json(&updated))
+}
+
+/// `tenzro_revealChallengeVote` — a committee member discloses `(verdict,
+/// salt)`, which must reproduce their earlier commit. `verdict = true` means
+/// "the commitment did not verify" (upholds the challenge). `salt` is hex.
+async fn handle_reveal_challenge_vote(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id = params
+        .get("challenge_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing challenge_id".to_string(),
+            data: None,
+        })?;
+    let voter = params
+        .get("voter")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing voter".to_string(),
+            data: None,
+        })?;
+    let verdict = params
+        .get("verdict")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing verdict (true = did-not-verify / upholds)".to_string(),
+            data: None,
+        })?;
+    let salt_hex = params
+        .get("salt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing salt (hex)".to_string(),
+            data: None,
+        })?;
+    let salt = hex::decode(salt_hex.trim_start_matches("0x")).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid salt hex: {e}"),
+        data: None,
+    })?;
+    let manager = challenge_manager_or_err(node)?;
+    let updated = manager
+        .reveal_vote(id, voter, verdict, &salt)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Vote reveal rejected: {e}"),
+            data: None,
+        })?;
+    Ok(challenge_to_json(&updated))
 }
 
 /// `tenzro_getInferenceChallenge` — look up one challenge by id.
@@ -25479,7 +25855,8 @@ async fn handle_get_inference_challenge(
 }
 
 /// `tenzro_listInferenceChallenges` — list challenges, optionally
-/// filtered by `status` (filed | upheld | dismissed) and/or `provider`.
+/// filtered by `status` (voting_commit | voting_reveal | upheld |
+/// dismissed) and/or `provider`.
 async fn handle_list_inference_challenges(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -25491,7 +25868,10 @@ async fn handle_list_inference_challenges(
         .map(|s| {
             crate::inference_challenge::ChallengeStatus::parse(s).ok_or_else(|| JsonRpcError {
                 code: -32602,
-                message: format!("Unknown status '{s}' (expected filed | upheld | dismissed)"),
+                message: format!(
+                    "Unknown status '{s}' \
+                     (expected voting_commit | voting_reveal | upheld | dismissed)"
+                ),
                 data: None,
             })
         })
@@ -25509,20 +25889,19 @@ async fn handle_list_inference_challenges(
     }))
 }
 
-/// `tenzro_resolveInferenceChallenge` — operator verdict on a filed
-/// challenge (admin-token-gated via `requires_admin_token`). When the
-/// resolver has the weights loaded locally and the caller supplies the
-/// original `prompt`, the node re-runs the TOPLOC check itself and the
-/// verdict follows the outcome; otherwise the caller passes an explicit
-/// `upheld` boolean (e.g. after running `tenzro_verifyInferenceCommitment`
-/// on a node that holds the weights).
+/// `tenzro_finalizeChallenge` — tally the committee's revealed votes and
+/// decide the dispute. No admin token: the verdict is whatever the
+/// stake-weighted committee revealed. Finalize is idempotent — a decided
+/// challenge returns its verdict unchanged. Pass `force = true` after the
+/// reveal window has elapsed to close a challenge that never reached an
+/// uphold quorum (the provider prevails).
 ///
 /// An upheld challenge fires the existing provider penalty paths — the
 /// `ProviderManager` call-failure reputation decrement and
 /// `ComputeBondManager::record_failure` — rather than a new slashing
 /// mechanism. Both are best-effort: a provider unknown to this node's
 /// registries still gets the on-record upheld verdict.
-async fn handle_resolve_inference_challenge(
+async fn handle_finalize_challenge(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -25539,71 +25918,21 @@ async fn handle_resolve_inference_challenge(
             message: "Missing challenge_id".to_string(),
             data: None,
         })?;
+    let force = params
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let manager = challenge_manager_or_err(node)?;
-    let filed = manager.get(id).ok_or_else(|| JsonRpcError {
+    let resolved = manager.finalize(id, force).map_err(|e| JsonRpcError {
         code: -32602,
-        message: format!("Unknown challenge {id}"),
+        message: format!("Finalize rejected: {e}"),
         data: None,
     })?;
 
-    // Verdict: local re-execution when a prompt is supplied and the
-    // weights are loaded here; explicit `upheld` boolean otherwise.
-    let (upheld, verification) = if let Some(prompt) =
-        params.get("prompt").and_then(|v| v.as_str())
-    {
-        let stored = manager
-            .get_commitment(&filed.commitment_hash)
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Commitment lookup failed: {e}"),
-                data: None,
-            })?
-            .ok_or_else(|| JsonRpcError {
-                code: -32000,
-                message: "Challenge references a missing commitment".to_string(),
-                data: None,
-            })?;
-        let runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
-            code: -32000,
-            message: "Model runtime not initialized".to_string(),
-            data: None,
-        })?;
-        let outcome = runtime
-            .verify_inference_commitment(&stored.model_id, prompt, stored.commitment)
-            .await
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Verification failed: {e}"),
-                data: None,
-            })?;
-        let verification = serde_json::json!({
-            "pass": outcome.pass,
-            "steps_total": outcome.steps_total,
-            "steps_passed": outcome.steps_passed,
-            "failing_steps": outcome.failing_steps,
-        });
-        // A failing verification upholds the challenge.
-        (!outcome.pass, Some(verification))
-    } else {
-        let upheld = params
-            .get("upheld")
-            .and_then(|v| v.as_bool())
-            .ok_or_else(|| JsonRpcError {
-                code: -32602,
-                message: "Provide either prompt (local re-execution) or upheld (explicit verdict)"
-                    .to_string(),
-                data: None,
-            })?;
-        (upheld, params.get("verification").cloned())
-    };
-
-    let resolved = manager
-        .resolve(id, upheld, verification)
-        .map_err(|e| JsonRpcError {
-            code: -32602,
-            message: format!("Resolution rejected: {e}"),
-            data: None,
-        })?;
+    let upheld = matches!(
+        resolved.status,
+        crate::inference_challenge::ChallengeStatus::Upheld
+    );
 
     let mut reputation_penalized = false;
     let mut bond_failure_recorded = false;
@@ -26053,11 +26382,13 @@ async fn handle_chat_simple(
             );
         drop(pricing);
 
+        let app = resolve_app_attribution(node, &params)?;
         let settlement = settle_inference_cost(
             node,
             params.get("caller_address").and_then(|v| v.as_str()),
             params.get("channel_id").and_then(|v| v.as_str()),
             params.get("channel_update_sig").and_then(|v| v.as_str()),
+            app.as_ref(),
             &model_id,
             cost_wei,
         )?;
@@ -26543,11 +26874,13 @@ async fn handle_chat_rich(
             );
         drop(pricing);
 
+        let app = resolve_app_attribution(node, &params)?;
         let settlement = settle_inference_cost(
             node,
             params.get("caller_address").and_then(|v| v.as_str()),
             params.get("channel_id").and_then(|v| v.as_str()),
             params.get("channel_update_sig").and_then(|v| v.as_str()),
+            app.as_ref(),
             &model_id,
             cost_wei,
         )?;
@@ -27142,6 +27475,12 @@ struct OpenAIChatRequest {
     /// responses and external-engine backends carry no commitment.
     #[serde(default)]
     verifiable: Option<bool>,
+    /// Sampling seed. Pins the generator so a streaming completion can be
+    /// deterministically re-prefilled by a different provider if the serving
+    /// one drops mid-stream. Absent, the runtime default seed is used and the
+    /// same value is captured for failover.
+    #[serde(default)]
+    seed: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -27526,6 +27865,41 @@ fn openai_error_response(status: StatusCode, message: &str) -> Response {
 /// supported because the underlying `generate_chat_stream`
 /// has no resume hook into the in-progress generation; for that, the
 /// client should retry against a fresh prompt.
+/// Resolve a continuation target for deterministic re-prefill failover: a
+/// provider serving `model_query` that is not `exclude` (the provider that just
+/// dropped). Prefers a registered local model service, then a network-announced
+/// provider. Returns `(chat_completions_url, provider_address)` or `None` when
+/// no alternate provider serves the model.
+fn resolve_failover_target(
+    node: &Arc<TenzroNode>,
+    model_query: &str,
+    exclude: &tenzro_types::primitives::Address,
+) -> Option<(String, tenzro_types::primitives::Address)> {
+    // A registered service instance for a *different* provider, if any.
+    if let Some(svc) = node
+        .find_model_service_excluding(model_query, exclude)
+        .filter(|s| s.location == ModelLocation::Network && !s.api_endpoint.is_empty())
+    {
+        return Some((
+            format!("{}/chat/completions", svc.api_endpoint),
+            svc.provider_address,
+        ));
+    }
+    // Fall back to a network-announced provider for the same model id.
+    for entry in node.network_models_snapshot() {
+        let reg = &entry.registration;
+        if reg.model_id.as_str() != model_query || reg.rpc_endpoint.is_empty() {
+            continue;
+        }
+        let addr = tenzro_types::primitives::Address::from_hex(&reg.provider).unwrap_or_default();
+        if &addr == exclude {
+            continue;
+        }
+        return Some((format!("{}/chat/completions", reg.rpc_endpoint), addr));
+    }
+    None
+}
+
 async fn handle_openai_chat_completions(
     State(node): State<Arc<TenzroNode>>,
     headers: HeaderMap,
@@ -27541,32 +27915,31 @@ async fn handle_openai_chat_completions(
     // model again. This is the *correct* shape for SSE resume per the
     // HTML5 spec (browsers auto-set this header on EventSource reconnect)
     // and matches what OpenAI/Anthropic SDK reconnect logic expects.
-    if stream_requested {
-        if let Some(hv) = headers.get("last-event-id")
-            && let Ok(s) = hv.to_str()
-            && let Some((rid, after_seq)) = crate::streaming::parse_last_event_id(s)
-            && let Some((replay, finished)) = node.stream_cursors.replay(&rid, after_seq)
-        {
-            let replay_stream = async_stream::stream! {
-                for chunk in replay {
-                    yield Ok::<_, std::convert::Infallible>(
-                        Event::default().id(format!("{}:{}", rid, chunk.seq)).data(chunk.encoded),
-                    );
-                }
-                if finished {
-                    yield Ok::<_, std::convert::Infallible>(
-                        Event::default().data("[DONE]"),
-                    );
-                }
-                // If not finished, the stream remains open; the client
-                // will be holding it. We don't have a live tap into the
-                // generator from a second request — that would need a
-                // broadcast topology on the producer side. Document it.
-            };
-            return Sse::new(replay_stream)
-                .keep_alive(axum::response::sse::KeepAlive::default())
-                .into_response();
-        }
+    if stream_requested
+        && let Some(hv) = headers.get("last-event-id")
+        && let Ok(s) = hv.to_str()
+        && let Some((rid, after_seq)) = crate::streaming::parse_last_event_id(s)
+        && let Some((replay, finished)) = node.stream_cursors.replay(&rid, after_seq)
+    {
+        let replay_stream = async_stream::stream! {
+            for chunk in replay {
+                yield Ok::<_, std::convert::Infallible>(
+                    Event::default().id(format!("{}:{}", rid, chunk.seq)).data(chunk.encoded),
+                );
+            }
+            if finished {
+                yield Ok::<_, std::convert::Infallible>(
+                    Event::default().data("[DONE]"),
+                );
+            }
+            // If not finished, the stream remains open; the client
+            // will be holding it. We don't have a live tap into the
+            // generator from a second request — that would need a
+            // broadcast topology on the producer side. Document it.
+        };
+        return Sse::new(replay_stream)
+            .keep_alive(axum::response::sse::KeepAlive::default())
+            .into_response();
     }
 
     // Resolve the model: try instance_id, then model_id in service registry, then served_models
@@ -27967,6 +28340,11 @@ async fn handle_openai_chat_completions(
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
+        // Sampling seed pins the generator so a streaming completion can be
+        // deterministically re-prefilled by a different provider on drop.
+        // Absent from the client, the runtime default (42) is used and the
+        // same value is captured for failover.
+        let sampling_seed = request.seed.unwrap_or(42);
         let forward_body = serde_json::json!({
             "model": svc.model_id,
             "messages": request.messages,
@@ -27975,6 +28353,7 @@ async fn handle_openai_chat_completions(
             "top_p": request.top_p,
             "stream": stream_requested,
             "draft_n": request.draft_n,
+            "seed": sampling_seed,
             // The remote provider persists the commitment and returns its
             // hash in the response body, which the non-streaming proxy path
             // passes through verbatim — challenges are filed against the
@@ -28016,10 +28395,40 @@ async fn handle_openai_chat_completions(
                     // already returns early above and is the call-failure
                     // path; this branch is reached only after the upstream
                     // accepted the request and started writing the SSE.
-                    let stream_provider_addr = svc.provider_address.clone();
+                    let stream_provider_addr = svc.provider_address;
                     let stream_provider_manager =
                         node.provider_manager().cloned();
                     let remote_url_for_log = remote_url.clone();
+
+                    // Deterministic re-prefill failover capture. If this
+                    // provider drops mid-stream, a different provider serving
+                    // the same model re-prefills the emitted prefix (carried in
+                    // `emitted_text`) and continues the SSE. The sampling seed
+                    // travels with the continuation so the resume samples from
+                    // the identical distribution. `emitted_text` is grown as
+                    // the loop forwards deltas.
+                    let mut failover_state = crate::streaming::SamplingState::new(
+                        svc.model_id.clone(),
+                        request
+                            .messages
+                            .iter()
+                            .map(|m| crate::streaming::ChatTurn {
+                                role: m.role.clone(),
+                                content: m.content.clone(),
+                            })
+                            .collect(),
+                        sampling_seed,
+                        request.temperature,
+                        request.top_p,
+                        request.max_tokens,
+                        request.draft_n,
+                    );
+                    // Node handle + the provider we must exclude when picking a
+                    // continuation target. `network_models_snapshot()` off this
+                    // handle re-resolves an alternate provider at drop time.
+                    let failover_node = node.clone();
+                    let failover_model_query = model_query.clone();
+                    let failover_exclude = svc.provider_address;
                     // P1.3 SLO metrics handle. Captured into the stream
                     // closure; observations on first-chunk (TTFT),
                     // every subsequent chunk (intertoken), and on stream
@@ -28130,6 +28539,13 @@ async fn handle_openai_chat_completions(
                                             );
                                             continue;
                                         }
+                                        // Fold the assistant delta into the
+                                        // failover prefix so a continuation
+                                        // provider re-prefills exactly what the
+                                        // client already saw.
+                                        failover_state.record_emitted(
+                                            &crate::streaming::extract_delta_content(&payload),
+                                        );
                                         let seq = cursors
                                             .record(&proxy_rid, payload.clone(), None)
                                             .unwrap_or(0);
@@ -28184,6 +28600,9 @@ async fn handle_openai_chat_completions(
                                     Event::default().data("[DONE]"),
                                 );
                             } else {
+                                failover_state.record_emitted(
+                                    &crate::streaming::extract_delta_content(&leftover),
+                                );
                                 let seq = cursors
                                     .record(&proxy_rid, leftover.clone(), None)
                                     .unwrap_or(0);
@@ -28221,6 +28640,104 @@ async fn handle_openai_chat_completions(
                                 None,
                                 Some(tenzro_events::VmType::Native),
                             );
+
+                            // Deterministic re-prefill failover: if this stream
+                            // emitted assistant text before dropping, hand the
+                            // captured prefix to a *different* provider serving
+                            // the same model. That provider re-prefills the
+                            // emitted text and continues sampling from the same
+                            // seed, so the client's SSE resumes without a
+                            // visible restart. On a second drop we penalize the
+                            // continuation provider too and stop — a bounded
+                            // single retry, not an unbounded chase.
+                            if failover_state.has_emitted()
+                                && let Some((alt_url, alt_addr)) = resolve_failover_target(
+                                    &failover_node,
+                                    &failover_model_query,
+                                    &failover_exclude,
+                                )
+                            {
+                                let cont_client = reqwest::Client::builder()
+                                    .connect_timeout(std::time::Duration::from_secs(5))
+                                    .build()
+                                    .unwrap_or_else(|_| reqwest::Client::new());
+                                let cont_body = failover_state.continuation_body();
+                                warn!(
+                                    "Re-prefill failover: continuing {} on {} after {} dropped",
+                                    audit_model_id, alt_addr, stream_provider_addr
+                                );
+                                if let Ok(cont_resp) = cont_client
+                                    .post(&alt_url)
+                                    .json(&cont_body)
+                                    .send()
+                                    .await
+                                    && cont_resp.status().is_success()
+                                {
+                                    let mut cont_bs = Box::pin(with_heartbeat(
+                                        cont_resp.bytes_stream(),
+                                        HeartbeatConfig::default(),
+                                    ));
+                                    let mut cont_buf = String::new();
+                                    let mut cont_dropped = false;
+                                    while let Some(cev) = cont_bs.next().await {
+                                        match cev {
+                                            HeartbeatedChunk::Chunk(Ok(bytes)) => {
+                                                cont_buf.push_str(
+                                                    &String::from_utf8_lossy(&bytes)
+                                                        .replace("\r\n", "\n"),
+                                                );
+                                                while let Some(pos) = cont_buf.find("\n\n") {
+                                                    let frame: String =
+                                                        cont_buf.drain(..pos + 2).collect();
+                                                    let payload = frame
+                                                        .lines()
+                                                        .filter_map(|l| l.strip_prefix("data:"))
+                                                        .map(|l| l.strip_prefix(' ').unwrap_or(l))
+                                                        .collect::<Vec<_>>()
+                                                        .join("\n");
+                                                    if payload.is_empty() {
+                                                        continue;
+                                                    }
+                                                    if payload == "[DONE]" {
+                                                        yield Ok::<_, std::convert::Infallible>(
+                                                            Event::default().data("[DONE]"),
+                                                        );
+                                                        continue;
+                                                    }
+                                                    failover_state.record_emitted(
+                                                        &crate::streaming::extract_delta_content(
+                                                            &payload,
+                                                        ),
+                                                    );
+                                                    let seq = cursors
+                                                        .record(&proxy_rid, payload.clone(), None)
+                                                        .unwrap_or(0);
+                                                    yield Ok::<_, std::convert::Infallible>(
+                                                        Event::default()
+                                                            .id(format!("{}:{}", proxy_rid, seq))
+                                                            .data(payload),
+                                                    );
+                                                }
+                                            }
+                                            HeartbeatedChunk::Chunk(Err(_))
+                                            | HeartbeatedChunk::Stalled { .. } => {
+                                                cont_dropped = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    // Penalize the continuation provider
+                                    // only if it also failed; a clean
+                                    // continuation resets its counter.
+                                    if let Some(pm) = &stream_provider_manager {
+                                        if cont_dropped {
+                                            pm.record_stream_failure(&alt_addr);
+                                        } else {
+                                            pm.record_success(&alt_addr, 0);
+                                        }
+                                    }
+                                }
+                            }
                         } else if got_any_chunk {
                             // Successful stream completion — reset the
                             // consecutive-stream-failure counter via the
@@ -28684,6 +29201,10 @@ pub async fn handle_chat_stream_rich(
         .get("caller_address")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // Resolve app attribution before entering the stream — a bad app_id
+    // must refuse the request up front rather than serve unbillable
+    // inference and fail at settlement time.
+    let app_attribution = resolve_app_attribution(&node, &params);
 
     let stream = async_stream::stream! {
         // Helper to emit a typed SSE event.
@@ -28696,6 +29217,19 @@ pub async fn handle_chat_stream_rich(
                 )
             }};
         }
+
+        let app_for_stream = match app_attribution {
+            Ok(app) => app,
+            Err(e) => {
+                yield sse_event!("error", serde_json::json!({
+                    "type": "invalid_request_error",
+                    "code": e.code,
+                    "message": e.message,
+                    "data": e.data,
+                }));
+                return;
+            }
+        };
 
         // ── message_start ────────────────────────────────────────────
         let start_payload = serde_json::json!({
@@ -28863,6 +29397,7 @@ pub async fn handle_chat_stream_rich(
             caller_address.as_deref(),
             None,
             None,
+            app_for_stream.as_ref(),
             &model_id_for_stream,
             cost_wei,
         ) {
@@ -29350,6 +29885,24 @@ async fn handle_create_payment_challenge(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    // Developer-margin attribution: an `app_id` marks the challenge as issued
+    // on behalf of a registered app. The payer-facing amount becomes the
+    // margin-inclusive total; the settlement path carves the margin back out
+    // to the app wallet from the snapshot stamped into `challenge.extra`.
+    let app = resolve_app_attribution(node, &params)?;
+    let amount = match &app {
+        Some(record) => tenzro_types::fees::apply_developer_margin(amount, record.margin_bps)
+            .ok_or_else(|| JsonRpcError {
+                code: -32603,
+                message: format!(
+                    "App '{}' has an invalid margin_bps ({}) or the marked-up amount overflows",
+                    record.app_id, record.margin_bps
+                ),
+                data: None,
+            })?,
+        None => amount,
+    };
+
     let gateway = node.payment_gateway().ok_or_else(|| JsonRpcError {
         code: -32603,
         message: "Payment gateway not initialized".to_string(),
@@ -29357,13 +29910,30 @@ async fn handle_create_payment_challenge(
     })?;
 
     use tenzro_payments::traits::PaymentGateway;
-    let challenge = gateway.create_challenge(protocol, resource, amount, asset, recipient)
+    let mut challenge = gateway.create_challenge(protocol, resource, amount, asset, recipient)
         .await
         .map_err(|e| JsonRpcError {
             code: -32603,
             message: format!("Failed to create payment challenge: {}", e),
             data: None,
         })?;
+
+    if let Some(record) = &app {
+        challenge.extra.insert(
+            "app_id".to_string(),
+            serde_json::Value::String(record.app_id.clone()),
+        );
+        challenge.extra.insert(
+            "app_wallet".to_string(),
+            serde_json::Value::String(format!("0x{}", hex::encode(record.app_wallet.0))),
+        );
+        challenge
+            .extra
+            .insert("margin_bps".to_string(), serde_json::json!(record.margin_bps));
+        // Overwrite the stored copy so `verify_and_settle` sees the
+        // attribution when it looks the challenge up by id.
+        gateway.challenge_store().store(&challenge);
+    }
 
     Ok(serde_json::to_value(&challenge).unwrap_or(serde_json::json!({})))
 }
@@ -29470,16 +30040,30 @@ async fn handle_list_x402_schemes(
         data: None,
     })?;
 
+    // The EIP-3009 / Permit2 backends verify + settle self-hosted when the
+    // operator has configured an external EVM relayer; otherwise they defer to
+    // the remote CDP facilitator.
+    let self_hosted = node.config().payments.x402_facilitator.is_some();
+    let facilitator_mode = if self_hosted { "self-hosted" } else { "cdp" };
+    let facilitator_note = if self_hosted {
+        "(self-hosted facilitator)"
+    } else {
+        "(CDP facilitator)"
+    };
+
     let ids = server.scheme_registry().ids();
     let schemes: Vec<Value> = ids
         .iter()
         .map(|id| {
             let description = match id.as_str() {
-                "tenzro-hybrid" => "Tenzro-native Ed25519 hybrid signature over canonical x402 preimage",
-                "exact-eip3009" => "USDC EIP-3009 transferWithAuthorization meta-transaction (CDP facilitator)",
-                "permit2" => "Uniswap Permit2 PermitTransferFrom (CDP facilitator)",
-                "erc7710" => "ERC-7710 delegation redemption (DelegationVerifier)",
-                _ => "Custom scheme backend",
+                "tenzro-hybrid" => "Tenzro-native Ed25519 hybrid signature over canonical x402 preimage".to_string(),
+                "exact-eip3009" => format!("USDC EIP-3009 transferWithAuthorization meta-transaction {facilitator_note}"),
+                "eip3009" => format!("USDC EIP-3009 transferWithAuthorization meta-transaction {facilitator_note}"),
+                "permit2" => format!("Uniswap Permit2 PermitTransferFrom {facilitator_note}"),
+                "erc7710" => "ERC-7710 delegation redemption (DelegationVerifier)".to_string(),
+                "upto" => "Usage-metered: buyer signs a maximum, seller settles the actual".to_string(),
+                "batch-settlement" => "Channel: buyer deposits once, then signs cumulative off-chain vouchers".to_string(),
+                _ => "Custom scheme backend".to_string(),
             };
             serde_json::json!({
                 "id": id,
@@ -29490,6 +30074,7 @@ async fn handle_list_x402_schemes(
 
     Ok(serde_json::json!({
         "default": tenzro_payments::x402::DEFAULT_SCHEME,
+        "facilitator_mode": facilitator_mode,
         "schemes": schemes,
         "count": ids.len(),
     }))
@@ -32562,8 +33147,8 @@ fn parse_address_param(params: &Value, key: &str) -> Option<Address> {
 }
 
 /// Parse a u128 amount field denominated in **base units (wei)**. JSON has no
-/// native u128, so we follow the industry-standard convention used by Aptos /
-/// Sui / Tenzro internals: decimal string is the canonical form, with a u64
+/// native u128, so we follow the industry-standard convention: decimal string
+/// is the canonical form, with a u64
 /// number accepted as a convenience for small values.
 ///
 /// - Decimal string `"100000000000000000000000"` → u128 (full range)
@@ -32725,13 +33310,13 @@ async fn handle_liquid_staking_claim_withdrawal(
     // stTNZO and decremented total_underlying_wei; we mirror that on the
     // ledger side by minting via the same path the staking manager uses
     // for unbonding payouts (transfer from null sentinel).
-    if let Some(token) = node.token() {
-        if let Err(e) = token.transfer(&Address::default(), &recipient, tnzo_amount) {
-            warn!(
-                "Liquid claim payout: token.transfer(default→recipient) failed: {} (request_id={}, amount={})",
-                e, request_id, tnzo_amount
-            );
-        }
+    if let Some(token) = node.token()
+        && let Err(e) = token.transfer(&Address::default(), &recipient, tnzo_amount)
+    {
+        warn!(
+            "Liquid claim payout: token.transfer(default→recipient) failed: {} (request_id={}, amount={})",
+            e, request_id, tnzo_amount
+        );
     }
 
     Ok(serde_json::json!({
@@ -34030,7 +34615,7 @@ fn proof_requirement_satisfied(
     // proof_data layout: leaf(32) || leaf_index(u32-le, 4) || siblings(32*k).
     if let R::Merkle { expected_root } = req {
         let data = &proof.proof_data;
-        if data.len() < 36 || (data.len() - 36) % 32 != 0 {
+        if data.len() < 36 || !(data.len() - 36).is_multiple_of(32) {
             return Err(
                 "merkle proof_data must be leaf(32) || leaf_index(u32-le) || siblings(32*k)".into(),
             );
@@ -35254,20 +35839,18 @@ async fn handle_capital_intent_open(
         return Err(JsonRpcError { code: -32000, message: format!("Capital intent already exists: {}", intent.intent_id), data: None });
     }
     // Verify the principal's signature over the canonical payload (if provided).
-    if !intent.signature.is_empty() {
-        if let Some(registry) = node.identity_registry() {
-            if let Ok(identity) = registry.resolve(&intent.principal_did) {
-                if let Some(ed) = identity.public_keys.iter().find(|pk| pk.key_type == "Ed25519" && pk.public_key.len() == 32) {
-                    use tenzro_crypto::keys::{KeyType, PublicKey};
-                    use tenzro_crypto::signatures::{verify, Signature};
-                    let pk = PublicKey::new(KeyType::Ed25519, ed.public_key.clone());
-                    let sig = Signature::new(KeyType::Ed25519, intent.signature.clone());
-                    verify(&pk, &intent.signing_payload(), &sig).map_err(|_| JsonRpcError {
-                        code: -32001, message: "capital intent signature did not verify".to_string(), data: None,
-                    })?;
-                }
-            }
-        }
+    if !intent.signature.is_empty()
+        && let Some(registry) = node.identity_registry()
+        && let Ok(identity) = registry.resolve(&intent.principal_did)
+        && let Some(ed) = identity.public_keys.iter().find(|pk| pk.key_type == "Ed25519" && pk.public_key.len() == 32)
+    {
+        use tenzro_crypto::keys::{KeyType, PublicKey};
+        use tenzro_crypto::signatures::{verify, Signature};
+        let pk = PublicKey::new(KeyType::Ed25519, ed.public_key.clone());
+        let sig = Signature::new(KeyType::Ed25519, intent.signature.clone());
+        verify(&pk, &intent.signing_payload(), &sig).map_err(|_| JsonRpcError {
+            code: -32001, message: "capital intent signature did not verify".to_string(), data: None,
+        })?;
     }
 
     let now = chrono::Utc::now().timestamp();
@@ -35472,32 +36055,28 @@ async fn handle_capital_intent_settle(
     let mut rec = load_capital_intent(node, intent_id)?;
 
     // Release escrow (vault -> payee/solver) if one was locked and still funded.
-    if let Some(escrow_id) = rec.escrow_id.clone() {
-        if let (Some(token), Some(escrow_mgr)) = (node.token(), node.escrow_manager()) {
-            if let Ok(escrow) = escrow_mgr.get_escrow(&escrow_id) {
-                if escrow.status == tenzro_settlement::EscrowStatus::Funded {
-                    let payee = params.get("payee").and_then(|v| v.as_str()).map(parse_address).transpose()?.unwrap_or(escrow.payee);
-                    let vault = task_escrow_vault(&escrow_id);
-                    token.transfer(&vault, &payee, escrow.amount).map_err(|e| JsonRpcError {
-                        code: -32000, message: format!("Capital escrow release failed: {e}"), data: None,
-                    })?;
-                    escrow_mgr.reflect_escrow_released(&escrow_id).map_err(|e| JsonRpcError {
-                        code: -32000, message: format!("Escrow index update failed: {e}"), data: None,
-                    })?;
-                }
-            }
-        }
+    if let Some(escrow_id) = rec.escrow_id.clone()
+        && let (Some(token), Some(escrow_mgr)) = (node.token(), node.escrow_manager())
+        && let Ok(escrow) = escrow_mgr.get_escrow(&escrow_id)
+        && escrow.status == tenzro_settlement::EscrowStatus::Funded
+    {
+        let payee = params.get("payee").and_then(|v| v.as_str()).map(parse_address).transpose()?.unwrap_or(escrow.payee);
+        let vault = task_escrow_vault(&escrow_id);
+        token.transfer(&vault, &payee, escrow.amount).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Capital escrow release failed: {e}"), data: None,
+        })?;
+        escrow_mgr.reflect_escrow_released(&escrow_id).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Escrow index update failed: {e}"), data: None,
+        })?;
     }
 
     // ERC-8004 reputation for the solver that fulfilled the intent.
     if let (Some(signer), Some(registry), Some(solver_did)) = (
         node.erc8004_system_signer(), node.erc8004_agent_registry(), rec.solver_did.clone(),
+    ) && let Err(e) = crate::erc8004_reputation_dispatcher::dispatch_reputation_feedback(
+        &solver_did, 100i8, &format!("tenzro_capital_intent:settled {intent_id}"), signer, registry,
     ) {
-        if let Err(e) = crate::erc8004_reputation_dispatcher::dispatch_reputation_feedback(
-            &solver_did, 100i8, &format!("tenzro_capital_intent:settled {intent_id}"), signer, registry,
-        ) {
-            warn!(error = %e, "capital intent reputation dispatch failed (settlement unaffected)");
-        }
+        warn!(error = %e, "capital intent reputation dispatch failed (settlement unaffected)");
     }
 
     // Receipt over intent id + legs.
@@ -35528,21 +36107,19 @@ async fn handle_capital_intent_compensate(
     let mut rec = load_capital_intent(node, intent_id)?;
 
     let mut refunded = None;
-    if let Some(escrow_id) = rec.escrow_id.clone() {
-        if let (Some(token), Some(escrow_mgr)) = (node.token(), node.escrow_manager()) {
-            if let Ok(escrow) = escrow_mgr.get_escrow(&escrow_id) {
-                if escrow.status == tenzro_settlement::EscrowStatus::Funded {
-                    let vault = task_escrow_vault(&escrow_id);
-                    token.transfer(&vault, &escrow.payer, escrow.amount).map_err(|e| JsonRpcError {
-                        code: -32000, message: format!("Capital escrow refund failed: {e}"), data: None,
-                    })?;
-                    escrow_mgr.reflect_escrow_refunded(&escrow_id).map_err(|e| JsonRpcError {
-                        code: -32000, message: format!("Escrow index update failed: {e}"), data: None,
-                    })?;
-                    refunded = Some(escrow_id);
-                }
-            }
-        }
+    if let Some(escrow_id) = rec.escrow_id.clone()
+        && let (Some(token), Some(escrow_mgr)) = (node.token(), node.escrow_manager())
+        && let Ok(escrow) = escrow_mgr.get_escrow(&escrow_id)
+        && escrow.status == tenzro_settlement::EscrowStatus::Funded
+    {
+        let vault = task_escrow_vault(&escrow_id);
+        token.transfer(&vault, &escrow.payer, escrow.amount).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Capital escrow refund failed: {e}"), data: None,
+        })?;
+        escrow_mgr.reflect_escrow_refunded(&escrow_id).map_err(|e| JsonRpcError {
+            code: -32000, message: format!("Escrow index update failed: {e}"), data: None,
+        })?;
+        refunded = Some(escrow_id);
     }
     for l in &mut rec.legs {
         if l.status == LegStatus::Settled {
@@ -35813,7 +36390,7 @@ async fn handle_schedule_corporate_action(
     let record = node.corporate_action_engine().schedule(token, action, effective_at).map_err(|e| JsonRpcError {
         code: -32001, message: format!("schedule failed: {e}"), data: None,
     })?;
-    Ok(serde_json::to_value(&record).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?)
+    serde_json::to_value(&record).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })
 }
 
 /// `tenzro_applyCorporateActions(token, now?)` — apply every due, still-pending
@@ -35864,7 +36441,7 @@ async fn handle_get_equity_profile(
     let profile = node.corporate_action_engine().profile(&token).ok_or_else(|| JsonRpcError {
         code: -32602, message: format!("no equity profile for token 0x{}", hex::encode(token)), data: None,
     })?;
-    Ok(serde_json::to_value(&profile).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?)
+    serde_json::to_value(&profile).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })
 }
 
 /// `tenzro_setEquityProfile(token, profile)` — install or replace the
@@ -35971,7 +36548,7 @@ async fn handle_dvp_open_saga(
     let saga = node.saga_orchestrator()
         .open_saga(creator, nonce, legs, tenzro_types::primitives::Timestamp::new(expires_at_ms))
         .map_err(|e| JsonRpcError { code: -32001, message: format!("open_saga failed: {e}"), data: None })?;
-    Ok(serde_json::to_value(&saga).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?)
+    serde_json::to_value(&saga).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })
 }
 
 /// `tenzro_dvpExecuteSaga(saga_id, proofs?)` — drive a saga through its legs.
@@ -36019,7 +36596,7 @@ async fn handle_dvp_execute_saga(
         .execute(saga_id, &executor)
         .await
         .map_err(|e| JsonRpcError { code: -32001, message: format!("execute failed: {e}"), data: None })?;
-    Ok(serde_json::to_value(&saga).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?)
+    serde_json::to_value(&saga).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })
 }
 
 /// `tenzro_dvpFinalizeSaga(saga_id)` — finalize a saga in the `Verifying` state.
@@ -36033,7 +36610,7 @@ async fn handle_dvp_finalize_saga(
     let saga = node.saga_orchestrator()
         .finalize(saga_id)
         .map_err(|e| JsonRpcError { code: -32001, message: format!("finalize failed: {e}"), data: None })?;
-    Ok(serde_json::to_value(&saga).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?)
+    serde_json::to_value(&saga).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })
 }
 
 /// `tenzro_dvpGetSaga(saga_id)` — read a saga record.
@@ -36046,7 +36623,7 @@ async fn handle_dvp_get_saga(
     let saga = node.saga_orchestrator()
         .get_saga(saga_id)
         .map_err(|e| JsonRpcError { code: -32602, message: format!("get_saga failed: {e}"), data: None })?;
-    Ok(serde_json::to_value(&saga).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?)
+    serde_json::to_value(&saga).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })
 }
 
 /// `tenzro_dvpListSagasByCreator(creator)` — list all sagas opened by `creator`.
@@ -36081,7 +36658,7 @@ async fn handle_netting_compute(
     let batch = node.netting_manager()
         .compute_batch(obligations)
         .map_err(|e| JsonRpcError { code: -32001, message: format!("compute_batch failed: {e}"), data: None })?;
-    Ok(serde_json::to_value(&batch).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?)
+    serde_json::to_value(&batch).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })
 }
 
 /// `tenzro_nettingSettle(batch_id)` — mark a computed netting batch as settled.
@@ -36095,7 +36672,7 @@ async fn handle_netting_settle(
     let batch = node.netting_manager()
         .mark_settled(batch_id)
         .map_err(|e| JsonRpcError { code: -32001, message: format!("mark_settled failed: {e}"), data: None })?;
-    Ok(serde_json::to_value(&batch).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?)
+    serde_json::to_value(&batch).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })
 }
 
 /// `tenzro_nettingGetBatch(batch_id)` — read a netting batch record.
@@ -36108,7 +36685,7 @@ async fn handle_netting_get_batch(
     let batch = node.netting_manager()
         .get_batch(batch_id)
         .map_err(|e| JsonRpcError { code: -32602, message: format!("get_batch failed: {e}"), data: None })?;
-    Ok(serde_json::to_value(&batch).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })?)
+    serde_json::to_value(&batch).map_err(|e| JsonRpcError { code: -32000, message: format!("Serialization error: {e}"), data: None })
 }
 
 /// `tenzro_nettingListBatches()` — list all computed netting batches.
@@ -36150,9 +36727,420 @@ async fn handle_verify_did_envelope(
     let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
         code: -32000, message: "Identity registry not initialized".to_string(), data: None,
     })?;
-    match tenzro_identity::envelope::verify_envelope(&env, &**registry) {
+    match tenzro_identity::envelope::verify_envelope(&env, registry) {
         Ok(()) => Ok(serde_json::json!({ "valid": true, "did": env.did, "method": env.method })),
         Err(e) => Ok(serde_json::json!({ "valid": false, "did": env.did, "error": e.to_string() })),
+    }
+}
+
+/// Client-facing JSON shape for an [`crate::app_registry::AppRecord`]:
+/// `app_wallet` and signing public keys are hex strings, u128 amounts are
+/// decimal strings.
+fn app_record_json(record: &crate::app_registry::AppRecord) -> Value {
+    serde_json::json!({
+        "app_id": record.app_id,
+        "developer_did": record.developer_did,
+        "app_wallet": format!("0x{}", hex::encode(record.app_wallet.as_bytes())),
+        "signing_pubkeys": record.signing_pubkeys.iter().map(|k| serde_json::json!({
+            "key_id": k.key_id,
+            "public_key": hex::encode(&k.public_key),
+            "daily_limit_tnzo": k.daily_limit_tnzo.map(|l| l.to_string()),
+        })).collect::<Vec<Value>>(),
+        "margin_bps": record.margin_bps,
+        "min_balance": record.min_balance.to_string(),
+        "created_at": record.created_at,
+        "active": record.active,
+    })
+}
+
+/// Maps app-registry errors onto JSON-RPC errors: validation and
+/// authorization failures are `-32602`, storage failures are `-32000`.
+fn app_registry_error(e: crate::error::NodeError) -> JsonRpcError {
+    match e {
+        crate::error::NodeError::InvalidState(msg) => JsonRpcError {
+            code: -32602,
+            message: msg,
+            data: None,
+        },
+        other => JsonRpcError {
+            code: -32000,
+            message: other.to_string(),
+            data: None,
+        },
+    }
+}
+
+/// Parses the `envelope` param (hex header value per
+/// `TenzroDidEnvelope::to_header_value`) shared by the app-registry writes.
+fn parse_envelope_param(
+    params: &Value,
+) -> std::result::Result<tenzro_identity::envelope::TenzroDidEnvelope, JsonRpcError> {
+    let hv = params
+        .get("envelope")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("envelope"))?;
+    tenzro_identity::envelope::TenzroDidEnvelope::from_header_value(hv).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("malformed envelope: {e}"),
+        data: None,
+    })
+}
+
+/// `tenzro_registerApp(app_id, developer_did, app_wallet, signing_pubkeys,
+/// margin_bps, min_balance?, active?, envelope)` — permissionless, first-writer-wins
+/// registration of a developer application. The envelope must be signed by
+/// `developer_did` with `method == "tenzro_registerApp"` and `params_hash`
+/// bound to the canonical registration params of the exact record supplied.
+async fn handle_register_app(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing_param("params"))?;
+    let app_id = params
+        .get("app_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("app_id"))?;
+    let developer_did = params
+        .get("developer_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("developer_did"))?;
+    let app_wallet = parse_address(
+        params
+            .get("app_wallet")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| missing_param("app_wallet"))?,
+    )?;
+    let keys_val = params
+        .get("signing_pubkeys")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| missing_param("signing_pubkeys"))?;
+    let mut signing_pubkeys = Vec::with_capacity(keys_val.len());
+    for entry in keys_val {
+        let key_id = entry
+            .get("key_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| missing_param("signing_pubkeys[].key_id"))?;
+        let pk_hex = entry
+            .get("public_key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| missing_param("signing_pubkeys[].public_key"))?;
+        let public_key = hex::decode(pk_hex.strip_prefix("0x").unwrap_or(pk_hex)).map_err(|e| {
+            JsonRpcError {
+                code: -32602,
+                message: format!("invalid signing public_key hex: {e}"),
+                data: None,
+            }
+        })?;
+        let daily_limit_tnzo = match entry.get("daily_limit_tnzo") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(parse_u128_field(v, "daily_limit_tnzo")?),
+        };
+        signing_pubkeys.push(crate::app_registry::AppSigningKey {
+            key_id: key_id.to_string(),
+            public_key,
+            daily_limit_tnzo,
+        });
+    }
+    let margin_bps = params
+        .get("margin_bps")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing_param("margin_bps"))?;
+    let margin_bps = u32::try_from(margin_bps).map_err(|_| JsonRpcError {
+        code: -32602,
+        message: "margin_bps out of range".to_string(),
+        data: None,
+    })?;
+    let min_balance = match params.get("min_balance") {
+        None | Some(Value::Null) => 0u128,
+        Some(v) => parse_u128_field(v, "min_balance")?,
+    };
+    let active = params.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
+    let env = parse_envelope_param(&params)?;
+
+    let record = crate::app_registry::AppRecord {
+        app_id: app_id.to_string(),
+        developer_did: developer_did.to_string(),
+        app_wallet,
+        signing_pubkeys,
+        margin_bps,
+        min_balance,
+        created_at: 0, // server-set inside `register_signed`
+        active,
+    };
+
+    let registry = node.app_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "App registry not initialized".to_string(),
+        data: None,
+    })?;
+    let identities = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+    let stored = registry
+        .register_signed(record, &env, identities)
+        .map_err(app_registry_error)?;
+    Ok(app_record_json(&stored))
+}
+
+/// `tenzro_setAppStatus(app_id, active, envelope)` — activate or deactivate a
+/// registered app. The envelope must be signed by the registered
+/// `developer_did` with `method == "tenzro_setAppStatus"` and `params_hash`
+/// bound to the canonical status params of `(app_id, active)`.
+async fn handle_set_app_status(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing_param("params"))?;
+    let app_id = params
+        .get("app_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("app_id"))?;
+    let active = params
+        .get("active")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| missing_param("active"))?;
+    let env = parse_envelope_param(&params)?;
+
+    let registry = node.app_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "App registry not initialized".to_string(),
+        data: None,
+    })?;
+    let identities = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+    let updated = registry
+        .set_active_signed(app_id, active, &env, identities)
+        .map_err(app_registry_error)?;
+    Ok(app_record_json(&updated))
+}
+
+/// `tenzro_getApp(app_id)` — look up a registered app.
+async fn handle_get_app(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing_param("params"))?;
+    let app_id = params
+        .get("app_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("app_id"))?;
+    let registry = node.app_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "App registry not initialized".to_string(),
+        data: None,
+    })?;
+    match registry.get(app_id) {
+        Some(record) => Ok(app_record_json(&record)),
+        None => Err(JsonRpcError {
+            code: -32602,
+            message: format!("unknown app_id '{}'", app_id),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_listApps()` — list all registered apps, sorted by `app_id`.
+async fn handle_list_apps(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+    let registry = node.app_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "App registry not initialized".to_string(),
+        data: None,
+    })?;
+    let apps: Vec<Value> = registry.list().iter().map(app_record_json).collect();
+    Ok(serde_json::json!({
+        "count": apps.len(),
+        "apps": apps,
+    }))
+}
+
+fn settle_authorized_outcome_json(
+    outcome: &crate::settle_authorized::SettleAuthorizedOutcome,
+) -> Value {
+    serde_json::json!({
+        "app_id": outcome.app_id,
+        "external_ref": outcome.external_ref,
+        "payer_did": outcome.payer_did,
+        "payer_wallet": format!("0x{}", hex::encode(outcome.payer_wallet.as_bytes())),
+        "amount_tnzo": outcome.amount_tnzo.to_string(),
+        "payer_net_tnzo": outcome.payer_net_tnzo.to_string(),
+        "commission_tnzo": outcome.commission_tnzo.to_string(),
+        "key_id": outcome.key_id,
+        "settled_at": outcome.settled_at,
+        "success": outcome.success,
+        "failure_reason": outcome.failure_reason,
+        "app_wallet_funded": outcome.app_wallet_funded,
+    })
+}
+
+/// Maps settle-authorized errors onto JSON-RPC errors: malformed requests are
+/// `-32602`, authorization failures are `-32001`, node-side gaps are `-32000`.
+fn settle_authorized_error(e: crate::settle_authorized::SettleAuthorizedError) -> JsonRpcError {
+    use crate::settle_authorized::SettleAuthorizedError as E;
+    let code = match e {
+        E::InvalidRequest(_) => -32602,
+        E::Unauthorized(_) => -32001,
+        E::Unavailable(_) => -32000,
+    };
+    JsonRpcError {
+        code,
+        message: e.to_string(),
+        data: None,
+    }
+}
+
+/// `tenzro_settleAuthorized(app_id, chain_id, payer_did, amount_tnzo,
+/// external_ref, nonce, expiry, key_id, signature)` — execute a
+/// developer-signed [`SettlementAuthorization`]. Non-custodial: TNZO moves
+/// from the developer's own app wallet to the payer, minus the network
+/// commission routed to the treasury. Idempotent on `(app_id, external_ref)`
+/// — a replay returns the recorded outcome with `duplicate: true`.
+async fn handle_settle_authorized(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing_param("params"))?;
+    let app_id = params
+        .get("app_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("app_id"))?;
+    let chain_id = params
+        .get("chain_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing_param("chain_id"))?;
+    let payer_did = params
+        .get("payer_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("payer_did"))?;
+    let amount_tnzo = parse_u128_field(
+        params.get("amount_tnzo").ok_or_else(|| missing_param("amount_tnzo"))?,
+        "amount_tnzo",
+    )?;
+    let external_ref = params
+        .get("external_ref")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("external_ref"))?;
+    let nonce_hex = params
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("nonce"))?;
+    let nonce_bytes = hex::decode(nonce_hex.strip_prefix("0x").unwrap_or(nonce_hex))
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid nonce hex: {e}"),
+            data: None,
+        })?;
+    let nonce: [u8; 32] = nonce_bytes.try_into().map_err(|_| JsonRpcError {
+        code: -32602,
+        message: "nonce must be exactly 32 bytes".to_string(),
+        data: None,
+    })?;
+    let expiry = params
+        .get("expiry")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| missing_param("expiry"))?;
+    let key_id = params
+        .get("key_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("key_id"))?;
+    let sig_hex = params
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("signature"))?;
+    let signature = hex::decode(sig_hex.strip_prefix("0x").unwrap_or(sig_hex))
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid signature hex: {e}"),
+            data: None,
+        })?;
+
+    let auth = tenzro_types::SettlementAuthorization {
+        app_id: app_id.to_string(),
+        chain_id,
+        payer_did: payer_did.to_string(),
+        amount_tnzo,
+        external_ref: external_ref.to_string(),
+        nonce,
+        expiry,
+        key_id: key_id.to_string(),
+        signature,
+    };
+
+    let registry = node.app_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "App registry not initialized".to_string(),
+        data: None,
+    })?;
+    let identities = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Identity registry not initialized".to_string(),
+        data: None,
+    })?;
+    let token = node.token().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Token layer not initialized".to_string(),
+        data: None,
+    })?;
+    let store = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+    let kv: Arc<dyn KvStore> = store.clone();
+    let node_chain_id = node.config().genesis.as_ref().map(|g| g.chain_id).unwrap_or(1337);
+
+    let (outcome, duplicate) = crate::settle_authorized::execute_settle_authorized(
+        &auth,
+        node_chain_id,
+        registry,
+        identities,
+        token,
+        &kv,
+    )
+    .map_err(settle_authorized_error)?;
+
+    let mut out = settle_authorized_outcome_json(&outcome);
+    out["duplicate"] = Value::Bool(duplicate);
+    Ok(out)
+}
+
+/// `tenzro_getSettleAuthorizedOutcome(app_id, external_ref)` — read the
+/// recorded outcome for a settled authorization, if any.
+async fn handle_get_settle_authorized_outcome(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing_param("params"))?;
+    let app_id = params
+        .get("app_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("app_id"))?;
+    let external_ref = params
+        .get("external_ref")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("external_ref"))?;
+    let store = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Storage not initialized".to_string(),
+        data: None,
+    })?;
+    let kv: Arc<dyn KvStore> = store.clone();
+    match crate::settle_authorized::get_outcome(&kv, app_id, external_ref)
+        .map_err(settle_authorized_error)?
+    {
+        Some(outcome) => Ok(settle_authorized_outcome_json(&outcome)),
+        None => Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "no recorded settlement for app '{}' external_ref '{}'",
+                app_id, external_ref
+            ),
+            data: None,
+        }),
     }
 }
 
@@ -36302,15 +37290,15 @@ async fn handle_workflow_step_execute(
         if let Some(store) = kv {
             let mut full_key = b"workflow_idempotency:".to_vec();
             full_key.extend_from_slice(key_hex.as_bytes());
-            if let Ok(Some(prev)) = store.get(tenzro_storage::CF_AGENTS, &full_key) {
-                if let Ok(prev_value) = serde_json::from_slice::<Value>(&prev) {
-                    return Ok(serde_json::json!({
-                        "workflow_id": workflow_id,
-                        "idempotency_key_hex": key_hex,
-                        "idempotent_replay": true,
-                        "first_result": prev_value,
-                    }));
-                }
+            if let Ok(Some(prev)) = store.get(tenzro_storage::CF_AGENTS, &full_key)
+                && let Ok(prev_value) = serde_json::from_slice::<Value>(&prev)
+            {
+                return Ok(serde_json::json!({
+                    "workflow_id": workflow_id,
+                    "idempotency_key_hex": key_hex,
+                    "idempotent_replay": true,
+                    "first_result": prev_value,
+                }));
             }
         }
     }
@@ -36400,17 +37388,17 @@ async fn handle_workflow_step_execute(
     // Persist the idempotency record (first-write-wins). A retry
     // submitting the same idempotency_key returns this exact result
     // shape instead of re-executing the saga step.
-    if let Some(key_hex) = &idempotency_key_hex {
-        if let Some(store) = node.storage().map(|s| s.clone() as Arc<dyn tenzro_storage::KvStore>) {
-            let mut full_key = b"workflow_idempotency:".to_vec();
-            full_key.extend_from_slice(key_hex.as_bytes());
-            if let Ok(bytes) = serde_json::to_vec(&result) {
-                // get-then-put first-write-wins (the runtime caller does
-                // not race here because step_execute is single-threaded
-                // per workflow). If a prior record exists we leave it.
-                if matches!(store.get(tenzro_storage::CF_AGENTS, &full_key), Ok(None)) {
-                    let _ = store.put(tenzro_storage::CF_AGENTS, &full_key, &bytes);
-                }
+    if let Some(key_hex) = &idempotency_key_hex
+        && let Some(store) = node.storage().map(|s| s.clone() as Arc<dyn tenzro_storage::KvStore>)
+    {
+        let mut full_key = b"workflow_idempotency:".to_vec();
+        full_key.extend_from_slice(key_hex.as_bytes());
+        if let Ok(bytes) = serde_json::to_vec(&result) {
+            // get-then-put first-write-wins (the runtime caller does
+            // not race here because step_execute is single-threaded
+            // per workflow). If a prior record exists we leave it.
+            if matches!(store.get(tenzro_storage::CF_AGENTS, &full_key), Ok(None)) {
+                let _ = store.put(tenzro_storage::CF_AGENTS, &full_key, &bytes);
             }
         }
     }
@@ -36468,16 +37456,14 @@ async fn handle_workflow_step_verify(
         node.erc8004_system_signer(),
         node.erc8004_agent_registry(),
         saga.steps[idx].executor_did.clone(),
+    ) && let Err(e) = crate::erc8004_reputation_dispatcher::dispatch_reputation_feedback(
+        &executor_did,
+        outcome_score as i8,
+        &format!("tenzro_saga:step_verified workflow={} step={}", workflow_id, idx),
+        signer,
+        registry,
     ) {
-        if let Err(e) = crate::erc8004_reputation_dispatcher::dispatch_reputation_feedback(
-            &executor_did,
-            outcome_score as i8,
-            &format!("tenzro_saga:step_verified workflow={} step={}", workflow_id, idx),
-            signer,
-            registry,
-        ) {
-            warn!(error = %e, "saga step reputation dispatch failed (verification unaffected)");
-        }
+        warn!(error = %e, "saga step reputation dispatch failed (verification unaffected)");
     }
 
     saga.steps[idx].verify_witnesses = witnesses;
@@ -36519,17 +37505,17 @@ async fn handle_workflow_step_compensate(
             let token = node.token().ok_or_else(|| JsonRpcError { code: -32000, message: "Token not initialized".to_string(), data: None })?;
             let escrow_mgr = node.escrow_manager().ok_or_else(|| JsonRpcError { code: -32000, message: "Escrow manager not initialized".to_string(), data: None })?;
             // Only refund if still funded (a Verified step already released).
-            if let Ok(escrow) = escrow_mgr.get_escrow(&escrow_id) {
-                if escrow.status == tenzro_settlement::EscrowStatus::Funded {
-                    let vault = task_escrow_vault(&escrow_id);
-                    token.transfer(&vault, &escrow.payer, escrow.amount).map_err(|e| JsonRpcError {
-                        code: -32000, message: format!("Step escrow refund failed: {}", e), data: None,
-                    })?;
-                    escrow_mgr.reflect_escrow_refunded(&escrow_id).map_err(|e| JsonRpcError {
-                        code: -32000, message: format!("Escrow index update failed: {}", e), data: None,
-                    })?;
-                    refunded.push(escrow_id);
-                }
+            if let Ok(escrow) = escrow_mgr.get_escrow(&escrow_id)
+                && escrow.status == tenzro_settlement::EscrowStatus::Funded
+            {
+                let vault = task_escrow_vault(&escrow_id);
+                token.transfer(&vault, &escrow.payer, escrow.amount).map_err(|e| JsonRpcError {
+                    code: -32000, message: format!("Step escrow refund failed: {}", e), data: None,
+                })?;
+                escrow_mgr.reflect_escrow_refunded(&escrow_id).map_err(|e| JsonRpcError {
+                    code: -32000, message: format!("Escrow index update failed: {}", e), data: None,
+                })?;
+                refunded.push(escrow_id);
             }
         }
         saga.steps[t].status = SagaStepStatus::Compensated;
@@ -37299,8 +38285,13 @@ async fn handle_run_agent_template(
     let mut payer_hex: Option<String> = None;
     let mut creator_hex: Option<String> = None;
     let mut treasury_hex: Option<String> = None;
+    let mut margin_amount: u128 = 0;
+    let mut margin_bps: u32 = 0;
+    let mut receipt_app_id: Option<String> = None;
+    let mut app_wallet_hex: Option<String> = None;
 
     if !dry_run {
+        let app = resolve_app_attribution(node, &params)?;
         // Single-source-of-truth split + transfer through `commission_policy`.
         // Free templates and zero-fee invocations short-circuit to `None`.
         let receipt = settle_invocation_fee(
@@ -37308,6 +38299,7 @@ async fn handle_run_agent_template(
             fee,
             payer_wallet_param.as_deref(),
             node.token().map(|t| &**t),
+            app.as_ref(),
             |s| parse_address(s).map_err(|e| e.message),
         )
         .map_err(|e| match e {
@@ -37318,7 +38310,8 @@ async fn handle_run_agent_template(
             },
             CommissionError::MissingCreatorWallet
             | CommissionError::TokenUnavailable
-            | CommissionError::TreasuryUnavailable => JsonRpcError {
+            | CommissionError::TreasuryUnavailable
+            | CommissionError::MarginRejected(_) => JsonRpcError {
                 code: -32603,
                 message: e.to_string(),
                 data: None,
@@ -37336,6 +38329,10 @@ async fn handle_run_agent_template(
             payer_hex = Some(format!("0x{}", hex::encode(r.payer.0)));
             creator_hex = Some(format!("0x{}", hex::encode(r.creator_wallet.0)));
             treasury_hex = Some(format!("0x{}", hex::encode(r.treasury.0)));
+            margin_amount = r.margin_amount;
+            margin_bps = r.margin_bps;
+            receipt_app_id = r.app_id;
+            app_wallet_hex = r.app_wallet.map(|w| format!("0x{}", hex::encode(w.0)));
         }
     }
 
@@ -37414,6 +38411,10 @@ async fn handle_run_agent_template(
         "payer_wallet": payer_hex,
         "creator_wallet": creator_hex,
         "treasury": treasury_hex,
+        "margin_bps": margin_bps,
+        "developer_margin": margin_amount.to_string(),
+        "app_id": receipt_app_id,
+        "app_wallet": app_wallet_hex,
         "invocation_count": template.invocation_count,
         "total_revenue": template.total_revenue.to_string(),
         "results": results,
@@ -37666,11 +38667,13 @@ pub(crate) async fn handle_use_skill(
     // can't pay, the caller gets a clean rejection and no endpoint is
     // hit. Free skills (price_per_call == 0) short-circuit to None.
     let fee = skill.price_per_call;
+    let app = resolve_app_attribution(&node, &params)?;
     let receipt = settle_paid_invocation(
         skill.creator_wallet,
         fee,
         payer_wallet_param.as_deref(),
         node.token().map(|t| &**t),
+        app.as_ref(),
         |s| parse_address(s).map_err(|e| e.message),
     )
     .map_err(|e| match e {
@@ -37681,7 +38684,8 @@ pub(crate) async fn handle_use_skill(
         },
         CommissionError::MissingCreatorWallet
         | CommissionError::TokenUnavailable
-        | CommissionError::TreasuryUnavailable => JsonRpcError {
+        | CommissionError::TreasuryUnavailable
+        | CommissionError::MarginRejected(_) => JsonRpcError {
             code: -32603,
             message: e.to_string(),
             data: None,
@@ -37758,6 +38762,10 @@ pub(crate) async fn handle_use_skill(
         obj.insert("treasury".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(r.treasury.as_bytes()))));
         obj.insert("creator_wallet".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(r.creator_wallet.as_bytes()))));
         obj.insert("payer_wallet".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(r.payer.as_bytes()))));
+        obj.insert("margin_bps".to_string(), serde_json::json!(r.margin_bps));
+        obj.insert("developer_margin".to_string(), serde_json::Value::String(r.margin_amount.to_string()));
+        obj.insert("app_id".to_string(), serde_json::json!(r.app_id));
+        obj.insert("app_wallet".to_string(), serde_json::json!(r.app_wallet.map(|w| format!("0x{}", hex::encode(w.0)))));
     }
 
     Ok(value)
@@ -38176,11 +39184,13 @@ pub(crate) async fn handle_use_tool(
     // Settle the commission split BEFORE dispatching to the tool. Free
     // tools (price_per_call == 0) short-circuit to None.
     let fee = tool.price_per_call;
+    let app = resolve_app_attribution(&node, &params)?;
     let receipt = settle_paid_invocation(
         tool.creator_wallet,
         fee,
         payer_wallet_param.as_deref(),
         node.token().map(|t| &**t),
+        app.as_ref(),
         |s| parse_address(s).map_err(|e| e.message),
     )
     .map_err(|e| match e {
@@ -38191,7 +39201,8 @@ pub(crate) async fn handle_use_tool(
         },
         CommissionError::MissingCreatorWallet
         | CommissionError::TokenUnavailable
-        | CommissionError::TreasuryUnavailable => JsonRpcError {
+        | CommissionError::TreasuryUnavailable
+        | CommissionError::MarginRejected(_) => JsonRpcError {
             code: -32603,
             message: e.to_string(),
             data: None,
@@ -38263,6 +39274,10 @@ pub(crate) async fn handle_use_tool(
         obj.insert("treasury".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(r.treasury.as_bytes()))));
         obj.insert("creator_wallet".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(r.creator_wallet.as_bytes()))));
         obj.insert("payer_wallet".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(r.payer.as_bytes()))));
+        obj.insert("margin_bps".to_string(), serde_json::json!(r.margin_bps));
+        obj.insert("developer_margin".to_string(), serde_json::Value::String(r.margin_amount.to_string()));
+        obj.insert("app_id".to_string(), serde_json::json!(r.app_id));
+        obj.insert("app_wallet".to_string(), serde_json::json!(r.app_wallet.map(|w| format!("0x{}", hex::encode(w.0)))));
     }
 
     Ok(value)
@@ -38908,11 +39923,13 @@ async fn handle_use_knowledge(
 
     // Settle BEFORE dispatching.
     let fee = rec.price_per_call;
+    let app = resolve_app_attribution(&node, &params)?;
     let receipt = settle_paid_invocation(
         rec.creator_wallet,
         fee,
         payer_wallet_param.as_deref(),
         node.token().map(|t| &**t),
+        app.as_ref(),
         |s| parse_address(s).map_err(|e| e.message),
     )
     .map_err(|e| match e {
@@ -38923,7 +39940,8 @@ async fn handle_use_knowledge(
         },
         CommissionError::MissingCreatorWallet
         | CommissionError::TokenUnavailable
-        | CommissionError::TreasuryUnavailable => JsonRpcError {
+        | CommissionError::TreasuryUnavailable
+        | CommissionError::MarginRejected(_) => JsonRpcError {
             code: -32603,
             message: e.to_string(),
             data: None,
@@ -39030,6 +40048,16 @@ async fn handle_use_knowledge(
         obj.insert(
             "payer_wallet".to_string(),
             serde_json::Value::String(format!("0x{}", hex::encode(r.payer.as_bytes()))),
+        );
+        obj.insert("margin_bps".to_string(), serde_json::json!(r.margin_bps));
+        obj.insert(
+            "developer_margin".to_string(),
+            serde_json::Value::String(r.margin_amount.to_string()),
+        );
+        obj.insert("app_id".to_string(), serde_json::json!(r.app_id));
+        obj.insert(
+            "app_wallet".to_string(),
+            serde_json::json!(r.app_wallet.map(|w| format!("0x{}", hex::encode(w.0)))),
         );
     }
     Ok(value)
@@ -39369,11 +40397,13 @@ async fn handle_instantiate_workflow(
     }
 
     // Settle the instantiation fee.
-    let _receipt = settle_paid_invocation(
+    let app = resolve_app_attribution(&node, &params)?;
+    let receipt = settle_paid_invocation(
         tpl.creator_wallet,
         tpl.price_per_instantiate,
         payer_wallet_param.as_deref(),
         node.token().map(|t| &**t),
+        app.as_ref(),
         |s| parse_address(s).map_err(|e| e.message),
     )
     .map_err(|e| match e {
@@ -39384,7 +40414,8 @@ async fn handle_instantiate_workflow(
         },
         CommissionError::MissingCreatorWallet
         | CommissionError::TokenUnavailable
-        | CommissionError::TreasuryUnavailable => JsonRpcError {
+        | CommissionError::TreasuryUnavailable
+        | CommissionError::MarginRejected(_) => JsonRpcError {
             code: -32603,
             message: e.to_string(),
             data: None,
@@ -39395,6 +40426,20 @@ async fn handle_instantiate_workflow(
             data: None,
         },
     })?;
+    let settlement = receipt.map(|r| {
+        serde_json::json!({
+            "fee_paid": tpl.price_per_instantiate.to_string(),
+            "network_commission": r.commission.to_string(),
+            "creator_share": r.creator_share.to_string(),
+            "treasury": format!("0x{}", hex::encode(r.treasury.as_bytes())),
+            "creator_wallet": format!("0x{}", hex::encode(r.creator_wallet.as_bytes())),
+            "payer_wallet": format!("0x{}", hex::encode(r.payer.as_bytes())),
+            "margin_bps": r.margin_bps,
+            "developer_margin": r.margin_amount.to_string(),
+            "app_id": r.app_id,
+            "app_wallet": r.app_wallet.map(|w| format!("0x{}", hex::encode(w.0))),
+        })
+    });
 
     // Generate a workflow_id, bump the template's instantiation counter,
     // and hand the run off to the workflow executor. The executor
@@ -39441,7 +40486,7 @@ async fn handle_instantiate_workflow(
             inputs.clone(),
             payer_did,
             payer_wallet_param.clone(),
-            api_key.map(|k| crate::api_key::hash_key(k)),
+            api_key.map(crate::api_key::hash_key),
         )
         .map_err(|e| JsonRpcError {
             code: -32603,
@@ -39475,6 +40520,7 @@ async fn handle_instantiate_workflow(
         "workflow_id": workflow_id,
         "started_at": started_at,
         "status": status_str,
+        "settlement": settlement,
         "run": terminal,
         // Keep the marker fields for back-compat with the original
         // WorkflowInstantiationResult shape.
@@ -42782,13 +43828,12 @@ async fn handle_nft_balance_of(
 
     let mut balance: u64 = 0;
     for (_key, value) in entries {
-        if let Ok(nft) = serde_json::from_slice::<Value>(&value) {
-            if let Some(owner) = nft.get("owner").and_then(|v| v.as_str()) {
-                if owner.to_lowercase() == expected_owner {
-                    let amt = nft.get("amount").and_then(|v| v.as_u64()).unwrap_or(1);
-                    balance = balance.saturating_add(amt);
-                }
-            }
+        if let Ok(nft) = serde_json::from_slice::<Value>(&value)
+            && let Some(owner) = nft.get("owner").and_then(|v| v.as_str())
+            && owner.to_lowercase() == expected_owner
+        {
+            let amt = nft.get("amount").and_then(|v| v.as_u64()).unwrap_or(1);
+            balance = balance.saturating_add(amt);
         }
     }
 
@@ -43357,8 +44402,7 @@ async fn handle_authorize_crosschain_bridge(
         params.get(key).and_then(|v| {
             if v.is_null() { None }
             else if let Some(s) = v.as_str() { Some(s.to_string()) }
-            else if let Some(n) = v.as_u64() { Some(n.to_string()) }
-            else { None }
+            else { v.as_u64().map(|n| n.to_string()) }
         })
     };
     let daily_mint_limit_str = read_amount("daily_mint_limit")
@@ -43528,8 +44572,7 @@ async fn handle_update_bridge_limits(
         params.get(key).and_then(|v| {
             if v.is_null() { None }
             else if let Some(s) = v.as_str() { Some(s.to_string()) }
-            else if let Some(n) = v.as_u64() { Some(n.to_string()) }
-            else { None }
+            else { v.as_u64().map(|n| n.to_string()) }
         })
     };
 
@@ -44618,10 +45661,10 @@ async fn handle_set_country_restriction(
     if let Some(list) = rules[other].as_array_mut() {
         list.retain(|v| v.as_str().map(|s| s != code_str).unwrap_or(true));
     }
-    if let Some(list) = rules[target].as_array_mut() {
-        if !list.iter().any(|v| v.as_str() == Some(code_str.as_str())) {
-            list.push(serde_json::Value::String(code_str.clone()));
-        }
+    if let Some(list) = rules[target].as_array_mut()
+        && !list.iter().any(|v| v.as_str() == Some(code_str.as_str()))
+    {
+        list.push(serde_json::Value::String(code_str.clone()));
     }
 
     let value = serde_json::to_vec(&rules).map_err(|e| JsonRpcError {
@@ -45415,13 +46458,65 @@ async fn handle_verify_zk_proof(
 
     match verify_result {
         Ok(()) => {
-            // Attest the commitment so downstream EVM contracts that
-            // gate via the `ZK_VERIFY` precompile (0x0101) can confirm
-            // the proof was off-EVM-verified by this validator. Without
-            // this attestation the precompile would always return 0
-            // and the entire commitment-attestation model would be a
-            // stub. `attest()` is idempotent.
-            let newly_inserted = node.zk_commitment_registry().attest(commitment);
+            // A commitment is admitted to the `ZK_VERIFY` precompile registry
+            // only after a 2f+1 stake-weight quorum of validators has each
+            // independently re-run `verify_proof_envelope` and co-signed the
+            // commitment. On a validator node this path publishes the proof
+            // to the DA layer, co-signs it, broadcasts a claim so peers can
+            // re-verify and reply, and records its own co-signature; when the
+            // validator set is a single node (or peers have already replied),
+            // that self-co-sign reaches quorum and the commitment is attested
+            // + a fraud-proof window is opened, all inside
+            // `record_zk_cosign_and_maybe_attest`. Non-validator (RPC-only)
+            // nodes have no quorum store and do not self-attest — they pick
+            // the commitment up from a validator's gossiped claim instead.
+            let newly_inserted = if node.zk_quorum_store().is_some() {
+                match node.publish_zk_proof_for_quorum(&envelope).await {
+                    Some(proof_locator) => {
+                        let store = node
+                            .zk_quorum_store()
+                            .expect("quorum store present (checked above)");
+                        let cosign = store.cosign(commitment);
+                        // Broadcast the claim + own co-signature so peers can
+                        // fetch, re-verify, and reply with their co-signatures.
+                        if let Some(network) = node.network() {
+                            let msg = tenzro_consensus::ZkQuorumMsg::Claim {
+                                claim: tenzro_consensus::ZkCommitmentClaim {
+                                    circuit_id: circuit_id.clone(),
+                                    commitment,
+                                    proof_locator: proof_locator.clone(),
+                                },
+                                cosign: cosign.clone(),
+                            };
+                            if let Ok(data) = bincode::serialize(&msg) {
+                                let net_msg = tenzro_network::NetworkMessage::new(
+                                    tenzro_network::MessagePayload::Custom {
+                                        topic: tenzro_consensus::ZK_QUORUM_TOPIC.to_string(),
+                                        data,
+                                    },
+                                );
+                                let _ = network
+                                    .broadcast(tenzro_consensus::ZK_QUORUM_TOPIC, net_msg)
+                                    .await;
+                            }
+                        }
+                        node.record_zk_cosign_and_maybe_attest(
+                            &circuit_id,
+                            cosign,
+                            &proof_locator,
+                        )
+                    }
+                    None => {
+                        // No DA layer bound: the quorum plane cannot function
+                        // (peers cannot fetch the proof to re-verify). Do not
+                        // self-attest — an un-fetchable proof cannot be
+                        // held accountable by the fraud window.
+                        false
+                    }
+                }
+            } else {
+                false
+            };
 
             // Surface the known soundness limitation of the current
             // AIRs (see `tenzro_zk::circuits::airs::inference`) so
@@ -45433,7 +46528,7 @@ async fn handle_verify_zk_proof(
             // those slots as canonical hashes.
             let advisory = matches!(
                 circuit_id.as_str(),
-                "inference" | "settlement" | "identity"
+                "inference" | "settlement" | "identity" | "pq-qc"
             );
             Ok(serde_json::json!({
                 "valid": true,
@@ -45443,6 +46538,15 @@ async fn handle_verify_zk_proof(
                 "status": "plonky3_verified",
                 "commitment_hex": format!("0x{}", hex::encode(commitment)),
                 "newly_attested": newly_inserted,
+                "attestation_model": "quorum",
+                "attestation_note": "A commitment is admitted to the ZK_VERIFY \
+                    precompile registry only under a 2f+1 stake-weight quorum \
+                    certificate (each co-signer independently re-verifies the \
+                    proof), then held accountable for FRAUD_WINDOW_BLOCKS during \
+                    which any staked party may file a fraud proof. \
+                    newly_attested=false with valid=true means this node \
+                    verified the proof but quorum is still being collected \
+                    across the validator set.",
                 "soundness_class": if advisory { "advisory" } else { "binding" },
                 "soundness_note": if advisory {
                     "AIR binds ALL DIGEST_LEN slots of each public-input digest to \
@@ -45478,6 +46582,158 @@ async fn handle_verify_zk_proof(
                 "error": error,
             }))
         }
+    }
+}
+
+/// `tenzro_fileZkFraudProof` — challenge an attested ZK commitment.
+///
+/// Any staked party may file a fraud proof against a commitment that is still
+/// inside its fraud window. This node fetches the proof from the record's DA
+/// locator, re-runs `verify_proof_envelope` deterministically, and resolves:
+///
+/// - `outcome: "unfounded"` — the proof re-verified; the commitment stands and
+///   the challenger's bond is forfeit.
+/// - `outcome: "upheld"` — the proof failed re-verification; the commitment is
+///   retracted from the on-chain registry and every co-signer named on the
+///   certificate is slashed for a consensus offence.
+async fn handle_file_zk_fraud_proof(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+
+    let commitment_hex = params
+        .get("commitment")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing commitment (0x-prefixed 32-byte hex)".to_string(),
+            data: None,
+        })?;
+    let raw = hex::decode(commitment_hex.strip_prefix("0x").unwrap_or(commitment_hex))
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid commitment hex: {e}"),
+            data: None,
+        })?;
+    if raw.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("commitment must be 32 bytes, got {}", raw.len()),
+            data: None,
+        });
+    }
+    let mut commitment = [0u8; 32];
+    commitment.copy_from_slice(&raw);
+
+    match node.resolve_zk_fraud_proof(&commitment).await {
+        Ok(outcome) => {
+            let (outcome_str, upheld) = match outcome {
+                tenzro_consensus::FraudOutcome::Upheld => ("upheld", true),
+                tenzro_consensus::FraudOutcome::Unfounded => ("unfounded", false),
+            };
+            Ok(serde_json::json!({
+                "commitment_hex": format!("0x{}", hex::encode(commitment)),
+                "outcome": outcome_str,
+                "upheld": upheld,
+                "note": if upheld {
+                    "Commitment retracted from the ZK_VERIFY registry; every \
+                     co-signer named on the certificate was slashed for a \
+                     consensus offence."
+                } else {
+                    "Commitment re-verified successfully and stands; the \
+                     challenger's bond is forfeit."
+                },
+            }))
+        }
+        Err(e) => Err(JsonRpcError {
+            code: -32004,
+            message: format!("fraud proof could not be adjudicated: {e}"),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_getZkAttestation` — read the fraud-window record for a commitment.
+///
+/// Returns the certificate voting power, the co-signer count, the DA locator
+/// co-signers use to re-verify, the height the fraud window opened at, and
+/// whether the window is still open at the current finalized height.
+async fn handle_get_zk_attestation(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602, message: "Missing params".to_string(), data: None,
+    })?;
+    let params = if let Some(arr) = params.as_array() {
+        arr.first().cloned().unwrap_or(params)
+    } else {
+        params
+    };
+    let commitment_hex = params
+        .get("commitment")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing commitment (0x-prefixed 32-byte hex)".to_string(),
+            data: None,
+        })?;
+    let raw = hex::decode(commitment_hex.strip_prefix("0x").unwrap_or(commitment_hex))
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid commitment hex: {e}"),
+            data: None,
+        })?;
+    if raw.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("commitment must be 32 bytes, got {}", raw.len()),
+            data: None,
+        });
+    }
+    let mut commitment = [0u8; 32];
+    commitment.copy_from_slice(&raw);
+
+    let store = node.zk_quorum_store().ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: "node holds no ZK quorum store".to_string(),
+        data: None,
+    })?;
+    let on_chain = node.zk_commitment_registry().is_attested(&commitment);
+    match store.attested(&commitment) {
+        Some(record) => {
+            let height = node
+                .consensus()
+                .map(|c| c.current_finalized_height().0)
+                .unwrap_or(0);
+            let window_open = record.in_fraud_window(height);
+            Ok(serde_json::json!({
+                "commitment_hex": format!("0x{}", hex::encode(commitment)),
+                "circuit_id": record.certificate.circuit_id,
+                "voting_power": record.certificate.voting_power.to_string(),
+                "attested_at_height": record.attested_at_height,
+                "fraud_window_closes_at":
+                    record.attested_at_height + tenzro_consensus::FRAUD_WINDOW_BLOCKS,
+                "fraud_window_open": window_open,
+                "proof_locator": record.proof_locator,
+                "on_chain_attested": on_chain,
+            }))
+        }
+        None => Ok(serde_json::json!({
+            "commitment_hex": format!("0x{}", hex::encode(commitment)),
+            "attested": false,
+            "on_chain_attested": on_chain,
+            "note": "No open fraud window for this commitment (never attested, \
+                     or its window has already closed).",
+        })),
     }
 }
 
@@ -49061,240 +50317,6 @@ async fn handle_revoke_session(
 }
 
 // ============================================================================
-// GROUP 5: App/Paymaster handlers (6 methods)
-// ============================================================================
-
-async fn handle_register_app(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = unwrap_params(params)?;
-
-    let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing name".to_string(), data: None,
-    })?;
-    let master_wallet_address = params.get("master_wallet_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing master_wallet_address".to_string(), data: None,
-    })?;
-
-    let app_id = uuid::Uuid::new_v4().to_string();
-    // Generate a simple API key from SHA-256 of app_id
-    let api_key_hash = tenzro_crypto::sha256(app_id.as_bytes());
-    let api_key = format!("tzr_{}", &api_key_hash.to_hex()[..32]);
-
-    let app = serde_json::json!({
-        "app_id": app_id,
-        "name": name,
-        "master_wallet_address": master_wallet_address,
-        "api_key": api_key,
-        "created_at": chrono::Utc::now().to_rfc3339(),
-        "status": "active",
-        "user_wallets": [],
-        "total_gas_spent": "0",
-        "total_inference_cost": "0",
-    });
-
-    let storage = node.storage().ok_or_else(|| JsonRpcError {
-        code: -32000, message: "Storage not initialized".to_string(), data: None,
-    })?;
-
-    let key = format!("app:{}", app_id);
-    storage.put(tenzro_storage::CF_METADATA, key.as_bytes(), serde_json::to_vec(&app).unwrap().as_slice()).map_err(|e| JsonRpcError {
-        code: -32603, message: format!("Failed to store app: {}", e), data: None,
-    })?;
-
-    Ok(app)
-}
-
-async fn handle_create_user_wallet(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = unwrap_params(params)?;
-
-    let app_id = params.get("app_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing app_id".to_string(), data: None,
-    })?;
-    let label = params.get("label").and_then(|v| v.as_str()).unwrap_or("user");
-    let initial_funding = params.get("initial_funding").and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<u128>().ok()).unwrap_or(0);
-
-    // Create a new wallet via wallet service
-    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
-        code: -32000, message: "Wallet service not initialized".to_string(), data: None,
-    })?;
-
-    use tenzro_wallet::WalletService;
-    let wallet = wallet_service.provision_wallet().await.map_err(|e| JsonRpcError {
-        code: -32000, message: format!("User wallet creation failed: {}", e), data: None,
-    })?;
-
-    // Store user wallet association with the app
-    let storage = node.storage().ok_or_else(|| JsonRpcError {
-        code: -32000, message: "Storage not initialized".to_string(), data: None,
-    })?;
-
-    let user_wallet = serde_json::json!({
-        "wallet_id": wallet.wallet_id.0,
-        "address": format!("{}", wallet.address),
-        "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
-        "app_id": app_id,
-        "label": label,
-        "initial_funding": initial_funding.to_string(),
-        "created_at": chrono::Utc::now().to_rfc3339(),
-    });
-
-    let key = format!("app_wallet:{}:{}", app_id, wallet.wallet_id.0);
-    storage.put(tenzro_storage::CF_METADATA, key.as_bytes(), serde_json::to_vec(&user_wallet).unwrap().as_slice()).map_err(|e| JsonRpcError {
-        code: -32603, message: format!("Failed to store user wallet: {}", e), data: None,
-    })?;
-
-    Ok(user_wallet)
-}
-
-async fn handle_fund_user_wallet(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = unwrap_params(params)?;
-
-    let master_address_str = params.get("master_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing master_address".to_string(), data: None,
-    })?;
-    let user_address_str = params.get("user_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing user_address".to_string(), data: None,
-    })?;
-    let amount_str = params.get("amount").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing amount".to_string(), data: None,
-    })?;
-
-    let amount: u128 = amount_str.parse().map_err(|_| JsonRpcError {
-        code: -32602, message: "Invalid amount".to_string(), data: None,
-    })?;
-
-    let master_address = parse_address(master_address_str)?;
-    let user_address = parse_address(user_address_str)?;
-
-    // Transfer via TnzoToken
-    if let Some(token) = node.token() {
-        token.transfer(&master_address, &user_address, amount).map_err(|e| JsonRpcError {
-            code: -32603, message: format!("Transfer failed: {}", e), data: None,
-        })?;
-    }
-
-    Ok(serde_json::json!({
-        "from": master_address_str,
-        "to": user_address_str,
-        "amount": amount_str,
-        "status": "funded",
-        "tx_hash": format!("0x{}", hex::encode(tenzro_crypto::sha256(
-            format!("fund:{}:{}:{}", master_address_str, user_address_str, amount_str).as_bytes()
-        ).as_bytes())),
-    }))
-}
-
-async fn handle_list_user_wallets(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = unwrap_params(params)?;
-
-    let app_id = params.get("app_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing app_id".to_string(), data: None,
-    })?;
-
-    let storage = node.storage().ok_or_else(|| JsonRpcError {
-        code: -32000, message: "Storage not initialized".to_string(), data: None,
-    })?;
-
-    let prefix = format!("app_wallet:{}:", app_id);
-    let mut wallets = Vec::new();
-    if let Ok(entries) = storage.scan_prefix(tenzro_storage::CF_METADATA, prefix.as_bytes()) {
-        for (_key, value) in entries {
-            if let Ok(w) = serde_json::from_slice::<Value>(&value) {
-                wallets.push(w);
-            }
-        }
-    }
-
-    Ok(serde_json::json!({
-        "app_id": app_id,
-        "wallets": wallets,
-        "total": wallets.len(),
-    }))
-}
-
-async fn handle_sponsor_transaction(
-    _node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = unwrap_params(params)?;
-
-    let master_address_str = params.get("master_address").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing master_address".to_string(), data: None,
-    })?;
-    let user_tx = params.get("user_tx").ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing user_tx".to_string(), data: None,
-    })?;
-
-    let gas_limit = user_tx.get("gas_limit").and_then(|v| v.as_u64()).unwrap_or(21000);
-    let gas_price = user_tx.get("gas_price").and_then(|v| v.as_u64()).unwrap_or(1_000_000_000);
-    let gas_cost = gas_limit * gas_price;
-
-    let sponsor_tx_hash = format!("0x{}", hex::encode(tenzro_crypto::sha256(
-        format!("sponsor:{}:{}", master_address_str, chrono::Utc::now().timestamp()).as_bytes()
-    ).as_bytes()));
-
-    Ok(serde_json::json!({
-        "sponsor_address": master_address_str,
-        "user_tx": user_tx,
-        "gas_limit": gas_limit,
-        "gas_price": gas_price.to_string(),
-        "gas_cost": gas_cost.to_string(),
-        "sponsor_tx_hash": sponsor_tx_hash,
-        "status": "sponsored",
-    }))
-}
-
-async fn handle_get_usage_stats(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = unwrap_params(params)?;
-
-    let app_id = params.get("app_id").and_then(|v| v.as_str()).ok_or_else(|| JsonRpcError {
-        code: -32602, message: "Missing app_id".to_string(), data: None,
-    })?;
-
-    let storage = node.storage().ok_or_else(|| JsonRpcError {
-        code: -32000, message: "Storage not initialized".to_string(), data: None,
-    })?;
-
-    // Read app stats from storage
-    let key = format!("app:{}", app_id);
-    let app_info = match storage.get(tenzro_storage::CF_METADATA, key.as_bytes()) {
-        Ok(Some(bytes)) => serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
-        _ => Value::Null,
-    };
-
-    // Count user wallets
-    let prefix = format!("app_wallet:{}:", app_id);
-    let wallet_count = storage.scan_prefix(tenzro_storage::CF_METADATA, prefix.as_bytes())
-        .map(|entries| entries.len())
-        .unwrap_or(0);
-
-    Ok(serde_json::json!({
-        "app_id": app_id,
-        "name": app_info.get("name").and_then(|v| v.as_str()).unwrap_or("unknown"),
-        "total_wallets": wallet_count,
-        "total_gas_spent": app_info.get("total_gas_spent").and_then(|v| v.as_str()).unwrap_or("0"),
-        "total_inference_cost": app_info.get("total_inference_cost").and_then(|v| v.as_str()).unwrap_or("0"),
-        "total_transactions": 0,
-        "status": app_info.get("status").and_then(|v| v.as_str()).unwrap_or("unknown"),
-    }))
-}
-
-// ============================================================================
 // GROUP 6: Contract ABI handlers (2 methods)
 // ============================================================================
 
@@ -49532,6 +50554,8 @@ fn training_err(e: tenzro_training::TrainingError) -> JsonRpcError {
         | TE::DimensionMismatch(_)
         | TE::PayloadSizeMismatch { .. }
         | TE::PayloadHashMismatch
+        | TE::PayloadKindMismatch { .. }
+        | TE::OuterUpdateRequiresSparse { .. }
         | TE::AggregationRuleTierMismatch { .. }
         | TE::SealedManifestMissing { .. }
         | TE::SealedManifestHashMismatch { .. }

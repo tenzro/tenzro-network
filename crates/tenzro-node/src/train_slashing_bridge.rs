@@ -13,7 +13,7 @@
 //! Unlike the SLA path (which debits a fixed per-miss amount so a flaky provider
 //! bleeds its bond down gradually), a rejected training contribution is a
 //! spec-deviation or an out-of-band gradient — the trainer is evicted for the
-//! remainder of the run with no rehabilitation (the INTELLECT-2 discipline). So
+//! remainder of the run with no rehabilitation. So
 //! the bridge slashes the entire remaining bond: `ComputeBondManager::slash`
 //! caps the applied amount at the bond balance, so passing `u128::MAX` zeroes
 //! the bond and flips its status to `Slashed` in one call.

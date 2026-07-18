@@ -148,14 +148,14 @@ impl KycGateRegistry {
     }
 
     pub fn set_requirement(&self, token_id: [u8; 32], required_tier: u8) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(&required_tier) {
-                let _ = storage.put(
-                    tenzro_storage::CF_TOKENS,
-                    &Self::gate_key(&token_id),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(&required_tier)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_TOKENS,
+                &Self::gate_key(&token_id),
+                &bytes,
+            );
         }
         self.requirements.insert(token_id, required_tier);
     }
@@ -219,23 +219,12 @@ pub struct FrozenAmount {
 
 /// Kill-switch state for a specific token. Global across the token's
 /// entire holder set.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KillSwitchState {
     pub active: bool,
     pub triggered_by_did: Option<String>,
     pub reason: Option<String>,
     pub triggered_at_ms: u64,
-}
-
-impl Default for KillSwitchState {
-    fn default() -> Self {
-        Self {
-            active: false,
-            triggered_by_did: None,
-            reason: None,
-            triggered_at_ms: 0,
-        }
-    }
 }
 
 /// uRWA compliance registry. Holds, per (token_id, account), the
@@ -342,26 +331,26 @@ impl UrwaRegistry {
     }
 
     fn persist_freeze(&self, token_id: &[u8; 32], account: &[u8; 20], amt: &FrozenAmount) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(amt) {
-                let _ = storage.put(
-                    tenzro_storage::CF_TOKENS,
-                    &Self::freeze_key(token_id, account),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(amt)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_TOKENS,
+                &Self::freeze_key(token_id, account),
+                &bytes,
+            );
         }
     }
 
     fn persist_kill(&self, token_id: &[u8; 32], state: &KillSwitchState) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(state) {
-                let _ = storage.put(
-                    tenzro_storage::CF_TOKENS,
-                    &Self::kill_key(token_id),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(state)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_TOKENS,
+                &Self::kill_key(token_id),
+                &bytes,
+            );
         }
     }
 

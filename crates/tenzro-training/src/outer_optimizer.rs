@@ -1,4 +1,4 @@
-//! Outer optimizer for Decoupled DiLoCo — Nesterov-momentum SGD applied by
+//! Outer optimizer — Nesterov-momentum SGD applied by
 //! the syncer to the aggregated outer gradient before committing the new
 //! parameter-fragment state.
 //!
@@ -11,12 +11,12 @@ use ndarray::{Array1, ArrayView1, ArrayViewMut1};
 /// Configuration for the Nesterov-momentum outer SGD step.
 #[derive(Debug, Clone, Copy)]
 pub struct NesterovSgdConfig {
-    /// Outer learning rate η. DiLoCo paper default: 0.7.
+    /// Outer learning rate η. Default: 0.7.
     pub lr: f32,
-    /// Nesterov momentum coefficient μ. DiLoCo paper default: 0.9.
+    /// Nesterov momentum coefficient μ. Default: 0.9.
     pub momentum: f32,
     /// Optional adaptive outer-LR scaling driven by inter-trainer gradient
-    /// agreement (INTELLECT-3 pattern). `None` disables scaling.
+    /// agreement. `None` disables scaling.
     pub adaptive_lr: Option<AdaptiveLrConfig>,
 }
 
@@ -36,7 +36,7 @@ impl Default for NesterovSgdConfig {
 /// the mean cosine similarity between each trainer's outer gradient and the
 /// aggregate.
 ///
-/// Rationale (INTELLECT-3, Prime Intellect 2025): when trainer replicas
+/// Rationale: when trainer replicas
 /// diverge (low agreement), a large outer step amplifies the noise; when they
 /// agree, the aggregate direction is trustworthy and a full-strength step is
 /// safe.
@@ -110,7 +110,7 @@ impl NesterovSgdState {
 
     /// Apply one outer Nesterov step.
     ///
-    /// Update rule (matches DiLoCo paper):
+    /// Update rule:
     ///   v ← μ · v + ∇
     ///   θ ← θ − η · (μ · v + ∇)
     ///
@@ -172,6 +172,23 @@ impl NesterovSgdState {
 
     pub fn velocity(&self) -> &Array1<f32> {
         &self.velocity
+    }
+}
+
+/// Stateless outer update for sparse error-feedback runs. Under [`OuterUpdateMode::SparseEf`]
+/// the momentum-equivalent state lives in the trainer-side error-feedback
+/// accumulator ([`crate::sparse::ErrorFeedback`]), not in the syncer, so the
+/// syncer applies the aggregated sparse update directly at the outer LR with no
+/// velocity buffer.
+///
+/// Update rule:
+///   θ ← θ − η · ḡ
+///
+/// where `ḡ` is the aggregated (densified, zero-filled) sparse outer gradient.
+pub fn sparse_ef_step(mut params: ArrayViewMut1<'_, f32>, outer_grad: ArrayView1<'_, f32>, lr: f32) {
+    debug_assert_eq!(params.len(), outer_grad.len());
+    for (p, g) in params.iter_mut().zip(outer_grad.iter()) {
+        *p -= lr * (*g);
     }
 }
 
@@ -255,6 +272,17 @@ mod tests {
         assert!((cfg.scale_for_agreement(-0.5) - 0.2).abs() < 1e-6);
         assert!((cfg.scale_for_agreement(0.5) - 0.6).abs() < 1e-6);
         assert!((cfg.scale_for_agreement(2.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sparse_ef_step_applies_lr_directly() {
+        // No momentum buffer: θ ← θ − η·ḡ, one shot.
+        let mut params = arr1(&[1.0_f32, 2.0, 3.0]);
+        let grad = arr1(&[1.0_f32, 0.0, -1.0]);
+        sparse_ef_step(params.view_mut(), grad.view(), 0.7);
+        assert!((params[0] - 0.3).abs() < 1e-6, "{}", params[0]);
+        assert!((params[1] - 2.0).abs() < 1e-6, "{}", params[1]);
+        assert!((params[2] - 3.7).abs() < 1e-6, "{}", params[2]);
     }
 
     #[test]

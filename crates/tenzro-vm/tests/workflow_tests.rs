@@ -1,8 +1,8 @@
 //! End-to-end agentic commerce, trading, payments, and automation
 //! workflows across EVM, SVM, and Canton/DAML VMs.
 //!
-//! These tests exercise the real executors (revm for EVM, solana_rbpf
-//! for SVM, tonic gRPC for Canton/DAML) with minimal hand-crafted
+//! These tests exercise the real executors (revm for EVM, the SPL/native
+//! dispatch path for SVM, tonic gRPC for Canton/DAML) with minimal hand-crafted
 //! bytecode / payloads so the suite is robust across backend version
 //! bumps. Canton tests are gated on a live participant probe and
 //! early-return with `tracing::warn!` when no participant is reachable.
@@ -469,12 +469,13 @@ mod evm_workflows {
 // SVM workflows
 // ============================================================================
 //
-// NOTE: SvmExecutor::execute_transaction only invokes real solana_rbpf
-// when the transaction data begins with the ELF magic `\x7fELF`. For
-// non-ELF payloads the dispatch path still runs — address routing,
-// nonce increment, gas accounting — but rbpf is not invoked. These
-// tests intentionally use non-ELF payloads and assert only on the
-// dispatch-level behavior: success, nonce bump, and VM-type routing.
+// NOTE: SvmExecutor::execute_transaction only invokes the real solana-svm
+// SBF processor (under the `svm-full` feature) when the transaction data
+// begins with the ELF magic `\x7fELF`. For non-ELF payloads the dispatch
+// path still runs — address routing, nonce increment, gas accounting — but
+// the SBF processor is not invoked. These tests intentionally use non-ELF
+// payloads and assert only on the dispatch-level behavior: success, nonce
+// bump, and VM-type routing.
 
 mod svm_workflows {
     use super::helpers::*;

@@ -193,7 +193,7 @@ mod onnx_backend {
                 let mut out = Vec::with_capacity(self.context_length);
                 let pad_value = *history.first().unwrap_or(&0.0);
                 let pad_len = self.context_length - history.len();
-                out.extend(std::iter::repeat(pad_value).take(pad_len));
+                out.extend(std::iter::repeat_n(pad_value, pad_len));
                 out.extend_from_slice(history);
                 out
             }

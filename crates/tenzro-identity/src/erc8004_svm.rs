@@ -592,9 +592,7 @@ fn bs58_encode(bytes: &[u8]) -> String {
         }
         out.push(B58_ALPHABET[remainder as usize]);
     }
-    for _ in 0..leading_zeros {
-        out.push(b'1');
-    }
+    out.extend(std::iter::repeat_n(b'1', leading_zeros));
     out.reverse();
     String::from_utf8(out).expect("base58 alphabet is ASCII")
 }

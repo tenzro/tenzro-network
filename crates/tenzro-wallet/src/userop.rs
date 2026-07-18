@@ -420,7 +420,7 @@ pub fn pack_validator_signature(validator_addr: &[u8], module_signature: &[u8]) 
     let n = validator_addr.len().min(20);
     // Left-pad if caller passed fewer than 20 bytes (uncommon but defensive).
     if n < 20 {
-        out.extend(std::iter::repeat(0u8).take(20 - n));
+        out.extend(std::iter::repeat_n(0u8, 20 - n));
     }
     out.extend_from_slice(&validator_addr[..n]);
     out.extend_from_slice(module_signature);
@@ -495,8 +495,8 @@ mod tests {
     fn hash_changes_with_entry_point() {
         let op = sample_op();
         assert_ne!(
-            op.eip712_hash(1337, &vec![0xaa; 20]),
-            op.eip712_hash(1337, &vec![0xbb; 20])
+            op.eip712_hash(1337, &[0xaa; 20]),
+            op.eip712_hash(1337, &[0xbb; 20])
         );
     }
 

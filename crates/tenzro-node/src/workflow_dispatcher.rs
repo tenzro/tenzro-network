@@ -51,10 +51,10 @@ impl StepDispatcher for NodeStepDispatcher {
             "tool_name": tool_name,
             "params": params,
         });
-        if let Some(w) = payer_wallet {
-            if let serde_json::Value::Object(obj) = &mut p {
-                obj.insert("payer_wallet".to_string(), json!(w));
-            }
+        if let Some(w) = payer_wallet
+            && let serde_json::Value::Object(obj) = &mut p
+        {
+            obj.insert("payer_wallet".to_string(), json!(w));
         }
         let result = crate::rpc::handle_use_tool_external(&self.node, p, api_key)
             .await
@@ -73,10 +73,10 @@ impl StepDispatcher for NodeStepDispatcher {
             "knowledge_id": knowledge_id,
             "params": params,
         });
-        if let Some(w) = payer_wallet {
-            if let serde_json::Value::Object(obj) = &mut p {
-                obj.insert("payer_wallet".to_string(), json!(w));
-            }
+        if let Some(w) = payer_wallet
+            && let serde_json::Value::Object(obj) = &mut p
+        {
+            obj.insert("payer_wallet".to_string(), json!(w));
         }
         let result = crate::rpc::handle_use_knowledge_external(&self.node, p, api_key)
             .await

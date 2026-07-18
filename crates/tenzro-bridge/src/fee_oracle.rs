@@ -62,6 +62,9 @@ impl BridgeAdapterId {
         }
     }
 
+    // Returns `Option<Self>` rather than the `Result` required by `FromStr`, so
+    // the standard trait signature does not fit.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "layerzero" | "lz" => Some(Self::LayerZero),
@@ -263,7 +266,7 @@ impl BridgeFeeOracle for GovernanceSetFeeOracle {
 }
 
 /// Chainlink Data Feed-backed oracle. Reads `(destination_native / USD)`
-/// + `(TNZO / USD)` and derives the cross-feed rate. Falls back to the
+/// and `(TNZO / USD)` and derives the cross-feed rate. Falls back to the
 /// inner [`GovernanceSetFeeOracle`] when a feed isn't configured for the
 /// requested pair, the live feed is stale, or the on-chain answer is
 /// invalid.

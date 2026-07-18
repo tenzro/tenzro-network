@@ -734,7 +734,7 @@ pub fn detect_node_profile() -> NodeProfile {
             }
         })
         .collect();
-    devices.sort_by(|a, b| b.mem_free.cmp(&a.mem_free));
+    devices.sort_by_key(|b| std::cmp::Reverse(b.mem_free));
 
     NodeProfile {
         llama_commit: LLAMA_CPP_COMMIT.to_string(),
