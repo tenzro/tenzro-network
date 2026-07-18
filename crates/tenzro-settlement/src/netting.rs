@@ -117,6 +117,10 @@ pub fn compute_batch_id(sorted_obligations: &[Obligation]) -> String {
 /// Returned as `(credit, debit)` totals to stay in u128.
 type PositionMap = BTreeMap<(String, [u8; 32]), (u128, u128)>;
 
+/// Per-asset reduced positions grouped as `(debtors, creditors)`, each a list
+/// of `(party_address, net_amount)` pairs.
+type PerAssetLedger = BTreeMap<String, (Vec<([u8; 32], u128)>, Vec<([u8; 32], u128)>)>;
+
 fn accumulate(
     positions: &mut PositionMap,
     asset: &str,
@@ -228,8 +232,7 @@ fn compute_netting(
     let positions = net_positions(&obligations)?;
 
     // Group reduced positions by asset, deterministically.
-    let mut per_asset: BTreeMap<String, (Vec<([u8; 32], u128)>, Vec<([u8; 32], u128)>)> =
-        BTreeMap::new();
+    let mut per_asset: PerAssetLedger = BTreeMap::new();
     for ((asset, party), (is_creditor, net)) in reduce(&positions) {
         let entry = per_asset.entry(asset).or_default();
         if is_creditor {

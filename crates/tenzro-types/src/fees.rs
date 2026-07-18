@@ -18,6 +18,52 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Upper bound on the per-app developer margin (basis points, 100 = 1%)
+///
+/// Applications registered in the on-chain app registry declare a `margin_bps`
+/// that is added on top of the network cost when their end users are settled
+/// through `tenzro_settleAuthorized`. Developers control their own fiat pricing,
+/// so this cap is abuse and fat-finger protection — not consumer protection.
+///
+/// Default cap: 2000 bps (20%).
+pub const MAX_DEVELOPER_MARGIN_BPS: u32 = 2000;
+
+/// Applies a developer margin to a network cost.
+///
+/// Returns `user_pays = network_cost * (1 + margin_bps / 10000)`, or `None`
+/// when `margin_bps` exceeds [`MAX_DEVELOPER_MARGIN_BPS`] or the arithmetic
+/// overflows.
+pub fn apply_developer_margin(network_cost: u128, margin_bps: u32) -> Option<u128> {
+    if margin_bps > MAX_DEVELOPER_MARGIN_BPS {
+        return None;
+    }
+    let margin = network_cost
+        .checked_mul(margin_bps as u128)?
+        .checked_div(10000)?;
+    network_cost.checked_add(margin)
+}
+
+/// Network commission on `tenzro_settleAuthorized` executions (basis points).
+///
+/// When a developer-signed [`crate::SettlementAuthorization`] moves TNZO from
+/// an app wallet to a payer, this fraction of the authorized amount routes to
+/// the network treasury instead — the same 0.5% rate as the settlement
+/// engine's network fee. The payer receives `amount_tnzo` minus this
+/// commission; the app wallet is debited exactly `amount_tnzo`.
+pub const SETTLEMENT_AUTHORIZATION_COMMISSION_BPS: u32 = 50;
+
+/// Splits an authorized settlement amount into (payer_net, commission).
+///
+/// `commission = amount * SETTLEMENT_AUTHORIZATION_COMMISSION_BPS / 10000`
+/// (integer floor), `payer_net = amount - commission`. Cannot overflow for
+/// any `u128` input because the multiply is decomposed.
+pub fn split_settlement_authorization(amount: u128) -> (u128, u128) {
+    let bps = SETTLEMENT_AUTHORIZATION_COMMISSION_BPS as u128;
+    // Quotient/remainder decomposition avoids u128 overflow on amount * bps.
+    let commission = (amount / 10000) * bps + (amount % 10000) * bps / 10000;
+    (amount - commission, commission)
+}
+
 /// Service fees for Tenzro Ledger operations, all denominated in TNZO
 ///
 /// These fees are charged for ledger-level operations like identity registration,
@@ -329,5 +375,27 @@ mod tests {
         let result = rates.calculate_inference_commission(u128::MAX);
         // We expect None due to overflow in checked_mul
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_apply_developer_margin() {
+        const ONE_HUNDRED_TNZO: u128 = 100_000_000_000_000_000_000;
+
+        // 10% margin on 100 TNZO -> 110 TNZO
+        let user_pays = apply_developer_margin(ONE_HUNDRED_TNZO, 1000).unwrap();
+        assert_eq!(user_pays, 110_000_000_000_000_000_000);
+
+        // Zero margin is identity
+        assert_eq!(apply_developer_margin(ONE_HUNDRED_TNZO, 0), Some(ONE_HUNDRED_TNZO));
+
+        // Cap itself is accepted
+        let at_cap = apply_developer_margin(ONE_HUNDRED_TNZO, MAX_DEVELOPER_MARGIN_BPS).unwrap();
+        assert_eq!(at_cap, 120_000_000_000_000_000_000);
+
+        // Above the cap is rejected
+        assert!(apply_developer_margin(ONE_HUNDRED_TNZO, MAX_DEVELOPER_MARGIN_BPS + 1).is_none());
+
+        // Overflow returns None instead of panicking
+        assert!(apply_developer_margin(u128::MAX, 1).is_none());
     }
 }

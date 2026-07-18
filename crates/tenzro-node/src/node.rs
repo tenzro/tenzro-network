@@ -100,6 +100,14 @@ impl StakingSlashingCallback {
 }
 
 impl StakingSlashingCallback {
+    /// Slash a validator that co-signed a ZK commitment whose fraud proof was
+    /// upheld. Routes through the shared consensus-offence path (10% stake +
+    /// pending-queue drop + registry jail), identical treatment to
+    /// equivocation. `height` is the finalized height the fraud was resolved at.
+    pub fn report_zk_fraud(&self, validator: &Address, height: u64, reason: String) {
+        self.slash_for_consensus_offence(validator, height, reason);
+    }
+
     /// Shared slash path for consensus offences: slash 10% of the
     /// validator's stake, drop them from the next-epoch pending queue,
     /// and jail them in the permissionless registry.
@@ -532,16 +540,16 @@ impl tenzro_token::governance::ProposalExecutor for TenzroProposalExecutor {
                     surplus_burn_bps,
                     "Applied SeedAgentEarmarkUpdate via governance"
                 );
-                if let Some(tx) = &self.seed_agent_broadcast {
-                    if let Err(e) = tx.send(
+                if let Some(tx) = &self.seed_agent_broadcast
+                    && let Err(e) = tx.send(
                         tenzro_token::SeedAgentGossipMessage::EarmarkUpdated(next),
-                    ) {
-                        tracing::warn!(
-                            proposal_id = %proposal.proposal_id,
-                            error = %e,
-                            "Failed to enqueue SeedAgent EarmarkUpdated gossip"
-                        );
-                    }
+                    )
+                {
+                    tracing::warn!(
+                        proposal_id = %proposal.proposal_id,
+                        error = %e,
+                        "Failed to enqueue SeedAgent EarmarkUpdated gossip"
+                    );
                 }
                 Ok(())
             }
@@ -569,19 +577,19 @@ impl tenzro_token::governance::ProposalExecutor for TenzroProposalExecutor {
                     name = %name,
                     "Applied SeedAgentCharterUpsert via governance"
                 );
-                if let Some(tx) = &self.seed_agent_broadcast {
-                    if let Err(e) = tx.send(
+                if let Some(tx) = &self.seed_agent_broadcast
+                    && let Err(e) = tx.send(
                         tenzro_token::SeedAgentGossipMessage::CharterUpserted(
                             charter_for_gossip,
                         ),
-                    ) {
-                        tracing::warn!(
-                            proposal_id = %proposal.proposal_id,
-                            charter_id = ?charter_id,
-                            error = %e,
-                            "Failed to enqueue SeedAgent CharterUpserted gossip"
-                        );
-                    }
+                    )
+                {
+                    tracing::warn!(
+                        proposal_id = %proposal.proposal_id,
+                        charter_id = ?charter_id,
+                        error = %e,
+                        "Failed to enqueue SeedAgent CharterUpserted gossip"
+                    );
                 }
                 Ok(())
             }
@@ -611,20 +619,20 @@ impl tenzro_token::governance::ProposalExecutor for TenzroProposalExecutor {
                     status = %status,
                     "Applied SeedAgentStatusSet via governance"
                 );
-                if let Some(tx) = &self.seed_agent_broadcast {
-                    if let Err(e) = tx.send(
+                if let Some(tx) = &self.seed_agent_broadcast
+                    && let Err(e) = tx.send(
                         tenzro_token::SeedAgentGossipMessage::AgentStatusChanged {
                             agent_did: agent_did.clone(),
                             status: target,
                         },
-                    ) {
-                        tracing::warn!(
-                            proposal_id = %proposal.proposal_id,
-                            agent_did = %agent_did,
-                            error = %e,
-                            "Failed to enqueue SeedAgent AgentStatusChanged gossip"
-                        );
-                    }
+                    )
+                {
+                    tracing::warn!(
+                        proposal_id = %proposal.proposal_id,
+                        agent_did = %agent_did,
+                        error = %e,
+                        "Failed to enqueue SeedAgent AgentStatusChanged gossip"
+                    );
                 }
                 Ok(())
             }
@@ -1005,6 +1013,8 @@ impl tenzro_payments::gateway::SettlementCallback for TnzoSettlementCallback {
         amount: u128,
         asset: &str,
         receipt_id: &str,
+        app_wallet: Option<&[u8]>,
+        margin_bps: u32,
     ) -> std::result::Result<String, tenzro_payments::PaymentError> {
         use tenzro_types::primitives::{ChainId, Nonce, Signature};
         use tenzro_types::transaction::{SignedTransaction, Transaction, TransactionType};
@@ -1012,6 +1022,7 @@ impl tenzro_payments::gateway::SettlementCallback for TnzoSettlementCallback {
         // Convert byte slices to 32-byte Address
         let payer_addr = bytes_to_address(payer);
         let payee_addr = bytes_to_address(payee);
+        let app_wallet_addr = app_wallet.map(bytes_to_address);
 
         // TNZO settlements move balance consensus-mediated: a system-key signed
         // `X402Settle` tx that executes through MultiVmRuntime in a finalized
@@ -1030,6 +1041,8 @@ impl tenzro_payments::gateway::SettlementCallback for TnzoSettlementCallback {
                     payee: payee_addr,
                     amount,
                     payment_id: receipt_id.to_string(),
+                    app_wallet: app_wallet_addr,
+                    margin_bps,
                 },
                 GAS_X402_SETTLE_TX_LIMIT,
                 X402_SETTLE_GAS_PRICE,
@@ -1064,16 +1077,15 @@ impl tenzro_payments::gateway::SettlementCallback for TnzoSettlementCallback {
                 })?;
 
             let sender = self.event_sender.lock().clone();
-            if let Some(sender) = sender {
-                if let Err(e) = sender
+            if let Some(sender) = sender
+                && let Err(e) = sender
                     .send(NodeEvent::LocallyAdmittedTransaction(signed_tx))
                     .await
-                {
-                    warn!(
-                        "x402 settle admitted but gossip enqueue failed (tx {}): {}",
-                        hash_str, e
-                    );
-                }
+            {
+                warn!(
+                    "x402 settle admitted but gossip enqueue failed (tx {}): {}",
+                    hash_str, e
+                );
             }
 
             info!(
@@ -1795,6 +1807,14 @@ pub struct TenzroNode {
     /// `CF_API_KEYS` via [`crate::api_key::ApiKeyManager::new`].
     api_key_manager: Option<Arc<crate::api_key::ApiKeyManager>>,
 
+    /// Permissionless application registry for developer payments.
+    /// Developers register apps by signing with their TDIP DID; records
+    /// persist to `CF_SETTLEMENTS` under `app:` and hydrate on startup.
+    /// Consumed by the settlement-authorization path to verify
+    /// developer-signed settlements and apply the declared margin.
+    /// `None` until storage is initialized.
+    app_registry: Option<Arc<crate::app_registry::AppRegistry>>,
+
     /// MCP plugin host. Runs operator-curated custom + third-party
     /// MCPs (stdio subprocesses, remote Streamable HTTP, legacy SSE).
     /// Holds the sealed credential vault for operator's upstream API
@@ -2108,6 +2128,14 @@ pub struct TenzroNode {
     /// `PRECOMPILE_ZK_VERIFY` precompile in the EVM. See
     /// `tenzro_vm::precompiles::ZkCommitmentRegistry`.
     zk_commitment_registry: Arc<tenzro_vm::precompiles::ZkCommitmentRegistry>,
+
+    /// Quorum-gated attestation store for ZK proof commitments. A commitment is
+    /// admitted to [`Self::zk_commitment_registry`] only after `2f+1`
+    /// stake-weight of the active validator set has independently re-run
+    /// `verify_proof_envelope` and co-signed it, and it remains slashable inside
+    /// a fraud-proof window. Present only on nodes that hold a validator BLS key.
+    /// See [`tenzro_consensus::ZkQuorumStore`].
+    zk_quorum_store: Option<Arc<tenzro_consensus::ZkQuorumStore>>,
 
     /// EIP-7702 Type-4 delegation registry. Records active authority →
     /// target delegations applied via `tenzro_install7702Delegation`.
@@ -2483,6 +2511,7 @@ impl TenzroNode {
             fee_collector: None,
             auth_engine: None,
             api_key_manager: None,
+            app_registry: None,
             mcp_plugin_host: None,
             workflow_executor: parking_lot::Mutex::new(None),
             canton_analytics: None,
@@ -2569,6 +2598,7 @@ impl TenzroNode {
             tee_provider: None,
             tee_registry: None,
             zk_commitment_registry: Arc::new(tenzro_vm::precompiles::ZkCommitmentRegistry::new()),
+            zk_quorum_store: None,
             eip7702_delegation_registry: Arc::new(tenzro_vm::eip7702::DelegationRegistry::new()),
             permit2_nonce_bitmap: Arc::new(tenzro_vm::permit2::Permit2NonceBitmap::new()),
             secure_mint_registry: Arc::new(tenzro_vm::secure_mint::SecureMintRegistry::new()),
@@ -2938,20 +2968,20 @@ impl TenzroNode {
         // slivers it previously attested to. Only runs for validators (the
         // committee IS the validator set) with storage, network, and consensus
         // all present.
-        if should_init_consensus {
-            if let (Some(network), Some(consensus), Some(storage), Some(da_peers)) = (
+        if should_init_consensus
+            && let (Some(network), Some(consensus), Some(storage), Some(da_peers)) = (
                 self.network.clone(),
                 self.consensus.clone(),
                 self.storage.clone(),
                 self.da_peer_registry.clone(),
-            ) {
-                match self
-                    .init_committee_da(network, consensus, storage, da_peers)
-                    .await
-                {
-                    Ok(()) => info!("Committee-resident DA backend + server wired"),
-                    Err(e) => warn!("Committee-DA init failed (continuing): {}", e),
-                }
+            )
+        {
+            match self
+                .init_committee_da(network, consensus, storage, da_peers)
+                .await
+            {
+                Ok(()) => info!("Committee-resident DA backend + server wired"),
+                Err(e) => warn!("Committee-DA init failed (continuing): {}", e),
             }
         }
 
@@ -2995,53 +3025,53 @@ impl TenzroNode {
         // charters. Gated by the consensus leader so only one validator
         // mutates per tick — convergence on other replicas happens via the
         // `tenzro/seed-agents` gossipsub topic.
-        if let Some(seed_agents) = self.seed_agent_manager.clone() {
-            if self.config.roles.is_validator() {
-                let mut daemon =
-                    tenzro_token::SeedAgentDaemon::new(seed_agents.clone());
-                if let Some(tx) = self.seed_agent_gossip_tx.clone() {
-                    daemon = daemon.with_gossip(tx);
-                }
-                // Tick-authority gate: this validator is authorised iff it
-                // is the elected leader for any of the next 32 views. The
-                // window is wide enough that one validator in a healthy
-                // 10-node fleet will consistently win the gate per 6-hour
-                // poll interval; if consensus has stalled or this node is
-                // not in the validator set, the conservative `Err` path
-                // inside `is_leader_in_next_views` returns `true`, but the
-                // earmark mutations are still serialised by the local
-                // manager's locks so divergence is bounded.
-                if let Some(consensus) = self.consensus.clone() {
-                    let gate: tenzro_token::TickAuthorityFn =
-                        Arc::new(move || consensus.is_leader_in_next_views(32));
-                    daemon = daemon.with_tick_authority(gate);
-                }
-                // Surplus-disposition callback (Spec 10 Task #44). When the
-                // wind-down sweep reports a non-zero surplus we log + emit
-                // gossip; the actual burn / treasury-deposit happens via a
-                // dedicated `ProposalType::SeedAgentSurplusDispose` governance
-                // proposal that consumes the disposition record. Keeping the
-                // daemon out of the supply-mutation path is intentional —
-                // sensitive flag-day economic events must traverse the
-                // proposal pipeline so they're recorded in the governance
-                // log and bounded by tally quorum.
-                let surplus_cb: tenzro_token::SurplusDispositionFn =
-                    Arc::new(|disposition| {
-                        info!(
-                            total = %disposition.total_wei,
-                            burn = %disposition.burn_wei,
-                            treasury = %disposition.treasury_wei,
-                            burn_bps = disposition.surplus_burn_bps,
-                            "SeedAgent surplus disposed at sunset — file SeedAgentSurplusDispose proposal to enact burn + treasury deposit"
-                        );
-                        Ok(())
-                    });
-                daemon = daemon.with_surplus_disposition(surplus_cb);
-                let daemon_arc = Arc::new(daemon);
-                daemon_arc.clone().spawn();
-                self.seed_agent_daemon = Some(daemon_arc);
-                info!("SeedAgentDaemon spawned (validator role, leader-gated)");
+        if let Some(seed_agents) = self.seed_agent_manager.clone()
+            && self.config.roles.is_validator()
+        {
+            let mut daemon =
+                tenzro_token::SeedAgentDaemon::new(seed_agents.clone());
+            if let Some(tx) = self.seed_agent_gossip_tx.clone() {
+                daemon = daemon.with_gossip(tx);
             }
+            // Tick-authority gate: this validator is authorised iff it
+            // is the elected leader for any of the next 32 views. The
+            // window is wide enough that one validator in a healthy
+            // 10-node fleet will consistently win the gate per 6-hour
+            // poll interval; if consensus has stalled or this node is
+            // not in the validator set, the conservative `Err` path
+            // inside `is_leader_in_next_views` returns `true`, but the
+            // earmark mutations are still serialised by the local
+            // manager's locks so divergence is bounded.
+            if let Some(consensus) = self.consensus.clone() {
+                let gate: tenzro_token::TickAuthorityFn =
+                    Arc::new(move || consensus.is_leader_in_next_views(32));
+                daemon = daemon.with_tick_authority(gate);
+            }
+            // Surplus-disposition callback (Spec 10 Task #44). When the
+            // wind-down sweep reports a non-zero surplus we log + emit
+            // gossip; the actual burn / treasury-deposit happens via a
+            // dedicated `ProposalType::SeedAgentSurplusDispose` governance
+            // proposal that consumes the disposition record. Keeping the
+            // daemon out of the supply-mutation path is intentional —
+            // sensitive flag-day economic events must traverse the
+            // proposal pipeline so they're recorded in the governance
+            // log and bounded by tally quorum.
+            let surplus_cb: tenzro_token::SurplusDispositionFn =
+                Arc::new(|disposition| {
+                    info!(
+                        total = %disposition.total_wei,
+                        burn = %disposition.burn_wei,
+                        treasury = %disposition.treasury_wei,
+                        burn_bps = disposition.surplus_burn_bps,
+                        "SeedAgent surplus disposed at sunset — file SeedAgentSurplusDispose proposal to enact burn + treasury deposit"
+                    );
+                    Ok(())
+                });
+            daemon = daemon.with_surplus_disposition(surplus_cb);
+            let daemon_arc = Arc::new(daemon);
+            daemon_arc.clone().spawn();
+            self.seed_agent_daemon = Some(daemon_arc);
+            info!("SeedAgentDaemon spawned (validator role, leader-gated)");
         }
 
         // 8. Initialize settlement
@@ -3223,12 +3253,13 @@ impl TenzroNode {
         // 15. Clean up stale model services from previous session
         self.cleanup_expired_model_services();
 
-        // 16. Spawn the streaming cursor GC. The handle is dropped here —
-        // the task lifetime is bound to the StreamCursorStore Arc inside.
-        // It runs until the process exits.
-        let _ = self
-            .stream_cursors
-            .spawn_gc(std::time::Duration::from_secs(30));
+        // 16. Spawn the streaming cursor GC. The join handle is intentionally
+        // detached — the task lifetime is bound to the StreamCursorStore Arc
+        // inside, and it runs until the process exits.
+        drop(
+            self.stream_cursors
+                .spawn_gc(std::time::Duration::from_secs(30)),
+        );
 
         // Mark as running
         *self.state.write() = NodeState::Running;
@@ -3426,6 +3457,15 @@ impl TenzroNode {
         )?;
         self.api_key_manager = Some(api_keys);
 
+        // Permissionless application registry for developer payments.
+        // Hydrates `AppRecord` rows from `CF_SETTLEMENTS` (`app:` prefix)
+        // so registered apps survive restart and every node converges on
+        // the same registry.
+        let app_registry = crate::app_registry::AppRegistry::new(
+            store.clone() as Arc<dyn tenzro_storage::KvStore>,
+        )?;
+        self.app_registry = Some(app_registry);
+
         // MCP plugin host. Lets the operator broker custom + third-
         // party MCPs (stdio + remote Streamable HTTP + legacy SSE)
         // through their Tenzro node. Initializes the sealed credential
@@ -3452,8 +3492,7 @@ impl TenzroNode {
                 return Err(NodeError::Internal(format!(
                     "mcp_plugin_host.master_secret_hex: expected 32 bytes, got {}",
                     bytes.len()
-                ))
-                .into());
+                )));
             }
             let mut ikm = [0u8; 32];
             ikm.copy_from_slice(&bytes);
@@ -4505,6 +4544,11 @@ impl TenzroNode {
         let local_pq_vk = pq_signing_key.verifying_key_bytes().to_vec();
         let bls_signing_key = crate::keygen::load_validator_bls_key(&self.config.data_dir)?;
         let local_bls_vk = bls_signing_key.public_key().to_bytes().to_vec();
+        // Capture the BLS secret bytes before `bls_signing_key` is moved into
+        // the consensus engine below, so the G6 batch-availability store can
+        // rebuild an independent handle to the same key (BLS keypairs are not
+        // `Clone` by design — same reason the hybrid signer rebuilds from bytes).
+        let bls_secret_bytes = bls_signing_key.secret_key().to_bytes();
 
         // Build a sibling `InMemoryHybridSigner` from the same key material
         // so webhook-sourced TDIP revocation paths (e.g. Stripe SPT
@@ -4782,12 +4826,70 @@ impl TenzroNode {
             engine = engine
                 .with_audit_storage(storage.clone() as Arc<dyn tenzro_storage::KvStore>);
             info!("Equivocation audit store wired to consensus engine (CF_AUDIT)");
+
+            // Wire the G6 batch-availability store: the producer path snapshots
+            // pending transactions into a batch, disseminates it over
+            // `tenzro/batches`, and collects a 2f+1 BLS-aggregated availability
+            // certificate so the ordering path can reference certified batches
+            // by hash. Durable (`CF_AUDIT`), so certified-but-unexecuted batches
+            // survive a restart. Rebuilds an independent BLS handle from the
+            // secret bytes captured before the engine consumed the original.
+            match tenzro_crypto::bls::BlsSecretKey::from_bytes(&bls_secret_bytes) {
+                Ok(sk) => {
+                    let batch_bls = Arc::new(
+                        tenzro_crypto::bls::BlsKeyPair::from_secret_key(sk),
+                    );
+                    let batch_store = Arc::new(
+                        tenzro_consensus::BatchCertStore::with_storage(
+                            batch_bls,
+                            address,
+                            storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                        ),
+                    );
+                    engine = engine.with_batch_cert_store(batch_store);
+                    info!("Batch-availability store wired to consensus engine (CF_AUDIT)");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to rebuild BLS key for batch store; batch-availability plane disabled");
+                }
+            }
+
+            // Wire the ZK quorum store: a proof commitment is admitted to the
+            // on-chain `ZkCommitmentRegistry` only once a 2f+1 stake-weight
+            // BLS quorum of validators has each independently re-run
+            // `verify_proof_envelope` and co-signed the 32-byte commitment
+            // hash. The store buffers co-signatures until quorum, then opens
+            // a fraud-proof window during which any staked party can trigger
+            // deterministic re-verification. Durable (`CF_AUDIT`), so open
+            // windows survive a restart. Rebuilds an independent BLS handle
+            // from the secret bytes captured before the engine consumed the
+            // original.
+            match tenzro_crypto::bls::BlsSecretKey::from_bytes(&bls_secret_bytes) {
+                Ok(sk) => {
+                    let zk_bls = Arc::new(
+                        tenzro_crypto::bls::BlsKeyPair::from_secret_key(sk),
+                    );
+                    let zk_store = Arc::new(
+                        tenzro_consensus::ZkQuorumStore::with_storage(
+                            zk_bls,
+                            address,
+                            storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                        ),
+                    );
+                    self.zk_quorum_store = Some(zk_store);
+                    info!("ZK quorum store wired (CF_AUDIT; 2f+1 co-sign gate on commitment attestation)");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to rebuild BLS key for ZK quorum store; commitment quorum gate disabled");
+                }
+            }
         }
 
         // Wire the persistent vote-state store so equivocation can never be
         // self-induced by a crash between sign and broadcast. The store
         // refuses any (view, height, step) ≤ last-persisted, with fsync on
-        // record. Mirrors CometBFT `FilePVLastSignState`.
+        // record. A persisted last-sign-state record preventing double-sign
+        // across restarts.
         //
         // ORDER MATTERS: this MUST run before `resume_from_height` below.
         // `resume_from_height` consults the vote-state store to jump
@@ -5190,12 +5292,14 @@ impl TenzroNode {
         // ModelRegistry::with_storage() scans CF_MODELS for `info:` prefix keys
         // and rehydrates the in-memory catalog so models registered before the
         // restart remain discoverable.
+        let acceptance = self.config.model_licensing.clone();
         let registry = if let Some(ref storage) = self.storage {
-            Arc::new(ModelRegistry::with_storage(
-                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
-            ))
+            Arc::new(
+                ModelRegistry::with_storage(storage.clone() as Arc<dyn tenzro_storage::KvStore>)
+                    .with_acceptance_policy(acceptance),
+            )
         } else {
-            Arc::new(ModelRegistry::new())
+            Arc::new(ModelRegistry::new().with_acceptance_policy(acceptance))
         };
         self.model_registry = Some(registry);
 
@@ -5487,9 +5591,11 @@ impl TenzroNode {
         .await
         {
             Ok(resolver) => {
-                if cfg.pkarr_relay_url.is_some() && cfg.secret_key_seed.is_some() {
+                if let Some(pkarr_relay) = cfg.pkarr_relay_url.as_ref()
+                    && cfg.secret_key_seed.is_some()
+                {
                     info!(
-                        pkarr_relay = %cfg.pkarr_relay_url.as_ref().unwrap(),
+                        pkarr_relay = %pkarr_relay,
                         bind_addr = %cfg.bind_addr,
                         "Tenzro iroh resolver bound (TDIP-anchored, Pkarr discovery via Tenzro relay, A2A + MCP + MoE + infer + http ALPNs registered)"
                     );
@@ -5550,6 +5656,36 @@ impl TenzroNode {
                                         supervisor = supervisor
                                             .with_kernel(std::path::PathBuf::from(kernel));
                                     }
+                                    // Hardened jailer defaults drop each microVM
+                                    // to an unprivileged uid/gid; operators with a
+                                    // dedicated system account override the pair.
+                                    if let (Ok(uid), Ok(gid)) = (
+                                        std::env::var("TENZRO_JAILER_UID"),
+                                        std::env::var("TENZRO_JAILER_GID"),
+                                    ) {
+                                        if let (Ok(uid), Ok(gid)) =
+                                            (uid.parse::<u32>(), gid.parse::<u32>())
+                                        {
+                                            supervisor =
+                                                supervisor.with_jailer_identity(uid, gid);
+                                        }
+                                    }
+                                    if let Ok(cg) =
+                                        std::env::var("TENZRO_JAILER_CGROUP_VERSION")
+                                    {
+                                        if let Ok(cg) = cg.parse::<u8>() {
+                                            let sc = std::env::var(
+                                                "TENZRO_JAILER_SECCOMP_LEVEL",
+                                            )
+                                            .ok()
+                                            .and_then(|s| s.parse::<u8>().ok())
+                                            .unwrap_or(
+                                                crate::machines::DEFAULT_JAILER_SECCOMP_LEVEL,
+                                            );
+                                            supervisor =
+                                                supervisor.with_jailer_isolation(cg, sc);
+                                        }
+                                    }
                                     self.machine_supervisor = Some(Arc::new(supervisor));
                                     info!("Machine supervisor wired (firecracker feature)");
                                 }
@@ -5587,9 +5723,9 @@ impl TenzroNode {
         // map (the streaming-escrow deposit ledger). The shared state is built
         // once here and handed to whichever runtimes this node's roles enable.
         if (self.config.roles.serves_storage() || self.config.roles.serves_ai())
-            && self.staking.is_some()
+            && let Some(staking) = self.staking.as_ref()
         {
-            let staking = self.staking.as_ref().expect("checked above").clone();
+            let staking = staking.clone();
             let provider_address = self
                 .identity_registry
                 .as_ref()
@@ -5772,45 +5908,45 @@ impl TenzroNode {
         // is automatic: the orchestrator write-through to CF_SETTLEMENTS makes
         // the expired state visible on the next hydrate, and `expire_sweep` is
         // idempotent under the orchestrator's in-flight guard.
-        if self.config.roles.is_validator() {
-            if let Some(escrow_manager) = self.escrow_manager.clone() {
-                let saga_orchestrator = self.saga_orchestrator.clone();
-                let consensus = self.consensus.clone();
-                tokio::spawn(async move {
-                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
-                        SAGA_EXPIRY_SWEEP_INTERVAL_SECS,
-                    ));
-                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    // Skip the immediate first tick — nothing is expired at boot.
+        if self.config.roles.is_validator()
+            && let Some(escrow_manager) = self.escrow_manager.clone()
+        {
+            let saga_orchestrator = self.saga_orchestrator.clone();
+            let consensus = self.consensus.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                    SAGA_EXPIRY_SWEEP_INTERVAL_SECS,
+                ));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // Skip the immediate first tick — nothing is expired at boot.
+                ticker.tick().await;
+                let executor =
+                    crate::saga_executor::NodeLegExecutor::new(escrow_manager);
+                loop {
                     ticker.tick().await;
-                    let executor =
-                        crate::saga_executor::NodeLegExecutor::new(escrow_manager);
-                    loop {
-                        ticker.tick().await;
-                        // Leader gate: only the elected leader for the next 32
-                        // views drives the sweep. The conservative `Err` path
-                        // in `is_leader_in_next_views` returns `true` when
-                        // consensus has stalled or this node is outside the
-                        // set, but the in-flight guard still serialises the
-                        // compensation so double-refund is impossible.
-                        let is_authority = consensus
-                            .as_ref()
-                            .map(|c| c.is_leader_in_next_views(32))
-                            .unwrap_or(true);
-                        if !is_authority {
-                            continue;
-                        }
-                        let expired = saga_orchestrator.expire_sweep(&executor).await;
-                        if expired > 0 {
-                            info!(expired, "DvP saga expiry sweep compensated expired sagas");
-                        }
+                    // Leader gate: only the elected leader for the next 32
+                    // views drives the sweep. The conservative `Err` path
+                    // in `is_leader_in_next_views` returns `true` when
+                    // consensus has stalled or this node is outside the
+                    // set, but the in-flight guard still serialises the
+                    // compensation so double-refund is impossible.
+                    let is_authority = consensus
+                        .as_ref()
+                        .map(|c| c.is_leader_in_next_views(32))
+                        .unwrap_or(true);
+                    if !is_authority {
+                        continue;
                     }
-                });
-                info!(
-                    interval_secs = SAGA_EXPIRY_SWEEP_INTERVAL_SECS,
-                    "DvP saga expiry sweep spawned (validator role, leader-gated)"
-                );
-            }
+                    let expired = saga_orchestrator.expire_sweep(&executor).await;
+                    if expired > 0 {
+                        info!(expired, "DvP saga expiry sweep compensated expired sagas");
+                    }
+                }
+            });
+            info!(
+                interval_secs = SAGA_EXPIRY_SWEEP_INTERVAL_SECS,
+                "DvP saga expiry sweep spawned (validator role, leader-gated)"
+            );
         }
 
         // App-hosting placement reconcile. Each node reconciles the leases it
@@ -6647,114 +6783,113 @@ impl TenzroNode {
         // synchronous `ComputeBondManager` API and stamps audit-trail events
         // with the latest finalized height pulled from the consensus engine.
         // ═══════════════════════════════════════════════════════════════════════
-        if self.config.roles.is_validator() {
-            if let (Some(consensus), Some(bonds)) =
+        if self.config.roles.is_validator()
+            && let (Some(consensus), Some(bonds)) =
                 (self.consensus.clone(), self.compute_bond_manager.clone())
-            {
-                let keypair = crate::keygen::load_validator_keypair(&self.config.data_dir)?;
-                let seed_bytes = keypair.secret_key().as_bytes();
-                if seed_bytes.len() != 32 {
-                    return Err(NodeError::Other(format!(
-                        "Validator Ed25519 seed has unexpected length {} (want 32)",
-                        seed_bytes.len()
-                    )));
-                }
-                let mut seed = [0u8; 32];
-                seed.copy_from_slice(seed_bytes);
-                let vrf_secret = tenzro_crypto::vrf::VrfSecretKey(seed);
-                let issuer = keypair.address();
+        {
+            let keypair = crate::keygen::load_validator_keypair(&self.config.data_dir)?;
+            let seed_bytes = keypair.secret_key().as_bytes();
+            if seed_bytes.len() != 32 {
+                return Err(NodeError::Other(format!(
+                    "Validator Ed25519 seed has unexpected length {} (want 32)",
+                    seed_bytes.len()
+                )));
+            }
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(seed_bytes);
+            let vrf_secret = tenzro_crypto::vrf::VrfSecretKey(seed);
+            let issuer = keypair.address();
 
-                let height_fn: crate::sla_slashing_bridge::BlockHeightFn = {
-                    let consensus = consensus.clone();
-                    Arc::new(move || consensus.current_finalized_height().0)
-                };
-                let bridge = Arc::new(
-                    crate::sla_slashing_bridge::ComputeBondSlashingBridge::new(bonds, height_fn),
-                );
-                let sla_manager = Arc::new(
-                    tenzro_model::SlaManager::new(issuer, vrf_secret, bridge),
-                );
-                self.sla_manager = Some(sla_manager.clone());
+            let height_fn: crate::sla_slashing_bridge::BlockHeightFn = {
+                let consensus = consensus.clone();
+                Arc::new(move || consensus.current_finalized_height().0)
+            };
+            let bridge = Arc::new(
+                crate::sla_slashing_bridge::ComputeBondSlashingBridge::new(bonds, height_fn),
+            );
+            let sla_manager = Arc::new(
+                tenzro_model::SlaManager::new(issuer, vrf_secret, bridge),
+            );
+            self.sla_manager = Some(sla_manager.clone());
 
-                // Subscribe to `tenzro/sla` so provider responses flow into
-                // `apply_response`. Custom-topic transport with bincode payload
-                // mirrors the agent-messaging pattern (no MessagePayload variant
-                // explosion, no cross-crate type leak of tenzro-model into
-                // tenzro-network). Outstanding probes are correlated by their
-                // 32-byte challenge_nonce (hex-encoded for DashMap key).
-                if let Some(network) = self.network.clone() {
-                    let outstanding = self.sla_outstanding_probes.clone();
-                    let mgr = sla_manager.clone();
-                    tokio::spawn(async move {
-                        match network.subscribe("tenzro/sla").await {
-                            Ok(mut rx) => {
-                                info!("SLA: subscribed to tenzro/sla");
-                                while let Some(msg) = rx.recv().await {
-                                    let data = match msg.payload {
-                                        tenzro_network::MessagePayload::Custom { data, .. } => data,
-                                        _ => continue,
-                                    };
-                                    let response: tenzro_model::SlaResponse =
-                                        match bincode::deserialize(&data) {
-                                            Ok(r) => r,
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    error = %e,
-                                                    "Ignoring non-SlaResponse payload on tenzro/sla"
-                                                );
-                                                continue;
-                                            }
-                                        };
-                                    let nonce_hex = hex::encode(response.challenge_nonce);
-                                    let probe = match outstanding.remove(&nonce_hex) {
-                                        Some((_, p)) => p,
-                                        None => {
+            // Subscribe to `tenzro/sla` so provider responses flow into
+            // `apply_response`. Custom-topic transport with bincode payload
+            // mirrors the agent-messaging pattern (no MessagePayload variant
+            // explosion, no cross-crate type leak of tenzro-model into
+            // tenzro-network). Outstanding probes are correlated by their
+            // 32-byte challenge_nonce (hex-encoded for DashMap key).
+            if let Some(network) = self.network.clone() {
+                let outstanding = self.sla_outstanding_probes.clone();
+                let mgr = sla_manager.clone();
+                tokio::spawn(async move {
+                    match network.subscribe("tenzro/sla").await {
+                        Ok(mut rx) => {
+                            info!("SLA: subscribed to tenzro/sla");
+                            while let Some(msg) = rx.recv().await {
+                                let data = match msg.payload {
+                                    tenzro_network::MessagePayload::Custom { data, .. } => data,
+                                    _ => continue,
+                                };
+                                let response: tenzro_model::SlaResponse =
+                                    match bincode::deserialize(&data) {
+                                        Ok(r) => r,
+                                        Err(e) => {
                                             tracing::debug!(
-                                                provider = %response.provider_did,
-                                                nonce = %nonce_hex,
-                                                "SLA response references unknown probe — likely \
-                                                 issued by a different validator; dropping"
+                                                error = %e,
+                                                "Ignoring non-SlaResponse payload on tenzro/sla"
                                             );
                                             continue;
                                         }
                                     };
-                                    let received_at_ms = chrono::Utc::now().timestamp_millis();
-                                    match mgr
-                                        .apply_response(&probe, Some(&response), received_at_ms)
-                                        .await
-                                    {
-                                        Ok(result) => {
-                                            tracing::info!(
-                                                provider = %probe.provider_did,
-                                                epoch = probe.epoch,
-                                                round = probe.round,
-                                                result = result.as_reason(),
-                                                "Applied SLA probe response"
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                provider = %probe.provider_did,
-                                                error = %e,
-                                                "SLA apply_response failed"
-                                            );
-                                        }
+                                let nonce_hex = hex::encode(response.challenge_nonce);
+                                let probe = match outstanding.remove(&nonce_hex) {
+                                    Some((_, p)) => p,
+                                    None => {
+                                        tracing::debug!(
+                                            provider = %response.provider_did,
+                                            nonce = %nonce_hex,
+                                            "SLA response references unknown probe — likely \
+                                             issued by a different validator; dropping"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let received_at_ms = chrono::Utc::now().timestamp_millis();
+                                match mgr
+                                    .apply_response(&probe, Some(&response), received_at_ms)
+                                    .await
+                                {
+                                    Ok(result) => {
+                                        tracing::info!(
+                                            provider = %probe.provider_did,
+                                            epoch = probe.epoch,
+                                            round = probe.round,
+                                            result = result.as_reason(),
+                                            "Applied SLA probe response"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            provider = %probe.provider_did,
+                                            error = %e,
+                                            "SLA apply_response failed"
+                                        );
                                     }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to subscribe to tenzro/sla gossipsub topic: {}",
-                                    e
-                                );
-                            }
                         }
-                    });
-                }
-                info!(
-                    "SLA fault detector wired: VRF-stamped probes → ComputeBond slashing"
-                );
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to subscribe to tenzro/sla gossipsub topic: {}",
+                                e
+                            );
+                        }
+                    }
+                });
             }
+            info!(
+                "SLA fault detector wired: VRF-stamped probes → ComputeBond slashing"
+            );
         }
 
         // Tenzro Train protocol runtime — write-through to CF_TRAINING_RUNS /
@@ -8177,6 +8312,58 @@ impl TenzroNode {
         Ok(())
     }
 
+    /// Build the x402 scheme registry with self-hosted EIP-3009 / Permit2
+    /// facilitation when the operator has configured an external EVM relayer.
+    ///
+    /// Returns `None` when no `payments.x402_facilitator` block is set or the
+    /// relayer key cannot be resolved / the signer fails to build — in which
+    /// case the x402 server and facilitator keep the default registry, which
+    /// routes those schemes through the remote CDP verifier.
+    fn build_x402_self_hosted_registry(
+        &self,
+    ) -> Option<tenzro_payments::x402::scheme::SchemeRegistry> {
+        let cfg = self.config.payments.x402_facilitator.as_ref()?;
+
+        let key_hex = match cfg.resolve_relayer_key() {
+            Some(k) => k,
+            None => {
+                warn!(
+                    "x402 self-hosted facilitator configured for chain {} but no relayer key \
+                     resolved (config field or TENZRO_X402_RELAYER_KEY) — EIP-3009 / Permit2 \
+                     will use the remote CDP verifier",
+                    cfg.chain_id
+                );
+                return None;
+            }
+        };
+
+        let signer_cfg =
+            EvmSignerConfig::custom(key_hex, cfg.chain_id, cfg.evm_rpc_url.clone());
+        match signer_cfg.build() {
+            Ok(signer) => {
+                let signer = Arc::new(signer);
+                info!(
+                    chain_id = cfg.chain_id,
+                    rpc = %cfg.evm_rpc_url,
+                    relayer = %signer.sender_address(),
+                    "x402 self-hosted facilitation enabled (EIP-3009 / Permit2 verify + settle)"
+                );
+                Some(tenzro_payments::x402::scheme::SchemeRegistry::with_local_facilitator(
+                    signer,
+                    cfg.evm_rpc_url.clone(),
+                ))
+            }
+            Err(e) => {
+                warn!(
+                    "x402 self-hosted relayer signer build failed for chain {}: {} — EIP-3009 / \
+                     Permit2 will use the remote CDP verifier",
+                    cfg.chain_id, e
+                );
+                None
+            }
+        }
+    }
+
     async fn init_payments(&mut self) -> Result<()> {
         info!("Initializing payment gateway (MPP/x402/Visa TAP/Mastercard Agent Pay)...");
 
@@ -8208,12 +8395,24 @@ impl TenzroNode {
         //     `pay_<offer-commitment×payer-did>` collapses duplicate
         //     settlements to the first receipt, hydrating prior receipts on
         //     boot so replay protection survives restart.
+        // Self-hosted x402 facilitation (EIP-3009 / Permit2). When the
+        // operator configures an external EVM relayer, the EIP-3009 / Permit2
+        // schemes verify and settle against the operator's own RPC + relayer
+        // signer via `LocalFacilitatorVerifier`, with no dependency on a remote
+        // Coinbase CDP facilitator. Absent config (or a resolvable key), those
+        // schemes fall back to the remote CDP verifier in the default registry.
+        let self_hosted_registry = self.build_x402_self_hosted_registry();
+
         let mut x402_builder = X402PaymentServer::new(
             "0x0000000000000000000000000000000000000001",
             vec!["tenzro".to_string(), "base".to_string(), "ethereum".to_string()],
         )
         .with_default_asset("USDC")
         .with_challenge_store(challenge_store.clone());
+
+        if let Some(registry) = &self_hosted_registry {
+            x402_builder = x402_builder.with_scheme_registry(registry.clone());
+        }
 
         match crate::keygen::load_validator_keypair(&self.config.data_dir) {
             Ok(offer_keypair) => {
@@ -8272,6 +8471,9 @@ impl TenzroNode {
             "base".to_string(),
             "ethereum".to_string(),
         ]);
+        if let Some(registry) = &self_hosted_registry {
+            facilitator = facilitator.with_scheme_registry(registry.clone());
+        }
         if let Some(engine) = &self.settlement {
             facilitator = facilitator.with_settlement_engine(engine.clone());
         }
@@ -9277,6 +9479,14 @@ impl TenzroNode {
             event_loop
         };
 
+        // Wire the ZK quorum store so closed fraud windows are pruned on each
+        // finalized-block advance.
+        let event_loop = if let Some(ref zq) = self.zk_quorum_store {
+            event_loop.with_zk_quorum_store(zq.clone())
+        } else {
+            event_loop
+        };
+
         // Wire network_agents map for gossipsub-discovered agent merging
         let event_loop = event_loop.with_agent_discovery(self.network_agents.clone());
 
@@ -9838,6 +10048,245 @@ impl TenzroNode {
                     }
                 });
                 info!("Status broadcast wired (every 10s on tenzro/status)");
+            }
+
+            // Wire the G6 batch-availability plane: subscribe to
+            // `tenzro/batches` and dispatch inbound batch bodies, acks, and
+            // availability certificates into the local HotStuff-2 engine. The
+            // network crate carries these as opaque bincode blobs (it does not
+            // depend on the consensus crate), so this subscriber decodes them:
+            //   - `BatchBody(bytes)`      → `Batch`      → `ingest_batch_body`
+            //   - `BatchAvailability(b)`  → try `BatchAvailabilityCertificate`,
+            //                               else `BatchAck` → the matching ingest
+            //   - `BatchBodyRequest(id)`  → serve the body if held locally
+            // Only nodes running consensus wire this; RPC-only nodes still
+            // subscribe (peer_manager gates publishing to validators) so they
+            // can pull bodies for execution.
+            if let Some(consensus) = self.consensus.clone() {
+                let net_batches = network.clone();
+                tokio::spawn(async move {
+                    let mut rx = match net_batches.subscribe("tenzro/batches").await {
+                        Ok(rx) => rx,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to subscribe to tenzro/batches");
+                            return;
+                        }
+                    };
+                    tracing::info!("Batch availability: subscribed to tenzro/batches");
+                    while let Some(msg) = rx.recv().await {
+                        match msg.payload {
+                            tenzro_network::MessagePayload::BatchBody(bytes) => {
+                                match bincode::deserialize::<tenzro_consensus::Batch>(&bytes) {
+                                    Ok(batch) => consensus.ingest_batch_body(batch),
+                                    Err(e) => tracing::debug!(error = %e, "batch_cert: malformed BatchBody"),
+                                }
+                            }
+                            tenzro_network::MessagePayload::BatchAvailability(bytes) => {
+                                // The producer aggregates acks into a certificate,
+                                // so a peer receives both shapes on this variant.
+                                // Prefer the certificate decode (verified + installed
+                                // by the engine), fall back to a single ack.
+                                if let Ok(cert) = bincode::deserialize::<
+                                    tenzro_consensus::BatchAvailabilityCertificate,
+                                >(&bytes)
+                                {
+                                    consensus.ingest_batch_certificate(cert);
+                                } else if let Ok(ack) =
+                                    bincode::deserialize::<tenzro_consensus::BatchAck>(&bytes)
+                                {
+                                    let batch_id = ack.batch_id;
+                                    consensus.ingest_batch_ack(batch_id, ack);
+                                } else {
+                                    tracing::debug!("batch_cert: malformed BatchAvailability payload");
+                                }
+                            }
+                            tenzro_network::MessagePayload::BatchBodyRequest(id) => {
+                                // Serve the requested body back onto the mesh when
+                                // this node holds it, so a peer that only has a
+                                // certificate can pull the transactions for
+                                // execution.
+                                if let Some(store) = consensus.batch_cert_store()
+                                    && let Some(batch) = store.get_body(&id)
+                                    && let Ok(b) = bincode::serialize(&batch)
+                                {
+                                    let reply = tenzro_network::NetworkMessage::new(
+                                        tenzro_network::MessagePayload::BatchBody(b),
+                                    );
+                                    if let Err(e) =
+                                        net_batches.broadcast("tenzro/batches", reply).await
+                                    {
+                                        tracing::debug!(error = %e, "batch_cert: body reply broadcast failed");
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                info!("Batch availability wired to gossipsub (tenzro/batches)");
+            }
+
+            // Wire the ZK quorum plane: subscribe to `tenzro/zk-quorum`.
+            //   - `Claim`  → a peer verified a proof and wants co-signatures.
+            //                Fetch the proof by its DA locator, re-run
+            //                `verify_proof_envelope`, and if it verifies, reply
+            //                with our own co-signature (and also fold the
+            //                claimer's co-sign toward quorum here so a small
+            //                validator set converges).
+            //   - `Cosign` → a peer's co-signature toward a commitment we are
+            //                aggregating. Fold it in; on quorum, attest +
+            //                open the fraud window.
+            // Only validators holding a quorum store aggregate; RPC-only nodes
+            // still subscribe but simply cannot form a certificate.
+            if let (Some(zk_store), Some(consensus), Some(resolver)) = (
+                self.zk_quorum_store.clone(),
+                self.consensus.clone(),
+                self.iroh_resolver.clone(),
+            ) {
+                let net_zk = network.clone();
+                let zk_registry = self.zk_commitment_registry.clone();
+                tokio::spawn(async move {
+                    let mut rx = match net_zk.subscribe(tenzro_consensus::ZK_QUORUM_TOPIC).await {
+                        Ok(rx) => rx,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to subscribe to tenzro/zk-quorum");
+                            return;
+                        }
+                    };
+                    tracing::info!("ZK quorum: subscribed to tenzro/zk-quorum");
+                    let self_addr = *zk_store.address();
+                    while let Some(msg) = rx.recv().await {
+                        let tenzro_network::MessagePayload::Custom { topic, data } = msg.payload
+                        else {
+                            continue;
+                        };
+                        if topic != tenzro_consensus::ZK_QUORUM_TOPIC {
+                            continue;
+                        }
+                        let decoded = match bincode::deserialize::<tenzro_consensus::ZkQuorumMsg>(&data) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::debug!(error = %e, "zk-quorum: malformed gossip message");
+                                continue;
+                            }
+                        };
+                        match decoded {
+                            tenzro_consensus::ZkQuorumMsg::Claim { claim, cosign } => {
+                                // Fold the claimer's co-signature toward quorum.
+                                fold_zk_cosign(
+                                    &zk_store,
+                                    &consensus,
+                                    &zk_registry,
+                                    &claim.circuit_id,
+                                    cosign,
+                                    &claim.proof_locator,
+                                );
+                                // Independently fetch + re-verify the proof; if
+                                // it verifies, co-sign and reply.
+                                let uri = match tenzro_iroh::TenzroUri::parse(&claim.proof_locator) {
+                                    Ok(u) => u,
+                                    Err(e) => {
+                                        tracing::debug!(error = %e, "zk-quorum: bad proof locator in claim");
+                                        continue;
+                                    }
+                                };
+                                use tenzro_iroh::IrohResolver;
+                                let bytes = match resolver.fetch_bytes(&uri).await {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        tracing::debug!(error = %e, "zk-quorum: proof fetch failed; cannot co-sign");
+                                        continue;
+                                    }
+                                };
+                                let envelope: tenzro_zk::Proof = match serde_json::from_slice(&bytes) {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        tracing::debug!(error = %e, "zk-quorum: proof decode failed");
+                                        continue;
+                                    }
+                                };
+                                let commitment = claim.commitment;
+                                // The commitment must actually be the commitment
+                                // of the fetched proof, or a co-signer could be
+                                // tricked into co-signing hash A while verifying
+                                // proof B.
+                                let recomputed =
+                                    tenzro_vm::precompiles::compute_zk_commitment(&envelope);
+                                if recomputed != commitment {
+                                    tracing::debug!("zk-quorum: claim commitment does not match fetched proof; ignoring");
+                                    continue;
+                                }
+                                let verified = tokio::task::spawn_blocking(move || {
+                                    tenzro_zk::verify_proof_envelope(&envelope).is_ok()
+                                })
+                                .await
+                                .unwrap_or(false);
+                                if !verified {
+                                    tracing::debug!("zk-quorum: claimed proof failed re-verification; not co-signing");
+                                    continue;
+                                }
+                                let my_cosign = zk_store.cosign(commitment);
+                                // Fold our own co-sign locally (drives quorum on
+                                // this node if we are the aggregator).
+                                fold_zk_cosign(
+                                    &zk_store,
+                                    &consensus,
+                                    &zk_registry,
+                                    &claim.circuit_id,
+                                    my_cosign.clone(),
+                                    &claim.proof_locator,
+                                );
+                                // Reply with our co-signature so the claimer (and
+                                // any other aggregator) can reach quorum.
+                                let reply = tenzro_consensus::ZkQuorumMsg::Cosign {
+                                    circuit_id: claim.circuit_id.clone(),
+                                    cosign: my_cosign,
+                                };
+                                if let Ok(rdata) = bincode::serialize(&reply) {
+                                    let net_msg = tenzro_network::NetworkMessage::new(
+                                        tenzro_network::MessagePayload::Custom {
+                                            topic: tenzro_consensus::ZK_QUORUM_TOPIC.to_string(),
+                                            data: rdata,
+                                        },
+                                    );
+                                    if let Err(e) = net_zk
+                                        .broadcast(tenzro_consensus::ZK_QUORUM_TOPIC, net_msg)
+                                        .await
+                                    {
+                                        tracing::debug!(error = %e, "zk-quorum: cosign reply broadcast failed");
+                                    }
+                                }
+                            }
+                            tenzro_consensus::ZkQuorumMsg::Cosign { circuit_id, cosign } => {
+                                if cosign.validator == self_addr {
+                                    // Our own reply echoed back — ignore.
+                                    continue;
+                                }
+                                // A peer's co-signature. We can only fold it if
+                                // we know the proof locator, which we recorded
+                                // when we saw the claim. The store keeps pending
+                                // co-signs keyed by commitment; if we never saw
+                                // the claim we have no locator to open a window
+                                // with, so we buffer against an empty locator —
+                                // the aggregator that DID see the claim carries
+                                // the real locator. To avoid attesting with an
+                                // empty locator here, we only fold when this node
+                                // already holds an attested record or pending
+                                // entry that came from a claim. In practice the
+                                // initiating validator is the aggregator; this
+                                // branch keeps other validators' partial tallies
+                                // warm without letting them attest locator-less.
+                                fold_zk_cosign_no_attest(
+                                    &zk_store,
+                                    &consensus,
+                                    &circuit_id,
+                                    cosign,
+                                );
+                            }
+                        }
+                    }
+                });
+                info!("ZK quorum plane wired to gossipsub (tenzro/zk-quorum)");
             }
 
             // Wire inbound consensus: subscribe to the consensus-direct
@@ -10917,10 +11366,11 @@ impl TenzroNode {
             // The hardware profile is populated lazily (first probe RPC), so an
             // absent profile means "not measured yet", not "zero disk" — detect
             // and cache on demand rather than rejecting on a missing reading.
-            let free_gb = match self.hardware_profile.read().as_ref() {
-                Some(h) => Some(h.storage_available_gb),
-                None => None,
-            };
+            let free_gb = self
+                .hardware_profile
+                .read()
+                .as_ref()
+                .map(|h| h.storage_available_gb);
             let free_gb = match free_gb {
                 Some(gb) => gb,
                 None => {
@@ -11187,6 +11637,195 @@ impl TenzroNode {
         -> &Arc<tenzro_vm::precompiles::ZkCommitmentRegistry>
     {
         &self.zk_commitment_registry
+    }
+
+    /// The quorum-gated ZK attestation store, present only on validator nodes
+    /// holding a BLS key. When present, the RPC verify path admits a commitment
+    /// to [`Self::zk_commitment_registry`] only after collecting a `2f+1`
+    /// quorum certificate, and opens a fraud-proof window. When absent (RPC-only
+    /// / non-validator nodes), the verify path has no way to co-sign or gate, so
+    /// the commitment is not self-attested — it is picked up from a validator's
+    /// gossiped claim instead.
+    pub fn zk_quorum_store(&self) -> Option<&Arc<tenzro_consensus::ZkQuorumStore>> {
+        self.zk_quorum_store.as_ref()
+    }
+
+    /// Publish a proof envelope this node has independently verified to the DA
+    /// layer, returning the `tenzro://blob/<hash>` locator co-signers use to
+    /// fetch and re-verify it. Returns `None` when no iroh resolver is bound
+    /// (the quorum plane is then inert on this node).
+    pub async fn publish_zk_proof_for_quorum(
+        &self,
+        envelope: &tenzro_zk::Proof,
+    ) -> Option<String> {
+        let resolver = self.iroh_resolver.as_ref()?;
+        let bytes = match serde_json::to_vec(envelope) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, "zk-quorum: failed to encode proof envelope for DA");
+                return None;
+            }
+        };
+        use tenzro_iroh::IrohResolver;
+        match resolver.publish_bytes(bytes.into()).await {
+            Ok(uri) => Some(uri.to_string()),
+            Err(e) => {
+                warn!(error = %e, "zk-quorum: failed to publish proof to DA");
+                None
+            }
+        }
+    }
+
+    /// Fetch a proof envelope from its DA locator and deterministically re-run
+    /// `verify_proof_envelope`. Returns the boolean verification result, or an
+    /// error string when the proof could not be fetched/decoded (a fetch
+    /// failure is NOT a verification failure — a challenger cannot be slashed
+    /// for an unavailable proof).
+    pub async fn reverify_zk_proof_at_locator(
+        &self,
+        proof_locator: &str,
+    ) -> std::result::Result<bool, String> {
+        let resolver = self
+            .iroh_resolver
+            .as_ref()
+            .ok_or_else(|| "no DA resolver bound; cannot fetch proof".to_string())?;
+        let uri = tenzro_iroh::TenzroUri::parse(proof_locator)
+            .map_err(|e| format!("invalid proof locator: {e}"))?;
+        use tenzro_iroh::IrohResolver;
+        let bytes = resolver
+            .fetch_bytes(&uri)
+            .await
+            .map_err(|e| format!("proof fetch failed: {e}"))?;
+        let envelope: tenzro_zk::Proof = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("proof decode failed: {e}"))?;
+        let verify = tokio::task::spawn_blocking(move || {
+            tenzro_zk::verify_proof_envelope(&envelope)
+        })
+        .await
+        .map_err(|e| format!("verify task join error: {e}"))?;
+        Ok(verify.is_ok())
+    }
+
+    /// Record a co-signature toward a commitment's quorum, and when quorum is
+    /// reached, verify the certificate, attest the commitment to the on-chain
+    /// registry, and open its fraud-proof window. Returns `true` iff the
+    /// commitment was newly attested by this call. Shared by the RPC verify
+    /// path (own initiating co-sign) and the gossip consumer (peer co-signs).
+    pub fn record_zk_cosign_and_maybe_attest(
+        &self,
+        circuit_id: &str,
+        cosign: tenzro_consensus::ZkCosign,
+        proof_locator: &str,
+    ) -> bool {
+        let Some(store) = self.zk_quorum_store.as_ref() else {
+            return false;
+        };
+        let Some(consensus) = self.consensus.as_ref() else {
+            return false;
+        };
+        let validator_set = consensus.validator_set();
+        let commitment = cosign.commitment;
+        match store.record_cosign(circuit_id, cosign, &validator_set) {
+            Ok(Some(cert)) => {
+                if let Err(e) = cert.verify(&validator_set) {
+                    warn!(error = %e, "zk-quorum: formed certificate failed verify; not attesting");
+                    return false;
+                }
+                let hash: tenzro_vm::precompiles::ZkCommitmentHash = commitment;
+                let newly = self.zk_commitment_registry.attest(hash);
+                let height = consensus.current_finalized_height().0;
+                store.open_fraud_window(cert, proof_locator.to_string(), height);
+                info!(
+                    commitment = %hex::encode(commitment),
+                    height,
+                    "zk-quorum: commitment attested under 2f+1 certificate; fraud window open"
+                );
+                newly
+            }
+            Ok(None) => false,
+            Err(e) => {
+                warn!(error = %e, "zk-quorum: record_cosign rejected");
+                false
+            }
+        }
+    }
+
+    /// Resolve a fraud proof filed against an attested ZK commitment.
+    ///
+    /// Any staked party may challenge a commitment that is inside its fraud
+    /// window. This node fetches the proof from the record's DA locator, re-runs
+    /// `verify_proof_envelope` deterministically, and resolves:
+    ///
+    /// - re-verify succeeds (`Unfounded`): the commitment stands; the caller's
+    ///   challenge bond is forfeit (bond handling is the RPC layer's concern).
+    /// - re-verify fails (`Upheld`): the commitment is retracted from both the
+    ///   quorum store and the on-chain [`ZkCommitmentRegistry`], and every
+    ///   co-signer named on the certificate is slashed for a consensus offence.
+    ///
+    /// A proof that cannot be fetched is NOT a verification failure — no one is
+    /// slashed for an unavailable proof; the challenge simply cannot be
+    /// adjudicated and returns an error.
+    pub async fn resolve_zk_fraud_proof(
+        &self,
+        commitment: &[u8; 32],
+    ) -> std::result::Result<tenzro_consensus::FraudOutcome, String> {
+        let store = self
+            .zk_quorum_store
+            .as_ref()
+            .ok_or_else(|| "node holds no ZK quorum store".to_string())?;
+        let consensus = self
+            .consensus
+            .as_ref()
+            .ok_or_else(|| "consensus engine not initialized".to_string())?;
+        let record = store
+            .attested(commitment)
+            .ok_or_else(|| "commitment is not inside any open fraud window".to_string())?;
+
+        // Deterministic re-run over the proof bytes fetched from DA.
+        let reverified = self
+            .reverify_zk_proof_at_locator(&record.proof_locator)
+            .await?;
+
+        let validator_set = consensus.validator_set();
+        let height = consensus.current_finalized_height().0;
+        let (outcome, accountable) = store
+            .resolve_fraud_proof(commitment, height, reverified, &validator_set)
+            .map_err(|e| format!("fraud resolution rejected: {e}"))?;
+
+        if let tenzro_consensus::FraudOutcome::Upheld = outcome {
+            // Retract from the on-chain registry so the ZK_VERIFY precompile
+            // stops treating the commitment as valid.
+            let retracted = self.zk_commitment_registry.retract(commitment);
+            warn!(
+                commitment = %hex::encode(commitment),
+                retracted,
+                co_signers = accountable.len(),
+                "zk-quorum: fraud proof UPHELD; commitment retracted, slashing co-signers"
+            );
+            // Slash every accountable co-signer through the consensus slash path.
+            if let Some(staking) = self.staking.as_ref() {
+                let mut cb = StakingSlashingCallback::new(staking.clone())
+                    .with_epoch_manager(consensus.epoch_manager());
+                if let Some(reg) = self.validator_registry.as_ref() {
+                    cb = cb.with_validator_registry(reg.clone());
+                }
+                let reason = format!(
+                    "ZK fraud proof upheld: co-signed an invalid commitment {}",
+                    hex::encode(commitment)
+                );
+                for validator in &accountable {
+                    cb.report_zk_fraud(validator, height, reason.clone());
+                }
+            } else {
+                warn!("zk-quorum: no staking manager; cannot slash upheld-fraud co-signers");
+            }
+        } else {
+            info!(
+                commitment = %hex::encode(commitment),
+                "zk-quorum: fraud proof UNFOUNDED; commitment stands, challenger bond forfeit"
+            );
+        }
+        Ok(outcome)
     }
 
     /// Set the state-sync peer URL. Must be called BEFORE
@@ -11554,6 +12193,13 @@ impl TenzroNode {
         self.api_key_manager.as_ref()
     }
 
+    /// Returns the permissionless application registry, populated once
+    /// storage is initialized. Used by the app-registration RPCs and the
+    /// developer-signed settlement path.
+    pub fn app_registry(&self) -> Option<&Arc<crate::app_registry::AppRegistry>> {
+        self.app_registry.as_ref()
+    }
+
     /// Returns the MCP plugin host if initialized. The plugin host runs
     /// operator-curated stdio + remote MCPs, holds the sealed credential
     /// vault, and dispatches `tenzro_useTool` calls for non-native tools.
@@ -11719,6 +12365,39 @@ impl TenzroNode {
     /// Returns the node config
     pub fn config(&self) -> &NodeConfig {
         &self.config
+    }
+
+    /// Enforces the operator model-license acceptance policy for a multi-modal
+    /// ONNX catalog entry. The multi-modal runtimes (vision / audio / detection
+    /// / segmentation / text-embedding / forecast / video) load ONNX bundles
+    /// directly into their own runtime rather than through
+    /// [`tenzro_model::ModelRegistry::register_model`], so the license gate that
+    /// `register_model` applies to LM catalog entries would otherwise be bypassed
+    /// on these load paths. Returns `Ok(())` when the tier is admitted; otherwise
+    /// `Err` with a caller-facing message naming the flag the operator must set.
+    pub fn check_model_license(
+        &self,
+        model_id: &str,
+        tier: tenzro_types::model::LicenseTier,
+        license_id: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        use tenzro_types::model::LicenseTier;
+        if self.config.model_licensing.admits(tier, license_id) {
+            return Ok(());
+        }
+        let remedy = match tier {
+            LicenseTier::NonCommercial => "operator must set --accept-non-commercial".to_string(),
+            LicenseTier::CommercialCustom => format!(
+                "operator must set --accept-license {}",
+                license_id.unwrap_or("<id>")
+            ),
+            LicenseTier::Permissive | LicenseTier::Attribution => {
+                "license tier is admitted by default".to_string()
+            }
+        };
+        Err(format!(
+            "model '{model_id}' has license tier {tier:?} which is not accepted: {remedy}"
+        ))
     }
 
     /// Submit a finalized block to the event loop for execution
@@ -12517,6 +13196,22 @@ impl TenzroNode {
             .map(|entry| entry.value().clone())
     }
 
+    /// Find a model service instance by model_id whose provider is not
+    /// `exclude`. Used by the streaming re-prefill failover path to pick a
+    /// different provider than the one that just dropped mid-stream.
+    pub fn find_model_service_excluding(
+        &self,
+        model_id: &str,
+        exclude: &tenzro_types::primitives::Address,
+    ) -> Option<ModelServiceInstance> {
+        self.model_services.iter()
+            .find(|entry| {
+                let svc = entry.value();
+                svc.model_id == model_id && &svc.provider_address != exclude
+            })
+            .map(|entry| entry.value().clone())
+    }
+
     /// Reconciles the task registry (CF_TASKS).
     ///
     /// For every persisted `TaskInfo`:
@@ -12577,6 +13272,77 @@ impl TenzroNode {
             ar.check_idle_agents(3600).await.len()
         } else {
             0
+        }
+    }
+}
+
+/// Fold a co-signature toward a commitment's quorum, and when quorum forms,
+/// verify the certificate, attest the commitment, and open its fraud window.
+///
+/// Free-function variant of [`TenzroNode::record_zk_cosign_and_maybe_attest`]
+/// so the gossip subscriber (which holds `Arc`s, not a `TenzroNode`) can drive
+/// aggregation. The caller supplies the `proof_locator` that co-signers use to
+/// fetch and re-verify the proof during the fraud window.
+fn fold_zk_cosign(
+    store: &Arc<tenzro_consensus::ZkQuorumStore>,
+    consensus: &Arc<HotStuff2Engine>,
+    registry: &Arc<tenzro_vm::precompiles::ZkCommitmentRegistry>,
+    circuit_id: &str,
+    cosign: tenzro_consensus::ZkCosign,
+    proof_locator: &str,
+) -> bool {
+    let validator_set = consensus.validator_set();
+    let commitment = cosign.commitment;
+    match store.record_cosign(circuit_id, cosign, &validator_set) {
+        Ok(Some(cert)) => {
+            if let Err(e) = cert.verify(&validator_set) {
+                warn!(error = %e, "zk-quorum: formed certificate failed verify; not attesting");
+                return false;
+            }
+            let hash: tenzro_vm::precompiles::ZkCommitmentHash = commitment;
+            let newly = registry.attest(hash);
+            let height = consensus.current_finalized_height().0;
+            store.open_fraud_window(cert, proof_locator.to_string(), height);
+            info!(
+                commitment = %hex::encode(commitment),
+                height,
+                "zk-quorum: commitment attested under 2f+1 certificate; fraud window open"
+            );
+            newly
+        }
+        Ok(None) => false,
+        Err(e) => {
+            debug!(error = %e, "zk-quorum: record_cosign rejected");
+            false
+        }
+    }
+}
+
+/// Fold a co-signature toward a commitment's tally WITHOUT ever attesting.
+///
+/// Used on the `Cosign` gossip path by validators that never saw the original
+/// claim and therefore hold no `proof_locator`. Attesting requires a locator
+/// (co-signers must be able to fetch the proof to re-verify it during the fraud
+/// window), so a locator-less node keeps its partial tally warm but leaves
+/// attestation to the aggregator that carries the real locator. If quorum
+/// happens to form here, the certificate is discarded rather than attested with
+/// an empty locator — the aggregator's window is the authoritative one.
+fn fold_zk_cosign_no_attest(
+    store: &Arc<tenzro_consensus::ZkQuorumStore>,
+    consensus: &Arc<HotStuff2Engine>,
+    circuit_id: &str,
+    cosign: tenzro_consensus::ZkCosign,
+) {
+    let validator_set = consensus.validator_set();
+    match store.record_cosign(circuit_id, cosign, &validator_set) {
+        Ok(Some(_cert)) => {
+            debug!(
+                "zk-quorum: quorum reached on a locator-less node; deferring attestation to the aggregator"
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            debug!(error = %e, "zk-quorum: record_cosign (no-attest) rejected");
         }
     }
 }

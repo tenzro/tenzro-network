@@ -25,9 +25,14 @@ pub enum InferenceCommand {
     GetChallenge(GetChallengeCmd),
     /// List inference challenges, optionally filtered by status or provider.
     ListChallenges(ListChallengesCmd),
-    /// Resolve an inference challenge (operator only). Upheld verdicts
-    /// decrement the provider's reputation and record a compute-bond failure.
-    ResolveChallenge(ResolveChallengeCmd),
+    /// Commit a committee vote (hidden) on an inference challenge.
+    CommitVote(CommitVoteCmd),
+    /// Reveal a previously committed committee vote.
+    RevealVote(RevealVoteCmd),
+    /// Finalize an inference challenge by tallying revealed committee
+    /// votes. Upheld verdicts decrement the provider's reputation and
+    /// record a compute-bond failure.
+    FinalizeChallenge(FinalizeChallengeCmd),
     /// Select a model for an intent (use case + budget + quality floor +
     /// cost-quality knob) without naming one. Discovery only — dispatches
     /// nothing. With `--message`, discovers and runs in one call.
@@ -45,7 +50,9 @@ impl InferenceCommand {
             Self::FileChallenge(cmd) => cmd.execute().await,
             Self::GetChallenge(cmd) => cmd.execute().await,
             Self::ListChallenges(cmd) => cmd.execute().await,
-            Self::ResolveChallenge(cmd) => cmd.execute().await,
+            Self::CommitVote(cmd) => cmd.execute().await,
+            Self::RevealVote(cmd) => cmd.execute().await,
+            Self::FinalizeChallenge(cmd) => cmd.execute().await,
             Self::Route(cmd) => cmd.execute().await,
         }
     }
@@ -431,10 +438,10 @@ impl GetChallengeCmd {
     }
 }
 
-/// `tenzro inference list-challenges [--status filed|upheld|dismissed] [--provider 0x..]`
+/// `tenzro inference list-challenges [--status voting_commit|voting_reveal|upheld|dismissed] [--provider 0x..]`
 #[derive(Debug, Parser)]
 pub struct ListChallengesCmd {
-    /// Filter by status (filed, upheld, dismissed).
+    /// Filter by status (voting_commit, voting_reveal, upheld, dismissed).
     #[arg(long)]
     status: Option<String>,
 
@@ -484,32 +491,23 @@ impl ListChallengesCmd {
     }
 }
 
-/// `tenzro inference resolve-challenge <challenge_id> (--prompt ... | --upheld <bool>)`
+/// `tenzro inference commit-vote <challenge_id> --voter 0x.. --commit-hash <hex>`
 ///
-/// Operator-only (requires the node admin token, via `--admin-token` or
-/// the `TENZRO_ADMIN_TOKEN` env var). With `--prompt`, the node
-/// re-executes locally and the verification outcome decides the verdict;
-/// with `--upheld`, the caller supplies the verdict directly.
+/// A drawn committee member records the hidden commit
+/// `H(verdict||salt||challenge_id||voter)`. The verdict stays sealed until
+/// `reveal-vote`.
 #[derive(Debug, Parser)]
-pub struct ResolveChallengeCmd {
+pub struct CommitVoteCmd {
     /// Challenge id (UUID).
     challenge_id: String,
 
-    /// Re-execute this prompt locally to decide the verdict.
-    #[arg(long, conflicts_with = "upheld")]
-    prompt: Option<String>,
-
-    /// Explicit verdict when no prompt is supplied.
+    /// Committee-member identity (validator address, hex).
     #[arg(long)]
-    upheld: Option<bool>,
+    voter: String,
 
-    /// Compute-bond provider DID (skips the bond-registry address scan).
+    /// Vote commitment hash (hex).
     #[arg(long)]
-    provider_did: Option<String>,
-
-    /// Node admin token (falls back to TENZRO_ADMIN_TOKEN).
-    #[arg(long)]
-    admin_token: Option<String>,
+    commit_hash: String,
 
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
@@ -520,38 +518,122 @@ pub struct ResolveChallengeCmd {
     rpc: String,
 }
 
-impl ResolveChallengeCmd {
+impl CommitVoteCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
-        let mut rpc = RpcClient::new(&self.rpc);
-        if let Some(token) = &self.admin_token {
-            rpc = rpc.with_admin_token(token.clone());
-        }
-
-        let mut params = serde_json::Map::new();
-        params.insert(
-            "challenge_id".to_string(),
-            serde_json::Value::String(self.challenge_id.clone()),
-        );
-        if let Some(prompt) = &self.prompt {
-            params.insert("prompt".to_string(), serde_json::Value::String(prompt.clone()));
-        } else if let Some(upheld) = self.upheld {
-            params.insert("upheld".to_string(), serde_json::Value::Bool(upheld));
-        } else {
-            anyhow::bail!("provide either --prompt (local re-execution) or --upheld <bool>");
-        }
-        if let Some(did) = &self.provider_did {
-            params.insert(
-                "provider_did".to_string(),
-                serde_json::Value::String(did.clone()),
-            );
-        }
-
-        let spinner = output::create_spinner("Resolving challenge...");
+        let rpc = RpcClient::new(&self.rpc);
         let result: serde_json::Value = rpc
             .call(
-                "tenzro_resolveInferenceChallenge",
-                serde_json::Value::Object(params),
+                "tenzro_commitChallengeVote",
+                serde_json::json!({
+                    "challenge_id": self.challenge_id,
+                    "voter": self.voter,
+                    "commit_hash": self.commit_hash,
+                }),
+            )
+            .await?;
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+        output::print_success("Vote committed");
+        print_challenge(&result);
+        Ok(())
+    }
+}
+
+/// `tenzro inference reveal-vote <challenge_id> --voter 0x.. --verdict <bool> --salt <hex>`
+///
+/// Reveals a committed vote. `(verdict, salt)` must reproduce the commit
+/// hash. `--verdict true` means the commitment did not verify (upholds).
+#[derive(Debug, Parser)]
+pub struct RevealVoteCmd {
+    /// Challenge id (UUID).
+    challenge_id: String,
+
+    /// Committee-member identity (validator address, hex).
+    #[arg(long)]
+    voter: String,
+
+    /// Revealed verdict (true = did-not-verify / upholds).
+    #[arg(long)]
+    verdict: bool,
+
+    /// Reveal salt (hex) — must reproduce the earlier commit hash.
+    #[arg(long)]
+    salt: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl RevealVoteCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_revealChallengeVote",
+                serde_json::json!({
+                    "challenge_id": self.challenge_id,
+                    "voter": self.voter,
+                    "verdict": self.verdict,
+                    "salt": self.salt,
+                }),
+            )
+            .await?;
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+        output::print_success("Vote revealed");
+        print_challenge(&result);
+        Ok(())
+    }
+}
+
+/// `tenzro inference finalize-challenge <challenge_id> [--force]`
+///
+/// Tallies the committee's revealed votes weighted by stake. No admin
+/// token — the verdict is the committee's. Idempotent. `--force` closes a
+/// challenge after the reveal window with no uphold quorum (provider
+/// prevails).
+#[derive(Debug, Parser)]
+pub struct FinalizeChallengeCmd {
+    /// Challenge id (UUID).
+    challenge_id: String,
+
+    /// Close the challenge after the reveal window even without an
+    /// uphold quorum.
+    #[arg(long)]
+    force: bool,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl FinalizeChallengeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+        let rpc = RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Finalizing challenge...");
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_finalizeChallenge",
+                serde_json::json!({
+                    "challenge_id": self.challenge_id,
+                    "force": self.force,
+                }),
             )
             .await?;
         spinner.finish_and_clear();
@@ -564,8 +646,10 @@ impl ResolveChallengeCmd {
         let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("");
         if status == "upheld" {
             output::print_warning("Challenge UPHELD — provider penalties applied");
-        } else {
+        } else if status == "dismissed" {
             output::print_success("Challenge dismissed");
+        } else {
+            output::print_warning(&format!("Challenge status: {status}"));
         }
         print_challenge(&result);
         for key in ["reputation_penalized", "bond_failure_recorded"] {
@@ -577,7 +661,7 @@ impl ResolveChallengeCmd {
             && !verification.is_null()
         {
             println!();
-            output::print_header("Verification");
+            output::print_header("Tally");
             output::print_json(verification)?;
         }
         Ok(())

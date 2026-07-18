@@ -60,25 +60,25 @@ impl WorkflowStatus {
     /// transition; rejections come back as `WorkflowError::InvalidTransition`.
     pub fn can_transition_to(&self, next: WorkflowStatus) -> bool {
         use WorkflowStatus::*;
-        match (*self, next) {
-            (Draft, AwaitingSignatures) => true,
-            (Draft, Cancelled) => true,
-            (AwaitingSignatures, Active) => true,
-            (AwaitingSignatures, Cancelled) => true,
-            (Active, Suspended) => true,
-            (Active, Settling) => true,
-            (Active, Disputed) => true,
-            (Suspended, Active) => true,
-            (Suspended, Failed) => true,
-            (Suspended, Cancelled) => true,
-            (Settling, Completed) => true,
-            (Settling, Failed) => true,
-            (Settling, Disputed) => true,
-            (Disputed, Active) => true,
-            (Disputed, Failed) => true,
-            (Disputed, Completed) => true,
-            _ => false,
-        }
+        matches!(
+            (*self, next),
+            (Draft, AwaitingSignatures)
+                | (Draft, Cancelled)
+                | (AwaitingSignatures, Active)
+                | (AwaitingSignatures, Cancelled)
+                | (Active, Suspended)
+                | (Active, Settling)
+                | (Active, Disputed)
+                | (Suspended, Active)
+                | (Suspended, Failed)
+                | (Suspended, Cancelled)
+                | (Settling, Completed)
+                | (Settling, Failed)
+                | (Settling, Disputed)
+                | (Disputed, Active)
+                | (Disputed, Failed)
+                | (Disputed, Completed)
+        )
     }
 
     pub fn as_str(&self) -> &'static str {

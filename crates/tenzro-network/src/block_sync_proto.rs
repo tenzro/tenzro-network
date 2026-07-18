@@ -1,15 +1,13 @@
 //! Block-sync wire protocol for Tenzro Network.
 //!
-//! Modeled on Sui's `state_sync` protocol
-//! (`MystenLabs/sui/crates/sui-network/src/state_sync`) and Aptos' `storage-service`
-//! request/response. A single `libp2p::request_response` behaviour multiplexes
-//! all sync RPC methods as enum variants on `BlockSyncRequest` /
-//! `BlockSyncResponse`.
+//! A state-sync request/response protocol: a single `libp2p::request_response`
+//! behaviour multiplexes all sync RPC methods as enum variants on
+//! `BlockSyncRequest` / `BlockSyncResponse`.
 //!
 //! Why this shape over Eth CL's chunked-stream `BeaconBlocksByRange`:
 //!   * Empty-block payloads are small (≪10 MiB) — chunked framing is overkill.
 //!   * CBOR-over-libp2p with bounded response size is dramatically simpler.
-//!   * Production HotStuff-family chains (Sui, Aptos) use this pattern.
+//!   * Production HotStuff-family chains use this pattern.
 //!
 //! Trust model — each `Block` carries a serialized `QuorumCertificate` in
 //! `header.consensus_proof.proof_data` (populated by
@@ -72,7 +70,7 @@ pub const REQUEST_TIMEOUT_BODIES: Duration = Duration::from_secs(30);
 pub enum BlockSyncRequest {
     /// Probe a peer's chain tip and lowest-available block.
     ///
-    /// Equivalent to Sui's `GetCheckpointAvailability`. Used by the sync state
+    /// A checkpoint-availability probe. Used by the sync state
     /// machine to choose target peers and detect partitions.
     GetTipInfo,
 
@@ -94,6 +92,10 @@ pub enum BlockSyncRequest {
 }
 
 /// Block-sync response envelope.
+// Boxing the large `BlockByHash` payload would alter every cross-crate
+// construction/match site of this wire type; the size disparity is inherent to
+// the request/response shape.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockSyncResponse {
     /// Response to `GetTipInfo`.

@@ -182,21 +182,21 @@ impl ChainlinkFeedClient {
             .unwrap_or(0);
 
         // Cache hit path.
-        if let Some(entry) = self.cache.read().get(&address) {
-            if entry.cached_at.elapsed() < self.cache_ttl {
-                let reg = self
-                    .get_registration(&address)
-                    .ok_or_else(|| BridgeError::AdapterError(format!(
-                        "feed not registered: {}",
-                        address
-                    )))?;
-                if entry.reading.is_invalid()
-                    || entry.reading.is_stale(now, reg.staleness_threshold_secs)
-                {
-                    // Stale or invalid — bypass cache, hit RPC.
-                } else {
-                    return Ok(entry.reading.clone());
-                }
+        if let Some(entry) = self.cache.read().get(&address)
+            && entry.cached_at.elapsed() < self.cache_ttl
+        {
+            let reg = self
+                .get_registration(&address)
+                .ok_or_else(|| BridgeError::AdapterError(format!(
+                    "feed not registered: {}",
+                    address
+                )))?;
+            if entry.reading.is_invalid()
+                || entry.reading.is_stale(now, reg.staleness_threshold_secs)
+            {
+                // Stale or invalid — bypass cache, hit RPC.
+            } else {
+                return Ok(entry.reading.clone());
             }
         }
 
@@ -530,11 +530,7 @@ mod tests {
         // TNZO/ETH = $0.10 / $2000 = 0.00005 → Q18 = 5 * 10^13.
         let expected_q18 = 50_000_000_000_000u128;
         // Allow ±1 rounding error on division.
-        let diff = if rate > expected_q18 {
-            rate - expected_q18
-        } else {
-            expected_q18 - rate
-        };
+        let diff = rate.abs_diff(expected_q18);
         assert!(
             diff <= 1,
             "rate={} expected_q18={} diff={}",
@@ -554,10 +550,8 @@ mod tests {
     #[test]
     fn i128_from_be_32_negative() {
         let mut b = [0u8; 32];
-        // Set all bytes 0..16 to 0xFF (sign extension) + low byte = 0xFF.
-        for i in 0..32 {
-            b[i] = 0xFF;
-        }
+        // Set all bytes to 0xFF (sign extension) so the value reads as -1.
+        b.fill(0xFF);
         assert_eq!(i128_from_be_32(&b), -1);
     }
 

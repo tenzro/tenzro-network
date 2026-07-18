@@ -294,7 +294,7 @@ pub struct ComplianceRules {
     pub token_id: TokenId,
     /// Whether holders must have a valid KYC claim.
     pub require_kyc: bool,
-    /// Minimum KYC tier required (maps to `tenzro_identity::KycTier`).
+    /// Minimum KYC tier required (maps to `tenzro_types::identity::KycTier`).
     pub min_kyc_tier: u8,
     /// Whether holders must be accredited investors.
     pub require_accreditation: bool,

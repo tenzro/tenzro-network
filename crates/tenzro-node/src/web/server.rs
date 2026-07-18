@@ -195,7 +195,7 @@ fn is_reserved_path(path: &str) -> bool {
         "/providers",
     ];
     RESERVED.iter().any(|p| path.starts_with(p))
-        || RESERVED_EXACT.iter().any(|p| path == *p)
+        || RESERVED_EXACT.contains(&path)
 }
 
 pub struct WebServer {

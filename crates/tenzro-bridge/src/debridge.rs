@@ -748,7 +748,7 @@ impl BridgeAdapter for DeBridgeAdapter {
         use sha3::{Digest as Sha3Digest, Keccak256};
         let mut k = Keccak256::new();
         Sha3Digest::update(&mut k, submission_id);
-        Sha3Digest::update(&mut k, &dst_chain_id.to_le_bytes());
+        Sha3Digest::update(&mut k, dst_chain_id.to_le_bytes());
         let prehash: [u8; 32] = k.finalize().into();
         set.verify_quorum(&prehash, &signatures)?;
         // Inner Tenzro-side check on the submission body after the

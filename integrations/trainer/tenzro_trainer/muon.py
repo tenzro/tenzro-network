@@ -2,9 +2,8 @@
 
 Muon (MomentUm Orthogonalized by Newton-Schulz; Keller Jordan et al.) runs
 momentum SGD and then orthogonalizes each 2D weight update with a 5-step
-Newton-Schulz iteration before applying it. MuLoCo (arXiv 2505.23725) showed
-Muon as the DiLoCo inner optimizer converges with less communication than
-AdamW, which is exactly the outer-loop regime this trainer runs under.
+Newton-Schulz iteration before applying it. As the inner optimizer under this
+trainer's outer loop it converges with less communication than AdamW.
 
 Matrix parameters (``ndim >= 2``, flattened to 2D for convs) take the Muon
 path; 1D parameters (biases, norms) and embedding / output-head weights take

@@ -117,10 +117,12 @@ fn check_announcement_freshness(timestamp_ms: i64, ttl_secs: u64) -> std::result
 /// class only claims the binary can serve it.
 fn hosting_runtime_classes() -> Vec<String> {
     let mut classes = vec!["static".to_string()];
-    #[cfg(feature = "wasi-skills")]
-    classes.push("function".to_string());
-    #[cfg(feature = "firecracker")]
-    classes.push("machine".to_string());
+    if cfg!(feature = "wasi-skills") {
+        classes.push("function".to_string());
+    }
+    if cfg!(feature = "firecracker") {
+        classes.push("machine".to_string());
+    }
     classes
 }
 
@@ -146,6 +148,9 @@ fn member_reachability_from_announcement(
 }
 
 /// Event types flowing through the node
+// In-process event message; the largest variant is the common hot path, so
+// boxing to equalize variant sizes would pessimize the common case.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum NodeEvent {
     /// New transaction received (from network gossipsub or unauthenticated RPC fallback).
@@ -419,6 +424,9 @@ pub struct EventLoop {
     /// members are all Terminated). Wired by `init_ai_infrastructure()` after
     /// `SwarmManager::with_storage()` has been constructed.
     swarm_manager: Option<Arc<tenzro_agent::SwarmManager>>,
+    /// ZK quorum store — when wired, closed fraud windows are pruned on each
+    /// finalized-block advance so the attested map does not grow unboundedly.
+    zk_quorum_store: Option<Arc<tenzro_consensus::ZkQuorumStore>>,
     /// Shared reference to the node's network_agents map for gossipsub agent discovery
     network_agents: Option<Arc<DashMap<String, crate::node::NetworkAgentEntry>>>,
     /// Shared reference to the node's network_providers map for gossipsub provider discovery
@@ -684,6 +692,7 @@ impl EventLoop {
             model_services: None,
             agent_runtime: None,
             swarm_manager: None,
+            zk_quorum_store: None,
             network_agents: None,
             network_providers: None,
             local_peers: None,
@@ -805,6 +814,16 @@ impl EventLoop {
         swarm_manager: Arc<tenzro_agent::SwarmManager>,
     ) -> Self {
         self.swarm_manager = Some(swarm_manager);
+        self
+    }
+
+    /// Wires the ZK quorum store so closed fraud windows are pruned on each
+    /// finalized-block advance.
+    pub fn with_zk_quorum_store(
+        mut self,
+        zk_quorum_store: Arc<tenzro_consensus::ZkQuorumStore>,
+    ) -> Self {
+        self.zk_quorum_store = Some(zk_quorum_store);
         self
     }
 
@@ -1133,6 +1152,16 @@ impl EventLoop {
             "Processing finality notification"
         );
         let height = notification.height.0;
+
+        // Prune ZK commitment fraud windows that closed at or before this
+        // height, so the attested map stays bounded.
+        if let Some(store) = self.zk_quorum_store.as_ref() {
+            let pruned = store.prune_closed_windows(height);
+            if pruned > 0 {
+                debug!(height, pruned, "zk-quorum: pruned closed fraud windows");
+            }
+        }
+
         let res = self.handle_block_finalized(notification.block).await;
 
         // Snapshot ABCI: produce a state-sync snapshot at the configured
@@ -1142,36 +1171,36 @@ impl EventLoop {
         // block we're snapshotting at. The recorded root is the LOCALLY
         // computed post-commit root (window back), not the proposer's header
         // claim — the header root lags execution and is unverified input.
-        if let Some(store) = self.snapshot_store.as_ref() {
-            if store.should_produce_at(height) {
-                let local_root = self
-                    .recent_state_roots
-                    .back()
-                    .copied()
-                    .unwrap_or_else(Hash::zero);
-                let mut sr = [0u8; 32];
-                let bytes = local_root.as_bytes();
-                let n = bytes.len().min(32);
-                sr[..n].copy_from_slice(&bytes[..n]);
-                let store = store.clone();
-                // Snapshot production walks 27 column families and is
-                // I/O-bound; run it off the event-loop thread so finality
-                // processing stays unblocked.
-                tokio::task::spawn_blocking(move || {
-                    match store.produce_at(height, sr) {
-                        Ok(m) => info!(
-                            height = m.height,
-                            num_chunks = m.num_chunks,
-                            "Produced state-sync snapshot"
-                        ),
-                        Err(e) => warn!(
-                            height = height,
-                            error = %e,
-                            "Failed to produce state-sync snapshot"
-                        ),
-                    }
-                });
-            }
+        if let Some(store) = self.snapshot_store.as_ref()
+            && store.should_produce_at(height)
+        {
+            let local_root = self
+                .recent_state_roots
+                .back()
+                .copied()
+                .unwrap_or_else(Hash::zero);
+            let mut sr = [0u8; 32];
+            let bytes = local_root.as_bytes();
+            let n = bytes.len().min(32);
+            sr[..n].copy_from_slice(&bytes[..n]);
+            let store = store.clone();
+            // Snapshot production walks 27 column families and is
+            // I/O-bound; run it off the event-loop thread so finality
+            // processing stays unblocked.
+            tokio::task::spawn_blocking(move || {
+                match store.produce_at(height, sr) {
+                    Ok(m) => info!(
+                        height = m.height,
+                        num_chunks = m.num_chunks,
+                        "Produced state-sync snapshot"
+                    ),
+                    Err(e) => warn!(
+                        height = height,
+                        error = %e,
+                        "Failed to produce state-sync snapshot"
+                    ),
+                }
+            });
         }
 
         res
@@ -1352,17 +1381,18 @@ impl EventLoop {
         // warning every attempt until infinity. Fixed 2026-07-16 after
         // a Studio dev launch spent minutes emitting this warning for
         // a NAT'd edge ModelProvider that never intended to validate.
-        if self.consensus.is_some() && self.network.is_some() {
-            let network = self.network.as_ref().expect("checked above");
+        if self.consensus.is_some()
+            && let Some(network) = self.network.as_ref()
+        {
             const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
             let warmup_start = std::time::Instant::now();
             let mut attempt: u32 = 0;
 
             // **Bootstrap quorum threshold.** Wait for ≥ 2f+1 admitted
             // validator peers (the BFT safety threshold) before starting
-            // consensus, not just ≥ 1. This is the production pattern from
-            // Solana (`--wait-for-supermajority`) and CometBFT (`genesis_time`
-            // + per-peer round-state gossip): on a freshly-bootstrapped
+            // consensus, not just ≥ 1. This is the standard production pattern
+            // (wait-for-supermajority at genesis plus per-peer round-state
+            // gossip): on a freshly-bootstrapped
             // fleet, starting consensus with only 1 peer admitted means the
             // first many views proceed without quorum, the pacemaker burns
             // through its timeout schedule, and validators end up at
@@ -1926,6 +1956,17 @@ impl EventLoop {
                             })
                             .unwrap_or_else(|| ctx.capacity.clone());
 
+                        // Refresh the advertised warm-prefix summary from the
+                        // serving runtime each tick, so prefix-affinity routing
+                        // reflects the prompts this provider currently holds
+                        // warm rather than a startup snapshot. Fingerprints
+                        // only (see `PrefixCacheSummary`); no KV bytes ride the
+                        // announcement.
+                        let mut capacity = capacity;
+                        if let Some(ref rt) = self.model_runtime {
+                            capacity.prefix_cache = rt.merged_warm_prefix_summary();
+                        }
+
                         let mut ann = tenzro_network::ProviderAnnouncementMessage {
                             peer_id: local_peer_id,
                             provider_address: ctx.provider_address.clone(),
@@ -2107,11 +2148,64 @@ impl EventLoop {
                     }
                 } => {
                     if let Some(msg) = outbound_consensus {
+                        // G6 batch-availability plane. Batch bodies, acks, and
+                        // availability certificates travel on the dedicated
+                        // `tenzro/batches` gossipsub topic (not the
+                        // consensus-direct overlay), as opaque bincode blobs the
+                        // consensus crate decodes on receipt — the network crate
+                        // does not depend on the consensus crate. Peel these off
+                        // before the consensus-message mapping below.
+                        let batch_payload: Option<MessagePayload> = match &msg {
+                            ConsensusOutMessage::Batch(batch) => {
+                                match bincode::serialize(batch) {
+                                    Ok(b) => Some(MessagePayload::BatchBody(b)),
+                                    Err(e) => {
+                                        warn!(error = %e, "batch_cert: failed to encode batch body; dropping");
+                                        None
+                                    }
+                                }
+                            }
+                            ConsensusOutMessage::BatchAck { ack, .. } => {
+                                match bincode::serialize(ack) {
+                                    Ok(b) => Some(MessagePayload::BatchAvailability(b)),
+                                    Err(e) => {
+                                        warn!(error = %e, "batch_cert: failed to encode batch ack; dropping");
+                                        None
+                                    }
+                                }
+                            }
+                            ConsensusOutMessage::BatchCertificate(cert) => {
+                                match bincode::serialize(cert) {
+                                    Ok(b) => Some(MessagePayload::BatchAvailability(b)),
+                                    Err(e) => {
+                                        warn!(error = %e, "batch_cert: failed to encode batch certificate; dropping");
+                                        None
+                                    }
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some(payload) = batch_payload {
+                            if let Some(ref network) = self.network {
+                                let network_clone = network.clone();
+                                let net_msg = NetworkMessage::new(payload);
+                                tokio::spawn(async move {
+                                    if let Err(e) = network_clone.broadcast("tenzro/batches", net_msg).await {
+                                        warn!(error = %e, "batch_cert: tenzro/batches broadcast failed");
+                                    }
+                                });
+                            }
+                            continue;
+                        }
                         let dbg_kind = match &msg {
                             ConsensusOutMessage::Vote(_) => "Vote",
                             ConsensusOutMessage::Proposal { .. } => "Proposal",
                             ConsensusOutMessage::Timeout(_) => "Timeout",
                             ConsensusOutMessage::NoEndorsement(_) => "NoEndorsement",
+                            // Batch variants are handled and `continue`d above.
+                            ConsensusOutMessage::Batch(_)
+                            | ConsensusOutMessage::BatchAck { .. }
+                            | ConsensusOutMessage::BatchCertificate(_) => unreachable!(),
                         };
                         info!(kind = dbg_kind, "event_loop.outbound_consensus: received msg from consensus engine");
                         if let Some(ref network) = self.network {
@@ -2183,7 +2277,7 @@ impl EventLoop {
                                             }
                                         }
                                     });
-                                    // MonadBFT NEC (arXiv:2502.20692): same encoding
+                                    // NEC tail-fork defence: same encoding
                                     // strategy as TC. If the bytes drop, the receiver
                                     // will reject the fresh-after-TC proposal — the
                                     // chain falls back to a repropose-of-high-tip on
@@ -2246,8 +2340,8 @@ impl EventLoop {
                                     }
                                 }
                                 ConsensusOutMessage::NoEndorsement(nec_msg) => {
-                                    // MonadBFT no-endorsement attestation
-                                    // (arXiv:2502.20692). Same hybrid signature
+                                    // No-endorsement attestation (NEC tail-fork
+                                    // defence). Same hybrid signature
                                     // encoding as Timeout.
                                     let encoded = bincode::serialize(&nec_msg.signature)
                                         .and_then(|s| bincode::serialize(&nec_msg.public_key).map(|p| (s, p)));
@@ -2267,6 +2361,10 @@ impl EventLoop {
                                         }
                                     }
                                 }
+                                // Batch variants are handled and `continue`d above.
+                                ConsensusOutMessage::Batch(_)
+                                | ConsensusOutMessage::BatchAck { .. }
+                                | ConsensusOutMessage::BatchCertificate(_) => unreachable!(),
                             };
                             if let Some(consensus_msg) = net_msg {
                                 let network_clone = network.clone();
@@ -3305,6 +3403,7 @@ impl EventLoop {
     /// 4. Persist the block to storage
     /// 5. Update local height/hash tracking
     /// 6. Clean up finalized transactions from pending pool
+    ///
     /// Process a finalized block — execute its transactions, commit state,
     /// persist the block + tx index + receipts, and (optionally) drive the
     /// epoch transition + gossip rebroadcast hooks.
@@ -6297,19 +6396,30 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         }
         // Field names MUST match the VM-side `X402SettlePayload` in
         // `tenzro-vm/src/native/mod.rs`.
-        TransactionType::X402Settle { payer, payee, amount, payment_id } => {
+        TransactionType::X402Settle {
+            payer,
+            payee,
+            amount,
+            payment_id,
+            app_wallet,
+            margin_bps,
+        } => {
             #[derive(serde::Serialize)]
             struct X402SettlePayload<'a> {
                 payer: &'a tenzro_types::primitives::Address,
                 payee: &'a tenzro_types::primitives::Address,
                 amount: u128,
                 payment_id: &'a str,
+                app_wallet: Option<&'a tenzro_types::primitives::Address>,
+                margin_bps: u32,
             }
             let payload = X402SettlePayload {
                 payer,
                 payee,
                 amount: *amount,
                 payment_id,
+                app_wallet: app_wallet.as_ref(),
+                margin_bps: *margin_bps,
             };
             let mut data = SELECTOR_X402_SETTLE.to_vec();
             data.extend_from_slice(

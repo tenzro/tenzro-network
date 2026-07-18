@@ -308,11 +308,35 @@ schemars = "1"
 revm = { version = "19", default-features = false, features = ["std", "serde-json"] }
 rlp = "0.6"
 ripemd = "0.1"
-solana-sbpf = { version = "0.20", default-features = false }
 num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"
 flate2 = "1"
+
+# SVM execution — Anza solana-svm, gated behind the tenzro-vm `svm-full` feature.
+# The processor crates are pinned to an exact 4.1.2 release train; interface
+# crates use the exact versions solana-svm 4.1.2 itself depends on. `svm-full`
+# opts these in via `dep:` gates; without the feature they are not compiled.
+# solana-svm + solana-svm-callback need `agave-unstable-api` for the public
+# TransactionBatchProcessor callback surface.
+solana-svm = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-svm-callback = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-svm-feature-set = { version = "=4.1.2" }
+solana-program-runtime = { version = "=4.1.2" }
+solana-syscalls = { version = "=4.1.2" }
+solana-bpf-loader-program = { version = "=4.1.2" }
+solana-system-program = { version = "=4.1.2" }
+solana-transaction-context = { version = "=4.1.2" }
+solana-account = { version = "4.3.0" }
+solana-clock = { version = "3.0.1" }
+solana-instruction = { version = "3.4.0", features = ["std"] }
+solana-message = { version = "4.1.1" }
+solana-transaction = { version = "4.1.1" }
+solana-pubkey = { version = "4.2.0" }
+solana-sdk-ids = { version = "3.1.0" }
+solana-fee-structure = { version = "3.0.0" }
+solana-hash = { version = "4.3.0" }
+solana-rent = { version = "4.2.0" }
 
 # X.509 certificate parsing & signature verification
 x509-cert = "0.2"

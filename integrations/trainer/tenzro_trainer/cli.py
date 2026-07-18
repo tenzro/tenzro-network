@@ -20,6 +20,7 @@ ephemeral Ed25519 trainer key per run unless ``--seed-file`` is provided.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -27,7 +28,11 @@ import sys
 import time
 from typing import Any
 
+import numpy as np
+
 from tenzro_trainer.gradient import (
+    ErrorFeedback,
+    FragmentBlob,
     TrainerKey,
     build_activation_commitment,
     build_round_gradients,
@@ -36,7 +41,11 @@ from tenzro_trainer.gradient import (
     deserialize_fragment_delta,
     flatten_fragment_values,
     partition_state_dict,
+    select_transmitted,
     serialize_fragment,
+    sparse_decode,
+    sparse_encode,
+    split_flat_to_fragment,
 )
 from tenzro_trainer.inner_loop import (
     OuterUpdateScheduler,
@@ -246,14 +255,25 @@ def cmd_run(args: argparse.Namespace) -> int:
         adapter = _build_adapter_for_modality(modality, arch_json, spec.metadata)
     model = adapter.model()
     scheduler = OuterUpdateScheduler(delayed=spec.delayed_apply)
+    # Chunked top-k sparse payloads route the outer pseudo-gradient
+    # g = θ_before − θ_after through a per-fragment error-feedback
+    # accumulator that replaces the syncer's synchronized momentum. The
+    # accumulators are trainer-local; the residual that the top-k drops each
+    # round decays by β (task metadata "sparse_ef_decay", default 0.95) and
+    # carries into the next round. Built lazily per fragment on its first
+    # sparse round.
+    sparse_kind = None if spec.payload_kind.is_dense else spec.payload_kind
+    ef_decay = float(spec.metadata.get("sparse_ef_decay", 0.95))
+    ef_state: dict[int, ErrorFeedback] = {}
     log.info(
         "running %d round(s) of %d inner steps each on shard %s "
-        "(sync=%s quantization=%s delayed_apply=%s)",
+        "(sync=%s quantization=%s payload=%s delayed_apply=%s)",
         max_rounds,
         inner_steps,
         args.shard_uri,
         spec.sync_strategy.to_json(),
         spec.quantization.label(),
+        spec.payload_kind.label(),
         spec.delayed_apply,
     )
 
@@ -273,7 +293,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
                 return 1
         scheduler.on_round_start(model)
-        # ADF-LoRA alternating freeze: under AggregationRule::LoraAlternating
+        # Alternating low-rank freeze: under AggregationRule::LoraAlternating
         # the adapter freezes one low-rank factor this round so the delta is a
         # single factor across contributors and the syncer's per-coordinate
         # mean is correct. No-op for full-FT adapters (no set_round method) and
@@ -307,7 +327,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
         delta_fragments = partition_state_dict(delta, fragment_count)
 
-        # Fragment eligibility this round: the Streaming DiLoCo shard
+        # Fragment eligibility this round: the streaming shard
         # rotation, intersected with this trainer's pipeline stage.
         active = [
             f
@@ -323,10 +343,35 @@ def cmd_run(args: argparse.Namespace) -> int:
             log.info("round %d: no fragments due from this trainer", round_index)
             continue
 
-        blobs = [
-            serialize_fragment(f, delta_fragments[f], spec.quantization)
-            for f in active
-        ]
+        # Serialize each active fragment. Dense fragments go straight to the
+        # safetensors/quantized codec. Sparse fragments fold g = −delta into
+        # the fragment's error-feedback accumulator, sparse-encode the
+        # transmit vector, and stash the transmit vector + the length so the
+        # local sync step below can decode the identical dropped-out delta the
+        # syncer and peers see.
+        blobs: list[FragmentBlob] = []
+        sparse_transmit: dict[int, "np.ndarray"] = {}
+        for f in active:
+            if sparse_kind is None:
+                blobs.append(
+                    serialize_fragment(f, delta_fragments[f], spec.quantization)
+                )
+                continue
+            flat_delta = flatten_fragment_values(delta_fragments[f])
+            ef = ef_state.get(f)
+            if ef is None:
+                ef = ErrorFeedback(flat_delta.size, ef_decay)
+                ef_state[f] = ef
+            # Outer pseudo-gradient is
+            # θ_before − θ_after = −(θ_after − θ_before) = −delta.
+            transmit = ef.prepare_transmit(-flat_delta)
+            payload = sparse_encode(transmit, sparse_kind.sparse)
+            ef.commit_transmitted(
+                transmit, select_transmitted(transmit, sparse_kind.sparse)
+            )
+            digest = hashlib.sha256(payload).digest()
+            blobs.append(FragmentBlob(fragment=f, payload=payload, digest=digest))
+            sparse_transmit[f] = transmit
         # Open tier: per-fragment TOPLOC-class activation commitments (loss
         # trajectory + top-k delta probes) — the syncer's accept gate is
         # fail-closed on these. Verified/Confidential carry TEE attestations
@@ -350,6 +395,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             inner_step_count=(round_index + 1) * inner_steps,
             key=key,
             commitments=commitments,
+            payload_kind=sparse_kind,
         )
         if ctx.is_primary:
             for g in gradients:
@@ -368,14 +414,23 @@ def cmd_run(args: argparse.Namespace) -> int:
         # Reset each synced fragment to θ⁽⁰⁾, then route the *wire-visible*
         # delta through the scheduler. Immediate mode nets to θ⁽ᴴ⁾ exactly
         # when unquantized, and to the lossy quantized delta otherwise — the
-        # same values peers and the syncer decode. Delayed mode (DiLoCoX)
+        # same values peers and the syncer decode. Delayed mode
         # buffers the update until the start of round r + 1.
         revert: dict[str, Any] = {}
         synced_delta: dict[str, Any] = {}
         for f, blob in zip(active, blobs):
             frag_pre = {k: pre_state[k] for k in delta_fragments[f]}
             revert.update(frag_pre)
-            if spec.quantization.is_none:
+            if sparse_kind is not None:
+                # Decode the transmit vector the wire carries (dropped
+                # coordinates zero-filled) back into the delta convention
+                # (delta ≈ −transmit) and split it across the fragment's
+                # keys so this trainer applies exactly the update its peers
+                # and the syncer see.
+                total = int(sparse_transmit[f].size)
+                decoded = sparse_decode(blob.payload, sparse_kind.sparse, total)
+                synced_delta.update(split_flat_to_fragment(-decoded, frag_pre))
+            elif spec.quantization.is_none:
                 synced_delta.update(delta_fragments[f])
             else:
                 synced_delta.update(
@@ -442,7 +497,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tenzro-trainer",
-        description="Tenzro Train Phase 1 reference trainer (Decoupled DiLoCo, PyTorch).",
+        description="Tenzro Train Phase 1 reference trainer (decoupled outer aggregation, PyTorch).",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)

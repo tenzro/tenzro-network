@@ -2,8 +2,8 @@
 //!
 //! # Why this exists
 //!
-//! The HotStuff-2 paper (Malkhi & Nayak 2023) leaves the Pacemaker module
-//! abstract. DiemBFT v4 §3.5 fills it in: on local view timeout each replica
+//! The HotStuff-2 paper leaves the Pacemaker module
+//! abstract. The Safety-Rules pattern fills it in: on local view timeout each replica
 //! **broadcasts** a signed [`TimeoutMsg`] carrying its highest QC view, and
 //! replicas that receive a `TimeoutMsg` for a higher view sync forward to
 //! it. When 2f+1 timeouts at the same view aggregate, the result is a
@@ -12,20 +12,16 @@
 //!
 //! Without these, the protocol can livelock under partial synchrony: the
 //! lone view-counter sync of phase 1 advances views but does not let the
-//! next leader propose. Aptos `safe_to_extend` rejects any block whose
+//! next leader propose. The safe-to-extend rule rejects any block whose
 //! parent QC view ≠ block.view-1 unless the proposal carries a TC for
 //! view N-1. Phase 2 (this module) adds that proof.
 //!
 //! References:
-//! - DiemBFT v4 §3.3, §3.5 (`local_timeout_round`, `process_remote_timeout`,
-//!   `TwoChainTimeoutCertificate`)
-//! - Jolteon (Gelashvili et al. 2022) §4 vote rule:
+//! - The two-chain timeout-certificate rule (`local_timeout_round`,
+//!   `process_remote_timeout`, `TwoChainTimeoutCertificate`)
+//! - The safe-to-extend vote rule:
 //!   `r = qc.r + 1` OR `r = tc.r + 1 ∧ qc.r ≥ max{tc.hqc_rounds}`
-//! - Aptos `consensus/src/round_manager.rs` (`process_local_timeout`,
-//!   `ensure_round_and_sync_up`)
-//! - "The Latest View on View Synchronization" (Malkhi, 2022)
-//! - "Liveness Attacks On HotStuff: The Vulnerability Of Timer Doubling
-//!   Mechanism" (Wang et al., Oxford CompJ 2024)
+//! - Round management (`process_local_timeout`, `ensure_round_and_sync_up`)
 //!
 //! # Wire compatibility
 //!
@@ -54,7 +50,7 @@ use tenzro_types::primitives::Address;
 /// the heal path for single-block finalization skew, where one replica
 /// finalized via a Commit QC the others never received and the proposer
 /// keeps re-proposing a conflicting block at the same height forever.
-/// **v2**: added `high_qc_view` — the DiemBFT `(round, hqc_round)` pair.
+/// **v2**: added `high_qc_view` — the `(round, hqc_round)` pair.
 /// Older messages are rejected.
 pub const TIMEOUT_MSG_FORMAT_VERSION: u8 = 3;
 
@@ -84,7 +80,7 @@ pub struct TimeoutMsg {
 
     /// The view of the highest Prepare QC the sender has observed. The new
     /// leader uses `max{high_qc_view}` over the 2f+1 signers to pick which
-    /// branch to extend (Jolteon vote rule). Receivers use this to verify
+    /// branch to extend (safe-to-extend vote rule). Receivers use this to verify
     /// that the proposal's parent QC view ≥ that maximum (`safe_to_extend`).
     pub high_qc_view: u64,
 
@@ -214,7 +210,7 @@ impl TimeoutMsg {
 
 /// One signer's contribution to a [`TimeoutCertificate`].
 ///
-/// Each signer carries their own `high_qc_view` because Jolteon's
+/// Each signer carries their own `high_qc_view` because the
 /// `safe_to_extend` rule requires the new leader's parent QC view to be
 /// ≥ `max{tc.signers[i].high_qc_view}`. We cannot collapse this into a
 /// single aggregated value without losing soundness against a Byzantine
@@ -262,7 +258,7 @@ pub const TIMEOUT_CERTIFICATE_FORMAT_VERSION: u8 = 1;
 /// super-majority. The next leader (at view N+1) attaches the TC to its
 /// proposal; receivers run `safe_to_extend` against the TC before voting.
 ///
-/// Per Jolteon vote rule:
+/// Per the safe-to-extend vote rule:
 /// > A replica votes for a block at round `r` iff
 /// > `r = qc.r + 1` OR
 /// > `r = tc.r + 1 AND qc.r ≥ max{signer.high_qc_view : signer in tc}`
@@ -387,7 +383,7 @@ impl TimeoutCertificate {
             })?;
         }
 
-        // Stake-weighted quorum (Sui model): the TC must carry > 2/3 of
+        // Stake-weighted quorum: the TC must carry > 2/3 of
         // normalized voting power, not merely 2f+1 signers by head-count.
         let signed_power = validator_set.voting_power_of(seen.iter());
         let quorum_power = validator_set.quorum_voting_power();
@@ -498,7 +494,7 @@ impl TimeoutCollector {
     /// Caller MUST have already verified the message via
     /// `TimeoutMsg::verify(validator_set)` before calling — the collector
     /// trusts the input. Verification before aggregation is the standard
-    /// HotStuff/Aptos pattern (`process_remote_timeout` rejects bad sigs
+    /// HotStuff-family pattern (`process_remote_timeout` rejects bad sigs
     /// at the gateway).
     pub fn add(&self, msg: &TimeoutMsg) -> CollectOutcome {
         let view = msg.view;
@@ -549,7 +545,7 @@ impl TimeoutCollector {
             },
         );
 
-        // Tally signed stake weight (Sui model), not a head-count of signers.
+        // Tally signed stake weight, not a head-count of signers.
         let signed_power = self
             .validator_set
             .voting_power_of(state.by_voter.keys());
@@ -594,10 +590,10 @@ impl TimeoutCollector {
 }
 
 // ---------------------------------------------------------------------------
-// MonadBFT No-Endorsement Certificate (NEC)
+// No-Endorsement Certificate (NEC)
 // ---------------------------------------------------------------------------
 //
-// MonadBFT (arXiv:2502.20692) closes the "tail-fork MEV" attack on HotStuff-2:
+// The NEC tail-fork defence closes the "tail-fork MEV" attack on HotStuff-2:
 // a Byzantine leader at view v can withhold its proposal from honest replicas,
 // trigger a timeout, and then leak its proposal to its successor at view v+1.
 // The successor extends the (otherwise-orphan) v block, so the Byzantine
@@ -780,7 +776,7 @@ pub struct NecSigner {
 /// no QC — which is what the protocol needs to safely allow a *new* block
 /// (rather than re-proposing a high-tip) at view v.
 ///
-/// MonadBFT calls this proof a "no-endorsement certificate" or "NEC".
+/// This proof is a "no-endorsement certificate" or "NEC".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoEndorsementCertificate {
     /// Wire-format version. Must equal

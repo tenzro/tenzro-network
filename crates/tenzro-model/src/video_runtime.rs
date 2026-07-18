@@ -209,7 +209,7 @@ impl VisionFallbackVideoEncoder {
             let status = std::process::Command::new("ffmpeg")
                 .args(["-loglevel", "error", "-y", "-i"])
                 .arg(video_path)
-                .args(["-vf", &format!("thumbnail,fps=1")])
+                .args(["-vf", "thumbnail,fps=1"])
                 .args(["-frames:v"])
                 .arg(format!("{}", n))
                 .arg(&pattern)

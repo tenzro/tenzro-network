@@ -100,7 +100,8 @@ pub const PEER_SCORE_DROP_THRESHOLD: i32 = -50;
 /// OOM-flapping peers serving the missing block), so its peer scores are
 /// degraded *by being behind*. Gating catchup on the same threshold starves
 /// the requester and deadlocks sync — the chain can then lose quorum and
-/// halt (cf. CometBFT GHSA-22qq-3xwm-r5x4 / issue #5801). While behind we
+/// halt (cf. the known catchup-starvation-on-degraded-score class of bug).
+/// While behind we
 /// only exclude peers that are hard-banned (egregious, sustained
 /// misbehavior), never peers merely below the steady-state drop line.
 pub const PEER_SCORE_HARD_BAN_THRESHOLD: i32 = -500;
@@ -167,7 +168,7 @@ impl PeerScore {
 /// `exclusion_threshold` is supplied by the caller's `peer_exclusion_threshold()`
 /// — the steady-state drop line when current, the hard-ban floor while behind —
 /// so catchup is never starved by scores that degraded *because* we fell behind
-/// (cf. CometBFT GHSA-22qq-3xwm-r5x4 / issue #5801).
+/// (cf. the known catchup-starvation-on-degraded-score class of bug).
 fn peer_is_sync_eligible(
     score: i32,
     advertised_tip: Option<(BlockHeight, Hash)>,
@@ -399,14 +400,14 @@ impl BlockSyncEngine {
             }
             PeerEvent::Disconnected(peer) => {
                 self.peers.remove(&peer);
-                if let SyncState::Syncing { peer: active, .. } = &self.state {
-                    if *active == peer {
-                        warn!(
-                            ?peer,
-                            "Block-sync: active sync peer disconnected — stalling"
-                        );
-                        self.state = SyncState::Stalled;
-                    }
+                if let SyncState::Syncing { peer: active, .. } = &self.state
+                    && *active == peer
+                {
+                    warn!(
+                        ?peer,
+                        "Block-sync: active sync peer disconnected — stalling"
+                    );
+                    self.state = SyncState::Stalled;
                 }
                 debug!(?peer, remaining = self.peers.len(), "Block-sync: peer disconnected");
             }
@@ -1046,7 +1047,7 @@ mod tests {
     /// block ahead is not a sync target until the gap exceeds the tolerance.
     #[test]
     fn single_block_gap_within_steady_tolerance_is_ignored() {
-        assert!(SLOT_IMPORT_TOLERANCE >= 1);
+        const { assert!(SLOT_IMPORT_TOLERANCE >= 1) };
         let r = peer_is_sync_eligible(
             0,
             tip(192_745),

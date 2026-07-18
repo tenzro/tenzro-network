@@ -1,19 +1,17 @@
 # tenzro-consensus
 
-HotStuff-2 BFT consensus engine with reputation-weighted proposer election, no-endorsement certificates, and hybrid post-quantum signatures. Powers the Tenzro Ledger L1 settlement layer.
-
-For the full protocol specification with formal arguments and references, see [`docs/papers/tenzro-consensus.md`](../../docs/papers/tenzro-consensus.md).
+HotStuff-2 BFT consensus engine with reputation-weighted proposer election, no-endorsement certificates, and hybrid post-quantum signatures. Powers the Tenzro Ledger settlement layer.
 
 ## Overview
 
-The crate composes four BFT mechanisms:
+The crate composes these BFT mechanisms:
 
 1. **Two-phase HotStuff-2** — linear-communication, partially-synchronous BFT with 2Δ optimistic finality.
 2. **Reputation-weighted proposer election** — stake × observed-behaviour leader draw. Closes the small-validator-set stall mode that round-robin suffers when one validator is flaky.
 3. **No-endorsement certificates (NECs)** — closes the tail-fork attack class on 2-chain HotStuff.
 4. **Ed25519 + ML-DSA-65 hybrid signatures** — every safety-critical message (vote, timeout, no-endorsement) is hybrid-signed. NIST FIPS 204 compliant.
-
-For academic citations and the formal protocol specification, see [`docs/papers/tenzro-consensus.md`](../../docs/papers/tenzro-consensus.md).
+5. **Batch certificates** — a proposal references transaction batches by ID plus an erasure-availability threshold, so the leader's egress bandwidth no longer caps throughput when serving large payloads.
+6. **Quorum-gated ZK commitment attestation** — a ZK proof commitment is recorded on-chain only after a validator quorum independently co-signs it, so no single validator can attest a proof that was never verified.
 
 ## Modules
 
@@ -28,6 +26,8 @@ For academic citations and the formal protocol specification, see [`docs/papers/
 | `timeout.rs` | 1,710 | `TimeoutMsg` / `TimeoutCertificate` (TC) and `NoEndorsementMsg` / `NoEndorsementCertificate` (NEC) |
 | `vote_state.rs` | 570 | `EquivocationDetector` |
 | `voter.rs` | 724 | `Vote`, `QuorumCertificate`, `VoteCollector` |
+| `batch_cert.rs` | 983 | `Batch` / batch certificates — decouple ordering bandwidth from data bandwidth so a proposal carries batch IDs plus an erasure-availability threshold instead of full transaction bodies |
+| `zk_quorum.rs` | 897 | `ZkCommitmentClaim` / `ZkCosign` / `ZkQuorumCertificate` — a ZK commitment is accepted only after a quorum of validators independently co-sign it off-EVM, not a single validator's run |
 | `mempool.rs` | 875 | Transaction admission + ordering |
 | `admission.rs` | 622 | Lane-based fee floor admission |
 | `epoch_manager.rs` | 574 | Atomic epoch transitions |
@@ -119,7 +119,7 @@ StakingSlashingCallback::report_equivocation(validator, view, evidence) {
 
 Pipeline: `EquivocationDetector` → `SlashingCallback` trait → `tenzro-node::StakingSlashingCallback` → `tenzro-token::StakingManager::slash` → on-chain TNZO burn. Slashed validators are dropped from the next epoch's pending queue.
 
-### View change (DiemBFT pacemaker)
+### View change (pacemaker)
 
 On local view timeout, replicas broadcast a signed `TimeoutMsg(view, high_qc_view)`. Receivers observing a higher-view timeout advance their local view. *2f+1* timeouts at the same view aggregate into a Timeout Certificate (TC). The next leader attaches the TC to its proposal.
 
@@ -227,7 +227,7 @@ Real TPS is execution-layer-dependent and orthogonal to consensus throughput. Pr
 ## Safety and liveness
 
 - **Safety.** No two honest replicas finalize different blocks at the same height. Follows from HotStuff-2's two-chain rule.
-- **Liveness (after GST).** Progress guaranteed once *2f+1* honest validators exchange messages within bounded delay. Follows from the DiemBFT v4 pacemaker argument.
+- **Liveness (after GST).** Progress guaranteed once *2f+1* honest validators exchange messages within bounded delay. Follows from the standard pacemaker liveness argument.
 - **Single-validator-fault resilience.** Reputation election deprioritizes flaky validators within ~20 rounds.
 - **Tail-fork resistance.** NEC blocks fresh-block proposals after a timeout unless f+1 validators attest no QC was observed.
 - **Quantum forgery resistance.** Hybrid Ed25519 + ML-DSA-65 over every safety-critical signature.

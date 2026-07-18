@@ -95,6 +95,23 @@ impl Default for MachineResources {
     }
 }
 
+/// Unprivileged uid the jailer drops each microVM to by default. Running
+/// firecracker as a non-root host user means a guest-to-host escape lands on an
+/// account with no privileges rather than root. Operators reserve a dedicated
+/// system account for this and override via
+/// [`MachineSupervisor::with_jailer_identity`].
+pub const DEFAULT_JAILER_UID: u32 = 30000;
+/// Unprivileged gid the jailer drops each microVM to by default.
+pub const DEFAULT_JAILER_GID: u32 = 30000;
+/// cgroup version the jailer uses for per-microVM resource accounting. `2` is
+/// the unified hierarchy present on current kernels; operators on legacy hosts
+/// override to `1`.
+pub const DEFAULT_JAILER_CGROUP_VERSION: u8 = 2;
+/// Seccomp filter level firecracker installs on itself. `2` is firecracker's
+/// advanced per-thread syscall allow-list; `0` disables filtering (not
+/// recommended). The jailer forwards this to firecracker.
+pub const DEFAULT_JAILER_SECCOMP_LEVEL: u8 = 2;
+
 /// A single sealed environment secret. `name` is the plaintext variable name
 /// (not secret); `sealed_value` is the `EncryptedEnvelope` (X25519 + AES-256-GCM)
 /// wrapped to the assigned node's sealing key, JSON-serialized. The supervisor
@@ -452,6 +469,22 @@ mod supervisor {
         /// Monotonic counter used to derive a unique tap device name and
         /// host/guest IP pair per launched microVM.
         tap_seq: std::sync::atomic::AtomicU32,
+        /// Unprivileged uid the jailer drops the microVM to. The jailer sets up
+        /// the chroot as root, then `setuid`s to this before exec'ing
+        /// firecracker so a guest escape lands on an unprivileged host user.
+        /// Defaults to [`DEFAULT_JAILER_UID`].
+        jailer_uid: u32,
+        /// Unprivileged gid the jailer drops the microVM to. Defaults to
+        /// [`DEFAULT_JAILER_GID`].
+        jailer_gid: u32,
+        /// cgroup version the jailer places the microVM in for resource
+        /// accounting (`2` for unified cgroup v2, `1` for legacy). Defaults to
+        /// [`DEFAULT_JAILER_CGROUP_VERSION`].
+        jailer_cgroup_version: u8,
+        /// Seccomp filter level firecracker installs on itself (`2` = advanced
+        /// per-thread filters, the firecracker default; `0` disables). Defaults
+        /// to [`DEFAULT_JAILER_SECCOMP_LEVEL`].
+        jailer_seccomp_level: u8,
         running: DashMap<String, RunningMachine>,
     }
 
@@ -479,6 +512,10 @@ mod supervisor {
                 chroot_base,
                 kernel_path,
                 tap_seq: std::sync::atomic::AtomicU32::new(0),
+                jailer_uid: DEFAULT_JAILER_UID,
+                jailer_gid: DEFAULT_JAILER_GID,
+                jailer_cgroup_version: DEFAULT_JAILER_CGROUP_VERSION,
+                jailer_seccomp_level: DEFAULT_JAILER_SECCOMP_LEVEL,
                 running: DashMap::new(),
             }
         }
@@ -486,6 +523,24 @@ mod supervisor {
         pub fn with_binaries(mut self, firecracker_bin: String, jailer_bin: String) -> Self {
             self.firecracker_bin = firecracker_bin;
             self.jailer_bin = jailer_bin;
+            self
+        }
+
+        /// Override the unprivileged uid/gid the jailer drops microVMs to. The
+        /// defaults ([`DEFAULT_JAILER_UID`] / [`DEFAULT_JAILER_GID`]) run every
+        /// guest as a non-root host account; pass `0` for either only on a host
+        /// where an unprivileged account cannot be provisioned.
+        pub fn with_jailer_identity(mut self, uid: u32, gid: u32) -> Self {
+            self.jailer_uid = uid;
+            self.jailer_gid = gid;
+            self
+        }
+
+        /// Override the jailer cgroup version and firecracker seccomp level.
+        /// `cgroup_version` is clamped to `1` or `2`; `seccomp_level` to `0..=2`.
+        pub fn with_jailer_isolation(mut self, cgroup_version: u8, seccomp_level: u8) -> Self {
+            self.jailer_cgroup_version = if cgroup_version == 1 { 1 } else { 2 };
+            self.jailer_seccomp_level = seccomp_level.min(2);
             self
         }
 
@@ -774,27 +829,37 @@ mod supervisor {
 
         /// Spawn `jailer --exec-file <firecracker> --id <inst> --chroot-base-dir
         /// <base> ...`. The jailer daemonizes firecracker into the chroot.
+        ///
+        /// Hardened defaults: the microVM is dropped to an unprivileged
+        /// `--uid`/`--gid` (so a guest escape lands on a non-root host account),
+        /// placed in a `--cgroup-version` hierarchy for resource accounting, and
+        /// firecracker runs its advanced `--seccomp-level` syscall filter. All
+        /// are operator-overridable via [`MachineSupervisor::with_jailer_identity`]
+        /// and [`MachineSupervisor::with_jailer_isolation`].
         async fn spawn_jailer(
             &self,
             inst: &str,
             _chroot: &std::path::Path,
         ) -> Result<tokio::process::Child, std::io::Error> {
-            tokio::process::Command::new(&self.jailer_bin)
-                .arg("--id")
+            let mut cmd = tokio::process::Command::new(&self.jailer_bin);
+            cmd.arg("--id")
                 .arg(inst)
                 .arg("--exec-file")
                 .arg(&self.firecracker_bin)
                 .arg("--chroot-base-dir")
                 .arg(&self.chroot_base)
                 .arg("--uid")
-                .arg("0")
+                .arg(self.jailer_uid.to_string())
                 .arg("--gid")
-                .arg("0")
+                .arg(self.jailer_gid.to_string())
+                .arg("--cgroup-version")
+                .arg(self.jailer_cgroup_version.to_string())
                 .arg("--")
                 .arg("--api-sock")
                 .arg("run/firecracker.socket")
-                .kill_on_drop(true)
-                .spawn()
+                .arg("--seccomp-level")
+                .arg(self.jailer_seccomp_level.to_string());
+            cmd.kill_on_drop(true).spawn()
         }
 
         /// PUT a JSON body to the Firecracker REST API over its unix socket. The

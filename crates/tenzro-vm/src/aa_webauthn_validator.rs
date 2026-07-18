@@ -266,21 +266,21 @@ impl WebAuthnValidator {
                 let inner = self
                     .enrollments
                     .entry(account)
-                    .or_insert_with(DashMap::new);
+                    .or_default();
                 inner.insert(credential_id, record);
             }
         }
     }
 
     fn persist(&self, account: &[u8], credential_id: &[u8], key: &WebAuthnAccountKey) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = bincode::serialize(key) {
-                let _ = storage.put(
-                    tenzro_storage::CF_VALIDATOR_MODULES,
-                    &Self::enrollment_key(account, credential_id),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = bincode::serialize(key)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::enrollment_key(account, credential_id),
+                &bytes,
+            );
         }
     }
 
@@ -319,7 +319,7 @@ impl WebAuthnValidator {
         let inner = self
             .enrollments
             .entry(account)
-            .or_insert_with(DashMap::new);
+            .or_default();
         inner.insert(credential_id, key);
         Ok(())
     }

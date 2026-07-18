@@ -788,7 +788,7 @@ impl fmt::Display for TenzroEvent {
 /// Wraps a [`TenzroEvent`] with monotonic sequencing and metadata.
 ///
 /// Sequences are gap-free and strictly increasing. Consumers can use
-/// `from_sequence` in [`EventFilter`] for cursor-based replay (Sui model).
+/// `from_sequence` in [`EventFilter`] for cursor-based replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventEnvelope {
     /// Monotonically increasing, gap-free sequence number.

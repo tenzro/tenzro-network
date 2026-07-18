@@ -282,26 +282,26 @@ impl CorporateActionEngine {
     }
 
     fn persist_record(&self, record: &CorporateActionRecord) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(record) {
-                let _ = storage.put(
-                    tenzro_storage::CF_TOKENS,
-                    &Self::action_key(&record.token, record.seq),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(record)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_TOKENS,
+                &Self::action_key(&record.token, record.seq),
+                &bytes,
+            );
         }
     }
 
     fn persist_profile(&self, token: &[u8; 20], profile: &TokenizedEquityProfile) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(profile) {
-                let _ = storage.put(
-                    tenzro_storage::CF_TOKENS,
-                    &Self::profile_key(token),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(profile)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_TOKENS,
+                &Self::profile_key(token),
+                &bytes,
+            );
         }
     }
 

@@ -71,6 +71,7 @@
 pub mod a2a;
 pub mod agent_kit_auth;
 pub mod api_key;
+pub mod app_registry;
 pub mod bazaar_store;
 pub mod block_sync;
 pub mod bootstrap_dns;
@@ -132,6 +133,7 @@ pub mod storage_provider_runtime;
 pub mod rpc;
 pub mod rpc_integrations;
 pub mod saga_executor;
+pub mod settle_authorized;
 pub mod sites;
 pub mod stable_conversion;
 pub mod stable_controller_driver;

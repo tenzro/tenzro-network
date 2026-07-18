@@ -333,7 +333,7 @@ impl ModelLibrary {
             .collect();
 
         // Sort by download count
-        models.sort_by(|a, b| b.download_count.cmp(&a.download_count));
+        models.sort_by_key(|b| std::cmp::Reverse(b.download_count));
 
         models.into_iter().take(10).collect()
     }

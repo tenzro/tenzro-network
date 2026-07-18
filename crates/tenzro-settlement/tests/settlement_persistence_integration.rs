@@ -474,7 +474,7 @@ fn test_channel_dispute_survives_restart() {
         manager.set_balance(&payer, &tnzo(), 1_000_000);
 
         let channel = manager
-            .open_channel(payer, payee, 10_000, tnzo(), far_future())
+            .open_channel(payer, payee, 10_000, tnzo(), far_future(), None, 0)
             .expect("open channel");
         channel_id = channel.channel_id.clone();
 

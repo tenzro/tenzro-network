@@ -463,9 +463,9 @@ mod tests {
             // contents, not which role we land in.
             let role = build_committee_bound_sign_config(
                 sample_instance_id(),
-                g.clone(),
+                g,
                 0,
-                params.clone(),
+                params,
                 sample_group_pk(),
                 message_hash,
                 chain_entropy,

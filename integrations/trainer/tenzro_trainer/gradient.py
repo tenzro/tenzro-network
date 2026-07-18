@@ -1,6 +1,6 @@
 """Outer-gradient packaging.
 
-Decoupled DiLoCo decomposes training into:
+Decoupled outer aggregation decomposes training into:
 
 * **Inner loop** — H steps of local SGD on a shard. Run per trainer per round.
 * **Outer step** — the syncer aggregates ``Δθᵢ = θᵢ⁽ᴴ⁾ − θ⁽⁰⁾`` from K-of-M
@@ -23,6 +23,7 @@ documented in docs/AI.md §7.4 (per-modality fragment partitioning).
 from __future__ import annotations
 
 import hashlib
+import struct
 import time
 from dataclasses import dataclass
 from typing import Iterable, Sequence
@@ -47,7 +48,9 @@ from tenzro_trainer.types import (
     DeltaProbe,
     GradientQuantization,
     OuterGradient,
+    PayloadKind,
     Signature,
+    SparseTopKParams,
 )
 
 
@@ -141,6 +144,37 @@ def flatten_fragment_values(
     return np.concatenate(parts).astype(np.float32, copy=False)
 
 
+def split_flat_to_fragment(
+    flat: "np.ndarray",
+    reference_state: dict[str, "torch.Tensor"],
+) -> dict[str, "torch.Tensor"]:
+    """Inverse of :func:`flatten_fragment_values`.
+
+    Reshapes a flat float32 vector back into per-key tensors, consuming the
+    vector in the same name-sorted, C-contiguous order the flatten produced.
+    ``reference_state`` supplies the key set and tensor shapes. Used to turn a
+    decoded sparse (or otherwise flattened) delta back into a state-dict the
+    local apply step consumes.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch is required")
+    values = np.asarray(flat, dtype=np.float32).reshape(-1)
+    total = sum(int(t.numel()) for t in reference_state.values())
+    if values.size != total:
+        raise ValueError(
+            f"flat length {values.size} != fragment element count {total}"
+        )
+    out: dict[str, "torch.Tensor"] = {}
+    cursor = 0
+    for k in sorted(reference_state.keys()):
+        ref = reference_state[k]
+        n = int(ref.numel())
+        chunk = values[cursor : cursor + n]
+        cursor += n
+        out[k] = torch.from_numpy(chunk.copy()).reshape(ref.shape)
+    return out
+
+
 def top_k_delta_probes(delta: "np.ndarray", k: int) -> list[DeltaProbe]:
     """Select the top-k probes from a flattened fragment delta.
 
@@ -185,21 +219,254 @@ def build_activation_commitment(
     )
 
 
+# ---------------------------------------------------------------------------
+# Chunked top-k + 2-bit codec
+#
+# Byte-identical to ``crates/tenzro-training/src/sparse.rs``. The wire layout
+# per chunk is: f32 LE ``scale``, ``kept`` u16 LE ascending chunk-local
+# indices, then ``ceil(kept/4)`` packed code bytes (2 bits each, low pair
+# first). The 2-bit code is sign-magnitude: ``00→0, 01→+1, 11→-1`` (``10``
+# reserved → 0). ``scale`` is the max magnitude of the kept coordinates.
+# ---------------------------------------------------------------------------
+
+
+def _sparse_top_k_indices(chunk: "np.ndarray", kept: int) -> "np.ndarray":
+    """Chunk-local indices of the ``kept`` largest-magnitude coordinates,
+    ascending (wire order). Ties break toward the lower index — the identical
+    deterministic ordering to the Rust ``top_k_indices``."""
+    n = chunk.size
+    if kept >= n:
+        return np.arange(n, dtype=np.int64)
+    if kept <= 0:
+        return np.zeros(0, dtype=np.int64)
+    magnitude = np.abs(chunk.astype(np.float32, copy=False))
+    # Descending |value|, ties broken by ascending index. lexsort's last key
+    # is primary.
+    order = np.lexsort((np.arange(n), -magnitude))[:kept]
+    order.sort()
+    return order.astype(np.int64, copy=False)
+
+
+def _encode_2bit(value: float, scale: float) -> int:
+    if scale == 0.0 or value == 0.0:
+        return 0b00
+    return 0b01 if value > 0.0 else 0b11
+
+
+def _decode_2bit(code: int) -> float:
+    code &= 0b11
+    if code == 0b01:
+        return 1.0
+    if code == 0b11:
+        return -1.0
+    return 0.0  # 0b00 and reserved 0b10
+
+
+def sparse_encoded_len(length: int, params: SparseTopKParams) -> int:
+    """Total byte length of the sparse encoding of a length-``length``
+    fragment under ``params`` — mirrors Rust ``sparse_encoded_len``."""
+    cs = max(params.chunk_size, 1)
+    total = 0
+    rem = length
+    while rem > 0:
+        chunk_len = min(rem, cs)
+        kept = params.kept_for_chunk(chunk_len)
+        total += 4 + kept * 2 + (kept + 3) // 4
+        rem -= chunk_len
+    return total
+
+
+def sparse_encode(values: "np.ndarray", params: SparseTopKParams) -> bytes:
+    """Encode a flattened fragment (the *transmit* vector) into the sparse
+    top-k + 2-bit wire format. Byte-identical to Rust ``sparse_encode``."""
+    flat = np.asarray(values, dtype=np.float32).reshape(-1)
+    cs = max(params.chunk_size, 1)
+    out = bytearray()
+    for start in range(0, flat.size, cs):
+        chunk = flat[start : start + cs]
+        kept = params.kept_for_chunk(chunk.size)
+        top = _sparse_top_k_indices(chunk, kept)
+        max_abs = float(np.abs(chunk[top]).max()) if top.size else 0.0
+        out += struct.pack("<f", max_abs)
+        for i in top:
+            out += struct.pack("<H", int(i))
+        # Pack 2-bit codes, 4 per byte, low pair first.
+        cur = 0
+        filled = 0
+        for i in top:
+            code = _encode_2bit(float(chunk[int(i)]), max_abs)
+            cur |= (code & 0b11) << (filled * 2)
+            filled += 1
+            if filled == 4:
+                out.append(cur)
+                cur = 0
+                filled = 0
+        if filled > 0:
+            out.append(cur)
+    return bytes(out)
+
+
+def sparse_decode(
+    data: bytes, params: SparseTopKParams, expected_len: int
+) -> "np.ndarray":
+    """Decode a sparse wire payload into a dense length-``expected_len`` float32
+    vector with dropped coordinates zero-filled. Mirrors Rust
+    ``sparse_decode``, including the malformed-length and out-of-range-index
+    rejections."""
+    expected_bytes = sparse_encoded_len(expected_len, params)
+    if len(data) != expected_bytes:
+        raise ValueError(
+            f"sparse {params.label()} payload is {len(data)} bytes, "
+            f"expected {expected_bytes} for {expected_len} values"
+        )
+    cs = max(params.chunk_size, 1)
+    out = np.zeros(expected_len, dtype=np.float32)
+    cursor = 0
+    base = 0
+    while base < expected_len:
+        chunk_len = min(expected_len - base, cs)
+        kept = params.kept_for_chunk(chunk_len)
+        (scale,) = struct.unpack_from("<f", data, cursor)
+        cursor += 4
+        indices: list[int] = []
+        for _ in range(kept):
+            (idx,) = struct.unpack_from("<H", data, cursor)
+            if idx >= chunk_len:
+                raise ValueError(
+                    f"sparse {params.label()}: chunk-local index {idx} out of "
+                    f"range for chunk length {chunk_len}"
+                )
+            indices.append(int(idx))
+            cursor += 2
+        code_bytes = (kept + 3) // 4
+        for n, idx in enumerate(indices):
+            byte = data[cursor + n // 4]
+            code = (byte >> ((n % 4) * 2)) & 0b11
+            out[base + idx] = _decode_2bit(code) * scale
+        cursor += code_bytes
+        base += chunk_len
+    return out
+
+
+def select_transmitted(
+    values: "np.ndarray", params: SparseTopKParams
+) -> list[tuple[int, float]]:
+    """The exact ``(global_index, transmitted_value)`` pairs
+    :func:`sparse_encode` would send for ``values``. Used to subtract the
+    transmitted mass from the error-feedback accumulator. Mirrors Rust
+    ``select_transmitted``."""
+    flat = np.asarray(values, dtype=np.float32).reshape(-1)
+    cs = max(params.chunk_size, 1)
+    sent: list[tuple[int, float]] = []
+    base = 0
+    for start in range(0, flat.size, cs):
+        chunk = flat[start : start + cs]
+        kept = params.kept_for_chunk(chunk.size)
+        top = _sparse_top_k_indices(chunk, kept)
+        max_abs = float(np.abs(chunk[top]).max()) if top.size else 0.0
+        for i in top:
+            i = int(i)
+            q = _decode_2bit(_encode_2bit(float(chunk[i]), max_abs)) * max_abs
+            sent.append((base + i, q))
+        base += chunk.size
+    return sent
+
+
+class ErrorFeedback:
+    """Trainer-local error-feedback accumulator.
+
+    Replaces the syncer's outer momentum. Each round:
+
+    1. compute the raw outer pseudo-gradient ``g = θ_before − θ_after``;
+    2. :meth:`prepare_transmit` returns ``t = decay·acc + g`` (the vector
+       actually sparsified and sent);
+    3. encode ``t`` with :func:`sparse_encode`;
+    4. :meth:`commit_transmitted` sets ``acc ← t`` with the transmitted
+       coordinates subtracted — the residual carries into the next round.
+
+    The accumulator is persisted next to the optimizer checkpoint via
+    :meth:`state_dict` / :meth:`load_state_dict`. Byte-for-byte equivalent to
+    the Rust ``ErrorFeedback`` so a Rust-side (Confidential-tier) syncer
+    reproduces the same discipline.
+    """
+
+    def __init__(self, length: int, decay: float) -> None:
+        self._decay = float(min(max(decay, 0.0), 1.0))
+        self._acc = np.zeros(int(length), dtype=np.float32)
+
+    @property
+    def decay(self) -> float:
+        return self._decay
+
+    @property
+    def accumulator(self) -> "np.ndarray":
+        return self._acc
+
+    def prepare_transmit(self, grad: "np.ndarray") -> "np.ndarray":
+        """Return the transmit vector ``t = decay·acc + grad``."""
+        g = np.asarray(grad, dtype=np.float32).reshape(-1)
+        if g.size != self._acc.size:
+            raise ValueError(
+                f"error-feedback grad length {g.size} != accumulator length "
+                f"{self._acc.size}"
+            )
+        return (self._decay * self._acc + g).astype(np.float32, copy=False)
+
+    def commit_transmitted(
+        self, transmit: "np.ndarray", transmitted: list[tuple[int, float]]
+    ) -> None:
+        """Set ``acc ← transmit`` then subtract the transmitted mass at the
+        exact coordinates that were sent (error feedback)."""
+        t = np.asarray(transmit, dtype=np.float32).reshape(-1)
+        if t.size != self._acc.size:
+            raise ValueError(
+                f"error-feedback transmit length {t.size} != accumulator "
+                f"length {self._acc.size}"
+            )
+        self._acc = t.copy()
+        for idx, value in transmitted:
+            if 0 <= idx < self._acc.size:
+                self._acc[idx] -= value
+
+    def state_dict(self) -> dict[str, object]:
+        """Serializable snapshot for checkpointing beside the optimizer."""
+        return {"decay": self._decay, "accumulator": self._acc.tolist()}
+
+    @classmethod
+    def load_state_dict(cls, state: dict[str, object]) -> "ErrorFeedback":
+        acc = np.asarray(state["accumulator"], dtype=np.float32)
+        ef = cls(acc.size, float(state["decay"]))
+        ef._acc = acc
+        return ef
+
+
 def serialize_fragment(
     fragment_index: int,
     delta_state_dict: dict[str, "torch.Tensor"],
     quantization: GradientQuantization,
+    payload_kind: PayloadKind | None = None,
 ) -> FragmentBlob:
     """Serialize one fragment's delta state-dict + SHA-256 digest.
 
-    ``none()`` keeps the safetensors container; ``Int8`` / ``Int4`` encode
-    the flattened values with the blockwise codec from
-    :mod:`tenzro_trainer.quantization` (the format the Rust syncer's
-    ``dequantize`` consumes).
+    Under ``PayloadKind.dense()`` (the default): ``none()`` keeps the
+    safetensors container; ``Int8`` / ``Int4`` encode the flattened values
+    with the blockwise codec from :mod:`tenzro_trainer.quantization` (the
+    format the Rust syncer's ``dequantize`` consumes).
+
+    Under ``PayloadKind.sparse_topk(params)``: the flattened fragment values
+    (already error-feedback-adjusted by the caller) are encoded with the
+    chunked top-k + 2-bit codec via :func:`sparse_encode`. Sparse and
+    dense-quantization are mutually exclusive — the syncer rejects a sparse
+    payload that also declares a blockwise ``GradientQuantization``.
     """
     if torch is None:
         raise RuntimeError("PyTorch is required to serialize fragments")
-    if quantization.is_none:
+    kind = payload_kind or PayloadKind.dense()
+    if not kind.is_dense:
+        if kind.sparse is None:  # pragma: no cover - guarded by dataclass
+            raise ValueError("SparseTopK payload kind requires params")
+        payload = sparse_encode(flatten_fragment_values(delta_state_dict), kind.sparse)
+    elif quantization.is_none:
         try:
             from safetensors.torch import save as safetensors_save
         except ImportError as e:  # pragma: no cover - hard runtime dep
@@ -408,11 +675,19 @@ def build_outer_gradient(
     key: TrainerKey,
     submitted_at_ms: int | None = None,
     commitment: ActivationCommitment | None = None,
+    payload_kind: PayloadKind | None = None,
 ) -> OuterGradient:
     """Assemble + sign an ``OuterGradient`` for one fragment.
 
     ``commitment`` is required for Open-tier tasks — the syncer's accept
     gate rejects Open-tier submissions without one.
+
+    ``payload_kind`` declares dense (default) vs SparseTopK layout of
+    ``blob.payload``; it must match the payload the caller passed to
+    :func:`serialize_fragment`, and the syncer rejects a mismatch against the
+    task spec. It is deliberately NOT part of the signed preimage — the Rust
+    ``outer_gradient_signing_bytes`` does not bind it, so adding it here would
+    diverge the wire signature.
     """
     submitted = (
         submitted_at_ms if submitted_at_ms is not None else int(time.time() * 1000)
@@ -440,6 +715,7 @@ def build_outer_gradient(
         safetensors_hash=blob.digest,
         payload_bytes=blob.size_bytes,
         quantization=quantization,
+        payload_kind=payload_kind or PayloadKind.dense(),
         inner_step_count=inner_step_count,
         submitted_at=submitted,
         signature=sig,
@@ -459,12 +735,18 @@ def build_round_gradients(
     inner_step_count: int,
     key: TrainerKey,
     commitments: dict[int, ActivationCommitment] | None = None,
+    payload_kind: PayloadKind | None = None,
 ) -> list[OuterGradient]:
     """Convenience: build one ``OuterGradient`` per fragment in a round.
 
     ``commitments`` maps fragment index → activation commitment; fragments
     without an entry are submitted commitment-free (Verified/Confidential
     tiers, where the TEE attestation carries the trust instead).
+
+    ``payload_kind`` applies to every fragment in the round — dense (default)
+    or SparseTopK. It must match the layout the fragments were serialized
+    with; the syncer rejects a submission whose declared kind disagrees with
+    the task spec.
     """
     submitted = int(time.time() * 1000)
     return [
@@ -479,6 +761,7 @@ def build_round_gradients(
             key=key,
             submitted_at_ms=submitted,
             commitment=(commitments or {}).get(b.fragment),
+            payload_kind=payload_kind,
         )
         for b in blobs
     ]

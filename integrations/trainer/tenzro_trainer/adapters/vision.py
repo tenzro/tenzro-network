@@ -1,7 +1,7 @@
 """Vision trainer adapter — ViT-B/16 family.
 
 This is the real inner-loop driver for ViT-class image training under
-Decoupled DiLoCo. The default backbone is **timm ViT-B/16**
+decoupled outer aggregation. The default backbone is **timm ViT-B/16**
 (``vit_base_patch16_224``), which is the architecture family our
 inference-side vision encoders share — DINOv3 ViT-B/16, SigLIP2-base, and
 CLIP ViT-B/16 in ``crates/tenzro-model/src/catalog.rs`` all use the

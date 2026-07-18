@@ -837,7 +837,7 @@ impl HfArtifactDownloader {
                 // Per-file size hint = total / N, used only for progress UI
                 // when Content-Length is missing.
                 let n = files.len() as u64;
-                let per_file_hint = if n > 0 { total_size_hint / n } else { 0 };
+                let per_file_hint = total_size_hint.checked_div(n).unwrap_or(0);
 
                 for (idx, filename) in files.iter().enumerate() {
                     let file_dest = tmp_dir.join(filename);

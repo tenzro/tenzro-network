@@ -1,7 +1,7 @@
 {
   "template_id": "ref-language-trainer-v1",
   "name": "Language Foundation Model Trainer",
-  "description": "Trains decoder-only or encoder-decoder language models (Llama, Mistral, T5) over Decoupled DiLoCo. Enrolls in a Tenzro Train task, runs H inner SGD steps locally, and submits outer gradients to the syncer. Phase 1: Open trust tier, Mean aggregation. Inner training loop runs in the Python reference trainer (PyTorch FSDP2 + Hivemind).",
+  "description": "Trains decoder-only or encoder-decoder language models (Qwen 3, Gemma 3, Mistral) with decoupled outer aggregation. Enrolls in a Tenzro Train task, runs H inner SGD steps locally, and submits outer gradients to the syncer. Phase 1: Open trust tier, Mean aggregation. Inner training loop runs in the Python reference trainer (PyTorch FSDP2 + Hivemind).",
   "template_type": "specialist",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   "version": "1.0.0",
@@ -12,7 +12,7 @@
     {
       "id": "language_training",
       "name": "Language Model Training",
-      "description": "Run inner SGD steps on a token shard and emit outer gradients per Decoupled DiLoCo",
+      "description": "Run inner SGD steps on a token shard and emit outer gradients per the decoupled outer-aggregation round",
       "input_schema": "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"trainer_did\":{\"type\":\"string\"},\"shard_uri\":{\"type\":\"string\"}}}",
       "output_schema": "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"round\":{\"type\":\"integer\"},\"fragment\":{\"type\":\"integer\"},\"safetensors_hash\":{\"type\":\"string\"}}}"
     }
@@ -29,12 +29,12 @@
   "system_prompt": "You are a language foundation model trainer. You enroll in posted Tenzro Train tasks, fetch your assigned token shard, run H inner SGD steps via the Python reference trainer, and submit safetensors-encoded outer gradients to the syncer. You must respect the configured aggregation rule and grace window.",
   "examples": [
     {
-      "description": "Enroll and train one round of a 7B Llama-class model",
-      "user_input": "Train task task-llama7b-202604 as did:tenzro:machine:trainer-3",
+      "description": "Enroll and train one round of a 7B decoder-only model",
+      "user_input": "Train task task-qwen7b-202604 as did:tenzro:machine:trainer-3",
       "expected_output": "Enrolled. Round 0 complete. Submitted gradient for fragment 5 (sha256:bcde...)."
     }
   ],
-  "tags": ["training", "language", "tenzro-train", "diloco", "llama", "transformer"],
+  "tags": ["training", "language", "tenzro-train", "transformer"],
   "download_count": 0,
   "rating": 0,
   "content_hash": null,

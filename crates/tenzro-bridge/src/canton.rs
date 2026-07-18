@@ -641,12 +641,11 @@ impl CantonAdapter {
         let amulet_count = contracts.len();
         let mut total_initial: f64 = 0.0;
         for c in &contracts {
-            if let Some(amount) = c.payload.get("amount") {
-                if let Some(init) = amount.get("initialAmount").and_then(|v| v.as_str()) {
-                    if let Ok(parsed) = init.parse::<f64>() {
-                        total_initial += parsed;
-                    }
-                }
+            if let Some(amount) = c.payload.get("amount")
+                && let Some(init) = amount.get("initialAmount").and_then(|v| v.as_str())
+                && let Ok(parsed) = init.parse::<f64>()
+            {
+                total_initial += parsed;
             }
         }
         Ok(serde_json::json!({
@@ -1820,30 +1819,23 @@ impl CantonAdapter {
             if let Ok(user_resp) = self
                 .build_request(reqwest::Method::GET, &path)
                 .await
+                && let Ok(resp) = user_resp.send().await
+                && resp.status().is_success()
+                && let Ok(body) = resp.json::<serde_json::Value>().await
+                && let Some(primary) = body
+                    .get("user")
+                    .and_then(|u| u.get("primaryParty"))
+                    .and_then(|p| p.as_str())
+                && primary.starts_with(&prefix)
             {
-                if let Ok(resp) = user_resp.send().await {
-                    if resp.status().is_success() {
-                        if let Ok(body) = resp.json::<serde_json::Value>().await {
-                            if let Some(primary) = body
-                                .get("user")
-                                .and_then(|u| u.get("primaryParty"))
-                                .and_then(|p| p.as_str())
-                            {
-                                if primary.starts_with(&prefix) {
-                                    let fq = primary.to_string();
-                                    let mut guard =
-                                        self.resolved_act_as_party_fq.write().await;
-                                    *guard = Some(fq.clone());
-                                    debug!(
-                                        "Canton: resolved act_as_party '{}' to FQ via /v2/users/{{client_id}}@clients",
-                                        hint
-                                    );
-                                    return Ok(fq);
-                                }
-                            }
-                        }
-                    }
-                }
+                let fq = primary.to_string();
+                let mut guard = self.resolved_act_as_party_fq.write().await;
+                *guard = Some(fq.clone());
+                debug!(
+                    "Canton: resolved act_as_party '{}' to FQ via /v2/users/{{client_id}}@clients",
+                    hint
+                );
+                return Ok(fq);
             }
         }
 

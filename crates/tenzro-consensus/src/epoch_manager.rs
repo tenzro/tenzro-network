@@ -145,6 +145,7 @@ pub struct EpochManager {
     /// Set via `with_store` (wired in node startup). When present:
     /// - construction hydrates `current_epoch` + `epoch_history` from disk;
     /// - every `transition_epoch` writes the new epoch through.
+    ///
     /// When absent (tests, ephemeral nodes), `EpochManager` behaves
     /// identically to the pre-persistence implementation.
     store: Option<Arc<dyn EpochStateStore>>,

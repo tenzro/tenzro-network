@@ -175,13 +175,13 @@ pub(crate) mod tests {
         async fn insert(&self, envelope: KeyshareEnvelope) -> Result<(), KeyshareError> {
             let mut g = self.inner.lock().await;
             let key = (envelope.group_id, envelope.epoch);
-            if let Some(existing) = g.get(&key) {
-                if existing != &envelope {
-                    return Err(KeyshareError::Conflict {
-                        group: envelope.group_id.to_hex(),
-                        epoch: envelope.epoch,
-                    });
-                }
+            if let Some(existing) = g.get(&key)
+                && existing != &envelope
+            {
+                return Err(KeyshareError::Conflict {
+                    group: envelope.group_id.to_hex(),
+                    epoch: envelope.epoch,
+                });
             }
             g.insert(key, envelope);
             Ok(())

@@ -153,7 +153,7 @@ impl QuantMatrix {
         data: Vec<u8>,
     ) -> QuantResult<Self> {
         let bw = kind.block_width();
-        if cols % bw != 0 {
+        if !cols.is_multiple_of(bw) {
             return Err(QuantError::UnalignedRow {
                 kind,
                 cols,
@@ -161,7 +161,7 @@ impl QuantMatrix {
             });
         }
         let bb = kind.block_bytes();
-        if data.len() % bb != 0 {
+        if !data.len().is_multiple_of(bb) {
             return Err(QuantError::RaggedPayload {
                 kind,
                 len: data.len(),
@@ -188,7 +188,7 @@ impl QuantMatrix {
     /// Quantize an `f32` row-major `[rows, cols]` matrix into this kind.
     pub fn quantize(kind: QuantKind, rows: usize, cols: usize, src: &[f32]) -> QuantResult<Self> {
         let bw = kind.block_width();
-        if cols % bw != 0 {
+        if !cols.is_multiple_of(bw) {
             return Err(QuantError::UnalignedRow {
                 kind,
                 cols,

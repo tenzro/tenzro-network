@@ -1223,7 +1223,7 @@ impl TenzroNetworkService {
     //
     // The wire protocol (`BlockSyncRequest` / `BlockSyncResponse`) is
     // defined in `crate::block_sync_proto`; see its module docs for the
-    // Sui `state_sync`-derived design rationale.
+    // state-sync design rationale.
     //
     // Outbound flow:
     //   1. Caller invokes `request_blocks(peer, start, count)` (or one
@@ -3626,8 +3626,7 @@ async fn handle_swarm_event(
                     let our_tier = state.reachability.tier();
                     let peer_speaks_hop = info
                         .protocols
-                        .iter()
-                        .any(|p| *p == libp2p::relay::HOP_PROTOCOL_NAME);
+                        .contains(&libp2p::relay::HOP_PROTOCOL_NAME);
                     // Bootstrap peers are the validator-class relay-serving
                     // nodes by convention. If the peer connected via one of
                     // our configured boot addresses, treat it as a relay
@@ -3839,8 +3838,8 @@ async fn handle_swarm_event(
                 // the next exchange (libp2p sources advertised addrs from
                 // `Swarm::external_addresses()`).
                 //
-                // This is the same primitive Substrate / Lighthouse / IPFS /
-                // Sui use to ship NAT-agnostic permissionless networks —
+                // This is the same primitive used to run NAT-agnostic
+                // permissionless networks —
                 // no `--external-p2p-addr` flag required, no per-deployment
                 // config, works from home wifi, mobile, EC2, GCE alike.
                 //
@@ -4082,15 +4081,15 @@ async fn handle_swarm_event(
                             .behaviour_mut()
                             .kademlia
                             .add_address(&peer_id, addr.clone());
-                        if !state.swarm.is_connected(&peer_id) {
-                            if let Err(e) = state.swarm.dial(dial_opts_new_port(addr.clone())) {
-                                tracing::debug!(
-                                    %peer_id,
-                                    %addr,
-                                    error = %e,
-                                    "mDNS local-peer dial skipped"
-                                );
-                            }
+                        if !state.swarm.is_connected(&peer_id)
+                            && let Err(e) = state.swarm.dial(dial_opts_new_port(addr.clone()))
+                        {
+                            tracing::debug!(
+                                %peer_id,
+                                %addr,
+                                error = %e,
+                                "mDNS local-peer dial skipped"
+                            );
                         }
                         state
                             .reachability
@@ -4203,30 +4202,32 @@ async fn handle_swarm_event(
             // multiplexed connections to the same peer don't re-emit. If
             // the receiver is gone (engine task panicked or stopped),
             // detach the subscriber so we stop trying.
-            if num_established.get() == 1 {
-                if let Some(tx) = state.peer_event_subscriber.as_ref() {
-                    if tx.send(PeerEvent::Connected(peer_id)).is_err() {
-                        tracing::warn!(
-                            "Peer-event subscriber dropped while sending Connected({}); detaching",
-                            peer_id
-                        );
-                        state.peer_event_subscriber = None;
-                    }
-                }
-
-                // NOTE: the on-connect eager reservation trigger was removed
-                // 2026-07-16. It raced with libp2p 0.21's relay-client
-                // handler installation: `listen_on(<relay>/p2p-circuit)`
-                // synchronously enqueues a Reserve message via the transport
-                // channel, but at connection-established time the
-                // ConnectionHandler that would consume that message on the
-                // relay's ConnectionId hasn't been installed yet, so the
-                // message drops silently — no reservation event, no error,
-                // no `NewListenAddr`. The IDENTIFY-time trigger (see the
-                // `identify::Event::Received` handler) fires ~200 ms later
-                // once the connection is fully set up and we've confirmed
-                // the peer speaks HOP, which is when reservations actually
-                // succeed.
+            // Fan out `PeerEvent::Connected` once per peer, on the first
+            // physical connection. If the receiver is gone, detach so we
+            // stop trying.
+            //
+            // NOTE: the on-connect eager reservation trigger was removed
+            // 2026-07-16. It raced with libp2p 0.21's relay-client
+            // handler installation: `listen_on(<relay>/p2p-circuit)`
+            // synchronously enqueues a Reserve message via the transport
+            // channel, but at connection-established time the
+            // ConnectionHandler that would consume that message on the
+            // relay's ConnectionId hasn't been installed yet, so the
+            // message drops silently — no reservation event, no error,
+            // no `NewListenAddr`. The IDENTIFY-time trigger (see the
+            // `identify::Event::Received` handler) fires ~200 ms later
+            // once the connection is fully set up and we've confirmed
+            // the peer speaks HOP, which is when reservations actually
+            // succeed.
+            if num_established.get() == 1
+                && let Some(tx) = state.peer_event_subscriber.as_ref()
+                && tx.send(PeerEvent::Connected(peer_id)).is_err()
+            {
+                tracing::warn!(
+                    "Peer-event subscriber dropped while sending Connected({}); detaching",
+                    peer_id
+                );
+                state.peer_event_subscriber = None;
             }
         }
         SwarmEvent::ConnectionClosed {
@@ -4278,14 +4279,14 @@ async fn handle_swarm_event(
                 // Last physical connection dropped — fan out
                 // `PeerEvent::Disconnected` so subscribers can evict this
                 // peer from their candidate sets.
-                if let Some(tx) = state.peer_event_subscriber.as_ref() {
-                    if tx.send(PeerEvent::Disconnected(peer_id)).is_err() {
-                        tracing::warn!(
-                            "Peer-event subscriber dropped while sending Disconnected({}); detaching",
-                            peer_id
-                        );
-                        state.peer_event_subscriber = None;
-                    }
+                if let Some(tx) = state.peer_event_subscriber.as_ref()
+                    && tx.send(PeerEvent::Disconnected(peer_id)).is_err()
+                {
+                    tracing::warn!(
+                        "Peer-event subscriber dropped while sending Disconnected({}); detaching",
+                        peer_id
+                    );
+                    state.peer_event_subscriber = None;
                 }
             }
         }

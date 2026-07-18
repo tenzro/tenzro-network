@@ -1,6 +1,6 @@
 //! Tenzro Train commands for the Tenzro CLI.
 //!
-//! Decentralized verifiable foundation-model training over Decoupled DiLoCo.
+//! Decentralized verifiable foundation-model training with decoupled outer aggregation.
 //! Phase 1: timeseries-first, Open trust tier, Mean aggregation.
 //!
 //! Subcommands wrap `tenzro_training_*` JSON-RPC methods exposed by the node.
@@ -28,7 +28,7 @@ pub enum TrainCommand {
     /// Finalize the current round (syncer flow)
     FinalizeRound(TrainFinalizeRoundCmd),
     /// Ask the syncer whether the current round should finalize, wait, or
-    /// advance on a no-endorsement certificate given the DiLoCo grace window
+    /// advance on a no-endorsement certificate given the grace window
     DecideRound(TrainDecideRoundCmd),
     /// Challenge a buffered gradient's activation commitment against a
     /// re-executed one (Open-tier fraud-proof flow)
@@ -216,7 +216,7 @@ impl TrainGetRunCmd {
 // ---------------------------------------------------------------------------
 
 /// Query the syncer's round decision. The syncer reports `finalize` once a
-/// quorum of witnesses has endorsed the round, `wait` while the DiLoCo grace
+/// quorum of witnesses has endorsed the round, `wait` while the grace
 /// window is still open, or `no_quorum` when the window elapsed without a
 /// quorum (the run then advances carrying the prior state root forward).
 #[derive(Debug, Parser)]

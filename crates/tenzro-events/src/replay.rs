@@ -1,7 +1,7 @@
 //! Cursor-based historical replay engine
 //!
 //! Seamlessly blends stored historical events with live streaming
-//! (Sui hybrid model). Detects gaps in the sequence and reports
+//! (hybrid replay model). Detects gaps in the sequence and reports
 //! them so the caller can decide whether to fill or skip.
 
 use crate::store::EventStore;

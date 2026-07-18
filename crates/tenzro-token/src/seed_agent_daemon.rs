@@ -261,13 +261,13 @@ impl SeedAgentDaemon {
         }
 
         // 2. Tick-authority gate.
-        if let Some(gate) = &self.tick_authority {
-            if !gate() {
-                debug!("SeedAgentDaemon: not tick authority, skipping");
-                outcome.authority_skipped = true;
-                *self.last_outcome.lock() = Some(outcome.clone());
-                return Ok(outcome);
-            }
+        if let Some(gate) = &self.tick_authority
+            && !gate()
+        {
+            debug!("SeedAgentDaemon: not tick authority, skipping");
+            outcome.authority_skipped = true;
+            *self.last_outcome.lock() = Some(outcome.clone());
+            return Ok(outcome);
         }
 
         // 3. Pause agents under disabled / sunset charters.
@@ -401,13 +401,13 @@ impl SeedAgentDaemon {
                         let _ = tx.send(msg);
                     }
                     // Enact the on-chain effect.
-                    if let Some(cb) = &self.surplus_disposition {
-                        if let Err(e) = cb(&disposition) {
-                            warn!(
-                                error = %e,
-                                "SeedAgentDaemon: surplus disposition callback failed"
-                            );
-                        }
+                    if let Some(cb) = &self.surplus_disposition
+                        && let Err(e) = cb(&disposition)
+                    {
+                        warn!(
+                            error = %e,
+                            "SeedAgentDaemon: surplus disposition callback failed"
+                        );
                     }
                 }
             }
@@ -744,11 +744,11 @@ mod tests {
         // First broadcast should be the quarantine status change.
         let mut saw_quarantine = false;
         while let Ok(msg) = rx.try_recv() {
-            if let SeedAgentGossipMessage::AgentStatusChanged { status, .. } = msg {
-                if status == SeedAgentStatus::Quarantined {
-                    saw_quarantine = true;
-                    break;
-                }
+            if let SeedAgentGossipMessage::AgentStatusChanged { status, .. } = msg
+                && status == SeedAgentStatus::Quarantined
+            {
+                saw_quarantine = true;
+                break;
             }
         }
         assert!(saw_quarantine, "expected Quarantined status broadcast");

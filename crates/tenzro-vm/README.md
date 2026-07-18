@@ -7,7 +7,7 @@ Multi-VM runtime for Tenzro Network — EVM, SVM, and DAML execution engines wit
 The `tenzro-vm` crate provides the virtual machine execution layer for Tenzro Network, supporting multiple blockchain execution environments:
 
 - **EVM** (Ethereum Virtual Machine) - For Ethereum-compatible smart contracts via revm
-- **SVM** (Solana Virtual Machine) - For high-performance BPF programs via solana_rbpf
+- **SVM** (Solana Virtual Machine) - SPL Token adapter, cross-VM native program, and PDA derivation always; real SBF program execution via Anza's `solana-svm` under the `svm-full` feature
 - **DAML** - For Canton/DAML enterprise smart contracts
 
 ## Architecture
@@ -155,10 +155,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### SVM (Solana Virtual Machine)
 
-- **Address Format**: 32 bytes (Pubkey)
-- **Implementation**: solana_rbpf
-- **Compute Units**: Solana-style compute unit accounting
-- **Bytecode**: BPF programs
+- **Address Format**: 32 bytes (Pubkey), used directly as the Tenzro SVM address
+- **Implementation**: SPL Token adapter + cross-VM native program + PDA derivation always; real SBF program execution via Anza's `solana-svm` `TransactionBatchProcessor` under the `svm-full` feature
+- **Compute Units**: Solana-style compute unit accounting, mapped onto the Tenzro gas schedule at the `MultiVmRuntime` boundary
+- **Bytecode**: SBF programs
 - **Account Model**: Separate program and account data
 
 ### DAML (Canton)
@@ -331,7 +331,7 @@ Test coverage: 286 tests passing.
 - `tenzro-settlement` - Payment settlement
 - `tenzro-token` - Token economics
 - `revm` - EVM execution
-- `solana_rbpf` - SVM BPF execution
+- `solana-svm` - real SBF program execution (under the `svm-full` feature)
 - `blst` - BLS12-381 precompiles
 - `tokio` - Async runtime
 

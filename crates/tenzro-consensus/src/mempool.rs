@@ -6,9 +6,9 @@
 //! without removing anything. Removal happens only via [`Mempool::remove_transactions`],
 //! which the consensus engine invokes on **finalization** of a block.
 //!
-//! This is the canonical production pattern — same shape as CometBFT's
-//! `ReapMaxBytesMaxGas` + `Update` split, the original Diem/Libra mempool, and
-//! pre-Quorum-Store Aptos. It guarantees liveness across view changes:
+//! This is the canonical production pattern — the same
+//! reap-then-update split used by production BFT mempools, including the
+//! pre-quorum-store design. It guarantees liveness across view changes:
 //! transactions in an abandoned proposal stay selectable, so the next leader
 //! picks them up. Across concurrent in-flight proposals the same tx may appear
 //! in more than one — at most one block finalizes, the other proposal is
@@ -21,8 +21,8 @@
 //! mempool, and any desync between the in-flight set and the abandonment
 //! notification reproduces exactly the stranding bug this design avoids.
 //!
-//! Future direction: abandon priority-pull entirely in favor of Quorum Store
-//! (Aptos) or DAG-mempool (Sui Mysticeti), where data availability is
+//! Future direction: abandon priority-pull entirely in favor of a quorum store
+//! or DAG-based mempool design, where data availability is
 //! certified before consensus orders it. Until then, non-destructive read is
 //! the right interim design.
 

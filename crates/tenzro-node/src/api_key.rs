@@ -54,7 +54,7 @@ pub enum ApiKeyScope {
     /// a private/B2B RPC turn it on.
     Evm,
     /// SVM program execution that the operator has chosen to gate.
-    /// Mirror of `Evm` for solana_rbpf-routed dispatches.
+    /// Mirror of `Evm` for SVM-routed dispatches.
     Svm,
     /// Model inference + serving endpoints
     /// (`tenzro_chat`, `tenzro_inferenceRequest`, the multi-modal
@@ -146,6 +146,8 @@ impl KeyClass {
 
     /// Parses the wire-format string. Returns `None` for unknown values
     /// so callers can produce a structured `-32602` error.
+    // Returns Option, not the FromStr `Result<Self, _>` contract.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "operator_protected" => Some(KeyClass::OperatorProtected),

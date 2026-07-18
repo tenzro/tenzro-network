@@ -29,8 +29,10 @@
 //! See `crates/tenzro-types/src/agent_template.rs` for the split math
 //! and `crates/tenzro-node/src/{rpc,mcp/server}.rs` for call sites.
 
+use crate::app_registry::AppRecord;
 use tenzro_token::TnzoToken;
 use tenzro_types::agent_template::AgentTemplate;
+use tenzro_types::fees::apply_developer_margin;
 use tenzro_types::marketplace::{split_marketplace_fee, MARKETPLACE_COMMISSION_BPS};
 use tenzro_types::primitives::Address;
 
@@ -43,12 +45,24 @@ pub struct CommissionReceipt {
     pub commission: u128,
     /// Amount transferred to `creator_wallet` (in TNZO base units).
     pub creator_share: u128,
-    /// Payer that funded both transfers.
+    /// Payer that funded the transfers.
     pub payer: Address,
     /// Treasury address that received the commission.
     pub treasury: Address,
     /// Creator wallet that received the creator share.
     pub creator_wallet: Address,
+    /// App the invocation was attributed to, when the caller passed an
+    /// `app_id` that resolved to an active [`AppRecord`].
+    pub app_id: Option<String>,
+    /// Developer margin applied on top of the network fee, in basis
+    /// points. Zero when no app was attributed.
+    pub margin_bps: u32,
+    /// Amount transferred to the app wallet as developer margin (in
+    /// TNZO base units). Zero when no app was attributed. The payer's
+    /// total debit is `commission + creator_share + margin_amount`.
+    pub margin_amount: u128,
+    /// App wallet that received the margin, when one was attributed.
+    pub app_wallet: Option<Address>,
 }
 
 /// Why a commission settlement was rejected. The caller maps these to
@@ -68,12 +82,18 @@ pub enum CommissionError {
     /// `NetworkTreasury` did not have a configured address.
     #[error("Treasury address not configured")]
     TreasuryUnavailable,
-    /// One of the two transfers failed. The original `TokenError` is
+    /// One of the transfers failed. The original `TokenError` is
     /// flattened into a string because callers across the codebase
     /// already render it as a string and this avoids leaking the
     /// `tenzro-token` error type through the `tenzro-node` boundary.
     #[error("Commission transfer failed: {0}")]
     TransferFailed(String),
+    /// The attributed app's margin could not be applied. Registration
+    /// already caps `margin_bps` at the protocol constant, so this only
+    /// fires on a corrupt record or arithmetic overflow — an internal
+    /// invariant violation, not a caller mistake.
+    #[error("Developer margin rejected: {0}")]
+    MarginRejected(String),
 }
 
 /// Marketplace-agnostic settlement primitive. Splits `fee` using
@@ -92,11 +112,21 @@ pub enum CommissionError {
 /// returning `JsonRpcError`; mcp/server.rs uses one returning
 /// `ErrorData`). Returning the parsed `Address` from `parse` makes the
 /// policy transport-agnostic.
+///
+/// `app` is the resolved app attribution for developer-margin billing.
+/// When present, the payer's total debit becomes
+/// `fee × (1 + margin_bps/10000)` and the margin on top of `fee` is
+/// transferred to the app's `app_wallet` in the same settlement. The
+/// margin never enters the network fee split — commission and creator
+/// share are computed over `fee` alone, so the burn/reward accounting
+/// is unaffected by attribution. When `app` is `None` the behavior is
+/// byte-identical to an unattributed invocation.
 pub fn settle_paid_invocation<F>(
     creator_wallet: Option<Address>,
     fee: u128,
     payer_wallet: Option<&str>,
     token: Option<&TnzoToken>,
+    app: Option<&AppRecord>,
     parse: F,
 ) -> Result<Option<CommissionReceipt>, CommissionError>
 where
@@ -117,6 +147,24 @@ where
         .treasury_address_ref()
         .ok_or(CommissionError::TreasuryUnavailable)?;
 
+    let (margin_amount, margin_bps, app_id, app_wallet) = match app {
+        Some(record) => {
+            let user_pays = apply_developer_margin(fee, record.margin_bps).ok_or_else(|| {
+                CommissionError::MarginRejected(format!(
+                    "app {} margin_bps {} exceeds protocol cap or overflows on fee {}",
+                    record.app_id, record.margin_bps, fee
+                ))
+            })?;
+            (
+                user_pays - fee,
+                record.margin_bps,
+                Some(record.app_id.clone()),
+                Some(record.app_wallet),
+            )
+        }
+        None => (0u128, 0u32, None, None),
+    };
+
     let (commission, creator_share) = split_marketplace_fee(fee, MARKETPLACE_COMMISSION_BPS);
 
     if commission > 0 {
@@ -129,6 +177,12 @@ where
             .transfer(&payer, &creator_wallet, creator_share)
             .map_err(|e| CommissionError::TransferFailed(format!("creator payout: {e}")))?;
     }
+    if margin_amount > 0 {
+        let wallet = app_wallet.expect("margin_amount > 0 implies an attributed app");
+        token
+            .transfer(&payer, &wallet, margin_amount)
+            .map_err(|e| CommissionError::TransferFailed(format!("developer margin: {e}")))?;
+    }
 
     Ok(Some(CommissionReceipt {
         commission,
@@ -136,6 +190,10 @@ where
         payer,
         treasury,
         creator_wallet,
+        app_id,
+        margin_bps,
+        margin_amount,
+        app_wallet,
     }))
 }
 
@@ -148,6 +206,7 @@ pub fn settle_invocation_fee<F>(
     fee: u128,
     payer_wallet: Option<&str>,
     token: Option<&TnzoToken>,
+    app: Option<&AppRecord>,
     parse: F,
 ) -> Result<Option<CommissionReceipt>, CommissionError>
 where
@@ -156,7 +215,7 @@ where
     if template.pricing.is_free() {
         return Ok(None);
     }
-    settle_paid_invocation(template.creator_wallet, fee, payer_wallet, token, parse)
+    settle_paid_invocation(template.creator_wallet, fee, payer_wallet, token, app, parse)
 }
 
 #[cfg(test)]
@@ -193,7 +252,8 @@ mod tests {
             "free".to_string(),
         );
         // Pricing is Free by default per AgentTemplate::new.
-        let receipt = settle_invocation_fee(&tmpl, 100, Some("payer"), None, ok_parse).unwrap();
+        let receipt =
+            settle_invocation_fee(&tmpl, 100, Some("payer"), None, None, ok_parse).unwrap();
         assert!(receipt.is_none(), "free template should not settle");
     }
 
@@ -201,21 +261,23 @@ mod tests {
     fn zero_fee_returns_none() {
         let tmpl = paid_template(Some(Address::default()));
         // fee=0 short-circuits even on a paid template (e.g. dry_run).
-        let receipt = settle_invocation_fee(&tmpl, 0, Some("payer"), None, ok_parse).unwrap();
+        let receipt =
+            settle_invocation_fee(&tmpl, 0, Some("payer"), None, None, ok_parse).unwrap();
         assert!(receipt.is_none());
     }
 
     #[test]
     fn paid_without_creator_wallet_rejects() {
         let tmpl = paid_template(None);
-        let err = settle_invocation_fee(&tmpl, 1_000, Some("payer"), None, ok_parse).unwrap_err();
+        let err = settle_invocation_fee(&tmpl, 1_000, Some("payer"), None, None, ok_parse)
+            .unwrap_err();
         assert!(matches!(err, CommissionError::MissingCreatorWallet));
     }
 
     #[test]
     fn paid_without_payer_rejects() {
         let tmpl = paid_template(Some(Address::default()));
-        let err = settle_invocation_fee(&tmpl, 1_000, None, None, ok_parse).unwrap_err();
+        let err = settle_invocation_fee(&tmpl, 1_000, None, None, None, ok_parse).unwrap_err();
         assert!(matches!(err, CommissionError::MissingPayerWallet));
     }
 
@@ -246,7 +308,7 @@ mod tests {
         // Parse callback returns the matching test address verbatim.
         let parse = |_: &str| Ok(payer);
 
-        let receipt = settle_invocation_fee(&tmpl, fee, Some("payer"), Some(&token), parse)
+        let receipt = settle_invocation_fee(&tmpl, fee, Some("payer"), Some(&token), None, parse)
             .expect("settlement must succeed")
             .expect("paid template must produce a receipt");
 
@@ -274,6 +336,12 @@ mod tests {
         assert_eq!(receipt.payer, payer);
         assert_eq!(receipt.treasury, treasury);
         assert_eq!(receipt.creator_wallet, creator);
+
+        // Unattributed invocation carries zeroed margin fields.
+        assert_eq!(receipt.app_id, None);
+        assert_eq!(receipt.margin_bps, 0);
+        assert_eq!(receipt.margin_amount, 0);
+        assert_eq!(receipt.app_wallet, None);
     }
 
     /// A payer with insufficient balance must surface a `TransferFailed` error
@@ -293,11 +361,128 @@ mod tests {
         let tmpl = paid_template(Some(creator));
         let parse = |_: &str| Ok(payer);
 
-        let err = settle_invocation_fee(&tmpl, 10_000, Some("payer"), Some(&token), parse)
+        let err = settle_invocation_fee(&tmpl, 10_000, Some("payer"), Some(&token), None, parse)
             .unwrap_err();
         assert!(matches!(err, CommissionError::TransferFailed(_)));
 
         // Creator never received anything — no half-settlement leaked through.
         assert_eq!(token.balance_of(&creator), 0);
+    }
+
+    fn app_record(margin_bps: u32, app_wallet: Address) -> crate::app_registry::AppRecord {
+        crate::app_registry::AppRecord {
+            app_id: "app-test".to_string(),
+            developer_did: "did:tenzro:human:dev".to_string(),
+            app_wallet,
+            signing_pubkeys: Vec::new(),
+            margin_bps,
+            min_balance: 0,
+            created_at: 0,
+            active: true,
+        }
+    }
+
+    /// Invariant: an attributed invocation debits the payer
+    /// `fee × (1 + margin_bps/10000)` and routes the margin to the app
+    /// wallet, while commission + creator share stay computed over the
+    /// network fee alone — attribution never changes the network split
+    /// (so burn/reward accounting is untouched).
+    #[test]
+    fn attributed_invocation_routes_margin_to_app_wallet() {
+        let token = TnzoToken::new();
+        let treasury = Address::new([0x01; 32]);
+        let payer = Address::new([0x02; 32]);
+        let creator = Address::new([0x03; 32]);
+        let app_wallet = Address::new([0x04; 32]);
+
+        token.set_treasury_address(treasury);
+        token.mint(&payer, 1_000_000, &treasury).unwrap();
+        let pre_payer = token.balance_of(&payer);
+        let pre_treasury = token.balance_of(&treasury);
+
+        let tmpl = paid_template(Some(creator));
+        let fee: u128 = 10_000;
+        // 10% margin → user pays 11_000, margin 1_000.
+        let app = app_record(1_000, app_wallet);
+        let parse = |_: &str| Ok(payer);
+
+        let receipt =
+            settle_invocation_fee(&tmpl, fee, Some("payer"), Some(&token), Some(&app), parse)
+                .expect("settlement must succeed")
+                .expect("paid template must produce a receipt");
+
+        assert_eq!(receipt.margin_bps, 1_000);
+        assert_eq!(receipt.margin_amount, 1_000);
+        assert_eq!(receipt.app_id.as_deref(), Some("app-test"));
+        assert_eq!(receipt.app_wallet, Some(app_wallet));
+        // Network split is unchanged by attribution.
+        assert_eq!(receipt.commission, 500);
+        assert_eq!(receipt.creator_share, 9_500);
+
+        // Ledger: payer debited fee + margin; margin landed on app wallet.
+        assert_eq!(token.balance_of(&payer), pre_payer - fee - 1_000);
+        assert_eq!(token.balance_of(&app_wallet), 1_000);
+        assert_eq!(token.balance_of(&treasury), pre_treasury + 500);
+        assert_eq!(token.balance_of(&creator), 9_500);
+    }
+
+    /// Zero-margin apps settle identically to unattributed invocations
+    /// on the ledger, but the receipt still records the attribution.
+    #[test]
+    fn zero_margin_app_settles_like_unattributed() {
+        let token = TnzoToken::new();
+        let treasury = Address::new([0x01; 32]);
+        let payer = Address::new([0x02; 32]);
+        let creator = Address::new([0x03; 32]);
+        let app_wallet = Address::new([0x04; 32]);
+
+        token.set_treasury_address(treasury);
+        token.mint(&payer, 1_000_000, &treasury).unwrap();
+        let pre_payer = token.balance_of(&payer);
+
+        let tmpl = paid_template(Some(creator));
+        let app = app_record(0, app_wallet);
+        let parse = |_: &str| Ok(payer);
+
+        let receipt =
+            settle_invocation_fee(&tmpl, 10_000, Some("payer"), Some(&token), Some(&app), parse)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(receipt.margin_amount, 0);
+        assert_eq!(receipt.app_id.as_deref(), Some("app-test"));
+        assert_eq!(token.balance_of(&payer), pre_payer - 10_000);
+        assert_eq!(token.balance_of(&app_wallet), 0);
+    }
+
+    /// A corrupt record whose margin exceeds the protocol cap is
+    /// rejected before any transfer happens.
+    #[test]
+    fn over_cap_margin_rejects_before_transfers() {
+        let token = TnzoToken::new();
+        let treasury = Address::new([0x01; 32]);
+        let payer = Address::new([0x02; 32]);
+        let creator = Address::new([0x03; 32]);
+        let app_wallet = Address::new([0x04; 32]);
+
+        token.set_treasury_address(treasury);
+        token.mint(&payer, 1_000_000, &treasury).unwrap();
+        let pre_payer = token.balance_of(&payer);
+
+        let tmpl = paid_template(Some(creator));
+        // Above MAX_DEVELOPER_MARGIN_BPS — registration would never
+        // persist this, so it models a corrupt record.
+        let app = app_record(tenzro_types::fees::MAX_DEVELOPER_MARGIN_BPS + 1, app_wallet);
+        let parse = |_: &str| Ok(payer);
+
+        let err =
+            settle_invocation_fee(&tmpl, 10_000, Some("payer"), Some(&token), Some(&app), parse)
+                .unwrap_err();
+        assert!(matches!(err, CommissionError::MarginRejected(_)));
+
+        // No transfer happened at all.
+        assert_eq!(token.balance_of(&payer), pre_payer);
+        assert_eq!(token.balance_of(&creator), 0);
+        assert_eq!(token.balance_of(&app_wallet), 0);
     }
 }

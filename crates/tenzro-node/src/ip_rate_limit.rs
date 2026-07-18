@@ -149,7 +149,7 @@ mod tests {
                 admitted += 1;
             }
         }
-        assert!(admitted >= 3 && admitted < 8);
+        assert!((3..8).contains(&admitted));
         assert!(matches!(limiter.check(ip), GcraDecision::Deny { .. }));
         // A different IP is unaffected.
         let other: IpAddr = "203.0.113.9".parse().unwrap();

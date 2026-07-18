@@ -435,7 +435,7 @@ impl MetaRouter {
 
         // 5. Score: cheapest measured cost wins within the tier; models with
         // no history sort after models with a record; latency breaks ties.
-        candidates.sort_by(|a, b| cost_key(a).cmp(&cost_key(b)));
+        candidates.sort_by_key(cost_key);
 
         let best = &candidates[0];
 
@@ -516,7 +516,7 @@ impl MetaRouter {
         for model_id in &chain {
             let request = InferenceRequest::new(
                 model_id.clone(),
-                requester.clone(),
+                requester,
                 Vec::new(),
                 max_price,
             );

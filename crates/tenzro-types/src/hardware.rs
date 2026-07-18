@@ -257,8 +257,10 @@ impl HardwareCapabilities {
     /// Shells out synchronously (tens of milliseconds when the vendor tools
     /// exist, a failed spawn otherwise) — call from a blocking context.
     pub fn detect() -> Self {
-        let mut caps = Self::default();
-        caps.detected = true;
+        let mut caps = Self {
+            detected: true,
+            ..Self::default()
+        };
 
         #[cfg(target_os = "linux")]
         {

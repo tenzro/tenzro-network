@@ -1,4 +1,4 @@
-"""OuterUpdateScheduler + partial-state helpers (DiLoCoX delayed apply)."""
+"""OuterUpdateScheduler + partial-state helpers (delayed apply)."""
 
 from __future__ import annotations
 

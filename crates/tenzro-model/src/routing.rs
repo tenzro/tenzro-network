@@ -816,8 +816,21 @@ impl InferenceRouter {
             }
         }
 
+        // Prefix-affinity ordering — bias selection toward the provider whose
+        // advertised warm KV-cache prefix best matches this prompt. A warm
+        // prefix lets the provider skip re-prefilling those bytes, so the
+        // request's time-to-first-token drops. The incoming prompt is hashed
+        // under the shared rolling scheme (`prefix_run_hashes`) and each
+        // provider is scored by its longest warm-prefix match against it
+        // (`PrefixCacheSummary::longest_match_len`). This is a soft bias, not
+        // a filter: a provider with no advertised prefix (or no match) still
+        // competes on the strategy score below — the prefix term only breaks
+        // ties in favor of a warm provider and floats a strongly-matching
+        // provider up the WeightedScore ranking.
+        let prompt_run_hashes = tenzro_types::prefix_run_hashes(&request.input);
+
         // Select provider based on strategy
-        let selected = self.select_provider(providers, config)?;
+        let selected = self.select_provider(providers, config, &prompt_run_hashes)?;
 
         debug!(
             "Routed request {} to provider {}",
@@ -827,11 +840,18 @@ impl InferenceRouter {
         Ok(selected)
     }
 
-    /// Selects the best provider based on the routing strategy
+    /// Selects the best provider based on the routing strategy.
+    ///
+    /// `prompt_run_hashes` is the incoming prompt hashed under the shared
+    /// rolling scheme; it drives the prefix-affinity bias applied on top of
+    /// the `WeightedScore` strategy (and as the final tie-break on every
+    /// strategy). Pass an empty slice when the prompt is unavailable — the
+    /// bias then contributes nothing.
     fn select_provider(
         &self,
         mut providers: Vec<ProviderWithMetrics>,
         config: &RoutingConfig,
+        prompt_run_hashes: &[u64],
     ) -> Result<Address> {
         // Check preferred providers first
         if !config.preferred_providers.is_empty() {
@@ -872,10 +892,20 @@ impl InferenceRouter {
                 providers.shuffle(&mut OsRng);
             }
             RoutingStrategy::WeightedScore => {
+                // Fold the prefix-affinity bias into the composite score: a
+                // provider whose warm prefix matches more of this prompt gets
+                // a bounded bonus on top of its observed-quality score, so a
+                // strong warm-prefix match can float a provider up the ranking
+                // without ever overriding a provider that is materially better
+                // on success rate / latency / reputation. `prefix_bias` is 0
+                // when the prompt or the provider's advertised prefix is
+                // empty, so this reduces to the plain score in that case.
                 providers.sort_by(|a, b| {
-                    b.calculate_score()
-                        .partial_cmp(&a.calculate_score())
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    let sa = a.calculate_score()
+                        + Self::prefix_bias(a, prompt_run_hashes);
+                    let sb = b.calculate_score()
+                        + Self::prefix_bias(b, prompt_run_hashes);
+                    sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
             RoutingStrategy::ReasoningDepth => {
@@ -889,10 +919,111 @@ impl InferenceRouter {
             }
         }
 
+        // Prefix-affinity tie-break: among the providers the strategy ranks
+        // effectively equal at the top, prefer the one holding the longest
+        // warm prefix for this prompt. This applies to every strategy (not
+        // just WeightedScore) but only ever reorders providers the strategy
+        // already considers interchangeable, so it never overrides a
+        // strategy's primary ordering (e.g. LowestPrice still wins on price).
+        if !prompt_run_hashes.is_empty()
+            && providers.len() > 1
+            && let Some(best_len) = providers
+                .iter()
+                .map(|p| p.provider.capacity.prefix_cache.longest_match_len(prompt_run_hashes))
+                .max()
+            && best_len > 0
+        {
+            // Only reorder within the leading tie-group of the strategy sort:
+            // find how many leading providers are equivalent to the first
+            // under the active strategy, then pick the best warm match among
+            // them.
+            let tie_len = Self::leading_tie_group_len(&providers, config);
+            if tie_len > 1
+                && let Some(pos) = providers[..tie_len].iter().position(|p| {
+                    p.provider.capacity.prefix_cache.longest_match_len(prompt_run_hashes)
+                        == best_len
+                })
+            {
+                providers.swap(0, pos);
+            }
+        }
+
         providers
             .first()
             .map(|p| p.provider.address)
             .ok_or_else(|| ModelError::RoutingError("No provider selected".to_string()))
+    }
+
+    /// Bounded prefix-affinity bonus (in the same 0-100 scale as
+    /// [`ProviderWithMetrics::calculate_score`]) for `provider` given the
+    /// incoming prompt's rolling run hashes. Scales the fraction of the prompt
+    /// covered by the provider's longest advertised warm prefix by a fixed
+    /// ceiling, so a full warm-prefix hit adds at most that ceiling and a
+    /// partial hit adds proportionally less. Returns 0 when the prompt or the
+    /// advertised prefix is empty.
+    fn prefix_bias(provider: &ProviderWithMetrics, prompt_run_hashes: &[u64]) -> f64 {
+        // Ceiling kept below the hardware component (10.0) so prefix affinity
+        // biases ranking without dominating observed quality.
+        const PREFIX_BIAS_CEILING: f64 = 8.0;
+        if prompt_run_hashes.is_empty() {
+            return 0.0;
+        }
+        let matched = provider
+            .provider
+            .capacity
+            .prefix_cache
+            .longest_match_len(prompt_run_hashes) as f64;
+        if matched <= 0.0 {
+            return 0.0;
+        }
+        let prompt_bytes = (prompt_run_hashes.len() * tenzro_types::PREFIX_RUN_BYTES) as f64;
+        let fraction = (matched / prompt_bytes).min(1.0);
+        fraction * PREFIX_BIAS_CEILING
+    }
+
+    /// Number of leading providers the active strategy ranks equal to the
+    /// first, i.e. the tie-group the prefix tie-break may reorder within.
+    /// Conservative: for score/latency/price/reputation strategies it counts
+    /// exact key equality with the head; for `Random` the whole list is a tie
+    /// group (the shuffle already made order arbitrary).
+    fn leading_tie_group_len(providers: &[ProviderWithMetrics], config: &RoutingConfig) -> usize {
+        if providers.is_empty() {
+            return 0;
+        }
+        match config.strategy {
+            RoutingStrategy::Random => providers.len(),
+            RoutingStrategy::LowestPrice => {
+                let head = providers[0].provider.pricing.minimum_price;
+                providers
+                    .iter()
+                    .take_while(|p| p.provider.pricing.minimum_price == head)
+                    .count()
+            }
+            RoutingStrategy::LowestLatency => {
+                let head = providers[0]
+                    .metrics
+                    .latency_p95_ms()
+                    .unwrap_or(providers[0].metrics.avg_latency_ms);
+                providers
+                    .iter()
+                    .take_while(|p| {
+                        p.metrics.latency_p95_ms().unwrap_or(p.metrics.avg_latency_ms) == head
+                    })
+                    .count()
+            }
+            RoutingStrategy::HighestReputation | RoutingStrategy::ReasoningDepth => {
+                let head = providers[0].provider.reputation;
+                providers
+                    .iter()
+                    .take_while(|p| p.provider.reputation == head)
+                    .count()
+            }
+            RoutingStrategy::WeightedScore => {
+                // WeightedScore already folded the prefix bias into its sort,
+                // so no separate tie-break group is needed here.
+                1
+            }
+        }
     }
 
     /// Forwards an inference request to the best available provider via HTTP.
@@ -953,19 +1084,18 @@ impl InferenceRouter {
             // (max_retries + 1) × timeout_ms. The first attempt (attempt 0)
             // always runs — a deadline shorter than a single dispatch is a
             // misconfiguration, not a reason to reject before trying.
-            if attempt > 0 {
-                if let Some(deadline) = deadline {
-                    if request_start.elapsed() >= deadline {
-                        self.metrics.deadline_exceeded.fetch_add(1, Ordering::Relaxed);
-                        last_error = Some(last_error.take().unwrap_or_else(|| {
-                            ModelError::InferenceError(format!(
-                                "request deadline of {}ms exceeded after {} attempt(s)",
-                                config.request_deadline_ms, attempt
-                            ))
-                        }));
-                        break;
-                    }
-                }
+            if attempt > 0
+                && let Some(deadline) = deadline
+                && request_start.elapsed() >= deadline
+            {
+                self.metrics.deadline_exceeded.fetch_add(1, Ordering::Relaxed);
+                last_error = Some(last_error.take().unwrap_or_else(|| {
+                    ModelError::InferenceError(format!(
+                        "request deadline of {}ms exceeded after {} attempt(s)",
+                        config.request_deadline_ms, attempt
+                    ))
+                }));
+                break;
             }
 
             // Select provider (excluding previously failed ones)
@@ -982,7 +1112,11 @@ impl InferenceRouter {
                     break;
                 }
 
-                self.select_provider(providers, config)?
+                // On failover the replacement provider still benefits from a
+                // warm prefix — it may already hold the shared prompt prefix,
+                // cutting the re-prefill cost of resuming the request.
+                let prompt_run_hashes = tenzro_types::prefix_run_hashes(&request.input);
+                self.select_provider(providers, config, &prompt_run_hashes)?
             };
 
             // First attempt only: try to line up a hedge target. The hedge
@@ -1114,7 +1248,8 @@ impl InferenceRouter {
         if providers.is_empty() {
             return None;
         }
-        self.select_provider(providers, config).ok()
+        let prompt_run_hashes = tenzro_types::prefix_run_hashes(&request.input);
+        self.select_provider(providers, config, &prompt_run_hashes).ok()
     }
 
     /// Races a primary dispatch against a hedge dispatch. The primary
@@ -1646,7 +1781,8 @@ impl InferenceRouter {
             )));
         }
 
-        let selected = self.select_provider(providers, &self.default_config)?;
+        let prompt_run_hashes = tenzro_types::prefix_run_hashes(&request.input);
+        let selected = self.select_provider(providers, &self.default_config, &prompt_run_hashes)?;
 
         warn!(
             "Failed over from {} to {} for request {}",

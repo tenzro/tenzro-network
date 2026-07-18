@@ -57,7 +57,7 @@ Tenzro is the layer that makes the agentic economy work end to end.
 
 **Open access to frontier intelligence.** Open-source models of every size and modality run on Tenzro — language, vision, audio, video, time-series forecasting, segmentation, detection, embeddings. Providers serve their own hardware (consumer GPUs to data-center clusters, Apple Silicon to NVIDIA H200, AMD Instinct to Intel Gaudi) and earn per inference. Users and agents pay per call, per token, or per session through the same settlement substrate.
 
-**Distributed AI at protocol level.** Training is not centralized. Tenzro Train coordinates DiLoCo-class distributed training over heterogeneous compute, with on-chain run-root commitments, sponsor escrow, slashing for misbehavior, and confidential variants that keep training data sealed inside enclaves. Inference and training share the same identity and settlement plane.
+**Distributed AI at protocol level.** Training is not centralized. Tenzro Train coordinates low-communication distributed training over heterogeneous compute, with on-chain run-root commitments, sponsor escrow, slashing for misbehavior, and confidential variants that keep training data sealed inside enclaves. Inference and training share the same identity and settlement plane.
 
 **Human control through delegated authority.** Agents act under explicit delegation scopes — per-transaction caps, daily spending limits, allowed counterparties, allowed operations, time bounds. ERC-7579 modular validators enforce these at signing time, not after the fact. Session keys, social recovery, and hardware-bound passkeys let humans grant, restrict, rotate, and revoke agent authority without surrendering control of the underlying account.
 
@@ -73,7 +73,7 @@ Four forces are reshaping the protocol layer at once.
 
 **Agents become economic actors.** Frontier AI labs have shipped tool-using agents capable of multi-step planning. Payment rails (Stripe MPP, Coinbase x402, Visa Tap, Mastercard Agent Pay) added HTTP 402-based machine-payment surfaces in 2025–2026. Standards bodies published trustless-agent identity (ERC-8004), agent-to-agent protocols (A2A), authorization mandates (AP2), and cross-chain intents (ERC-7683). Agents need to discover, transact, and settle without a human in the loop, and the rails for that arrived this cycle.
 
-**Open-source intelligence catches up.** Open-weight models from Qwen, Gemma, Mistral, DeepSeek, Granite, and others now match or exceed the closed-source frontier on most public benchmarks. Inference moved from a handful of mega-providers to a long tail of operators running their own GPUs. Distributed training (DiLoCo, Decoupled DiLoCo, OpenDiLoCo, INTELLECT-1/2/3, Hermes 4) demonstrated that frontier-quality models can be trained across regions and operators rather than inside one data center. The bottleneck is no longer model quality — it is coordination.
+**Open-source intelligence catches up.** Open-weight models from Qwen, Gemma, Mistral, DeepSeek, Granite, and others now match or exceed the closed-source frontier on most public benchmarks. Inference moved from a handful of mega-providers to a long tail of operators running their own GPUs. Distributed low-communication training demonstrated that frontier-quality models can be trained across regions and operators rather than inside one data center. The bottleneck is no longer model quality — it is coordination.
 
 **Regulation tightens.** The EU AI Act took effect in 2025 with Article 50 disclosure rules now binding. MiCA bound stablecoin and crypto-asset service providers in EEA jurisdictions. Travel rule enforcement extended to virtual asset service providers. Agent-driven payments require auditable receipts, mandate-bound authorization, and KYC-tier-bound delegation. Anything claiming to be production-grade for institutional users has to make those legible at the protocol layer, not paper over them in app code.
 
@@ -612,7 +612,6 @@ These are not hypotheticals — every primitive named above is shipped in the cu
 - **BLS12-381** — Pairing-friendly elliptic curve used for signature aggregation.
 - **BitVM2 / Clementine** — Trust-minimised two-way Bitcoin peg with optimistic challenge protocol.
 - **Canton** — A privacy-preserving distributed ledger for institutional financial settlement, DAML-based.
-- **DiLoCo** — Distributed Local Compute; an outer/inner SGD scheme for cross-region model training.
 - **DKLS23** — Threshold ECDSA signing protocol (Doerner-Kondi-Lee-Shelat 2023).
 - **EIP-1559** — Ethereum fee-market upgrade with base-fee burn.
 - **EIP-2537** — BLS12-381 precompiles.

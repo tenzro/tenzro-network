@@ -46,8 +46,8 @@ use tenzro_types::transaction::{Transaction, SignedTransaction};
 
 /// Cap on the exponent applied to [`ViewChangeTimer::on_timeout`]. With
 /// `backoff_multiplier = 2.0` and `base_timeout = 1000ms`, a cap of 3 yields
-/// the schedule `1s → 2s → 4s → 8s` (saturated). Short cap matches Aptos
-/// AptosBFTv4 / CometBFT production tuning — long view timeouts on a
+/// the schedule `1s → 2s → 4s → 8s` (saturated). Short cap matches
+/// production BFT tuning — long view timeouts on a
 /// multi-region fleet cause a pacemaker race where the proposer's block
 /// reaches nearby peers in time but distant peers (cross-Pacific RTT
 /// ~180ms) have already timed out and broadcast `TimeoutMsg`. The
@@ -504,18 +504,18 @@ pub enum ConsensusOutMessage {
     /// `timeout_certificate` is `Some(_)` only when the leader is recovering
     /// from a view timeout — it carries 2f+1 timeout signatures from the
     /// previous view so peers can verify the new view was legitimately
-    /// abandoned (Jolteon vote rule, DiemBFT v4 §3.5).
+    /// abandoned (the safe-to-extend vote rule).
     ///
     /// `no_endorsement_certificate` is `Some(_)` when the leader is proposing
     /// a *new* block at view N+1 after view N timed out — it carries f+1
     /// no-endorsement signatures from view N proving the predecessor's QC
-    /// was not withheld. MonadBFT (arXiv:2502.20692) — closes the tail-fork
+    /// was not withheld (the NEC tail-fork defence) — closes the tail-fork
     /// MEV vulnerability. If absent, receivers must require the proposal to
     /// repropose the high-tip block; a fresh block with neither a NEC nor
     /// a high-tip parent is rejected.
     ///
     /// `high_qc_view` is the leader's local highest-Prepare-QC view at the
-    /// moment of proposing (#171, Aptos SyncInfo pattern). Receivers use it to
+    /// moment of proposing (#171, the SyncInfo pattern). Receivers use it to
     /// fast-forward their own `high_qc_view` if the proposer is ahead, which
     /// shrinks the gap a lagging replica has to close before it can vote.
     /// Must satisfy `high_qc_view < view`.
@@ -536,13 +536,31 @@ pub enum ConsensusOutMessage {
     },
     /// A pacemaker timeout broadcast emitted on local view-timer expiry.
     /// Carries the sender's current view so a lagging peer can fast-forward
-    /// (DiemBFT v4 §3.5 backward-sync channel; phase 1 of #164).
+    /// (the backward-sync channel; phase 1 of #164).
     Timeout(crate::timeout::TimeoutMsg),
     /// A no-endorsement attestation broadcast emitted on local view-timer
     /// expiry. Aggregates into an f+1 NoEndorsementCertificate that the next
-    /// leader attaches to its proposal when proposing a new block (MonadBFT,
-    /// arXiv:2502.20692).
+    /// leader attaches to its proposal when proposing a new block (the NEC
+    /// tail-fork defence).
     NoEndorsement(crate::timeout::NoEndorsementMsg),
+    /// A batch body this replica produced, fanned out over `tenzro/batches`
+    /// so peer validators can store it and return an availability ack (G6
+    /// data-dissemination plane). Peers verify `Batch::verify_id` before
+    /// storing and acking.
+    Batch(crate::batch_cert::Batch),
+    /// An availability ack this replica emitted after storing a peer's batch
+    /// body. Carries the producer address so the ack can be routed back to
+    /// the producer collecting the availability certificate.
+    BatchAck {
+        /// Address of the producer that disseminated the batch (ack target).
+        producer: Address,
+        /// The signed availability ack.
+        ack: crate::batch_cert::BatchAck,
+    },
+    /// A completed batch availability certificate (k-of-N BLS-aggregated)
+    /// this replica formed as producer, broadcast so the ordering path on
+    /// every replica can reference the batch by its 32-byte hash.
+    BatchCertificate(crate::batch_cert::BatchAvailabilityCertificate),
 }
 
 /// HotStuff-2 consensus engine
@@ -648,7 +666,7 @@ pub struct HotStuff2Engine {
 
     /// Persistent vote state — refuses to sign any (view, height, step) ≤
     /// last persisted, and persists each new vote with fsync **before** the
-    /// vote is broadcast. Mirrors CometBFT `FilePVLastSignState`. Defaults to
+    /// vote is broadcast. Follows the persistent last-sign-state pattern. Defaults to
     /// an in-memory store for tests; production wires a `FileVoteStateStore`
     /// rooted at `<data_dir>/consensus/last_sign.json`.
     vote_state_store: Arc<dyn VoteStateStore>,
@@ -669,7 +687,7 @@ pub struct HotStuff2Engine {
     /// has formed or learned of. Set by `on_timeout_msg` once 2f+1 timeouts
     /// at the same view aggregate; cleared (or replaced) when a new TC at a
     /// higher view is formed. The leader at view N+1 attaches this TC to
-    /// its proposal so receivers can run `safe_to_extend` (Jolteon Fig 2
+    /// its proposal so receivers can run `safe_to_extend` (the safe-to-extend
     /// vote rule).
     last_round_tc: Arc<RwLock<Option<crate::timeout::TimeoutCertificate>>>,
 
@@ -683,8 +701,8 @@ pub struct HotStuff2Engine {
     /// f+1 attestations at the same view aggregate; cleared (or replaced)
     /// when a new NEC at a higher view is formed. The leader at view N+1
     /// attaches this NEC to its proposal when it cannot repropose a high-tip
-    /// block — closes the tail-fork MEV vulnerability (MonadBFT,
-    /// arXiv:2502.20692).
+    /// block — closes the tail-fork MEV vulnerability (the NEC tail-fork
+    /// defence).
     last_round_nec: Arc<RwLock<Option<crate::timeout::NoEndorsementCertificate>>>,
 
     /// f+1 [`crate::timeout::NoEndorsementMsg`] aggregator. Initialized
@@ -697,9 +715,9 @@ pub struct HotStuff2Engine {
     /// for the same view — even if `propose_block_internal()` awaited long
     /// enough for the pacemaker to advance the view (e.g. Bracha boost from
     /// remote TimeoutMsgs) and the next tick re-enters the propose path on
-    /// the new view. Both AptosBFT (`RoundManager::process_certificates`) and
-    /// DiemBFT (`EventProcessor::process_new_round_event`) gate proposal
-    /// generation on this same monotonic-round invariant; without it, the
+    /// the new view. Production HotStuff-family BFT implementations gate
+    /// proposal generation on this same monotonic-round invariant (via their
+    /// certificate-processing and new-round handlers); without it, the
     /// honest leader can self-equivocate by racing a mempool-snapshot-drift
     /// rebuild against its own view-change handler. Sentinel value `u64::MAX`
     /// means "never proposed" (no view will compare-and-swap past it because
@@ -718,8 +736,8 @@ pub struct HotStuff2Engine {
     /// Set of `(view, proposer_addr_first_4_bytes_u32, block_hash)` so a
     /// duplicate of a proposal we've already seen at this view from this
     /// proposer is dropped at the door — BEFORE running the catchup, vote,
-    /// and vote-state-store paths. Mirrors AptosBFT's
-    /// `EpochManager::process_message` seen-set dedup. Without this, gossipsub
+    /// and vote-state-store paths. Follows the standard
+    /// message-processing seen-set dedup. Without this, gossipsub
     /// IHAVE/IWANT replay (and any pre-fix in-flight proposals from the buggy
     /// run before the equivocation patch) keep firing the vote-state-store's
     /// double-sign refuse path and noise up the equivocation telemetry —
@@ -731,7 +749,7 @@ pub struct HotStuff2Engine {
     /// Strategy for selecting the leader of a given round/view. Resolved
     /// from [`ConsensusConfig::proposer_election`] at construction time.
     /// `RoundRobinProposer` (`view % N`) for tests, `ReputationProposer`
-    /// (Aptos LeaderReputation) for production.
+    /// (reputation-weighted proposer election) for production.
     proposer_election: Arc<dyn ProposerElection>,
 
     /// Optional shared reputation state. Populated when
@@ -761,6 +779,19 @@ pub struct HotStuff2Engine {
     /// whenever a fresh block is proposed. Initialised to engine-start so
     /// the first heartbeat fires one interval after boot, not immediately.
     last_block_time: Arc<RwLock<Instant>>,
+
+    /// Batch availability-certificate store (G6 data-dissemination plane).
+    ///
+    /// Decouples data bandwidth from ordering bandwidth: a producer snapshots
+    /// pending transactions into a [`crate::batch_cert::Batch`], disseminates
+    /// the body over `tenzro/batches`, and collects a k-of-N BLS-aggregated
+    /// [`crate::batch_cert::BatchAvailabilityCertificate`]. The ordering path
+    /// then references only 32-byte cert hashes (via
+    /// [`crate::batch_cert::agree_prefix`]) rather than full transaction
+    /// bodies. `None` until [`Self::with_batch_cert_store`] is called (tests
+    /// and single-node bootstrap run without the availability plane and fall
+    /// back to direct mempool selection).
+    batch_cert_store: Option<Arc<crate::batch_cert::BatchCertStore>>,
 }
 
 /// Evicts the lowest-`view` cached blocks until the map holds at most
@@ -893,6 +924,7 @@ impl HotStuff2Engine {
             reputation,
             behind_hint_tx: tokio::sync::watch::Sender::new(0),
             last_block_time: Arc::new(RwLock::new(Instant::now())),
+            batch_cert_store: None,
         }
     }
 
@@ -940,6 +972,148 @@ impl HotStuff2Engine {
     ) -> Self {
         self.consensus_out_tx = Some(tx);
         self
+    }
+
+    /// Installs the batch availability-certificate store (G6 data-dissemination
+    /// plane). When set, [`Self::produce_batch`] snapshots pending transactions
+    /// into a batch and disseminates it, and the ingest methods
+    /// ([`Self::ingest_batch_body`], [`Self::ingest_batch_ack`],
+    /// [`Self::ingest_batch_certificate`]) drive availability-certificate
+    /// formation. Absent this, the engine runs the direct mempool-selection
+    /// path with no availability plane. Must be called before `start()`.
+    pub fn with_batch_cert_store(
+        mut self,
+        store: Arc<crate::batch_cert::BatchCertStore>,
+    ) -> Self {
+        self.batch_cert_store = Some(store);
+        self
+    }
+
+    /// Returns the installed batch availability-certificate store, if any.
+    pub fn batch_cert_store(&self) -> Option<Arc<crate::batch_cert::BatchCertStore>> {
+        self.batch_cert_store.clone()
+    }
+
+    /// Snapshots up to `config.max_transactions_per_block` pending mempool
+    /// transactions into a [`crate::batch_cert::Batch`], stores the body
+    /// locally, and emits it over `tenzro/batches` for peer validators to
+    /// store and ack (G6 producer path). Returns the batch id, or `None` when
+    /// no batch-cert store is installed or the mempool is empty.
+    ///
+    /// This is the availability-dissemination step that runs *ahead* of
+    /// ordering: the producer proves the data is stored by 2f+1 stake-weight
+    /// before the ordering path references the batch by hash.
+    pub fn produce_batch(&self) -> Option<Hash> {
+        let store = self.batch_cert_store.as_ref()?;
+        self.mempool.cleanup_expired();
+        let txs = self.mempool.select_transactions(
+            self.config.max_transactions_per_block,
+            self.config.max_gas_per_block,
+        );
+        if txs.is_empty() {
+            return None;
+        }
+        let batch = store.produce(txs);
+        let id = batch.id;
+        let validator_set = self.validator_set();
+        // Erasure-coded broadcast decision (G6 stage 2): at or above the
+        // activation threshold the batch is Reed-Solomon-coded (n = 3f+1
+        // slivers, any 2f+1 reconstruct) so no single node uploads the full
+        // body to every peer; below it, direct gossip of the full body is
+        // cheaper. The threshold and fault bound are pure functions of the
+        // validator-set size — no fixed region count.
+        let validator_count = validator_set.active_validators().len();
+        match store.encode_for_broadcast(&batch, validator_count) {
+            Ok(Some(encoded)) => tracing::debug!(
+                n = validator_count,
+                slivers = encoded.slivers.len(),
+                commitment = %hex::encode(&encoded.commitment.as_bytes()[..8]),
+                "batch_cert: erasure-coded batch for broadcast"
+            ),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "batch_cert: erasure encode failed; falling back to direct gossip"),
+        }
+        // Sign our own availability ack (the producer stored the body) so the
+        // producer's own stake counts toward the certificate.
+        let ack = store.sign_ack(&id);
+        let _ = store.record_ack(id, ack, &validator_set);
+        self.send_out(ConsensusOutMessage::Batch(batch));
+        Some(id)
+    }
+
+    /// Ingests a peer's batch body (received over `tenzro/batches`): verifies
+    /// the batch id binds to its transactions, stores the body, and emits a
+    /// signed availability ack back toward the producer. No-op without a
+    /// batch-cert store.
+    pub fn ingest_batch_body(&self, batch: crate::batch_cert::Batch) {
+        let Some(store) = self.batch_cert_store.as_ref() else {
+            return;
+        };
+        if !batch.verify_id() {
+            tracing::warn!("batch_cert: rejecting batch body with mismatched id");
+            return;
+        }
+        let producer = batch.producer;
+        let batch_id = batch.id;
+        store.store_body(batch);
+        let ack = store.sign_ack(&batch_id);
+        self.send_out(ConsensusOutMessage::BatchAck { producer, ack });
+    }
+
+    /// Ingests an availability ack for a batch this replica produced (received
+    /// over `tenzro/batches`): records it, and — once 2f+1 stake-weight of
+    /// acks accumulate — forms and broadcasts the availability certificate.
+    /// No-op without a batch-cert store.
+    pub fn ingest_batch_ack(&self, batch_id: Hash, ack: crate::batch_cert::BatchAck) {
+        let Some(store) = self.batch_cert_store.as_ref() else {
+            return;
+        };
+        let validator_set = self.validator_set();
+        match store.record_ack(batch_id, ack, &validator_set) {
+            Ok(Some(cert)) => {
+                tracing::info!(
+                    batch = %hex::encode(&batch_id.as_bytes()[..8]),
+                    "batch_cert: availability certificate formed"
+                );
+                self.send_out(ConsensusOutMessage::BatchCertificate(cert));
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!(error = %e, "batch_cert: ack rejected"),
+        }
+    }
+
+    /// Ingests a completed availability certificate (received over
+    /// `tenzro/batches`): verifies its BLS aggregate against the active
+    /// validator set and installs it so the ordering path can reference the
+    /// batch by hash. No-op without a batch-cert store.
+    pub fn ingest_batch_certificate(
+        &self,
+        cert: crate::batch_cert::BatchAvailabilityCertificate,
+    ) {
+        let Some(store) = self.batch_cert_store.as_ref() else {
+            return;
+        };
+        let validator_set = self.validator_set();
+        // `install_cert` verifies the 2f+1 BLS aggregate against the active set
+        // before persisting; a certificate that fails verification is rejected.
+        match store.install_cert(cert, &validator_set) {
+            Ok(()) => {
+                // Recompute the certified prefix (G6 prefix consensus): the newly
+                // installed certificate may extend the ordered frontier of
+                // availability-certified batches the ordering path can reference
+                // by hash. The prefix is the longest deterministically-ordered
+                // run of certs whose bodies are held, so two honest nodes on the
+                // same certified history derive the same reference list.
+                let prefix = store.certified_prefix();
+                tracing::debug!(
+                    certified_frontier = prefix.len(),
+                    "batch_cert: availability certificate installed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "batch_cert: rejecting invalid availability certificate");
+            }
+        }
     }
 
     /// Installs a persistent vote-state store. Production callers should use
@@ -1086,6 +1260,9 @@ impl HotStuff2Engine {
             ConsensusOutMessage::Proposal { .. } => "Proposal",
             ConsensusOutMessage::Timeout(_) => "Timeout",
             ConsensusOutMessage::NoEndorsement(_) => "NoEndorsement",
+            ConsensusOutMessage::Batch(_) => "Batch",
+            ConsensusOutMessage::BatchAck { .. } => "BatchAck",
+            ConsensusOutMessage::BatchCertificate(_) => "BatchCertificate",
         };
         match self.consensus_out_tx {
             Some(ref tx) => {
@@ -1111,15 +1288,15 @@ impl HotStuff2Engine {
     /// vote already cast in a prior run. Without this jump, after an
     /// unproductive run that votes through (say) view=62 at height=1
     /// without finalizing, a fresh boot would propose at view=0,1,2,…
-    /// and every vote would be refused by the CometBFT-style CheckHRS rule
+    /// and every vote would be refused by the height-round-step (HRS) check
     /// (`vote_state.rs::check_vrs`) — wedging the chain.
     ///
     /// **The persisted `last_signed_view` is a strict, height-independent
-    /// signing ceiling.** This mirrors:
-    ///   - DiemBFT v4 `SafetyData::last_voted_round` — checked
+    /// signing ceiling.** This follows the standard Safety-Rules patterns:
+    ///   - `last_voted_round` — checked
     ///     synchronously in `verify_and_update_last_vote_round()` against
     ///     `round`, never against `(round, height)`.
-    ///   - CometBFT privValidator `LastSignState{Height,Round,Step}` —
+    ///   - Persistent `LastSignState{Height,Round,Step}` —
     ///     `is_strictly_after` enforces lex order with view first, so a
     ///     persisted `(v=N, h=H-1, Commit)` blocks signing any
     ///     `(v ≤ N, h=H, *)` next height.
@@ -1155,7 +1332,7 @@ impl HotStuff2Engine {
         // holds a higher lock and refuses to vote, the view times out, and
         // the chain live-locks across all validators rebooting in sequence.
         //
-        // This is the Diem/Aptos Safety Rules pattern: persisted highest_qc
+        // This is the Safety-Rules pattern: persisted highest_qc
         // is restored on boot so the engine cannot regress its lock.
         // Mirrors the `commit_qc_view` parameter accepted by
         // `resume_from_synced_height`, but recovered from storage instead of
@@ -1311,8 +1488,8 @@ impl HotStuff2Engine {
     ///     are produced one phase after Prepare in the same view), so
     ///     using `commit_qc_view` here is sound.
     ///
-    /// Modeled on Lighthouse's `BeaconChain::reset_post_sync` and
-    /// Aptos' `ConsensusObserver::on_synced_to_block`.
+    /// Modeled on the standard post-sync consensus-state reset performed
+    /// once a replica has synced to a finalized block.
     ///
     /// **Caller contract:** the QC at `commit_qc_view` MUST already be
     /// signature-verified against the validator set known at the
@@ -1672,7 +1849,7 @@ impl HotStuff2Engine {
 
     /// Handles view timeout.
     ///
-    /// Per DiemBFT v4 §3.5 / Aptos `process_local_timeout`, this **must
+    /// Per the standard `process_local_timeout` rule, this **must
     /// broadcast** a signed timeout message before advancing locally. The
     /// broadcast is the channel that lets a lagging peer fast-forward to
     /// our view (backward-sync). Silent `view += 1` — the previous
@@ -1731,8 +1908,8 @@ impl HotStuff2Engine {
 
         // Build & sign a NoEndorsementMsg for the timing-out view. The
         // attestation is "I observed no QC for view current_view - 1" — the
-        // f+1 aggregation closes the tail-fork MEV vulnerability (MonadBFT,
-        // arXiv:2502.20692). Skipped at view 0 (no predecessor) and the same
+        // f+1 aggregation closes the tail-fork MEV vulnerability (the NEC
+        // tail-fork defence). Skipped at view 0 (no predecessor) and the same
         // best-effort posture as the timeout broadcast: signing failure does
         // not block the pacemaker.
         if current_view > 0 {
@@ -1832,7 +2009,7 @@ impl HotStuff2Engine {
     ///
     /// Three layered effects:
     ///
-    /// 1. **Backward view-counter sync** (DiemBFT v4 §3.5). If
+    /// 1. **Backward view-counter sync.** If
     ///    `msg.view > local_view`, advance our local view to match. The
     ///    cryptographic gate is the hybrid signature on `(view,
     ///    high_qc_view, voter)` — no numeric jump cap is applied, since
@@ -1860,7 +2037,7 @@ impl HotStuff2Engine {
         // returns Ok, the (view, high_qc_view, voter) triple is hybrid-
         // signature-bound to a registered validator.
         //
-        // Per DiemBFT v4 §3.5 `process_remote_timeout`, the cryptographic
+        // Per the standard `process_remote_timeout` rule, the cryptographic
         // gate is the signature itself — no numeric jump cap is applied. A
         // malicious validator's "I timed out at view N" message costs them
         // a publicly verifiable signature; they cannot drag the protocol
@@ -1909,7 +2086,7 @@ impl HotStuff2Engine {
                 CollectOutcome::BrachaBoost => {
                     // f+1 honest replicas have timed out on this view —
                     // amplify by treating this as if our own local timer had
-                    // expired. This is the Bracha-boost / DiemBFT
+                    // expired. This is the Bracha-boost
                     // `process_remote_timeout` path that drives all honest
                     // replicas to converge on the timeout decision in
                     // network-delay time.
@@ -2062,7 +2239,7 @@ impl HotStuff2Engine {
     /// collector. When f+1 attestations at the same view aggregate, the
     /// collector emits a [`crate::timeout::NoEndorsementCertificate`] which
     /// we store as `last_round_nec` so the next leader can attach it to a
-    /// fresh proposal at view+1 (MonadBFT, arXiv:2502.20692).
+    /// fresh proposal at view+1 (the NEC tail-fork defence).
     ///
     /// Unlike `on_timeout_msg`, this method does NOT advance the local view —
     /// the NEC is purely a certificate-formation channel; view-sync remains
@@ -2115,8 +2292,8 @@ impl HotStuff2Engine {
     ///
     /// # Double-sign protection
     ///
-    /// Before signing, consults `vote_state_store` (mirrors CometBFT
-    /// `FilePVLastSignState`):
+    /// Before signing, consults `vote_state_store` (the persistent
+    /// last-sign-state pattern):
     /// - If `(view, height, step)` is strictly past the last persisted tuple,
     ///   sign and **persist with fsync before returning** so the broadcast
     ///   downstream of this function can never reveal a vote that wasn't
@@ -2342,7 +2519,7 @@ impl HotStuff2Engine {
                 // Track the highest prepare QC view we've witnessed — used as the
                 // `high_qc_view` field of any future TimeoutMsg, so the resulting
                 // TC's `max_high_qc_view()` lets the next leader compute a
-                // safe-to-extend predicate per Jolteon §3.5.
+                // safe-to-extend predicate.
                 let qc_view = state.view;
 
                 tracing::info!(
@@ -2582,8 +2759,8 @@ impl HotStuff2Engine {
                 if is_leader && !self.is_draining() {
                     // Leader proposes a block
                     if state.proposed_block.is_none() {
-                        // EMPTY-BLOCK SUPPRESSION (CometBFT
-                        // `create_empty_blocks=false` adapted for HotStuff-2):
+                        // EMPTY-BLOCK SUPPRESSION (the standard
+                        // `create_empty_blocks=false` pattern adapted for HotStuff-2):
                         // on an idle chain, don't mint a fresh empty block on
                         // every pacemaker beat — that accreted ~216k
                         // never-pruned empty headers/day of SST. Hold the view
@@ -2608,7 +2785,7 @@ impl HotStuff2Engine {
                             );
                             return Ok(());
                         }
-                        // PROPOSAL-GUARD (Aptos/Diem invariant): atomically
+                        // PROPOSAL-GUARD (HotStuff-family invariant): atomically
                         // claim the current view as the "I am proposing for
                         // view V" slot before we await the block builder. If
                         // we already proposed for V (or any view ≥ V), bail.
@@ -2635,6 +2812,16 @@ impl HotStuff2Engine {
                             return Ok(());
                         }
                         drop(state);
+                        // G6 availability-dissemination beat: the leader (which
+                        // has just won the proposal-guard for this view) snapshots
+                        // the mempool into a batch, stores it, self-acks, and
+                        // disseminates it over `tenzro/batches` so peers can attest
+                        // availability. This runs ahead of ordering: the batch's
+                        // 2f+1 availability certificate is what the ordering path
+                        // later references by hash (via `agree_prefix`), decoupling
+                        // data bandwidth from ordering bandwidth. No-op when no
+                        // batch-cert store is installed or the mempool is empty.
+                        let _ = self.produce_batch();
                         let block = self.propose_block_internal().await?;
                         // Late-check: by the time the block is built, the
                         // pacemaker may have advanced past the view we
@@ -2665,10 +2852,10 @@ impl HotStuff2Engine {
                         // Broadcast proposal to all peers so they can vote on it.
                         // If we just recovered from a view timeout, attach the
                         // TC we collected so peers can verify the previous view
-                        // was abandoned (Jolteon safe_to_extend predicate).
+                        // was abandoned (the safe_to_extend predicate).
                         let view = self.view_state.read().view;
                         let timeout_certificate = self.last_round_tc.read().clone();
-                        // MonadBFT NEC (arXiv:2502.20692 §4): when proposing a
+                        // NEC tail-fork defence: when proposing a
                         // fresh block after a TC, attach the f+1 NEC we
                         // collected so peers can verify no Prepare-QC formed at
                         // the timed-out view. When reproposing the high_tip
@@ -2807,7 +2994,7 @@ impl HotStuff2Engine {
             (state.height, state.view)
         };
 
-        // MonadBFT tail-fork defence (arXiv:2502.20692 §4):
+        // NEC tail-fork defence:
         // If we're recovering from a view timeout AND we observed a Prepare-QC
         // for the timed-out view (i.e. `high_qc_view >= tc.view`), we MUST
         // repropose the existing high_tip block at our current height — we
@@ -2881,16 +3068,61 @@ impl HotStuff2Engine {
             }
         };
 
-        let block = self.proposer.propose_block(
-            height,
-            view,
-            prev_hash,
-            self.address,
-            state_root,
-            parent_base_fee,
-            parent_gas_used,
-            parent_gas_limit,
-        )?;
+        // G6: when the batch-availability plane is wired and this node holds a
+        // certified prefix whose bodies are all locally reconstructable, source
+        // the proposal from those certified batches rather than the raw
+        // mempool. The transactions were already disseminated + `2f+1`-certified
+        // over the availability mesh, so the proposal references a small,
+        // already-available set; the block still carries the full ordered
+        // transaction list, so execution/storage/RPC read paths are unchanged.
+        // Fall back to the mempool path when no store is wired, the certified
+        // prefix is empty, or any referenced body is missing locally (a body we
+        // cannot reconstruct must not enter a block we propose).
+        let batch_sourced = self.batch_cert_store.as_ref().and_then(|store| {
+            let prefix = store.certified_prefix();
+            if prefix.is_empty() {
+                return None;
+            }
+            let mut txs: Vec<tenzro_types::transaction::SignedTransaction> = Vec::new();
+            for batch_id in &prefix {
+                let body = store.get_body(batch_id)?;
+                txs.extend(body.transactions);
+            }
+            if txs.is_empty() {
+                None
+            } else {
+                tracing::debug!(
+                    batches = prefix.len(),
+                    tx_count = txs.len(),
+                    "batch_cert: sourcing proposal from certified prefix"
+                );
+                Some(txs)
+            }
+        });
+
+        let block = match batch_sourced {
+            Some(transactions) => self.proposer.propose_block_from_transactions(
+                height,
+                view,
+                prev_hash,
+                self.address,
+                state_root,
+                parent_base_fee,
+                parent_gas_used,
+                parent_gas_limit,
+                transactions,
+            )?,
+            None => self.proposer.propose_block(
+                height,
+                view,
+                prev_hash,
+                self.address,
+                state_root,
+                parent_base_fee,
+                parent_gas_used,
+                parent_gas_limit,
+            )?,
+        };
 
         // Validate block size before broadcasting
         self.proposer.validate_block_size(&block)?;
@@ -2949,8 +3181,8 @@ impl HotStuff2Engine {
         // memory and are lost on restart, and a syncing peer has no way to
         // verify that a served block was actually finalized.
         //
-        // Pattern: HotStuff family (Aptos `BlockData::quorum_cert`,
-        // Diem `BlockData::quorum_cert`, libhotstuff `Block::qc`) — each
+        // Pattern: HotStuff family (each block carries a `quorum_cert` /
+        // `qc` field) — each
         // block carries the QC certifying its parent. Here the block is the
         // newly-finalized block carrying the Commit QC over itself; the next
         // block produced will also point back to this block via `prev_hash`,
@@ -3051,6 +3283,20 @@ impl HotStuff2Engine {
         let tx_hashes: Vec<Hash> =
             block.transactions.iter().map(|tx| tx.transaction.hash()).collect();
         self.mempool.remove_transactions(&tx_hashes);
+
+        // G6: evict availability certificates whose batches are now finalized
+        // on-chain. Their bodies no longer need to be held for availability, so
+        // the cert/body/pending-acks are dropped (write-through). Certs whose
+        // batches are only partially finalized are retained to back a later
+        // block. This bounds the certified-prefix window to the unfinalized
+        // frontier the ordering path still references by hash.
+        if let Some(store) = self.batch_cert_store.as_ref() {
+            let finalized: std::collections::HashSet<Hash> = tx_hashes.iter().copied().collect();
+            let evicted = store.evict_finalized(&finalized);
+            if evicted > 0 {
+                tracing::debug!(evicted, "batch_cert: evicted finalized availability certificates");
+            }
+        }
 
         // Epoch transition (vote_collector.write() — must not hold view_state lock here)
         self.transition_epoch_if_due(transition_height)?;
@@ -3154,8 +3400,8 @@ impl ConsensusEngine for HotStuff2Engine {
         *self.timeout_collector.write() = Some(Arc::new(
             crate::timeout::TimeoutCollector::new(validator_set_arc.clone()),
         ));
-        // Initialize no-endorsement collector (f+1 NEC formation, MonadBFT
-        // tail-fork defence — arXiv:2502.20692)
+        // Initialize no-endorsement collector (f+1 NEC formation, the
+        // NEC tail-fork defence)
         *self.nec_collector.write() = Some(Arc::new(
             crate::timeout::NoEndorsementCollector::new(validator_set_arc),
         ));
@@ -3218,8 +3464,8 @@ impl ConsensusEngine for HotStuff2Engine {
         proposer_high_qc_view: u64,
         proposer_signature: &tenzro_crypto::composite::CompositeSignature,
     ) -> Result<Vote> {
-        // RECEIVER-SIDE DEDUP (AptosBFT EpochManager::process_message
-        // pattern): drop duplicate proposals at the door, keyed by
+        // RECEIVER-SIDE DEDUP (the standard message-processing
+        // seen-set pattern): drop duplicate proposals at the door, keyed by
         // `(view, block_hash)`. A gossipsub IHAVE/IWANT replay, a peer-
         // forwarded copy of a proposal we already saw via the consensus-
         // direct overlay, or in-flight proposals from a previous buggy
@@ -3329,7 +3575,7 @@ impl ConsensusEngine for HotStuff2Engine {
             ));
         }
 
-        // SyncInfo (#171, Aptos pattern): the proposer piggybacks its current
+        // SyncInfo (#171): the proposer piggybacks its current
         // `high_qc_view` on every proposal. We adopt it if higher than our
         // own (subject to `< proposal_view`). This is the steady-state
         // backward-sync channel — a lagging replica that observes any honest
@@ -3351,9 +3597,8 @@ impl ConsensusEngine for HotStuff2Engine {
         }
 
         // View sync: advance local view to match the proposal's view before
-        // voting. This is the canonical HotStuff-2 Pacemaker rule (Malkhi &
-        // Nayak 2023, Figure 2 step 3) and mirrors Aptos `round_manager.rs`
-        // `ensure_round_and_sync_up`: when a proposal arrives at a higher view
+        // voting. This is the canonical HotStuff-2 Pacemaker rule and the
+        // `ensure_round_and_sync_up` pattern: when a proposal arrives at a higher view
         // than our local view, we sync up so our vote is stamped with the
         // proposer's view and lands in the same vote-collector bucket as the
         // proposer's self-vote and other peers' votes — otherwise validators
@@ -3372,7 +3617,7 @@ impl ConsensusEngine for HotStuff2Engine {
             (state.view, state.height)
         };
 
-        // Catchup-on-proposal (Aptos `ensure_blocks_in_storage` / Diem
+        // Catchup-on-proposal (the `ensure_blocks_in_storage` /
         // `process_certificates` pattern): if the proposer is ahead by one
         // height, the proposal carries the parent's Commit QC in
         // `block.header.consensus_proof.proof_data`. We can apply that QC
@@ -3486,28 +3731,27 @@ impl ConsensusEngine for HotStuff2Engine {
                         // run the same finalize path that the leader-driven
                         // commit takes. Idempotent if we somehow already
                         // finalized.
-                        if qc_verified {
-                            if let Some(parent_block) =
+                        if qc_verified
+                            && let Some(parent_block) =
                                 self.blocks.get(&parent_hash).map(|r| r.clone())
+                        {
+                            tracing::info!(
+                                proposal_height = %proposal_height,
+                                parent_height = %local_height,
+                                qc_view = parent_commit_qc.view,
+                                "Catchup-on-proposal: finalizing missed parent \
+                                 via verified QC embedded in incoming proposal"
+                            );
+                            if let Err(e) = self
+                                .finalize_with_commit_qc(&parent_block, parent_commit_qc)
+                                .await
                             {
-                                tracing::info!(
-                                    proposal_height = %proposal_height,
+                                tracing::warn!(
+                                    error = %e,
                                     parent_height = %local_height,
-                                    qc_view = parent_commit_qc.view,
-                                    "Catchup-on-proposal: finalizing missed parent \
-                                     via verified QC embedded in incoming proposal"
+                                    "Catchup-on-proposal: parent finalize failed; \
+                                     falling through to regular height-mismatch reject"
                                 );
-                                if let Err(e) = self
-                                    .finalize_with_commit_qc(&parent_block, parent_commit_qc)
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        error = %e,
-                                        parent_height = %local_height,
-                                        "Catchup-on-proposal: parent finalize failed; \
-                                         falling through to regular height-mismatch reject"
-                                    );
-                                }
                             }
                         }
                     }
@@ -3574,23 +3818,23 @@ impl ConsensusEngine for HotStuff2Engine {
         // rejected. If election itself fails (validator set unknown for
         // the view) we fall through rather than reject — the QC quorum
         // still gates finalization.
-        if let Ok(expected_leader) = self.leader_for_view(block.header.view) {
-            if block.header.proposer != expected_leader {
-                tracing::warn!(
-                    proposal_view = block.header.view,
-                    proposer = %block.header.proposer,
-                    expected = %expected_leader,
-                    height = %proposal_height,
-                    "Rejecting proposal: proposer is not the elected leader for its view"
-                );
-                return Err(ConsensusError::InvalidProposal(format!(
-                    "proposer {} is not the elected leader {} for view {}",
-                    block.header.proposer, expected_leader, block.header.view
-                )));
-            }
+        if let Ok(expected_leader) = self.leader_for_view(block.header.view)
+            && block.header.proposer != expected_leader
+        {
+            tracing::warn!(
+                proposal_view = block.header.view,
+                proposer = %block.header.proposer,
+                expected = %expected_leader,
+                height = %proposal_height,
+                "Rejecting proposal: proposer is not the elected leader for its view"
+            );
+            return Err(ConsensusError::InvalidProposal(format!(
+                "proposer {} is not the elected leader {} for view {}",
+                block.header.proposer, expected_leader, block.header.view
+            )));
         }
 
-        // safe_to_extend (Jolteon §3.5 / DiemBFT v4 §3.5):
+        // safe_to_extend:
         // A proposal at round r is safe to vote on iff
         //   (a) r == high_qc.round + 1                (happy path), OR
         //   (b) r == tc.round + 1                     (timeout recovery), AND
@@ -3643,7 +3887,7 @@ impl ConsensusEngine for HotStuff2Engine {
                 }
             }
 
-            // MonadBFT tail-fork defence (arXiv:2502.20692 §4):
+            // NEC tail-fork defence:
             // After a TC for view v-1, the leader has two legal options:
             //   (a) repropose the existing `high_tip` (block at the highest
             //       observed Prepare-QC), OR
@@ -3751,7 +3995,7 @@ impl ConsensusEngine for HotStuff2Engine {
         self.fork_choice.add_block(block.clone(), None);
 
         // Advance local view to match the proposer's view. The
-        // safe_to_extend block above (DiemBFT v4 §3.5) is the cryptographic
+        // safe_to_extend block above is the cryptographic
         // gate — by reaching this point the jump has been proven legal:
         // either `proposal_view == local_view + 1` (happy-path consecutive
         // view), or a verified TC for view `proposal_view - 1` was
@@ -3803,7 +4047,7 @@ impl ConsensusEngine for HotStuff2Engine {
     }
 
     async fn on_vote(&self, vote: &Vote) -> Result<()> {
-        // SyncInfo (#171, Aptos pattern): every vote piggybacks the voter's
+        // SyncInfo (#171): every vote piggybacks the voter's
         // `high_qc_view`. Adopt it if higher than our local view, so a lagging
         // replica receiving votes for a future view can fast-forward without
         // a separate sync RPC. The bound `< vote.view` is enforced upstream
@@ -3861,7 +4105,7 @@ impl ConsensusEngine for HotStuff2Engine {
             }
         }; // vote_collector read lock dropped before driving phase progression
 
-        // Pacemaker advance via inbound SyncInfo (Jolteon §3.5 / DiemBFT v4):
+        // Pacemaker advance via inbound SyncInfo:
         // a vote whose `high_qc_view = Q` is observable evidence of a 2f+1
         // Prepare QC at view Q — the QC is itself a 2f+1 aggregate, so a
         // single piece of evidence suffices to advance the pacemaker. The
@@ -3879,8 +4123,8 @@ impl ConsensusEngine for HotStuff2Engine {
         // replicas that have legitimately fallen behind by many thousands
         // of views.
         //
-        // This is the canonical Aptos/DiemBFT recovery channel — see
-        // `aptos-core/consensus/src/round_manager.rs::process_certificates`.
+        // This is the canonical HotStuff-family recovery channel — the
+        // certificate-processing path advances the pacemaker on observed QCs.
         if vote.high_qc_view > 0 {
             let target = vote.high_qc_view.saturating_add(1);
             let mut state = self.view_state.write();
@@ -3943,7 +4187,7 @@ impl ConsensusEngine for HotStuff2Engine {
                 // next-height proposals had no parent QC to carry → 1-block
                 // tip fork → live-lock.
                 //
-                // The fix (Aptos/Diem/Jolteon Safety Rules pattern): drop the
+                // The fix (the Safety-Rules pattern): drop the
                 // local view gate and rely on `create_vote` + `vote_state_store`
                 // for the safety guard. `create_vote` calls
                 // `vote_state_store.record_or_reject` which enforces strict
@@ -4130,6 +4374,7 @@ impl Clone for HotStuff2Engine {
             behind_hint_tx: self.behind_hint_tx.clone(),
             last_block_time: self.last_block_time.clone(),
             view_timeouts_total: self.view_timeouts_total.clone(),
+            batch_cert_store: self.batch_cert_store.clone(),
         }
     }
 }
@@ -4294,7 +4539,7 @@ mod tests {
     /// was not warm). `PersistentVoteState` correctly records the highest
     /// vote (view=62, height=1) before the pod restarts. On restart, the new
     /// run resets `current_view` to 0 — but `vote_state.rs::check_vrs`
-    /// (CometBFT CheckHRS) refuses every vote whose `(view, height, step)`
+    /// (the height-round-step check) refuses every vote whose `(view, height, step)`
     /// is not strictly past the persisted tuple. Since 0..62 are all <= 62
     /// at the same height, EVERY vote the new run tries to cast is refused
     /// as "double-sign prevented", and the chain wedges at height=0 forever.
@@ -4357,7 +4602,7 @@ mod tests {
     ///
     /// Fix: adopt the persisted view ceiling **unconditionally**.
     /// `persisted.view` is a height-independent strict signing floor
-    /// (DiemBFT v4 §3.5: `last_voted_round` is checked against `round`,
+    /// (`last_voted_round` is checked against `round`,
     /// never against `(round, height)`).
     #[tokio::test]
     async fn test_resume_from_height_jumps_view_past_persisted_vote_cross_height() {
@@ -4424,7 +4669,7 @@ mod tests {
     /// observable as `DOUBLE-SIGN PREVENTED` at multiple views with
     /// vote heights spanning 49,282..55,540.
     ///
-    /// Fix (Diem/Aptos Safety Rules pattern): on boot, read the latest
+    /// Fix (the Safety-Rules pattern): on boot, read the latest
     /// finalized block via the wired `BlockProvider`, extract
     /// `header.view` (the certifying Commit-QC view), and restore
     /// `high_qc_view` to that value. Mirrors `resume_from_synced_height`'s
@@ -4750,8 +4995,8 @@ mod tests {
     /// view to match the proposer's view BEFORE constructing the vote, so the
     /// vote is bucketed at the proposer's view and a quorum can form.
     ///
-    /// Mirrors Aptos `ensure_round_and_sync_up` (consensus/src/round_manager.rs)
-    /// and HotStuff-2 paper Figure 1/2 (Malkhi & Nayak, eprint 2023/397).
+    /// Follows the `ensure_round_and_sync_up` pattern and the HotStuff-2
+    /// Pacemaker rule.
     ///
     /// Without the fix: each validator votes at its own drifted view, votes
     /// scatter across view-buckets, and no view ever reaches the threshold.
@@ -5054,7 +5299,7 @@ mod tests {
     }
 
     /// Receiving a TimeoutMsg at a strictly higher view must advance the
-    /// local view counter — this is the DiemBFT-style backward-sync channel
+    /// local view counter — this is the backward-sync channel
     /// (#164).
     #[tokio::test]
     async fn test_on_timeout_msg_advances_local_view() {
@@ -5246,7 +5491,7 @@ mod tests {
         )
     }
 
-    /// safe_to_extend (Jolteon §3.5): a proposal at view V where V > local_view + 1
+    /// safe_to_extend: a proposal at view V where V > local_view + 1
     /// must carry a valid TimeoutCertificate at view V-1 signed by 2f+1 validators.
     /// Without the TC, the proposal must be rejected — the leader could otherwise
     /// fork the chain by skipping views unilaterally.
@@ -5329,7 +5574,7 @@ mod tests {
         };
 
         // Build a NoEndorsementCertificate for view 4 (f+1 = 2 of 4 signers
-        // suffice). MonadBFT tail-fork defence: the proposer claims no QC
+        // suffice). NEC tail-fork defence: the proposer claims no QC
         // formed at the timed-out view, and must back that claim with an
         // f+1 attestation. Engine local high_qc_view is 0 < 4, consistent
         // with "no QC observed" so the NEC will be accepted.

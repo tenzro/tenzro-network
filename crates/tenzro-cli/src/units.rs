@@ -1,7 +1,7 @@
 //! TNZO ↔ wei conversion helpers.
 //!
 //! The Tenzro RPC surface expresses all amounts in **wei** (10^-18 TNZO),
-//! matching the convention used by Ethereum, Aptos, and Sui. The CLI accepts
+//! matching the standard smallest-unit convention. The CLI accepts
 //! human-friendly decimal TNZO input (e.g. `100`, `100.5`, `0.0001`) and
 //! converts it to a wei decimal string before dispatching the RPC call.
 //!

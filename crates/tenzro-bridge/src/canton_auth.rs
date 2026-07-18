@@ -134,10 +134,10 @@ impl CantonTokenProvider {
     /// the cache is empty or within 60s of expiry.
     pub async fn bearer(&self) -> Result<String> {
         // Fast path: cached and not near expiry.
-        if let Some(t) = self.cache.read().as_ref() {
-            if t.expires_at > Instant::now() + Duration::from_secs(60) {
-                return Ok(t.token.clone());
-            }
+        if let Some(t) = self.cache.read().as_ref()
+            && t.expires_at > Instant::now() + Duration::from_secs(60)
+        {
+            return Ok(t.token.clone());
         }
 
         // Slow path: refresh. Multiple concurrent refreshes are fine —

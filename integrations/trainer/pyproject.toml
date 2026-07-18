@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tenzro-trainer"
 version = "0.1.0"
-description = "Tenzro Train reference trainer (Python). Inner training loops for Decoupled DiLoCo over PyTorch FSDP2 + Hivemind + safetensors. Coordinates with the Rust syncer in tenzro-training over JSON-RPC."
+description = "Tenzro Train reference trainer (Python). Decoupled inner training loops over PyTorch FSDP2 + safetensors, with chunked top-k error-feedback outer-gradient compression. Coordinates with the Rust syncer in tenzro-training over JSON-RPC; gradients distribute over content-addressed blob transport."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -25,7 +25,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-hivemind = ["hivemind>=1.1.10"]
 language = [
     "transformers>=4.45",
     "datasets>=2.20",
@@ -45,7 +44,7 @@ fp8 = ["torchao>=0.7"]
 # Runs inside the trainer's TEE enclave; never on the syncer side.
 confidential = ["pyhpke>=0.5", "cryptography>=42.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
-all = ["tenzro-trainer[hivemind,language,vision,timeseries,confidential,fp8]"]
+all = ["tenzro-trainer[language,vision,timeseries,confidential,fp8]"]
 
 [project.scripts]
 tenzro-trainer = "tenzro_trainer.cli:main"

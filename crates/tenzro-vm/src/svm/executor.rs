@@ -1,53 +1,40 @@
-//! SVM executor implementation with real Anza solana-sbpf BPF execution
+//! SVM executor implementing Solana Virtual Machine compatibility for Tenzro.
 //!
-//! This executor implements Solana Virtual Machine (SVM) compatibility for Tenzro Network
-//! using the `solana-sbpf` crate (the Anza fork of solana_rbpf, which is the active 2026
-//! upstream) for actual eBPF/SBF program execution. Programs are loaded as ELF binaries
-//! and executed in a metered, sandboxed BPF virtual machine with Solana-compatible syscalls.
+//! This executor serves three code paths, dispatched in
+//! [`SvmExecutor::execute_transaction`] on the destination program id:
 //!
-//! # Architecture
+//! 1. **SPL Token adapter** (`tx.to == SPL_TOKEN_PROGRAM_ID`) — the wTNZO SPL
+//!    Token program is implemented in Rust over the native `VmState` balance
+//!    layer (9-decimal truncation, ATA derivation). See [`Self::execute_spl_native`].
+//! 2. **`tenzro_cross_vm` native program** (`tx.to == TENZRO_CROSS_VM_PROGRAM_ID`)
+//!    — a Rust-implemented native program (analogous to Solana's System /
+//!    BPFLoader) that decodes cross-VM intents and emits canonical structured
+//!    logs. See [`Self::execute_cross_vm_native`].
+//! 3. **SBF/BPF program execution** (any other stored ELF) — real Solana
+//!    transaction processing via Anza's `solana-svm`
+//!    `TransactionBatchProcessor`, compiled in only under the `svm-full` cargo
+//!    feature. Without that feature, executing a stored ELF returns
+//!    [`VmError::SvmFullFeatureRequired`].
 //!
-//! 1. Accepts `VmTransaction` from the multi-VM runtime router
-//! 2. Loads program ELF bytecode from state
-//! 3. Sets up Solana-compatible memory layout (stack, heap, input region)
-//! 4. Registers syscall builtins (sol_log_, sol_log_64_, sol_sha256, abort)
-//! 5. Executes via `solana_sbpf::vm::EbpfVm::execute_program()` in interpreted mode
-//! 6. Maps results back to Tenzro's `ExecutionResult` format
+//! Program-derived addresses (PDAs) are derived with a Solana-compatible
+//! off-curve algorithm in [`Self::derive_pda`], available on every build.
 //!
-//! # Compute Units
+//! # Compute units → gas
 //!
-//! Solana uses compute units (CU) instead of gas. The instruction meter enforces limits:
-//! - 200,000 CU default per instruction
-//! - 1,400,000 CU max per transaction
-//! - Each BPF instruction consumes 1 CU
-//!
-//! # solana-sbpf 0.20 model notes
-//!
-//! In sBPF 0.20 the `ContextObject` trait owns the `MemoryMapping` (returned via
-//! `active_mapping_ptr`). Syscalls receive `&mut C` (the context object) directly,
-//! and access memory through the mapping pointer. This is the canonical pattern
-//! used by Anza's own `TestContextObject` and is required for the safe-by-default
-//! `declare_builtin_function!` macro.
+//! Solana meters in compute units (CU). The CU↔gas mapping onto the Tenzro gas
+//! schedule is the single deterministic ratio in
+//! [`crate::gas::gas_normalizer`] (`VmType::Svm`), applied at the
+//! `MultiVmRuntime` boundary. Per-instruction CU costs for the native paths
+//! mirror Solana's documented program costs (System transfer ~150 CU, SPL
+//! Token transfer ~5_000 CU).
 
 use async_trait::async_trait;
-use std::ptr::NonNull;
 use std::sync::Arc;
-
-use solana_sbpf::{
-    aligned_memory::AlignedMemory,
-    declare_builtin_function, ebpf,
-    elf::Executable,
-    error::EbpfError,
-    memory_region::{AccessType, MemoryMapping, MemoryRegion},
-    program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
-    verifier::RequisiteVerifier,
-    vm::{CallFrame, Config, ContextObject, EbpfVm, ExecutionMode},
-};
 
 use crate::{
     config::VmConfig,
     error::{Result, VmError},
-    gas::{GasOracle, svm_gas_costs},
+    gas::{svm_gas_costs, GasOracle},
     traits::{VmExecutor, VmState, VmType},
     types::{
         CallResult, ContractCall, ContractDeployment, DeployResult, ExecutionResult, Log,
@@ -55,204 +42,11 @@ use crate::{
     },
 };
 
-/// Tenzro context object implementing sBPF 0.20's `ContextObject` trait.
-///
-/// In sBPF 0.20 the context owns the `MemoryMapping` — the VM borrows the
-/// mapping via `active_mapping_ptr()`. The mapping is initialized just before
-/// `EbpfVm::new` is called and lives as long as `TenzroContext` itself.
-///
-/// The `'static` lifetime is a transmute artifact — the actual borrows in the
-/// regions vector (stack/heap/input slices) are scoped to `execute_program`,
-/// and the mapping is dropped via `Drop`-on-`TenzroContext` before those slices
-/// go out of scope. This mirrors the idiom in Anza's own example at
-/// `solana_sbpf::vm::EbpfVm` doc and `TestContextObject::memory_mapping`.
-pub(crate) struct TenzroContext {
-    /// Remaining compute units
-    remaining: u64,
-    /// Collected log messages from sol_log syscalls
-    log_messages: Vec<String>,
-    /// The active memory mapping. Initialized to an empty mapping at construction;
-    /// callers MUST replace it (via `set_memory_mapping`) before the VM runs.
-    ///
-    /// `MemoryMapping` lost its lifetime parameter in sBPF 0.20: it stores raw
-    /// `(host_addr, vm_addr, len)` triples in `MemoryRegion`, so the borrow
-    /// is no longer tracked by the type system. The caller is responsible for
-    /// keeping the underlying buffers alive — see `set_memory_mapping`.
-    memory_mapping: MemoryMapping,
-}
+#[cfg(feature = "svm-full")]
+mod full;
 
-impl TenzroContext {
-    /// Construct a context with an empty placeholder mapping.
-    ///
-    /// `set_memory_mapping` must be called before passing to `EbpfVm::new`.
-    fn new(compute_units: u64, config: &Config, version: SBPFVersion) -> Result<Self> {
-        // SAFETY: empty regions vector → no host buffers referenced.
-        let placeholder = unsafe {
-            MemoryMapping::new(Vec::new(), config, version).map_err(|e| {
-                VmError::ExecutionFailed(format!("Failed to create placeholder mapping: {}", e))
-            })?
-        };
-        Ok(Self {
-            remaining: compute_units,
-            log_messages: Vec::new(),
-            memory_mapping: placeholder,
-        })
-    }
-
-    /// Install the real mapping covering stack/heap/input/ro regions.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that every host buffer referenced by
-    /// `mapping`'s regions outlives every subsequent VM call that uses this
-    /// context. In practice, `execute_program` in this module owns the
-    /// buffers and the context on the same stack frame, so the references
-    /// are sound.
-    unsafe fn set_memory_mapping(&mut self, mapping: MemoryMapping) {
-        self.memory_mapping = mapping;
-    }
-}
-
-impl ContextObject for TenzroContext {
-    fn consume(&mut self, amount: u64) {
-        self.remaining = self.remaining.saturating_sub(amount);
-    }
-
-    fn get_remaining(&self) -> u64 {
-        self.remaining
-    }
-
-    fn active_mapping_ptr(&mut self) -> NonNull<MemoryMapping> {
-        NonNull::from(&mut self.memory_mapping)
-    }
-}
-
-// ─── Syscall implementations (sBPF 0.20 macro form) ────────────────────────
-//
-// In sBPF 0.20 syscalls receive `&mut C` (the ContextObject) directly. Memory
-// translation goes through the mapping pointer the context exposes via
-// `active_mapping_ptr()`. The `declare_builtin_function!` macro emits the
-// `BuiltinFunctionDefinition` impl with the safe `vm` wrapper that handles
-// instruction metering and result propagation automatically.
-
-declare_builtin_function!(
-    /// `sol_log_` — logs a UTF-8 string from program memory.
-    ///
-    /// Arguments: `(vm_addr, len, _, _, _)`.
-    SyscallSolLog,
-    fn rust(
-        ctx: &mut TenzroContext,
-        vm_addr: u64,
-        len: u64,
-        _arg3: u64,
-        _arg4: u64,
-        _arg5: u64,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
-        // SAFETY: the VM only invokes syscalls while a valid mapping is installed.
-        let mapping = unsafe { ctx.active_mapping_ptr().as_ref() };
-        let host_addr_result: std::result::Result<u64, EbpfError> =
-            mapping.map(AccessType::Load, vm_addr, len).into();
-        if let Ok(host_addr) = host_addr_result {
-            // SAFETY: `map` returned a host address backed by `len` bytes.
-            let slice =
-                unsafe { std::slice::from_raw_parts(host_addr as *const u8, len as usize) };
-            if let Ok(msg) = std::str::from_utf8(slice) {
-                tracing::debug!("SVM program log: {}", msg);
-                ctx.log_messages.push(msg.to_string());
-            }
-        }
-        Ok(0)
-    }
-);
-
-declare_builtin_function!(
-    /// `sol_log_64_` — logs five u64 values.
-    SyscallSolLog64,
-    fn rust(
-        ctx: &mut TenzroContext,
-        arg1: u64,
-        arg2: u64,
-        arg3: u64,
-        arg4: u64,
-        arg5: u64,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
-        let msg = format!(
-            "Program log: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}",
-            arg1, arg2, arg3, arg4, arg5
-        );
-        tracing::debug!("SVM: {}", msg);
-        ctx.log_messages.push(msg);
-        Ok(0)
-    }
-);
-
-declare_builtin_function!(
-    /// `sol_sha256` — computes SHA-256 over guest memory.
-    ///
-    /// Arguments: `(vals_addr, vals_len, result_addr, _, _)`.
-    /// Reads `vals_len` bytes from `vals_addr`, computes SHA-256, and writes the
-    /// 32-byte digest to `result_addr`.
-    SyscallSolSha256,
-    fn rust(
-        ctx: &mut TenzroContext,
-        vals_addr: u64,
-        vals_len: u64,
-        result_addr: u64,
-        _arg4: u64,
-        _arg5: u64,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
-        use sha2::{Digest, Sha256};
-
-        // SAFETY: the VM only invokes syscalls while a valid mapping is installed.
-        let mapping = unsafe { ctx.active_mapping_ptr().as_ref() };
-
-        let load_result: std::result::Result<u64, EbpfError> =
-            mapping.map(AccessType::Load, vals_addr, vals_len).into();
-        let host_in = match load_result {
-            Ok(addr) => addr,
-            Err(e) => return Err(Box::new(e)),
-        };
-
-        // SAFETY: backed by `vals_len` bytes at `host_in` per `map`.
-        let input =
-            unsafe { std::slice::from_raw_parts(host_in as *const u8, vals_len as usize) };
-        let digest: [u8; 32] = Sha256::digest(input).into();
-
-        let store_result: std::result::Result<u64, EbpfError> =
-            mapping.map(AccessType::Store, result_addr, 32).into();
-        let host_out = match store_result {
-            Ok(addr) => addr,
-            Err(e) => return Err(Box::new(e)),
-        };
-        // SAFETY: backed by 32 writable bytes at `host_out` per `map`.
-        unsafe {
-            std::ptr::copy_nonoverlapping(digest.as_ptr(), host_out as *mut u8, 32);
-        }
-        Ok(0)
-    }
-);
-
-declare_builtin_function!(
-    /// `abort` — terminate program execution with an explicit syscall error.
-    SyscallAbort,
-    fn rust(
-        _ctx: &mut TenzroContext,
-        _arg1: u64,
-        _arg2: u64,
-        _arg3: u64,
-        _arg4: u64,
-        _arg5: u64,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
-        Err(Box::new(std::io::Error::other("program aborted")))
-    }
-);
-
-// ─── SVM Executor ──────────────────────────────────────────────────────────
-
-/// SVM executor using solana-sbpf (the Anza fork) for real eBPF/SBF program execution.
-///
-/// Programs are loaded as ELF binaries and executed in a sandboxed BPF VM
-/// with instruction metering (compute units) and Solana-compatible syscalls.
+/// SVM executor dispatching SPL / cross-VM native paths and, under the
+/// `svm-full` feature, real SBF program execution via Anza's `solana-svm`.
 pub struct SvmExecutor {
     /// Configuration
     config: VmConfig,
@@ -267,24 +61,23 @@ pub struct SvmExecutor {
 
     /// Maximum compute unit limit per transaction
     max_compute_unit_limit: u64,
-
-    /// The solana-sbpf loader (config + registered syscalls).
-    loader: Arc<BuiltinProgram<TenzroContext>>,
 }
 
 impl SvmExecutor {
-    /// Create a new SVM executor with real solana-sbpf BPF execution engine.
+    /// Create a new SVM executor.
     pub fn new(config: VmConfig, gas_oracle: Arc<GasOracle>) -> Result<Self> {
-        tracing::info!("Initializing SVM executor (solana-sbpf BPF VM)");
-
-        let loader = Arc::new(Self::create_loader());
+        #[cfg(feature = "svm-full")]
+        tracing::info!("Initializing SVM executor (solana-svm TransactionBatchProcessor)");
+        #[cfg(not(feature = "svm-full"))]
+        tracing::info!(
+            "Initializing SVM executor (SPL + cross-VM native paths; SBF programs require `svm-full`)"
+        );
 
         Ok(Self {
             config,
             gas_oracle,
             default_compute_unit_limit: 200_000,
             max_compute_unit_limit: svm_gas_costs::MAX_COMPUTE_UNITS,
-            loader,
         })
     }
 
@@ -293,59 +86,18 @@ impl SvmExecutor {
         &self.gas_oracle
     }
 
-    /// Create the sBPF loader with Solana-compatible syscall registrations.
+    /// Derive program-derived address (PDA) using Solana-compatible algorithm.
     ///
-    /// In sBPF 0.20 the loader is built in two steps:
-    ///   1. `BuiltinProgram::new_loader(config)` — installs the VM `Config`.
-    ///   2. `<Syscall>::register(&mut program, "name")` — wires each syscall
-    ///      via the `BuiltinFunctionDefinition` trait emitted by
-    ///      `declare_builtin_function!`.
-    fn create_loader() -> BuiltinProgram<TenzroContext> {
-        let config = Config {
-            max_call_depth: 64,
-            stack_frame_size: 4_096,
-            enable_address_translation: true,
-            enable_stack_frame_gaps: true,
-            instruction_meter_checkpoint_distance: 10_000,
-            enable_instruction_meter: true,
-            enable_register_tracing: false,
-            enable_symbol_and_section_labels: false,
-            reject_broken_elfs: false,
-            optimize_rodata: true,
-            allow_memory_region_zero: true,
-            aligned_memory_mapping: true,
-            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
-        };
-
-        let mut program = BuiltinProgram::<TenzroContext>::new_loader(config);
-
-        // Register Solana-compatible syscalls. The symbol names must match
-        // what Solana programs link against.
-        SyscallSolLog::register(&mut program, "sol_log_")
-            .expect("Failed to register sol_log_ syscall");
-        SyscallSolLog64::register(&mut program, "sol_log_64_")
-            .expect("Failed to register sol_log_64_ syscall");
-        SyscallSolSha256::register(&mut program, "sol_sha256")
-            .expect("Failed to register sol_sha256 syscall");
-        SyscallAbort::register(&mut program, "abort")
-            .expect("Failed to register abort syscall");
-
-        program
-    }
-
-    /// Derive program-derived address (PDA) using Solana-compatible algorithm
-    ///
-    /// PDAs are off-curve Ed25519 points derived deterministically from a program ID
-    /// and seeds. They enable programs to "sign" for accounts without a private key.
+    /// PDAs are off-curve Ed25519 points derived deterministically from a
+    /// program ID and seeds. They enable programs to "sign" for accounts
+    /// without a private key.
     ///
     /// Algorithm (Solana-compatible `find_program_address`):
     /// 1. Iterate bump seed from 255 down to 0
     /// 2. Hash: SHA-256(seeds || [bump] || program_id || "ProgramDerivedAddress")
-    /// 3. Check if the resulting 32-byte hash is NOT a valid Ed25519 public key (off-curve)
+    /// 3. Check if the resulting 32-byte hash is NOT a valid Ed25519 public key
+    ///    (off-curve)
     /// 4. Return the first off-curve result as the PDA
-    ///
-    /// This ensures the PDA cannot have a corresponding private key, so only
-    /// the program can "sign" for it via CPI.
     fn derive_pda(program_id: &[u8], seeds: &[&[u8]]) -> Vec<u8> {
         use sha2::{Digest, Sha256};
 
@@ -361,20 +113,17 @@ impl SvmExecutor {
             let hash = hasher.finalize();
             let hash_bytes: [u8; 32] = hash.into();
 
-            // Check if the point is off-curve (not a valid Ed25519 public key).
-            // We use curve25519-dalek's CompressedEdwardsY to attempt decompression.
-            // If decompression fails, the point is off-curve → valid PDA.
+            // Off-curve check: if CompressedEdwardsY decompression fails, the
+            // point has no corresponding private key → valid PDA.
             let compressed = curve25519_dalek::edwards::CompressedEdwardsY(hash_bytes);
             if compressed.decompress().is_none() {
-                // Off-curve: this is a valid PDA
                 return hash_bytes.to_vec();
             }
-            // On-curve: try next bump
         }
 
-        // Fallback: all 256 bumps produced on-curve points (astronomically unlikely).
-        // Use bump=0 result anyway — matches Solana's behavior of returning an error,
-        // but for deployment address derivation we need a deterministic fallback.
+        // Fallback: all 256 bumps on-curve (astronomically unlikely).
+        // Deterministic bump=0 result — deployment address derivation needs a
+        // total function.
         let mut hasher = Sha256::new();
         for seed in seeds {
             hasher.update(seed);
@@ -388,9 +137,9 @@ impl SvmExecutor {
     /// Execute the native `tenzro_cross_vm` program.
     ///
     /// `tenzro_cross_vm` has no stored ELF — it is a Rust-implemented native
-    /// program (analogous to Solana's System / BPFLoader programs). The
-    /// dispatch site in [`Self::execute_transaction`] short-circuits the
-    /// ELF lookup whenever `tx.to == TENZRO_CROSS_VM_PROGRAM_ID`.
+    /// program. The dispatch site in [`Self::execute_transaction`]
+    /// short-circuits the ELF lookup whenever
+    /// `tx.to == TENZRO_CROSS_VM_PROGRAM_ID`.
     ///
     /// # Execution model
     ///
@@ -415,8 +164,7 @@ impl SvmExecutor {
     /// program emit a canonical, signed structured intent that flows into the
     /// existing EVM precompile, we preserve a single source of truth for
     /// cross-VM transitions while still allowing SVM transactions to
-    /// originate them — matching Hyperlane / Wormhole 2026 patterns where the
-    /// origin VM emits and the canonical bridge processes.
+    /// originate them.
     fn execute_cross_vm_native(
         &self,
         tx: &VmTransaction,
@@ -782,124 +530,50 @@ impl SvmExecutor {
         ))
     }
 
-    /// Execute a loaded SBF/BPF program via the solana-sbpf virtual machine.
+    /// Execute a stored SBF/BPF program.
     ///
-    /// This performs real eBPF execution:
-    /// 1. Parses the ELF binary via `Executable::from_elf()`
-    /// 2. Verifies the bytecode with `RequisiteVerifier`
-    /// 3. Sets up memory mapping (stack, heap, input region)
-    /// 4. Installs the mapping on the `TenzroContext`
-    /// 5. Creates `EbpfVm` and calls `execute_program()` in interpreted mode
-    /// 6. Returns output data and compute units consumed
-    fn execute_program(
+    /// Under the `svm-full` feature this drives Anza's `solana-svm`
+    /// `TransactionBatchProcessor` against a `VmState`-backed account loader
+    /// (see [`full`]). Without the feature it returns
+    /// [`VmError::SvmFullFeatureRequired`] — there is no interpreter fallback.
+    #[cfg(feature = "svm-full")]
+    fn execute_sbf_program(
         &self,
+        program_id: &[u8],
         program_elf: &[u8],
         instruction_data: &[u8],
         compute_unit_limit: u64,
+        state: &dyn VmState,
     ) -> Result<(Vec<u8>, u64, Vec<String>)> {
-        tracing::debug!(
-            "Executing SBF program via rBPF VM ({} bytes ELF, {} bytes input, {} CU limit)",
-            program_elf.len(),
-            instruction_data.len(),
+        full::process_sbf_transaction(
+            program_id,
+            program_elf,
+            instruction_data,
             compute_unit_limit,
-        );
+            self.max_compute_unit_limit,
+            state,
+        )
+    }
 
-        // 1. Parse ELF and create executable
-        let executable = Executable::<TenzroContext>::from_elf(program_elf, self.loader.clone())
-            .map_err(|e| VmError::ExecutionFailed(format!("ELF load error: {}", e)))?;
-
-        // 2. Verify the bytecode
-        executable
-            .verify::<RequisiteVerifier>()
-            .map_err(|e| VmError::ExecutionFailed(format!("Verification error: {}", e)))?;
-
-        // 3. Set up memory regions
-        let config = executable.get_config();
-        let sbpf_version = executable.get_sbpf_version();
-
-        // Stack
-        let mut stack =
-            AlignedMemory::<{ ebpf::HOST_ALIGN }>::zero_filled(config.stack_size());
-        let stack_len = stack.len();
-
-        // Heap (32 KB default, matching Solana)
-        let heap_size = 32 * 1024;
-        let mut heap = AlignedMemory::<{ ebpf::HOST_ALIGN }>::zero_filled(heap_size);
-
-        // Input region — contains serialized instruction data
-        let mut input_mem = instruction_data.to_vec();
-
-        // 4. Create context owning a placeholder mapping that we'll replace.
-        let mut context = TenzroContext::new(compute_unit_limit, config, sbpf_version)?;
-
-        // 5. Build the real memory mapping (sBPF 0.20: `MemoryRegion::new<HO>`
-        //    with `&mut AlignedMemory` / `*mut [u8]` host memory objects).
-        let regions: Vec<MemoryRegion> = vec![
-            executable.get_ro_region(),
-            MemoryRegion::new(&mut stack, ebpf::MM_STACK_START),
-            MemoryRegion::new(&mut heap, ebpf::MM_HEAP_START),
-            MemoryRegion::new(
-                &raw mut *input_mem.as_mut_slice(),
-                ebpf::MM_INPUT_START,
-            ),
-        ];
-
-        // SAFETY: `regions` borrows from `stack`/`heap`/`input_mem` which all
-        // live to the end of this function; the `MemoryMapping` is dropped
-        // (with `context`) before those buffers go out of scope.
-        let memory_mapping = unsafe {
-            MemoryMapping::new(regions, config, sbpf_version).map_err(|e| {
-                VmError::ExecutionFailed(format!("Memory mapping error: {}", e))
-            })?
-        };
-
-        // SAFETY: stack/heap/input_mem outlive `context` per the same scope
-        // argument as the `MemoryMapping::new` SAFETY comment above.
-        unsafe {
-            context.set_memory_mapping(memory_mapping);
-        }
-
-        // 6. Allocate call frame buffer per the executable's max_call_depth.
-        let mut call_frames = vec![CallFrame::default(); config.max_call_depth];
-
-        // 7. Create VM and execute (sBPF 0.20: 4-arg constructor — mapping is
-        //    pulled from the context object via `active_mapping_ptr()`).
-        let mut vm = EbpfVm::new(self.loader.clone(), sbpf_version, &mut context, stack_len);
-        let mut mode = ExecutionMode::Interpreted;
-        let (instruction_count, result) =
-            vm.execute_program(&executable, &mut mode, &mut call_frames);
-
-        // 8. Process result. `ProgramResult` is a `StableResult`; convert to
-        //    a regular `std::result::Result` via `.into()` for ergonomic match.
-        let compute_units_consumed = compute_unit_limit.saturating_sub(context.get_remaining());
-        let log_messages = std::mem::take(&mut context.log_messages);
-        let result_std: std::result::Result<u64, EbpfError> = result.into();
-
-        match result_std {
-            Ok(return_value) => {
-                tracing::debug!(
-                    "SVM program executed successfully: return={}, insns={}, CU used={}",
-                    return_value,
-                    instruction_count,
-                    compute_units_consumed,
-                );
-                // Return value is in r0; output is the modified input region
-                Ok((input_mem, compute_units_consumed, log_messages))
-            }
-            Err(err) => {
-                tracing::warn!("SVM program execution failed: {}", err);
-                Err(VmError::ExecutionFailed(format!(
-                    "BPF execution error: {}",
-                    err
-                )))
-            }
-        }
+    /// Off-feature path: executing a stored SBF program requires the
+    /// `svm-full` feature. Returns [`VmError::SvmFullFeatureRequired`].
+    #[cfg(not(feature = "svm-full"))]
+    fn execute_sbf_program(
+        &self,
+        _program_id: &[u8],
+        _program_elf: &[u8],
+        _instruction_data: &[u8],
+        _compute_unit_limit: u64,
+        _state: &dyn VmState,
+    ) -> Result<(Vec<u8>, u64, Vec<String>)> {
+        Err(VmError::SvmFullFeatureRequired)
     }
 
     /// Calculate compute units for a transaction.
     ///
     /// Maps transaction properties to Solana compute unit costs.
-    /// When actual BPF execution occurs, the real CU consumption is metered by the VM.
+    /// When actual BPF execution occurs, the real CU consumption is metered by
+    /// the processor.
     fn calculate_compute_units(&self, data_len: usize, num_accounts: usize) -> u64 {
         let base = svm_gas_costs::TRANSACTION;
         let data_cost = (data_len as u64) * svm_gas_costs::DATA_BYTE;
@@ -930,10 +604,7 @@ impl VmExecutor for SvmExecutor {
         tx: &VmTransaction,
         state: &mut dyn VmState,
     ) -> Result<ExecutionResult> {
-        tracing::debug!(
-            "SVM: Executing transaction from {}",
-            hex::encode(&tx.from)
-        );
+        tracing::debug!("SVM: Executing transaction from {}", hex::encode(&tx.from));
 
         // Validate sender has sufficient balance
         let sender_balance = state.get_balance(&tx.from);
@@ -971,17 +642,7 @@ impl VmExecutor for SvmExecutor {
             tracing::info!("SVM: Deploying program to {}", hex::encode(&program_id));
 
             // Validate program size
-            self.config
-                .validate_contract_size(tx.data.len())?;
-
-            // Validate ELF format by attempting to parse it
-            // (only if it looks like an ELF — check magic bytes)
-            if tx.data.len() >= 4 && &tx.data[..4] == b"\x7fELF" {
-                let _ = Executable::<TenzroContext>::from_elf(&tx.data, self.loader.clone())
-                    .map_err(|e| {
-                        VmError::InvalidTransaction(format!("Invalid SBF ELF: {}", e))
-                    })?;
-            }
+            self.config.validate_contract_size(tx.data.len())?;
 
             // Store program code
             state.set_code(&program_id, tx.data.clone());
@@ -1002,7 +663,6 @@ impl VmExecutor for SvmExecutor {
             // Track state changes
             let mut state_changes = Vec::new();
 
-            // Nonce change
             state_changes.push(StateChange::new(
                 tx.from.clone(),
                 b"nonce".to_vec(),
@@ -1010,7 +670,6 @@ impl VmExecutor for SvmExecutor {
                 Some((nonce + 1).to_le_bytes().to_vec()),
             ));
 
-            // Sender balance change
             state_changes.push(StateChange::new(
                 tx.from.clone(),
                 b"balance".to_vec(),
@@ -1018,7 +677,6 @@ impl VmExecutor for SvmExecutor {
                 Some(new_sender_balance.to_le_bytes().to_vec()),
             ));
 
-            // Program code deployed
             state_changes.push(StateChange::new(
                 program_id.clone(),
                 b"code".to_vec(),
@@ -1026,7 +684,6 @@ impl VmExecutor for SvmExecutor {
                 Some(tx.data.clone()),
             ));
 
-            // Program account balance (if value transferred)
             if tx.value > 0 {
                 state_changes.push(StateChange::new(
                     program_id.clone(),
@@ -1044,18 +701,13 @@ impl VmExecutor for SvmExecutor {
             ))
         } else if let Some(program_id) = tx.to.as_ref() {
             // Native program short-circuit: tenzro_cross_vm is implemented in
-            // Rust, has no stored ELF, and is dispatched directly here. See
-            // [`crate::svm::cross_vm`] for the program ID derivation, the
-            // Anchor-style 8-byte discriminators, and the instruction layout.
+            // Rust, has no stored ELF, and is dispatched directly here.
             if program_id.as_slice() == super::cross_vm::TENZRO_CROSS_VM_PROGRAM_ID.as_slice() {
                 return self.execute_cross_vm_native(tx, state, sender_balance, compute_units);
             }
 
             // SPL Token Program short-circuit: the wTNZO SPL adapter is
-            // implemented in Rust over the native VmState balance layer
-            // (no ELF). All canonical SPL instructions for wTNZO
-            // (Transfer / MintTo / Burn / GetBalance) are dispatched
-            // here. Wire format per [`Self::execute_spl_native`].
+            // implemented in Rust over the native VmState balance layer.
             if program_id.as_slice() == super::spl_adapter::SPL_TOKEN_PROGRAM_ID.as_slice() {
                 return self.execute_spl_native(tx, state, sender_balance, compute_units);
             }
@@ -1067,30 +719,46 @@ impl VmExecutor for SvmExecutor {
 
             tracing::debug!("SVM: Executing program at {}", hex::encode(program_id));
 
-            // Try real BPF execution if the program is a valid ELF
-            let (output, cu_consumed, log_messages) =
-                if program.len() >= 4 && &program[..4] == b"\x7fELF" {
-                    // Real BPF execution via rBPF
-                    match self.execute_program(&program, &tx.data, tx.gas_limit) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            // BPF execution failed — return error result
-                            let nonce = state.get_nonce(&tx.from);
-                            state.set_nonce(&tx.from, nonce + 1);
-                            let gas_cost = compute_units as u128 * tx.gas_price;
-                            state.set_balance(&tx.from, sender_balance - gas_cost);
+            // Real SBF execution via solana-svm (feature-gated). Non-ELF
+            // program bytes at a call target are a client error.
+            if !(program.len() >= 4 && &program[..4] == b"\x7fELF") {
+                let nonce = state.get_nonce(&tx.from);
+                state.set_nonce(&tx.from, nonce + 1);
+                let gas_cost = compute_units as u128 * tx.gas_price;
+                state.set_balance(&tx.from, sender_balance - gas_cost);
+                return Ok(ExecutionResult::failed(
+                    compute_units,
+                    "SVM: program at target is not a valid SBF ELF".to_string(),
+                ));
+            }
 
-                            return Ok(ExecutionResult::failed(
-                                compute_units,
-                                format!("BPF execution failed: {}", e),
-                            ));
-                        }
-                    }
-                } else {
-                    // Non-ELF program (e.g., raw data) — process as simple transfer
-                    tracing::debug!("SVM: Program is not ELF, processing as data transfer");
-                    (Vec::new(), compute_units, Vec::new())
-                };
+            let (output, cu_consumed, log_messages) = match self.execute_sbf_program(
+                program_id,
+                &program,
+                &tx.data,
+                tx.gas_limit,
+                state,
+            ) {
+                Ok(result) => result,
+                Err(VmError::SvmFullFeatureRequired) => {
+                    // No interpreter fallback — the operator must build with
+                    // `svm-full` to run stored SBF programs. Do not charge the
+                    // sender for an unsupported build configuration.
+                    return Err(VmError::SvmFullFeatureRequired);
+                }
+                Err(e) => {
+                    // Program execution failed — charge gas + bump nonce
+                    // (Solana semantics) and return a failed result.
+                    let nonce = state.get_nonce(&tx.from);
+                    state.set_nonce(&tx.from, nonce + 1);
+                    let gas_cost = compute_units as u128 * tx.gas_price;
+                    state.set_balance(&tx.from, sender_balance - gas_cost);
+                    return Ok(ExecutionResult::failed(
+                        compute_units,
+                        format!("SBF execution failed: {}", e),
+                    ));
+                }
+            };
 
             // Capture pre-state for state change tracking
             let nonce = state.get_nonce(&tx.from);
@@ -1100,10 +768,9 @@ impl VmExecutor for SvmExecutor {
                 None
             };
 
-            // Update nonce
             state.set_nonce(&tx.from, nonce + 1);
 
-            // Deduct costs (use actual CU consumed if BPF executed)
+            // Deduct costs (use actual CU consumed by the processor).
             let actual_cu = cu_consumed.max(compute_units);
             let gas_cost = actual_cu as u128 * tx.gas_price;
             let new_sender_balance = sender_balance - gas_cost - tx.value;
@@ -1115,16 +782,13 @@ impl VmExecutor for SvmExecutor {
                 state.set_balance(program_id, recipient_balance + tx.value);
             }
 
-            // Convert log messages to Log entries
             let logs: Vec<Log> = log_messages
                 .iter()
                 .map(|msg| Log::new(program_id.clone(), Vec::new(), msg.as_bytes().to_vec()))
                 .collect();
 
-            // Track state changes
             let mut state_changes = Vec::new();
 
-            // Nonce change
             state_changes.push(StateChange::new(
                 tx.from.clone(),
                 b"nonce".to_vec(),
@@ -1132,7 +796,6 @@ impl VmExecutor for SvmExecutor {
                 Some((nonce + 1).to_le_bytes().to_vec()),
             ));
 
-            // Sender balance change
             state_changes.push(StateChange::new(
                 tx.from.clone(),
                 b"balance".to_vec(),
@@ -1140,7 +803,6 @@ impl VmExecutor for SvmExecutor {
                 Some(new_sender_balance.to_le_bytes().to_vec()),
             ));
 
-            // Recipient balance change (if value transferred)
             if tx.value > 0 {
                 let old_bal = old_recipient_balance.unwrap_or(0);
                 state_changes.push(StateChange::new(
@@ -1159,44 +821,38 @@ impl VmExecutor for SvmExecutor {
             ))
         } else {
             // Unreachable: tx.to.is_none() was already handled above
-            Err(VmError::InvalidTransaction("Missing destination address".to_string()))
+            Err(VmError::InvalidTransaction(
+                "Missing destination address".to_string(),
+            ))
         }
     }
 
-    async fn call(
-        &self,
-        call: &ContractCall,
-        state: &dyn VmState,
-    ) -> Result<CallResult> {
-        tracing::debug!(
-            "SVM: Read-only call to {}",
-            hex::encode(&call.contract)
-        );
+    async fn call(&self, call: &ContractCall, state: &dyn VmState) -> Result<CallResult> {
+        tracing::debug!("SVM: Read-only call to {}", hex::encode(&call.contract));
 
         // Get program code
         let program = state
             .get_code(&call.contract)
             .ok_or_else(|| VmError::ContractNotFound(hex::encode(&call.contract)))?;
 
-        // Try real BPF execution if valid ELF
-        if program.len() >= 4 && &program[..4] == b"\x7fELF" {
-            let compute_limit = call.gas_limit.min(self.max_compute_unit_limit);
-            match self.execute_program(&program, &call.data, compute_limit) {
-                Ok((output, cu_consumed, _logs)) => {
-                    Ok(CallResult::success(output, cu_consumed))
-                }
-                Err(e) => {
-                    let cu = self.calculate_compute_units(call.data.len(), 2);
-                    Ok(CallResult::failed(
-                        cu,
-                        format!("BPF call failed: {}", e),
-                    ))
-                }
+        if !(program.len() >= 4 && &program[..4] == b"\x7fELF") {
+            return Err(VmError::ContractNotFound(hex::encode(&call.contract)));
+        }
+
+        let compute_limit = call.gas_limit.min(self.max_compute_unit_limit);
+        match self.execute_sbf_program(
+            &call.contract,
+            &program,
+            &call.data,
+            compute_limit,
+            state,
+        ) {
+            Ok((output, cu_consumed, _logs)) => Ok(CallResult::success(output, cu_consumed)),
+            Err(VmError::SvmFullFeatureRequired) => Err(VmError::SvmFullFeatureRequired),
+            Err(e) => {
+                let cu = self.calculate_compute_units(call.data.len(), 2);
+                Ok(CallResult::failed(cu, format!("SBF call failed: {}", e)))
             }
-        } else {
-            // Non-ELF program — return empty result
-            let compute_units = self.calculate_compute_units(call.data.len(), 2);
-            Ok(CallResult::success(Vec::new(), compute_units))
         }
     }
 
@@ -1211,24 +867,15 @@ impl VmExecutor for SvmExecutor {
         );
 
         // Validate program size
-        self.config
-            .validate_contract_size(deployment.code.len())?;
-
-        // Validate ELF if it's an ELF binary
-        if deployment.code.len() >= 4 && &deployment.code[..4] == b"\x7fELF" {
-            let _ = Executable::<TenzroContext>::from_elf(&deployment.code, self.loader.clone())
-                .map_err(|e| {
-                    VmError::InvalidTransaction(format!("Invalid SBF ELF: {}", e))
-                })?;
-        }
+        self.config.validate_contract_size(deployment.code.len())?;
 
         // Derive program ID
         let nonce = state.get_nonce(&deployment.deployer);
         let program_id = Self::derive_pda(&deployment.deployer, &[&nonce.to_le_bytes()]);
 
         // Calculate compute units
-        let compute_units =
-            svm_gas_costs::CREATE_ACCOUNT + (deployment.code.len() as u64 * svm_gas_costs::DATA_BYTE);
+        let compute_units = svm_gas_costs::CREATE_ACCOUNT
+            + (deployment.code.len() as u64 * svm_gas_costs::DATA_BYTE);
 
         if compute_units > deployment.gas_limit {
             return Ok(DeployResult::failed(
@@ -1288,7 +935,6 @@ impl VmExecutor for SvmExecutor {
 mod tests {
     use super::*;
     use crate::state_adapter::StateAdapter;
-    use solana_sbpf::program::FunctionRegistry;
 
     fn create_executor() -> SvmExecutor {
         let config = VmConfig::default();
@@ -1306,134 +952,16 @@ mod tests {
         assert_eq!(pda.len(), 32);
     }
 
-    #[test]
-    fn test_loader_has_syscalls() {
-        let executor = create_executor();
-        let registry = executor.loader.get_function_registry();
-
-        // Verify syscalls are registered
-        assert!(
-            registry.lookup_by_name(b"sol_log_").is_some(),
-            "sol_log_ should be registered"
-        );
-        assert!(
-            registry.lookup_by_name(b"sol_log_64_").is_some(),
-            "sol_log_64_ should be registered"
-        );
-        assert!(
-            registry.lookup_by_name(b"abort").is_some(),
-            "abort should be registered"
-        );
-    }
-
-    /// Build a context, mapping, and run an assembled program in interpreted
-    /// mode. Returns `(instruction_count, result, remaining_cu)`.
-    fn run_program_text(
-        prog: &[u8],
-        sbpf_version: SBPFVersion,
-        compute_units: u64,
-    ) -> (u64, std::result::Result<u64, EbpfError>, u64) {
-        let loader = Arc::new(BuiltinProgram::<TenzroContext>::new_mock());
-        let function_registry = FunctionRegistry::default();
-        let executable = Executable::<TenzroContext>::from_text_bytes(
-            prog,
-            loader.clone(),
-            sbpf_version,
-            function_registry,
-        )
-        .unwrap();
-        executable.verify::<RequisiteVerifier>().unwrap();
-
-        let config = executable.get_config();
-        let sbpf_version = executable.get_sbpf_version();
-
-        let mut stack =
-            AlignedMemory::<{ ebpf::HOST_ALIGN }>::zero_filled(config.stack_size());
-        let stack_len = stack.len();
-        let mut heap = AlignedMemory::<{ ebpf::HOST_ALIGN }>::with_capacity(0);
-        let mut input: Vec<u8> = Vec::new();
-
-        let mut context = TenzroContext::new(compute_units, config, sbpf_version).unwrap();
-
-        let regions: Vec<MemoryRegion> = vec![
-            executable.get_ro_region(),
-            MemoryRegion::new(&mut stack, ebpf::MM_STACK_START),
-            MemoryRegion::new(&mut heap, ebpf::MM_HEAP_START),
-            MemoryRegion::new(
-                &raw mut *input.as_mut_slice(),
-                ebpf::MM_INPUT_START,
-            ),
-        ];
-        let memory_mapping =
-            unsafe { MemoryMapping::new(regions, config, sbpf_version).unwrap() };
-        unsafe { context.set_memory_mapping(memory_mapping) };
-
-        let mut call_frames = vec![CallFrame::default(); config.max_call_depth];
-        let mut vm = EbpfVm::new(loader, sbpf_version, &mut context, stack_len);
-        let mut mode = ExecutionMode::Interpreted;
-        let (insn_count, result) =
-            vm.execute_program(&executable, &mut mode, &mut call_frames);
-        let remaining = context.get_remaining();
-        let result_std: std::result::Result<u64, EbpfError> = result.into();
-        (insn_count, result_std, remaining)
-    }
-
-    #[test]
-    fn test_rbpf_simple_program() {
-        // A minimal sBPFv2 program that just exits with return value 0
-        let prog = &[
-            0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov64 r0, 0
-            0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
-        ];
-
-        let (insn_count, result, _) = run_program_text(prog, SBPFVersion::V2, 100);
-
-        assert_eq!(insn_count, 2); // mov64 + exit
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0);
-    }
-
-    #[test]
-    fn test_rbpf_compute_meter() {
-        // A program that should exhaust compute units
-        // mov64 r0, 0; mov64 r0, 1; mov64 r0, 2; exit
-        let prog = &[
-            0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov64 r0, 0
-            0xb7, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov64 r0, 1
-            0xb7, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // mov64 r0, 2
-            0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
-        ];
-
-        // Give only 2 compute units — should run out before finishing all 4 instructions
-        let (_insn_count, result, _) = run_program_text(prog, SBPFVersion::V2, 2);
-
-        // Should fail with ExceededMaxInstructions
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_context_object() {
-        let loader_program = SvmExecutor::create_loader();
-        let config = loader_program.get_config();
-        let mut ctx = TenzroContext::new(1000, config, SBPFVersion::V2).unwrap();
-        assert_eq!(ctx.get_remaining(), 1000);
-
-        ctx.consume(200);
-        assert_eq!(ctx.get_remaining(), 800);
-
-        ctx.consume(900); // saturating
-        assert_eq!(ctx.get_remaining(), 0);
-    }
-
     #[tokio::test]
     async fn test_program_deployment() {
         let executor = create_executor();
         let mut state = StateAdapter::new();
 
         let deployer = vec![1u8; 32];
-        let code = vec![0x00, 0x61, 0x73, 0x6D]; // WebAssembly magic number (non-ELF)
+        // Non-ELF payload — deployment stores code verbatim without invoking
+        // the SBF processor (validation happens at execution time).
+        let code = vec![0x00, 0x61, 0x73, 0x6D];
 
-        // Set initial balance
         state.set_balance(&deployer, 10_000_000_000_000_000_000u128);
 
         let deployment = ContractDeployment::new(
@@ -1454,21 +982,21 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.address.len(), 32);
 
-        // Check program code was stored
         let stored_code = state.get_code(&result.address).unwrap();
         assert_eq!(stored_code, code);
     }
 
     #[tokio::test]
-    async fn test_program_execution() {
+    async fn test_non_elf_call_target_fails() {
         let executor = create_executor();
         let mut state = StateAdapter::new();
 
         let caller = vec![1u8; 32];
         let program_id = vec![2u8; 32];
-        let program_code = vec![0x00, 0x61, 0x73, 0x6D]; // Non-ELF: will skip BPF execution
+        // Non-ELF bytes stored at a call target — must be rejected as an
+        // invalid SBF program regardless of build features.
+        let program_code = vec![0x00, 0x61, 0x73, 0x6D];
 
-        // Set up state
         state.set_balance(&caller, 10_000_000_000_000_000_000u128);
         state.set_code(&program_id, program_code);
 
@@ -1476,7 +1004,7 @@ mod tests {
             caller.clone(),
             Some(program_id.clone()),
             0,
-            vec![1, 2, 3, 4], // Instruction data
+            vec![1, 2, 3, 4],
             100_000,
             1_000_000_000,
             0,
@@ -1488,8 +1016,11 @@ mod tests {
             .execute_transaction(&tx, &mut state)
             .await
             .unwrap();
-        assert!(result.success);
-        assert!(result.gas_used > 0);
+        assert!(!result.success);
+        assert!(result
+            .revert_reason
+            .unwrap()
+            .contains("not a valid SBF ELF"));
     }
 
     #[tokio::test]
@@ -1556,8 +1087,8 @@ mod tests {
     /// source → dest balance moves and authority signing parity is enforced.
     #[tokio::test]
     async fn test_spl_native_transfer() {
-        use crate::traits::VmState;
         use crate::svm::spl_adapter::SPL_TOKEN_PROGRAM_ID;
+        use crate::traits::VmState;
         use tenzro_token::spl_to_native;
 
         let executor = create_executor();
@@ -1569,7 +1100,7 @@ mod tests {
 
         // Fund source with 100 native TNZO (18 dec) — enough to cover gas + transfer.
         let one_tnzo: u128 = 1_000_000_000_000_000_000;
-        state.set_balance(&source.to_vec(), 100 * one_tnzo);
+        state.set_balance(&source, 100 * one_tnzo);
 
         // Build calldata: [n_accounts=3][source][dest][authority][opcode=3][amount_le_u64].
         let amount_spl: u64 = 5_000_000_000; // 5.0 wTNZO at 9 decimals
@@ -1598,26 +1129,39 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success, "SPL transfer should succeed: {:?}", result.revert_reason);
+        assert!(
+            result.success,
+            "SPL transfer should succeed: {:?}",
+            result.revert_reason
+        );
 
         let amount_native = spl_to_native(amount_spl);
-        let dest_after = state.get_balance(&dest.to_vec());
-        assert_eq!(dest_after, amount_native, "destination should receive native amount");
+        let dest_after = state.get_balance(&dest);
+        assert_eq!(
+            dest_after, amount_native,
+            "destination should receive native amount"
+        );
 
         // Source balance: started at 100 TNZO, lost gas + 5 TNZO transfer.
-        let src_after = state.get_balance(&source.to_vec());
-        assert!(src_after < (100 * one_tnzo) - amount_native, "source must pay gas");
-        assert!(src_after >= (100 * one_tnzo) - amount_native - (1 * one_tnzo), "gas should be modest");
+        let src_after = state.get_balance(&source);
+        assert!(
+            src_after < (100 * one_tnzo) - amount_native,
+            "source must pay gas"
+        );
+        assert!(
+            src_after >= (100 * one_tnzo) - amount_native - one_tnzo,
+            "gas should be modest"
+        );
 
         // Nonce bumped.
-        assert_eq!(state.get_nonce(&source.to_vec()), 1);
+        assert_eq!(state.get_nonce(&source), 1);
     }
 
     /// SPL Transfer must fail when authority != tx signer.
     #[tokio::test]
     async fn test_spl_native_transfer_authority_mismatch() {
-        use crate::traits::VmState;
         use crate::svm::spl_adapter::SPL_TOKEN_PROGRAM_ID;
+        use crate::traits::VmState;
 
         let executor = create_executor();
         let mut state = StateAdapter::new();
@@ -1627,7 +1171,7 @@ mod tests {
         let wrong_authority = [0x33u8; 32]; // not the signer
 
         let one_tnzo: u128 = 1_000_000_000_000_000_000;
-        state.set_balance(&source.to_vec(), 100 * one_tnzo);
+        state.set_balance(&source, 100 * one_tnzo);
 
         let amount_spl: u64 = 1_000_000_000;
         let mut data = Vec::new();
@@ -1657,6 +1201,42 @@ mod tests {
 
         assert!(!result.success, "authority mismatch should fail");
         // But nonce is still bumped (Solana semantics).
-        assert_eq!(state.get_nonce(&source.to_vec()), 1);
+        assert_eq!(state.get_nonce(&source), 1);
+    }
+
+    /// Without the `svm-full` feature, executing a stored SBF ELF at a call
+    /// target must surface [`VmError::SvmFullFeatureRequired`] — no
+    /// interpreter fallback and no silent success.
+    #[cfg(not(feature = "svm-full"))]
+    #[tokio::test]
+    async fn test_sbf_requires_svm_full_feature() {
+        let executor = create_executor();
+        let mut state = StateAdapter::new();
+
+        let caller = vec![1u8; 32];
+        let program_id = vec![2u8; 32];
+        // Minimal ELF magic — enough to route into the SBF path.
+        let program_code = b"\x7fELF".to_vec();
+
+        state.set_balance(&caller, 10_000_000_000_000_000_000u128);
+        state.set_code(&program_id, program_code);
+
+        let tx = VmTransaction::new(
+            caller,
+            Some(program_id),
+            0,
+            vec![1, 2, 3, 4],
+            100_000,
+            1_000_000_000,
+            0,
+            VmType::Svm,
+            1337,
+        );
+
+        let err = executor
+            .execute_transaction(&tx, &mut state)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VmError::SvmFullFeatureRequired));
     }
 }

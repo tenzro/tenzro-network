@@ -657,7 +657,7 @@ impl BridgeRouter {
         // Note: This is a workaround since adapters are Box<dyn> not Arc<dyn>
         // In production, we would refactor to use Arc<dyn BridgeAdapter>
         let adapters_read = self.adapters.read().await;
-        for (name, _adapter) in adapters_read.iter() {
+        for name in adapters_read.keys() {
             info!(
                 "Bridge monitor: Would register adapter '{}' (adapters need Arc wrapping for monitor)",
                 name

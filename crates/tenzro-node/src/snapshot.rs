@@ -1,17 +1,15 @@
-//! Cosmos-style snapshot ABCI for fast state-sync of fresh / wedged validators.
+//! Snapshot-chunk interface for fast state-sync of fresh / wedged validators.
 //!
 //! # Design
 //!
-//! Modeled on the CometBFT/Cosmos-SDK snapshot interface — the smallest
-//! 4-method surface that lets a fresh node skip block replay and start
-//! from a recent state root:
+//! A chunked snapshot interface — the smallest 4-method surface that lets a
+//! fresh node skip block replay and start from a recent state root:
 //!
 //!   * [`SnapshotStore::list_snapshots`] — enumerate locally available snapshots
 //!   * [`SnapshotStore::get_chunk`]     — serve one chunk to a fetching peer
 //!   * [`SnapshotStore::offer`]         — accept an inbound snapshot manifest
 //!   * [`SnapshotStore::apply_chunk`]   — write one inbound chunk; on the last
-//!                                         chunk verify the merkle root and
-//!                                         atomically commit to the live store
+//!     chunk verify the merkle root and atomically commit to the live store
 //!
 //! These are wired to JSON-RPC as `tenzro_listSnapshots`,
 //! `tenzro_getSnapshotChunk`, `tenzro_offerSnapshot`, `tenzro_applySnapshotChunk`.
@@ -64,7 +62,7 @@ use tenzro_storage::{
 };
 use tokio::sync::RwLock;
 
-/// Cap on raw KV bytes per chunk. 10 MiB matches CometBFT's default.
+/// Cap on raw KV bytes per chunk. 10 MiB is a conservative default.
 pub const CHUNK_MAX_BYTES: usize = 10 * 1024 * 1024;
 
 /// Default interval between state-sync snapshots, in finalized blocks.
@@ -272,7 +270,7 @@ impl SnapshotStore {
     /// True if a finalized `height` is a snapshot boundary for this node's
     /// configured cadence. Always `false` when the producer is disabled.
     pub fn should_produce_at(&self, height: u64) -> bool {
-        self.config.enabled && height > 0 && height % self.config.effective_interval() == 0
+        self.config.enabled && height > 0 && height.is_multiple_of(self.config.effective_interval())
     }
 
     /// Reclaim orphaned snapshot directories on startup. Producers and
@@ -311,7 +309,7 @@ impl SnapshotStore {
                 format: manifest.format,
             });
         }
-        summaries.sort_by(|a, b| b.height.cmp(&a.height));
+        summaries.sort_by_key(|s| std::cmp::Reverse(s.height));
         Ok(summaries)
     }
 
@@ -573,7 +571,7 @@ impl SnapshotStore {
     fn prune_keeping(&self, keep_complete: usize) -> Result<()> {
         // Pass 1: retention over complete snapshots.
         let mut complete = self.list_snapshots()?;
-        complete.sort_by(|a, b| b.height.cmp(&a.height));
+        complete.sort_by_key(|s| std::cmp::Reverse(s.height));
         let retain: std::collections::HashSet<u64> = complete
             .iter()
             .take(keep_complete)
@@ -797,7 +795,7 @@ pub async fn bootstrap_from_peer(
     // To keep the bootstrap path simple and robust, the four-method
     // surface is extended on the read side here: the peer is expected to
     // expose `tenzro_getSnapshotManifest { height }` returning the full
-    // manifest. This matches the CometBFT behaviour where the manifest
+    // manifest. This matches the standard behaviour where the manifest
     // is fetched alongside the chunk index.
     let manifest_req = serde_json::json!({
         "jsonrpc": "2.0",

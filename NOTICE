@@ -1,0 +1,74 @@
+Tenzro Network
+Copyright 2026 Tenzro
+
+This product is licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License. A copy of the
+License is included in the LICENSE file at the root of this repository.
+
+This product includes and builds upon open-source software. The components below
+retain their own copyright and license terms; those terms govern the respective
+components regardless of this NOTICE.
+
+--------------------------------------------------------------------------------
+Vendored components (in vendor/)
+--------------------------------------------------------------------------------
+
+llama-cpp-rs
+    Rust bindings over llama.cpp. Licensed under MIT OR Apache-2.0.
+    License files: vendor/llama-cpp-rs/LICENSE-MIT, vendor/llama-cpp-rs/LICENSE-APACHE.
+    The bundled llama.cpp sources under vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp
+    retain their upstream MIT license and copyright headers.
+
+glass_pumpkin
+    Cryptographic prime generation. License: vendor/glass_pumpkin/LICENSE.
+
+erc8004-solana
+    ERC-8004 reference on Solana. License: vendor/erc8004-solana/LICENSE.
+
+dkls23-core, dkls23-secp256k1
+    DKLS23 threshold ECDSA. Vendored under [patch.crates-io] for the bridge
+    threshold-signing path.
+
+erc8004-atom, erc8004-daml, erc8004-evm
+    ERC-8004 reference material across execution environments.
+
+--------------------------------------------------------------------------------
+Principal dependencies
+--------------------------------------------------------------------------------
+
+Networking and transport
+    libp2p, iroh, iroh-blobs, iroh-gossip, iroh-docs, rustls, aws-lc-rs, quinn
+
+Execution
+    revm (EVM)
+    solana-svm and the solana-* runtime crates (SVM)
+    ndarray, ort (ONNX Runtime), safetensors, tokenizers (inference runtimes)
+    llama-cpp-2 (language-model serving)
+
+Consensus and cryptography
+    ed25519-dalek, k256, p256, p384, curve25519-dalek, ecdsa, signature
+    blst (BLS12-381)
+    ml-kem, ml-dsa, slh-dsa (post-quantum, FIPS 203/204/205)
+    frost-ed25519, frost-secp256k1 (threshold signatures)
+    argon2, aes-gcm, x25519-dalek, sha2, sha3, ripemd, zeroize
+
+Zero-knowledge
+    p3-* (Plonky3) STARK stack over the KoalaBear field
+
+Storage and data
+    rocksdb, lancedb, tantivy, arrow, tokio-postgres, redis
+    reed-solomon-erasure, multihash, cid
+
+Serialization and protocol
+    serde, serde_json, bincode, prost, ciborium, rlp, quick-xml
+
+Runtime and utilities
+    tokio, futures, async-trait, dashmap, parking_lot, thiserror, anyhow,
+    tracing, reqwest, hyper, axum, tower, clap, uuid, chrono
+
+Agent and model-context protocols
+    rmcp (Model Context Protocol)
+
+A machine-readable list of every dependency and its resolved version is in
+Cargo.lock. Per-crate license terms are available through `cargo license` or
+`cargo about`.

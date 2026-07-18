@@ -312,7 +312,17 @@ mod tests {
         let p = provider().await;
         let scheme = RedundancyScheme::erasure(3, 2).unwrap();
         let data = b"storage provider object payload that spans several shards".to_vec();
-        let desc = p.store_object("obj-1", "deadbeef", &data, scheme).await.unwrap();
+        let desc = p
+            .store_object(
+                "obj-1",
+                "deadbeef",
+                &data,
+                scheme,
+                AccessPolicy::public("did:tenzro:human:test"),
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(desc.shard_count(), 5);
         assert_eq!(desc.size_bytes, data.len() as u64);
 
@@ -332,7 +342,16 @@ mod tests {
     async fn descriptor_is_recorded() {
         let p = provider().await;
         let scheme = RedundancyScheme::replicated(3).unwrap();
-        p.store_object("obj-2", "cafe", b"small", scheme).await.unwrap();
+        p.store_object(
+            "obj-2",
+            "cafe",
+            b"small",
+            scheme,
+            AccessPolicy::public("did:tenzro:human:test"),
+            None,
+        )
+        .await
+        .unwrap();
         let d = p.descriptor("obj-2").unwrap();
         assert_eq!(d.owner_hex, "cafe");
         assert_eq!(d.scheme.total_shards(), 3);

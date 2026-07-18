@@ -93,12 +93,15 @@ pub use precompiles::{
     PRECOMPILE_TNZO_BRIDGE, PRECOMPILE_TOKEN_FACTORY, PRECOMPILE_CROSS_VM_BRIDGE,
     PRECOMPILE_STAKING, PRECOMPILE_GOVERNANCE, PRECOMPILE_NFT_FACTORY,
 };
-pub use state_adapter::{StateAdapter, PersistentState, CacheStats};
+pub use state_adapter::{StateAdapter, PersistentState, CacheStats, PrefetchKeys};
 pub use evm::EvmExecutor;
 pub use svm::SvmExecutor;
 pub use daml::DamlExecutor;
 pub use native::NativeExecutor;
-pub use parallel::{BlockStmExecutor, BlockStmConfig, ParallelExecutionResult};
+pub use parallel::{
+    BaseState, BlockStmConfig, BlockStmExecutor, ParallelExecutionResult, ReadWriteSet,
+    ResolvedDeltas, TxExecutionStatus, ZeroBaseState,
+};
 pub use eip1559::{FeeMarket, Eip1559Config, EffectiveGasPrice, FeeMarketStats, FeeUrgency};
 pub use hot_state::{
     AccountSample, ContentionScore, HotStateMarket, local_multiplier_for_score,

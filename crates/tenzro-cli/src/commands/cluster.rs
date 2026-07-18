@@ -185,19 +185,19 @@ impl PreviewCmd {
             }
         }
 
-        if let Some(rejected) = value.get("rejected").and_then(|v| v.as_array()) {
-            if !rejected.is_empty() {
-                println!();
-                output::print_field("Not Eligible", &rejected.len().to_string());
-                for r in rejected {
-                    let address = r.get("address").and_then(|v| v.as_str()).unwrap_or("?");
-                    let reason = r
-                        .get("reason")
-                        .and_then(|v| v.get("kind"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    output::print_field(&format!("  {}", address), reason);
-                }
+        if let Some(rejected) = value.get("rejected").and_then(|v| v.as_array())
+            && !rejected.is_empty()
+        {
+            println!();
+            output::print_field("Not Eligible", &rejected.len().to_string());
+            for r in rejected {
+                let address = r.get("address").and_then(|v| v.as_str()).unwrap_or("?");
+                let reason = r
+                    .get("reason")
+                    .and_then(|v| v.get("kind"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                output::print_field(&format!("  {}", address), reason);
             }
         }
 

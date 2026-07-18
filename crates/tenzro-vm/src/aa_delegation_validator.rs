@@ -153,17 +153,17 @@ pub struct CallIntent {
     pub value: u128,
 }
 
-/// ERC-7579 `Execution::execute(address target, uint256 value, bytes data)`
-/// selector: `keccak256("execute(address,uint256,bytes)")[..4]`.
-///
-/// We don't hard-code one canonical selector here because ERC-7579's IExecutor
-/// surface is open-ended. Instead, the validator accepts any call_data shape
-/// via the [`CallIntentDecoder`] trait — the default is
-/// [`StandardExecuteDecoder`] which understands the canonical
-/// `execute(address,uint256,bytes)` ABI encoding.
-
 // -----------------------------------------------------------------------------
 // CallIntentDecoder — pluggable extractor
+//
+// ERC-7579 `Execution::execute(address target, uint256 value, bytes data)`
+// selector: `keccak256("execute(address,uint256,bytes)")[..4]`.
+//
+// We don't hard-code one canonical selector here because ERC-7579's IExecutor
+// surface is open-ended. Instead, the validator accepts any call_data shape
+// via the CallIntentDecoder trait — the default is StandardExecuteDecoder
+// which understands the canonical `execute(address,uint256,bytes)` ABI
+// encoding.
 // -----------------------------------------------------------------------------
 
 /// Pluggable strategy for extracting a [`CallIntent`] from a UserOp's
@@ -354,10 +354,10 @@ impl DelegationScopeValidator {
         }
 
         // 2. Per-tx ceiling.
-        if let Some(max_tx) = scope.max_per_tx {
-            if intent.value > max_tx {
-                return ValidationData::failure();
-            }
+        if let Some(max_tx) = scope.max_per_tx
+            && intent.value > max_tx
+        {
+            return ValidationData::failure();
         }
 
         // 3. Per-day ceiling (with rollover).

@@ -5282,54 +5282,81 @@ def revoke_session(session_id: str) -> dict:
     return _rpc("tenzro_revokeSession", {"session_id": session_id})
 
 
-# ── App / Paymaster ──────────────────────────────────────────────
+# ── App registry + settlement authorization ──────────────────────
 
 
-def register_app(name: str, master_wallet_address: str) -> dict:
-    """Register a new application with a master wallet."""
-    return _rpc("tenzro_registerApp", {
-        "name": name,
-        "master_wallet_address": master_wallet_address,
+def register_app(app_id: str, developer_did: str, app_wallet: str,
+                 signing_pubkeys: list, margin_bps: int, envelope: str,
+                 min_balance: str = None, active: bool = True) -> dict:
+    """Register a developer app in the on-chain app registry.
+
+    Permissionless: the developer signs a DID envelope with their own key; the
+    app wallet is the developer's own TNZO treasury (the network never holds
+    custody). ``signing_pubkeys`` is a list of {key_id, public_key (hex Ed25519),
+    daily_limit_tnzo (optional decimal string)}. ``envelope`` is the
+    developer-signed DID envelope (hex header value).
+    """
+    params = {
+        "app_id": app_id,
+        "developer_did": developer_did,
+        "app_wallet": app_wallet,
+        "signing_pubkeys": signing_pubkeys,
+        "margin_bps": margin_bps,
+        "active": active,
+        "envelope": envelope,
+    }
+    if min_balance is not None:
+        params["min_balance"] = min_balance
+    return _rpc("tenzro_registerApp", params)
+
+
+def set_app_status(app_id: str, active: bool, envelope: str) -> dict:
+    """Activate or deactivate a registered app (developer-signed DID envelope)."""
+    return _rpc("tenzro_setAppStatus", {
+        "app_id": app_id,
+        "active": active,
+        "envelope": envelope,
     })
 
 
-def create_user_wallet(app_id: str, label: str,
-                       initial_funding: float = None) -> dict:
-    """Create a user wallet under an application."""
-    params = {"app_id": app_id, "label": label}
-    if initial_funding is not None:
-        params["initial_funding"] = initial_funding
-    return _rpc("tenzro_createUserWallet", params)
+def get_app(app_id: str) -> dict:
+    """Look up a registered app by id."""
+    return _rpc("tenzro_getApp", {"app_id": app_id})
 
 
-def fund_user_wallet(master_address: str, user_address: str,
-                     amount: float) -> dict:
-    """Fund a user wallet from the app master wallet."""
-    return _rpc("tenzro_fundUserWallet", {
-        "master_address": master_address,
-        "user_address": user_address,
-        "amount": amount,
+def list_apps() -> dict:
+    """List all apps registered in the on-chain app registry."""
+    return _rpc("tenzro_listApps", {})
+
+
+def settle_authorized(app_id: str, chain_id: int, payer_did: str,
+                      amount_tnzo: str, external_ref: str, nonce: str,
+                      expiry: int, key_id: str, signature: str) -> dict:
+    """Execute a developer-signed settlement authorization.
+
+    Moves TNZO from the app wallet to the payer, minus the network commission.
+    Idempotent per (app_id, external_ref). ``signature`` (hex Ed25519 over the
+    authorization signing hash) must be from one of the app's registered keys.
+    """
+    return _rpc("tenzro_settleAuthorized", {
+        "app_id": app_id,
+        "chain_id": chain_id,
+        "payer_did": payer_did,
+        "amount_tnzo": amount_tnzo,
+        "external_ref": external_ref,
+        "nonce": nonce,
+        "expiry": expiry,
+        "key_id": key_id,
+        "signature": signature,
     })
 
 
-def list_user_wallets(app_id: str) -> dict:
-    """List all user wallets for an application."""
-    return _rpc("tenzro_listUserWallets", {"app_id": app_id})
-
-
-def sponsor_transaction(master_address: str, to: str,
-                        amount: float) -> dict:
-    """Sponsor a transaction using the paymaster wallet."""
-    return _rpc("tenzro_sponsorTransaction", {
-        "master_address": master_address,
-        "to": to,
-        "amount": amount,
+def get_settle_authorized_outcome(app_id: str, external_ref: str) -> dict:
+    """Fetch the recorded outcome for a settlement authorization."""
+    return _rpc("tenzro_getSettleAuthorizedOutcome", {
+        "app_id": app_id,
+        "external_ref": external_ref,
     })
-
-
-def get_usage_stats(app_id: str) -> dict:
-    """Get usage statistics for an application."""
-    return _rpc("tenzro_getUsageStats", {"app_id": app_id})
 
 
 # ── Contract ABI ─────────────────────────────────────────────────
@@ -7335,7 +7362,7 @@ def training_get_sealed_manifest(task_id: str) -> dict:
 def training_decide_round(task_id: str) -> dict:
     """Ask the syncer for its round decision on a training run.
 
-    The decision follows the DiLoCo grace window: `{decision: "wait",
+    The decision follows the grace window: `{decision: "wait",
     remaining_ms}` while the window is open, `{decision: "finalize", round}`
     once a witness quorum endorses the round, and `{decision: "no_quorum",
     round}` when the window elapses without a quorum (the run advances,
@@ -8924,20 +8951,25 @@ COMMANDS = {
         args[2].split(",") if len(args) > 2 else [],
     ),
     "revoke_session": lambda args: revoke_session(args[0]),
-    # ── App / Paymaster ──
-    "register_app": lambda args: register_app(args[0], args[1]),
-    "create_user_wallet": lambda args: create_user_wallet(
+    # ── App registry + settlement authorization ──
+    "register_app": lambda args: register_app(
+        args[0], args[1], args[2],
+        json.loads(args[3]), int(args[4]), args[5],
+        args[6] if len(args) > 6 else None,
+        (args[7].lower() != "false") if len(args) > 7 else True,
+    ),
+    "set_app_status": lambda args: set_app_status(
+        args[0], args[1].lower() != "false", args[2],
+    ),
+    "get_app": lambda args: get_app(args[0]),
+    "list_apps": lambda args: list_apps(),
+    "settle_authorized": lambda args: settle_authorized(
+        args[0], int(args[1]), args[2], args[3], args[4],
+        args[5], int(args[6]), args[7], args[8],
+    ),
+    "get_settle_authorized_outcome": lambda args: get_settle_authorized_outcome(
         args[0], args[1],
-        float(args[2]) if len(args) > 2 else None,
     ),
-    "fund_user_wallet": lambda args: fund_user_wallet(
-        args[0], args[1], float(args[2]),
-    ),
-    "list_user_wallets": lambda args: list_user_wallets(args[0]),
-    "sponsor_transaction": lambda args: sponsor_transaction(
-        args[0], args[1], float(args[2]),
-    ),
-    "get_usage_stats": lambda args: get_usage_stats(args[0]),
     # ── Contract ABI ──
     "encode_function": lambda args: encode_function(
         args[0],

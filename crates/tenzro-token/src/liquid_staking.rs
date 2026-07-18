@@ -490,6 +490,10 @@ impl LiquidStakingPool {
     ///
     /// Returns the rate as a fixed-point number with 18 decimals.
     /// A rate of `1_000_000_000_000_000_000` (10^18) means 1:1.
+    // The zero-supply branch returns the 1:1 sentinel; the else branch does
+    // overflow-decomposed mul-div (quotient + fractional remainder), so a
+    // plain checked_div would drop the fractional term.
+    #[allow(clippy::manual_checked_ops)]
     pub fn exchange_rate(&self) -> u128 {
         let supply = *self.total_sttnzo_supply.read();
         let underlying = *self.total_underlying_wei.read();
@@ -518,6 +522,9 @@ impl LiquidStakingPool {
     ///
     /// The amount of stTNZO minted is calculated from the current exchange rate:
     /// `sttnzo_amount = tnzo_amount * 10^18 / exchange_rate`
+    // The rate-zero branch mints 1:1; the else branch does overflow-decomposed
+    // mul-div, so a plain checked_div would drop the fractional remainder.
+    #[allow(clippy::manual_checked_ops)]
     pub fn deposit(&self, depositor: Address, tnzo_amount: u128) -> Result<u128> {
         let config = self.config.read();
 

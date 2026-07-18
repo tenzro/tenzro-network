@@ -1186,10 +1186,12 @@ mod tests {
         measurement: Vec<u8>,
         valid: bool,
     ) -> AttestationResult {
-        let mut result = AttestationResult::default();
-        result.vendor = vendor;
-        result.valid = valid;
-        result.tcb_version = "OK".to_string();
+        let mut result = AttestationResult {
+            vendor,
+            valid,
+            tcb_version: "OK".to_string(),
+            ..Default::default()
+        };
         result.measurements.push(Measurement {
             index: 0,
             algorithm: "SHA384".to_string(),

@@ -80,6 +80,7 @@ impl Default for NetworkConfig {
                 "tenzro/blocks".to_string(),
                 "tenzro/transactions".to_string(),
                 "tenzro/consensus".to_string(),
+                "tenzro/batches".to_string(),
             ],
             enable_dht: true,
             // SECURITY: mDNS leaks LAN presence — disabled by default for production;

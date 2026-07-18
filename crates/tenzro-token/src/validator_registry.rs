@@ -2,20 +2,20 @@
 //!
 //! This module is the on-chain source of truth for who is a validator. It is
 //! consulted at every epoch boundary by the consensus epoch manager to decide
-//! which validators are active in the next epoch. The registry implements a
-//! Modern 2026 hybrid pattern combining ideas from:
+//! which validators are active in the next epoch. The registry combines
+//! several established mechanisms:
 //!
 //! - **Ethereum Pectra (EIP-7251 / EIP-7002 / EIP-8061)** — typed transactions
 //!   for register/exit, weight-based churn caps with separate activation and
 //!   exit budgets per epoch.
-//! - **Sui** — explicit `Candidate` intermediate state where metadata is
-//!   published before the validator can be activated.
-//! - **Aptos** — five-state machine
+//! - An explicit `Candidate` intermediate state where metadata is published
+//!   before the validator can be activated.
+//! - A five-state machine
 //!   (`Candidate` → `PendingActive` → `Active` → `PendingExit` → `Exited`)
 //!   plus a separate `Jailed` quarantine state reachable from `Active`.
-//! - **Cosmos** — absolute-power `ValidatorUpdates` returned at epoch
-//!   boundaries with a fixed effective-date delay so HotStuff-2 high-QC chains
-//!   stay safe across reconfigurations.
+//! - Absolute-power validator-set updates applied at epoch boundaries with a
+//!   fixed effective-date delay so HotStuff-2 high-QC chains stay safe across
+//!   reconfigurations.
 //!
 //! The TEE multiplier is **not** stored in the registry. It is applied only at
 //! `select_active_set_for_next_epoch()` boundaries — operators can lose TEE
@@ -161,6 +161,9 @@ impl ValidatorTier {
     }
 }
 
+// Not derivable: the natural derive would default to the first variant
+// (`ResourceOnly`), but persisted rows must default to `Staked`.
+#[allow(clippy::derivable_impls)]
 impl Default for ValidatorTier {
     fn default() -> Self {
         // Old persisted rows without a tier field default to Staked —

@@ -1,6 +1,6 @@
 """Tenzro Train reference trainer (Python).
 
-Inner training loops for Decoupled DiLoCo over PyTorch FSDP2 +
+Inner training loops with decoupled outer aggregation over PyTorch FSDP2 +
 Hivemind + safetensors. Coordinates with the Rust syncer in
 ``crates/tenzro-training`` over JSON-RPC.
 

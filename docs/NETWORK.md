@@ -51,13 +51,14 @@ The data plane lets agents on a public network connect peer-to-peer without an H
 
 ## 2. Gossipsub topics
 
-The control plane carries thirteen topics built on top of `gossipsub` with a hardened configuration (Strict validation mode, 1 MiB max message size, mesh degree D=8, peer scoring enabled).
+The control plane carries fourteen topics built on top of `gossipsub` with a hardened configuration (Strict validation mode, 1 MiB max message size, mesh degree D=8, peer scoring enabled).
 
 | Topic | Producer | Consumer | Validator-only |
 |---|---|---|---|
 | `tenzro/blocks` | leader / proposer | every node | yes |
 | `tenzro/transactions` | wallets / agents | every node | no |
 | `tenzro/consensus` | every validator | every validator | yes |
+| `tenzro/batches` | any validator (batch producer) | every validator | yes |
 | `tenzro/attestations` | TEE providers, light clients | every node | no |
 | `tenzro/models` | model providers | every node | no |
 | `tenzro/inference` | inference clients | model providers | no |
@@ -69,7 +70,9 @@ The control plane carries thirteen topics built on top of `gossipsub` with a har
 | `tenzro/training/syncer` | witness committee | training participants | no |
 | `/tenzro/mpc/session/<instance_id>` | DKLS23 round participants | session participants | no |
 
-Validator-only topics enforce origin on the receive side: `ValidatorRegistry::is_validator(peer_id)` is consulted before a `tenzro/blocks` or `tenzro/consensus` message is admitted. Non-validators that publish on these topics get their messages dropped.
+Validator-only topics enforce origin on the receive side: `ValidatorRegistry::is_validator(peer_id)` is consulted before a `tenzro/blocks`, `tenzro/consensus`, or `tenzro/batches` message is admitted. Non-validators that publish on these topics get their messages dropped.
+
+The `tenzro/batches` topic carries the availability-dissemination plane that decouples transaction data from ordering. A batch producer broadcasts a batch body; validators that store it return a signed availability acknowledgment; the producer aggregates 2f+1 stake-weight of acknowledgments into a BLS availability certificate. The ordering path then references certified batches by hash instead of carrying full transaction bodies, so leader bandwidth on the ordering path scales with the number of certificates rather than block size. Three message shapes travel on the topic — batch bodies, availability acknowledgments/certificates, and body requests (for a peer that holds a certificate but not the body). Above a validator-count activation threshold, batch bodies are erasure-coded so no single node fans the full body out to every peer.
 
 Model and provider announcements are authenticated independently of the validator gate. Messages on `tenzro/models` and `tenzro/providers` carry the announcing node's Ed25519 public key and a signature over a canonical preimage of their routable fields. Each message is verified on ingest against the embedded key; unsigned or tampered announcements are dropped before they reach the discovery index. Model announcements additionally advertise `weights_sha256`, a streaming SHA-256 of the served on-disk weights, so consumers can detect weight substitution before routing inference to a provider.
 
@@ -120,7 +123,7 @@ The same authorization gate covers the consensus-direct request/response protoco
 
 Some message flows are too sensitive to gossipsub's lossy fanout. Tenzro carries them through libp2p request/response with explicit per-protocol concurrency limits.
 
-- **`/tenzro/block-sync/1.0.0`** — a lagging node requests a contiguous range of blocks from a chosen peer. The provider streams the response in framed chunks. Modeled on Sui's `state_sync` and Aptos's `storage-service`. The wire types live in `block_sync_proto.rs`.
+- **`/tenzro/block-sync/1.0.0`** — a lagging node requests a contiguous range of blocks from a chosen peer. The provider streams the response in framed chunks. A standard state-sync / storage-service protocol. The wire types live in `block_sync_proto.rs`.
 - **`/tenzro/consensus-direct/1.0.0`** — validators exchange HotStuff-2 vote messages and quorum certificates directly without going through gossipsub. Bounded latency, validator-only.
 - **`/tenzro/mpc/req-resp/1.0.0`** — DKLS23 round messages between MPC committee members. Pairs with the `/tenzro/mpc/session/<instance_id>` gossipsub topic for broadcast rounds.
 - **`/tenzro/cluster-tunnel/1.0.0`** — the authenticated transport for intra-cluster pipeline traffic. A LAN cluster head opens one tunnel session per member; framed payloads carry the ggml RPC byte stream between the head's loopback bridge and the member's loopback `rpc-server` (see AI.md §3.5). The member never binds its `rpc-server` on a network interface — the tunnel is the only way in, so the unauthenticated RPC protocol is wrapped in libp2p's authenticated transport. Sessions are demultiplexed by a session id carried on each frame; one request-response pair is full-duplex with return bytes piggybacked on the acknowledgement.

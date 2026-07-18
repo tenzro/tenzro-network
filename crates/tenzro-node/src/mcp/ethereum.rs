@@ -916,7 +916,7 @@ impl EthereumMcpServer {
         // ENS names are ASCII-safe so no percent-encoding needed
         let api_url = format!(
             "https://ens.api.onchainkit.com/api/resolve?name={}",
-            &name
+            name
         );
 
         if let Ok(resp) = self.http.get(&api_url).send().await
@@ -985,7 +985,7 @@ impl EthereumMcpServer {
         // Fallback: OnchainKit ENS reverse API
         let api_url = format!(
             "https://ens.api.onchainkit.com/api/reverse?address={}",
-            &address
+            address
         );
 
         if let Ok(resp) = self.http.get(&api_url).send().await

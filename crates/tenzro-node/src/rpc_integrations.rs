@@ -552,7 +552,7 @@ pub(crate) async fn handle_x402_verify_offer(
         .ok_or_else(|| invalid_params("requirement required"))?;
     let requirement: tenzro_payments::x402::X402PaymentRequirement =
         serde_json::from_value(req_value.clone())
-            .map_err(|e| invalid_params(&format!("requirement decode: {e}")))?;
+            .map_err(|e| invalid_params(format!("requirement decode: {e}")))?;
 
     let offer = tenzro_payments::x402::SignedOffer::extract_from(&requirement)
         .ok_or_else(|| invalid_params("requirement carries no signed offer"))?;
@@ -594,11 +594,11 @@ pub(crate) async fn handle_x402_payment_id(
         if let Some(req_value) = p.get("requirement").filter(|v| !v.is_null()) {
             let requirement: tenzro_payments::x402::X402PaymentRequirement =
                 serde_json::from_value(req_value.clone())
-                    .map_err(|e| invalid_params(&format!("requirement decode: {e}")))?;
+                    .map_err(|e| invalid_params(format!("requirement decode: {e}")))?;
             tenzro_payments::x402::compute_offer_commitment(&requirement)
         } else if let Some(hex_str) = p.get("offerCommitment").and_then(Value::as_str) {
             let bytes = hex::decode(hex_str)
-                .map_err(|e| invalid_params(&format!("offerCommitment hex: {e}")))?;
+                .map_err(|e| invalid_params(format!("offerCommitment hex: {e}")))?;
             bytes
                 .try_into()
                 .map_err(|_| invalid_params("offerCommitment must be 32 bytes"))?
@@ -2727,7 +2727,7 @@ fn ccip_encode_evm2any(
     fn enc_bytes(b: &[u8]) -> Vec<u8> {
         let mut out = pad32_left(&(b.len() as u64).to_be_bytes());
         let mut padded = b.to_vec();
-        while padded.len() % 32 != 0 {
+        while !padded.len().is_multiple_of(32) {
             padded.push(0);
         }
         out.extend_from_slice(&padded);
@@ -5641,41 +5641,41 @@ pub(crate) async fn handle_quote_bridge_fee_in_tnzo(
     })?;
 
     // Consult the router's wired oracle if available.
-    if let Some(router) = node.bridge_router() {
-        if let Some(surface) = router.fee_surface() {
-            match surface
-                .oracle
-                .quote(adapter, &req.dest_chain, native_fee)
-                .await
-            {
-                Ok(q) => {
-                    return Ok(json!({
-                        "quote_id_hex": q.quote_id_hex,
-                        "adapter": q.adapter.as_str(),
-                        "dest_chain": q.dest_chain,
-                        "native_fee_smallest_unit": q.native_fee_smallest_unit.to_string(),
-                        "tnzo_amount_wei": q.tnzo_amount_wei.to_string(),
-                        "rate_q18_hex": q.rate_q18_hex,
-                        "issued_at_ms": q.issued_at_ms,
-                        "valid_until_ms": q.valid_until_ms,
-                        "oracle_backing": format!("{:?}", q.oracle_backing).to_lowercase(),
-                    }));
-                }
-                Err(e) => {
-                    // No row configured — surface the scaffold response
-                    // with the upstream error for diagnostics.
-                    return Ok(json!({
-                        "adapter": adapter.as_str(),
-                        "dest_chain": req.dest_chain,
-                        "native_fee_smallest_unit": native_fee.to_string(),
-                        "tnzo_amount_wei": "0",
-                        "oracle_backing": "fallback",
-                        "note": format!(
-                            "no governance-set TNZO rate configured for this pair: {}",
-                            e
-                        ),
-                    }));
-                }
+    if let Some(router) = node.bridge_router()
+        && let Some(surface) = router.fee_surface()
+    {
+        match surface
+            .oracle
+            .quote(adapter, &req.dest_chain, native_fee)
+            .await
+        {
+            Ok(q) => {
+                return Ok(json!({
+                    "quote_id_hex": q.quote_id_hex,
+                    "adapter": q.adapter.as_str(),
+                    "dest_chain": q.dest_chain,
+                    "native_fee_smallest_unit": q.native_fee_smallest_unit.to_string(),
+                    "tnzo_amount_wei": q.tnzo_amount_wei.to_string(),
+                    "rate_q18_hex": q.rate_q18_hex,
+                    "issued_at_ms": q.issued_at_ms,
+                    "valid_until_ms": q.valid_until_ms,
+                    "oracle_backing": format!("{:?}", q.oracle_backing).to_lowercase(),
+                }));
+            }
+            Err(e) => {
+                // No row configured — surface the scaffold response
+                // with the upstream error for diagnostics.
+                return Ok(json!({
+                    "adapter": adapter.as_str(),
+                    "dest_chain": req.dest_chain,
+                    "native_fee_smallest_unit": native_fee.to_string(),
+                    "tnzo_amount_wei": "0",
+                    "oracle_backing": "fallback",
+                    "note": format!(
+                        "no governance-set TNZO rate configured for this pair: {}",
+                        e
+                    ),
+                }));
             }
         }
     }
@@ -5709,25 +5709,25 @@ pub(crate) async fn handle_list_bridge_sponsorship_pools(
     use tenzro_bridge::fee_sponsor::SponsorshipPool;
 
     // Live path: walk the router's wired sponsor for real balances.
-    if let Some(router) = node.bridge_router() {
-        if router.fee_surface().is_some() {
-            let live = router.list_sponsorship_pools().await;
-            let mut pools = Vec::with_capacity(live.len());
-            for p in live {
-                pools.push(json!({
-                    "adapter": p.adapter.as_str(),
-                    "vault_address_hex": format!("0x{}", hex::encode(p.vault_address)),
-                    "tnzo_balance_wei": p.tnzo_balance_wei.to_string(),
-                    "native_outstanding_smallest_unit": p.native_outstanding_smallest_unit.to_string(),
-                    "refill_threshold_bps": p.refill_threshold_bps,
-                }));
-            }
-            return Ok(json!({
-                "pools": pools,
-                "total": pools.len(),
-                "wire_path": "router.list_sponsorship_pools",
+    if let Some(router) = node.bridge_router()
+        && router.fee_surface().is_some()
+    {
+        let live = router.list_sponsorship_pools().await;
+        let mut pools = Vec::with_capacity(live.len());
+        for p in live {
+            pools.push(json!({
+                "adapter": p.adapter.as_str(),
+                "vault_address_hex": format!("0x{}", hex::encode(p.vault_address)),
+                "tnzo_balance_wei": p.tnzo_balance_wei.to_string(),
+                "native_outstanding_smallest_unit": p.native_outstanding_smallest_unit.to_string(),
+                "refill_threshold_bps": p.refill_threshold_bps,
             }));
         }
+        return Ok(json!({
+            "pools": pools,
+            "total": pools.len(),
+            "wire_path": "router.list_sponsorship_pools",
+        }));
     }
 
     // Scaffold path: deterministic vault addresses only.

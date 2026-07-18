@@ -763,11 +763,11 @@ fn print_database(db: Option<&serde_json::Value>) {
         };
         output::print_field("  Pricing", &label);
     }
-    if let Some(conf) = db.get("confidential") {
-        if !conf.is_null() {
-            let alg = conf.get("wrap_alg").and_then(|v| v.as_str()).unwrap_or("?");
-            output::print_field("  Confidential", &format!("sealed · {}", alg));
-        }
+    if let Some(conf) = db.get("confidential")
+        && !conf.is_null()
+    {
+        let alg = conf.get("wrap_alg").and_then(|v| v.as_str()).unwrap_or("?");
+        output::print_field("  Confidential", &format!("sealed · {}", alg));
     }
 }
 

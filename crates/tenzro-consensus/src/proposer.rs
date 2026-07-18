@@ -59,6 +59,67 @@ impl BlockProposer {
             tracing::debug!("No transactions available for block proposal");
         }
 
+        self.assemble_block(
+            height,
+            view,
+            prev_hash,
+            proposer,
+            state_root,
+            parent_base_fee,
+            parent_gas_used,
+            parent_gas_limit,
+            transactions,
+        )
+    }
+
+    /// Assemble a block from a pre-selected, already-ordered transaction set.
+    ///
+    /// This is the block-body-independent assembly core shared by the mempool
+    /// path ([`Self::propose_block`]) and the batch-certificate path
+    /// ([`Self::propose_block_from_transactions`]). The transactions are taken
+    /// verbatim in the order supplied — the caller owns ordering. Header,
+    /// tx-root, EIP-1559 base fee, and metadata are derived identically
+    /// regardless of where the transactions came from, so a block built from a
+    /// certified batch prefix is byte-compatible with one built from the
+    /// mempool and validates through the same path.
+    pub fn propose_block_from_transactions(
+        &self,
+        height: BlockHeight,
+        view: u64,
+        prev_hash: Hash,
+        proposer: Address,
+        state_root: Hash,
+        parent_base_fee: Option<u128>,
+        parent_gas_used: u64,
+        parent_gas_limit: u64,
+        transactions: Vec<SignedTransaction>,
+    ) -> Result<Block> {
+        self.assemble_block(
+            height,
+            view,
+            prev_hash,
+            proposer,
+            state_root,
+            parent_base_fee,
+            parent_gas_used,
+            parent_gas_limit,
+            transactions,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_block(
+        &self,
+        height: BlockHeight,
+        view: u64,
+        prev_hash: Hash,
+        proposer: Address,
+        state_root: Hash,
+        parent_base_fee: Option<u128>,
+        parent_gas_used: u64,
+        parent_gas_limit: u64,
+        transactions: Vec<SignedTransaction>,
+    ) -> Result<Block> {
         // Calculate transaction root (Merkle root)
         let tx_root = self.calculate_tx_root(&transactions);
 

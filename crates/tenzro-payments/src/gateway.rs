@@ -26,9 +26,15 @@ pub trait SettlementCallback: Send + Sync {
     /// # Arguments
     /// * `payer` - Payer address bytes (up to 32 bytes)
     /// * `payee` - Payee address bytes (up to 32 bytes)
-    /// * `amount` - Amount in smallest token unit
+    /// * `amount` - Amount in smallest token unit. When `margin_bps > 0`,
+    ///   this is the margin-inclusive total the payer authorized.
     /// * `asset` - Asset identifier (e.g. "TNZO", "USDC")
     /// * `receipt_id` - The payment receipt ID for correlation
+    /// * `app_wallet` - Registered app's wallet receiving the developer-margin
+    ///   carve, snapshot at challenge creation. `None` disables the carve.
+    /// * `margin_bps` - Developer margin, in basis points, already included in
+    ///   `amount`; the on-chain settlement carves
+    ///   `amount * margin_bps / (10_000 + margin_bps)` to `app_wallet`.
     ///
     /// # Returns
     /// A settlement reference string (e.g. transaction hash) on success.
@@ -39,6 +45,8 @@ pub trait SettlementCallback: Send + Sync {
         amount: u128,
         asset: &str,
         receipt_id: &str,
+        app_wallet: Option<&[u8]>,
+        margin_bps: u32,
     ) -> std::result::Result<String, PaymentError>;
 }
 
@@ -293,6 +301,42 @@ impl PaymentGateway for TenzroPaymentGateway {
                 (receipt.amount, receipt.asset.clone())
             };
 
+            // Developer-margin attribution snapshot from challenge creation:
+            // `handle_create_payment_challenge` resolved the app registry and
+            // stamped the wallet + margin into `challenge.extra`, so the
+            // settlement path never consults the registry.
+            let app_wallet_bytes: Option<Vec<u8>> = challenge
+                .extra
+                .get("app_wallet")
+                .and_then(|v| v.as_str())
+                .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok());
+            let margin_bps: u32 = challenge
+                .extra
+                .get("margin_bps")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            if margin_bps > 0 {
+                let developer_margin = settle_amount
+                    .saturating_mul(margin_bps as u128)
+                    / (10_000u128 + margin_bps as u128);
+                receipt.extra.insert(
+                    "margin_bps".to_string(),
+                    serde_json::json!(margin_bps),
+                );
+                receipt.extra.insert(
+                    "developer_margin".to_string(),
+                    serde_json::Value::String(developer_margin.to_string()),
+                );
+                if let Some(app_id) = challenge.extra.get("app_id") {
+                    receipt.extra.insert("app_id".to_string(), app_id.clone());
+                }
+                if let Some(app_wallet) = challenge.extra.get("app_wallet") {
+                    receipt
+                        .extra
+                        .insert("app_wallet".to_string(), app_wallet.clone());
+                }
+            }
+
             match callback
                 .settle_on_chain(
                     &payer_bytes,
@@ -300,6 +344,8 @@ impl PaymentGateway for TenzroPaymentGateway {
                     settle_amount,
                     &settle_asset,
                     &receipt.receipt_id,
+                    app_wallet_bytes.as_deref(),
+                    margin_bps,
                 )
                 .await
             {
@@ -476,6 +522,8 @@ mod tests {
             amount: u128,
             asset: &str,
             _receipt_id: &str,
+            _app_wallet: Option<&[u8]>,
+            _margin_bps: u32,
         ) -> std::result::Result<String, PaymentError> {
             *self.seen.lock().unwrap() = Some((amount, asset.to_string()));
             Ok("0xsettled".to_string())

@@ -18,7 +18,7 @@ use tenzro_crypto::PublicKey;
 pub const BLS_G1_COMPRESSED_LEN: usize = 48;
 
 /// Maximum normalized voting weight any single validator may hold, in basis
-/// points of the active set's total weight (Sui anti-domination cap). Excess
+/// points of the active set's total weight (anti-domination cap). Excess
 /// above this cap is redistributed proportionally across the uncapped
 /// validators. 1,000 bps = 10%.
 pub const MAX_VALIDATOR_WEIGHT_BPS: u32 = 1_000;
@@ -382,7 +382,7 @@ impl ValidatorSet {
     /// Voting power equals each *active* validator's bonded stake, capped at
     /// [`MAX_VALIDATOR_WEIGHT_BPS`] of the (uncapped) total with the excess
     /// redistributed proportionally across the uncapped validators. This is
-    /// the Sui anti-domination model expressed in integer math so formation
+    /// an anti-domination model expressed in integer math so formation
     /// and verification agree byte-for-byte. A node with zero stake (or one
     /// that is inactive) contributes zero — unstaked service nodes cannot move
     /// a quorum.
@@ -483,10 +483,10 @@ impl ValidatorSet {
             if !seen.insert(addr) {
                 continue;
             }
-            if let Some(idx) = self.index_of(addr) {
-                if let Some(w) = weights.get(idx) {
-                    sum = sum.saturating_add(*w);
-                }
+            if let Some(idx) = self.index_of(addr)
+                && let Some(w) = weights.get(idx)
+            {
+                sum = sum.saturating_add(*w);
             }
         }
         sum
@@ -740,12 +740,11 @@ impl EquivocationDetector {
             storage.scan_prefix(tenzro_storage::CF_AUDIT, b"equivocation/votes/")
         {
             for (key, value) in entries {
-                if let Some(vk) = Self::parse_vote_key(&key) {
-                    if let Ok(payload) =
+                if let Some(vk) = Self::parse_vote_key(&key)
+                    && let Ok(payload) =
                         serde_json::from_slice::<(Hash, crate::voter::VoteType)>(&value)
-                    {
-                        self.votes.insert(vk, payload);
-                    }
+                {
+                    self.votes.insert(vk, payload);
                 }
             }
         }
@@ -755,12 +754,9 @@ impl EquivocationDetector {
             for (key, value) in entries {
                 if let Some((addr, view)) =
                     Self::parse_addr_view_key(b"equivocation/evidence/", &key)
+                    && let Ok(ev) = serde_json::from_slice::<EquivocationEvidence>(&value)
                 {
-                    if let Ok(ev) =
-                        serde_json::from_slice::<EquivocationEvidence>(&value)
-                    {
-                        self.evidence.insert((addr, view), ev);
-                    }
+                    self.evidence.insert((addr, view), ev);
                 }
             }
         }
@@ -770,11 +766,10 @@ impl EquivocationDetector {
             for (key, value) in entries {
                 if let Some((validator, view)) =
                     Self::parse_addr_view_key(b"equivocation/proposals/", &key)
+                    && let Ok(record) = serde_json::from_slice::<ProposalRecord>(&value)
                 {
-                    if let Ok(record) = serde_json::from_slice::<ProposalRecord>(&value) {
-                        self.proposals
-                            .insert(ValidatorViewKey { validator, view }, record);
-                    }
+                    self.proposals
+                        .insert(ValidatorViewKey { validator, view }, record);
                 }
             }
         }
@@ -784,12 +779,10 @@ impl EquivocationDetector {
             for (key, value) in entries {
                 if let Some((addr, view)) =
                     Self::parse_addr_view_key(b"equivocation/proposal_evidence/", &key)
-                {
-                    if let Ok(ev) =
+                    && let Ok(ev) =
                         serde_json::from_slice::<ProposalEquivocationEvidence>(&value)
-                    {
-                        self.proposal_evidence.insert((addr, view), ev);
-                    }
+                {
+                    self.proposal_evidence.insert((addr, view), ev);
                 }
             }
         }
@@ -833,50 +826,50 @@ impl EquivocationDetector {
         vk: &ValidatorViewKey,
         payload: &(Hash, crate::voter::VoteType),
     ) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(payload) {
-                let _ = storage.put(
-                    tenzro_storage::CF_AUDIT,
-                    &Self::vote_key(&vk.validator, vk.view),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(payload)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_AUDIT,
+                &Self::vote_key(&vk.validator, vk.view),
+                &bytes,
+            );
         }
     }
 
     fn persist_evidence(&self, ev: &EquivocationEvidence) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(ev) {
-                let _ = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
-                    cf: tenzro_storage::CF_AUDIT.to_string(),
-                    key: Self::evidence_key(&ev.validator, ev.view),
-                    value: bytes,
-                }]);
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(ev)
+        {
+            let _ = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+                cf: tenzro_storage::CF_AUDIT.to_string(),
+                key: Self::evidence_key(&ev.validator, ev.view),
+                value: bytes,
+            }]);
         }
     }
 
     fn persist_proposal(&self, key: &ValidatorViewKey, record: &ProposalRecord) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(record) {
-                let _ = storage.put(
-                    tenzro_storage::CF_AUDIT,
-                    &Self::proposal_key(&key.validator, key.view),
-                    &bytes,
-                );
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(record)
+        {
+            let _ = storage.put(
+                tenzro_storage::CF_AUDIT,
+                &Self::proposal_key(&key.validator, key.view),
+                &bytes,
+            );
         }
     }
 
     fn persist_proposal_evidence(&self, ev: &ProposalEquivocationEvidence) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(ev) {
-                let _ = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
-                    cf: tenzro_storage::CF_AUDIT.to_string(),
-                    key: Self::proposal_evidence_key(&ev.proposer, ev.view),
-                    value: bytes,
-                }]);
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(ev)
+        {
+            let _ = storage.write_batch_sync(vec![tenzro_storage::WriteOp::Put {
+                cf: tenzro_storage::CF_AUDIT.to_string(),
+                key: Self::proposal_evidence_key(&ev.proposer, ev.view),
+                value: bytes,
+            }]);
         }
     }
 
@@ -1162,7 +1155,7 @@ impl Default for EquivocationDetector {
 /// - [`RoundRobinProposer`] — naïve `view % N` rotation. Useful for tests and
 ///   for validator sets so small that reputation history is not yet
 ///   meaningful. **Not recommended for production.**
-/// - [`ReputationProposer`] — Aptos LeaderReputation. Stake-weighted draw
+/// - [`ReputationProposer`] — reputation-weighted proposer election. Stake-weighted draw
 ///   whose per-validator weight is multiplied by an observed-behaviour term
 ///   (active / inactive / failed). A flaky validator's effective weight
 ///   collapses to ~0.1% of a healthy peer's within ~20 rounds, which is what
@@ -1216,7 +1209,7 @@ impl ProposerElection for RoundRobinProposer {
     }
 }
 
-/// Aptos LeaderReputation proposer.
+/// Reputation-weighted proposer election.
 ///
 /// Wraps a shared [`LeaderReputation`] state and dispatches to its seeded
 /// weighted draw. The wrapped state is the same one the engine feeds with

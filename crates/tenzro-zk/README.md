@@ -11,7 +11,7 @@ The Plonky3 git revision is pinned at `32079474b1d31d9221656ae774afb322d2597db0`
 ## Modules
 
 - `plonky3` — Plonky3 STARK prover/verifier wrappers (`Plonky3Prover`, `Plonky3Verifier`, `TenzroStarkConfig`, `build_testnet_config`), `verify_proof_envelope` dispatcher
-- `circuits` — Three concrete AIRs (`InferenceAir`, `SettlementAir`, `IdentityAir`) with trace generators and public-input encoders
+- `circuits` — Four concrete AIRs (`InferenceAir`, `SettlementAir`, `IdentityAir`, `PqQcAggregationAir`) with trace generators and public-input encoders
 - `proof` — `Proof` envelope, `ProofType` (`Plonky3` only), `ProofMetadata`, `TeeZkProof`
 - `tee_integration` — Hybrid ZK-in-TEE execution combining STARK proofs with hardware attestation
 - `error` — `ZkError`, `VerifyEnvelopeError` (`WrongProofType`, `UnknownCircuit`, `EnvelopeDecode`, `VerifierRejected`)
@@ -20,10 +20,11 @@ The Plonky3 git revision is pinned at `32079474b1d31d9221656ae774afb322d2597db0`
 ## Key Features
 
 - **Plonky3 STARKs** over the KoalaBear field — no trusted setup, post-quantum sound
-- **Three pre-built AIRs**, addressed by `circuit_id`:
+- **Four pre-built AIRs**, addressed by `circuit_id`:
   - `"inference"` — Verify AI model inference results (model hash, input hash, output hash)
   - `"settlement"` — Verify payment settlements (service hash, settlement hash, amount)
   - `"identity"` — Verify identity claims (public-key hash, capability commitment)
+  - `"pq-qc"` — Prove aggregation of the ML-DSA-65 signatures in a quorum certificate over a shared vote message (signer count recovered from the public values)
 - **Poseidon2 hashing** — canonical Plonky3 algebraic hash, far more efficient inside STARK constraints than SHA-256/Keccak
 - **Generic dispatcher** — `verify_proof_envelope(&Proof)` matches on `circuit_id` and routes to the right AIR verifier
 - **Wire format** — public inputs are 4-byte little-endian KoalaBear field-element chunks; the verifier reassembles them before checking AIR boundary constraints
@@ -101,7 +102,7 @@ let commitment = compute_zk_commitment(
 ## Test Coverage
 
 40 unit tests + 5 doc tests covering:
-- Plonky3 STARK proof generation and verification across all three AIRs
+- Plonky3 STARK proof generation and verification across all four AIRs
 - `verify_proof_envelope` dispatch (correct circuit, unknown circuit, malformed bytes)
 - Public-input KoalaBear field-chunk encode/decode round-trip
 - `compute_zk_commitment` determinism + length-prefix robustness
@@ -110,7 +111,7 @@ let commitment = compute_zk_commitment(
 ## Production Status
 
 Components:
-- Plonky3 STARK proving + verification across the three AIRs
+- Plonky3 STARK proving + verification across the four AIRs
 - Commitment-attestation registry wired into the EVM `ZK_VERIFY` precompile
 - TEE-in-ZK hybrid execution
 

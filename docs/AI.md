@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Tenzro AI is the protocol surface that makes intelligence a network resource — discovered, compensated, attested, and settled in TNZO. The same network providers serve dense single-replica inference, sharded Mixture-of-Experts serving for frontier-scale models, speculative decoding via Multi-Token Prediction, multi-modal inference across seven ONNX runtimes plus the llama.cpp language path, TEE-confidential inference, recurrent-depth reasoning (Cortex), and Decoupled-DiLoCo decentralized training.
+Tenzro AI is the protocol surface that makes intelligence a network resource — discovered, compensated, attested, and settled in TNZO. The same network providers serve dense single-replica inference, sharded Mixture-of-Experts serving for frontier-scale models, speculative decoding via Multi-Token Prediction, multi-modal inference across seven ONNX runtimes plus the llama.cpp language path, TEE-confidential inference, recurrent-depth reasoning (Cortex), and decoupled-outer-aggregation decentralized training.
 
 None of these are silos. Compute providers serving an MoE expert shard are the same providers that serve a dense Qwen 3.5 27B chat completion. The TDIP identity that pays a per-token bill on inference is the same identity that sponsors a training run. The reputation a provider earns serving inference is the reputation that admits them to a training witness committee. The protocol layer underwrites all of it with one consensus, one settlement asset, and one identity model.
 
@@ -17,7 +17,7 @@ This document describes the inference surface, the MoE serving primitives, MTP w
 The following paths have been exercised end to end against live network nodes, using the network's own registry and node machinery — no external orchestration:
 
 - **Decentralized MoE serving.** Registry-native expert extraction turns a catalog MoE entry into per-expert and gate blobs addressed by `tenzro://blob/` URI. Independent nodes each load a subset of those experts into their own memory, so the full model is assembled across distributed memory that no single node holds. A router node runs the gating step and dispatches per-token expert batches to the holders — local when the expert is resident, over the holder's iroh QUIC endpoint otherwise — and combines the returned hidden states into a single forward pass. Cross-node expert loads, the distributed forward pass, and finite outputs were all confirmed.
-- **Decentralized MoE-aware training.** The reference trainer auto-detects the MoE backbone (expert and router parameter groups, auxiliary load-balancing loss) and attaches an ADF-LoRA alternating adapter under the `LoraAlternating` aggregation rule, which freezes one adapter factor per round. Independent trainers run their inner loops, sign gradient fragments, and submit them to the syncer; the syncer reaches cross-node quorum, aggregates per coordinate, produces the aggregated state root, records it on-chain via the round-finalize path, and advances the run to the next round. A genuine multi-trainer quorum finalize was confirmed.
+- **Decentralized MoE-aware training.** The reference trainer auto-detects the MoE backbone (expert and router parameter groups, auxiliary load-balancing loss) and attaches an alternating low-rank (LoRA) adapter under the `LoraAlternating` aggregation rule, which freezes one adapter factor per round. Independent trainers run their inner loops, sign gradient fragments, and submit them to the syncer; the syncer reaches cross-node quorum, aggregates per coordinate, produces the aggregated state root, records it on-chain via the round-finalize path, and advances the run to the next round. A genuine multi-trainer quorum finalize was confirmed.
 - **Confidential-tier attestation on real hardware.** The TEE attestation path was exercised on genuine confidential-compute hardware — both an Intel TDX node and an AMD SEV-SNP node — reading real hardware evidence rather than a simulated device. This is the trust primitive the Verified and Confidential training tiers and confidential inference bind to.
 - **Supporting surface.** The provider registry, `tenzro://blob/` addressing, cross-node blob fetch over iroh, gradient-fragment submission, and on-chain round finalization were all verified in the same runs.
 
@@ -35,7 +35,7 @@ The crates that implement this:
 
 - `tenzro-model` — catalog, registry, inference router, provider manager, MoE shard view, MoE dispatch planner, ONNX runtimes (forecast / vision / text-embed / segmentation / detection / audio / video)
 - `tenzro-cortex` — recurrent-depth reasoning sidecar
-- `tenzro-training` — Decoupled DiLoCo protocol layer (syncer, aggregators, receipts, on-chain commitments)
+- `tenzro-training` — decoupled outer-aggregation protocol layer (syncer, aggregators, receipts, on-chain commitments)
 - `integrations/trainer/` — Python reference trainer (PyTorch FSDP2, Hivemind, safetensors)
 
 ---
@@ -197,6 +197,8 @@ A holder can lower an expert's resident footprint by loading it block-quantized 
 
 `resolve` serves a memory hit directly (touching its LRU position) and, on a disk hit, decodes the blob, admits it to memory, and re-runs eviction. `status` reports both tiers — per-expert `tier` (`memory` / `disk`), the coarsest projection `quant` tag when quantized, plus `memory_bytes`, `memory_budget_bytes`, `memory_experts`, and `disk_experts`.
 
+The runtime also carries cumulative residency counters so an operator can see whether a node's memory budget matches the model it serves: `evicted_to_disk` (experts spilled to the disk tier under LRU pressure), `evicted_dropped` (experts dropped entirely because no disk tier is configured — these must be re-fetched from a peer holder before serving again), and `admissions_over_budget` (a single expert larger than the whole budget was admitted anyway, keeping it servable while resident bytes exceed the ceiling). A rising `evicted_dropped` on a node without a disk tier, or a non-zero `admissions_over_budget`, signals the budget is too small for the assigned shard and the holder is thrashing network fetches or overcommitting memory.
+
 A distributed layer forward (`tenzro_moeForward`) runs in three steps on the coordinating node:
 
 1. **Gate.** The local gating network routes each token's hidden state to its top-k experts (`route_batch`).
@@ -333,7 +335,7 @@ Foundation model training today is concentrated in a handful of hyperscalers, fo
 1. **Compute density** — synchronous SGD over thousands of accelerators requires high-bandwidth interconnects.
 2. **Data gravity** — proprietary datasets sit inside organizational boundaries.
 
-Decoupled DiLoCo addresses (1) by reducing inter-worker bandwidth by approximately two orders of magnitude relative to elastic data-parallel training, making cross-region (and ultimately cross-organization) training feasible. It does not address (2): in DeepMind's setting, learners are operated by the same entity that owns the data, and worker faults are hardware failures, not adversarial behavior.
+Low-communication outer aggregation addresses (1) by reducing inter-worker bandwidth by approximately two orders of magnitude relative to elastic data-parallel training, making cross-region (and ultimately cross-organization) training feasible. It does not address (2): in the standard low-communication setting, learners are operated by the same entity that owns the data, and worker faults are hardware failures, not adversarial behavior.
 
 Tenzro Train completes the picture: learners can be operated by independent parties, data can remain with its owner via TEE-resident execution, and the resulting model is settled on-chain with cryptographic provenance. This unlocks two distinct markets:
 
@@ -344,17 +346,17 @@ Both markets apply equally to language models, timeseries models, vision models,
 
 ---
 
-### 7.2 Background: Decoupled DiLoCo
+### 7.2 Background: Decoupled Outer Aggregation
 
-DiLoCo (Distributed Low-Communication training) reduces synchronization bandwidth by performing many local SGD steps on each worker before exchanging parameter updates. Decoupled DiLoCo extends this with three further changes that matter for our setting:
+Low-communication training reduces synchronization bandwidth by performing many local SGD steps on each worker before exchanging parameter updates. Decoupled outer aggregation extends this with three further changes that matter for our setting:
 
 1. **Asynchronous learners.** M learners train independently. None waits for any other.
-2. **Centralized syncer.** A coordinator holds the global parameter state. After every H inner SGD steps a learner sends its outer gradient (param delta) to the syncer; the syncer applies a fragment-wise outer optimizer (Nesterov-momentum SGD in the paper) and ships the updated fragment back.
+2. **Centralized syncer.** A coordinator holds the global parameter state. After every H inner SGD steps a learner sends its outer gradient (param delta) to the syncer; the syncer applies a fragment-wise outer optimizer (Nesterov-momentum SGD) and ships the updated fragment back.
 3. **Fragment-wise quorum.** Parameters are partitioned into P fragments. The syncer accepts an outer gradient for fragment j as soon as K of M learners have submitted; stragglers are absorbed via an adaptive grace window τ.
 
-The reported result: at 1.2M-chip scale with 1-year MTBF per chip, Decoupled DiLoCo achieves 88% goodput versus 58% for elastic data-parallel, with no correctness loss versus synchronous baseline. Bandwidth between learners and syncer is approximately two orders of magnitude lower than elastic data-parallel.
+Reported results at large chip scale with realistic per-chip MTBF show substantially higher goodput than elastic data-parallel, with no correctness loss versus a synchronous baseline. Bandwidth between learners and syncer is approximately two orders of magnitude lower than elastic data-parallel.
 
-What the paper does not provide and Tenzro Train must supply:
+What the base technique does not provide and Tenzro Train must supply:
 
 - **Trustless syncer.** The single syncer is a censorship and forgery surface in a permissionless network.
 - **Adversarial gradient defense.** A malicious learner can submit poisoned outer gradients.
@@ -445,7 +447,7 @@ Sponsors pay for what they use: Open is the cheap default, Verified adds an atte
 
 The aggregation rule is committed in the `TrainingTask` and verified by all observers.
 
-**LoRA / QLoRA runs.** When the task trains low-rank adapters rather than the full model, only the adapter matrices carry gradient and the outer gradient transmits just those matrices — the frozen base (4-bit NF4 for QLoRA) is never in the delta. The naive fix of meaning both factors independently is wrong: the useful update is the product `B·A`, and the mean of the products is not the product of the means. The `LoraAlternating` rule handles this by freezing one of the two factors each round (`round % 2`) and syncing only the other, so within a round every contributor submits the same single factor and a plain per-coordinate mean is correct (ADF-LoRA). The reference trainer's language adapter enables this via `architecture.metadata.lora`; the alternating freeze lives in the trainer, so the syncer never needs the rank and applies the same `MeanAggregator` it uses for a full fine-tune. `LoraAlternating` is admissible at the Open tier.
+**LoRA / QLoRA runs.** When the task trains low-rank adapters rather than the full model, only the adapter matrices carry gradient and the outer gradient transmits just those matrices — the frozen base (4-bit NF4 for QLoRA) is never in the delta. The naive fix of meaning both factors independently is wrong: the useful update is the product `B·A`, and the mean of the products is not the product of the means. The `LoraAlternating` rule handles this by freezing one of the two factors each round (`round % 2`) and syncing only the other, so within a round every contributor submits the same single factor and a plain per-coordinate mean is correct. The reference trainer's language adapter enables this via `architecture.metadata.lora`; the alternating freeze lives in the trainer, so the syncer never needs the rank and applies the same `MeanAggregator` it uses for a full fine-tune. `LoraAlternating` is admissible at the Open tier.
 
 **Redundant assignment.** For high-value runs, the same data shard can be assigned to two or three independent trainers. The syncer compares their outer gradients; statistically significant divergence triggers slashing of the outliers. This is the protocol's primary defense against single-trainer malice in the Open tier — and works without any TEE.
 
@@ -548,7 +550,7 @@ CLIP-style dual encoders, audio (Whisper-style), and video extend naturally. The
 
 #### 7.4.5 Heterogeneous Trainers
 
-Different trainers may have different hardware (e.g., A100 vs. consumer 4090 vs. CPU-only). Decoupled DiLoCo's quorum-based design handles this naturally: slower trainers fall behind in vector-clock order but their late submissions are absorbed by τ. Sponsors can also tier trainers by `min_throughput` requirements in the `TrainingTask`, which the syncer enforces at enrollment.
+Different trainers may have different hardware (e.g., A100 vs. consumer 4090 vs. CPU-only). The quorum-based outer-aggregation design handles this naturally: slower trainers fall behind in vector-clock order but their late submissions are absorbed by τ. Sponsors can also tier trainers by `min_throughput` requirements in the `TrainingTask`, which the syncer enforces at enrollment.
 
 ---
 
@@ -663,7 +665,7 @@ The receipt is mintable as an NFT (using `tenzro-vm`'s NFT factory) and represen
 
 #### 7.7.1 Architecture: Rust protocol + Python reference trainer
 
-Tenzro Train splits cleanly into two layers — a Rust **protocol layer** that owns coordination, settlement, and verification, and a Python **inner-training reference** that owns the actual gradient computation. This mirrors the split adopted by every production decentralized training project in 2026 (Prime Intellect, Nous Research, OpenDiLoCo).
+Tenzro Train splits cleanly into two layers — a Rust **protocol layer** that owns coordination, settlement, and verification, and a Python **inner-training reference** that owns the actual gradient computation. This mirrors the split adopted by production decentralized training projects in 2026.
 
 **Why this split:** PyTorch's training ecosystem (FSDP2, DTensor, torch.compile, Hivemind, transformers, gluonts, timm, and per-architecture implementations of TimesFM/Chronos/Moirai/Llama/ViT) is irreplaceable for inner training in 2026. Rust ML frameworks (Candle, Burn, tch-rs) are excellent for inference and protocol code but no production decentralized training run picks them as the inner trainer — the per-modality library coverage isn't there. llama.cpp's `finetune` is LoRA-only, LLaMA-architecture-only, and does not cover timeseries or vision. Rather than reimplement the PyTorch ecosystem in Rust, Tenzro Train uses Rust for what Rust is best at (deterministic protocol code, on-chain commitments, signature verification, gossip topics) and delegates inner training to the existing Python tooling.
 
@@ -684,8 +686,8 @@ The crate intentionally does **not** define a `ModalityAdapter` in Rust. Modalit
 
 Python reference trainer that implements the inner training loop for each modality. Built on:
 
-- **PyTorch FSDP2** — intra-node sharding (matches OpenDiLoCo / Prime Intellect's stack)
-- **Hivemind** — DHT-based inter-worker coordination metadata (the published OpenDiLoCo reference uses Hivemind; we adopt it directly to avoid reinventing peer discovery)
+- **PyTorch FSDP2** — intra-node sharding
+- **Hivemind** — DHT-based inter-worker coordination metadata (adopted directly to avoid reinventing peer discovery)
 - **safetensors** — fragment serialization on the wire (TEE-friendly, deterministic, no pickle)
 - **Per-modality libraries** — `transformers` for language, `gluonts` + native PyTorch for timeseries (TimesFM, Chronos, Moirai), `timm` + native PyTorch for vision
 
@@ -827,10 +829,10 @@ image; everyone else runs the lean base image.
 | Approach | Permissionless | Verifiable | Privacy | Multi-modal | Settlement |
 |---|---|---|---|---|---|
 | Centralized DC training (OpenAI, Anthropic) | No | No | No | Yes | Off-chain |
-| Decoupled DiLoCo (DeepMind, original) | No | No | No | Yes (in principle) | N/A |
+| Low-communication outer aggregation (single-operator) | No | No | No | Yes (in principle) | N/A |
 | Federated learning (FedAvg, etc.) | Partial | No | Partial | Yes | None |
-| Bittensor | Yes | Partial (via consensus) | No | Limited | TAO |
-| Akash + custom orchestration | Yes | No | No | Yes | AKT |
+| Incentivized subnet training | Yes | Partial (via consensus) | No | Limited | Subnet token |
+| Rented-compute + custom orchestration | Yes | No | No | Yes | Compute token |
 | **Tenzro Train** | **Yes** | **Yes (TEE + fraud proofs + receipts)** | **Yes (TEE-resident mode)** | **Yes** | **TNZO, on-chain** |
 
 Tenzro Train's distinctive combination is verifiability + privacy + multi-modal in a single protocol with native on-chain settlement. No existing system covers all four.
@@ -843,13 +845,13 @@ Tenzro Train's distinctive combination is verifiability + privacy + multi-modal 
 - **Optimal F (fragment count).** Higher F means smaller per-fragment transfers but more coordination overhead. The sweet spot is model- and bandwidth-dependent.
 - **Syncer state size.** For a 70B model with full optimizer state (Adam: 3× param size), the syncer holds ~840 GB. This argues for sharded syncers (multiple elected nodes each owning a fragment range) for the largest models. Single-syncer suffices for the 1B-class models we expect to train first.
 - **Cross-modality fragment-aware scheduling.** A trainer with limited memory may want to participate only in some fragments. The protocol allows this; the economics need to ensure such participation is fairly rewarded.
-- **Long-running run resumability.** A training run may take days or weeks. Trainers join and leave continuously. Decoupled DiLoCo handles this natively via vector clocks; we need to confirm the on-chain commitment cadence doesn't become a cost bottleneck. State roots every N rounds (rather than every round) is the obvious lever.
+- **Long-running run resumability.** A training run may take days or weeks. Trainers join and leave continuously. The outer-aggregation design handles this natively via vector clocks; we need to confirm the on-chain commitment cadence doesn't become a cost bottleneck. State roots every N rounds (rather than every round) is the obvious lever.
 
 ---
 
 ### 7.10 Conclusion
 
-Tenzro Train is a tractable extension of the existing Tenzro Network. The training algorithm (Decoupled DiLoCo) is published and proven. The trust primitives (TEE attestation, stake slashing, fraud proofs) already exist in production. The economic rails (TNZO escrow, micropayments, receipt minting) are operational. What's left is the integration work: a new crate, extensions to a handful of existing crates, and reference adapters for the modalities we want to support first.
+Tenzro Train is a tractable extension of the existing Tenzro Network. The training algorithm (decoupled outer aggregation) is published and proven. The trust primitives (TEE attestation, stake slashing, fraud proofs) already exist in production. The economic rails (TNZO escrow, micropayments, receipt minting) are operational. What's left is the integration work: a new crate, extensions to a handful of existing crates, and reference adapters for the modalities we want to support first.
 
 The protocol is the same whether we're training a 200M timeseries forecaster or a 7B language model. The first product to release should be the timeseries one — smaller models, underserved market, immediate on-chain consumers, strongest privacy story. Language models follow. Vision and multimodal extend naturally from there.
 
@@ -893,11 +895,6 @@ For Phase 3 language scaling:
 
 ### 7.B Related work
 
-- Douillard et al., *Decoupled DiLoCo: A New Frontier for Resilient Distributed AI Training*, DeepMind, 2025.
-- Douillard et al., *DiLoCo: Distributed Low-Communication Training of Language Models*, 2023.
-- Douillard et al., *Streaming DiLoCo with overlapping communication: Towards a Distributed Free Lunch*, arXiv:2501.18512, 2025.
-- Thérien et al., *MuLoCo: Muon is a practical inner optimizer for DiLoCo*, arXiv:2505.23725, 2025.
-- Qi et al., *DiLoCoX: A Low-Communication Large-Scale Training Framework for Decentralized Cluster*, arXiv:2506.21263, 2025.
 - Das et al., *TimesFM: A decoder-only foundation model for time-series forecasting*, Google, 2024.
 - Ansari et al., *Chronos: Learning the Language of Time Series*, Amazon, 2024.
 - Woo et al., *Moirai: A Time Series Foundation Model for Universal Forecasting*, Salesforce, 2024.

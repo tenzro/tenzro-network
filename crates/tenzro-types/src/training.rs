@@ -137,8 +137,8 @@ pub enum AggregationRule {
     /// Krum / Multi-Krum: pick gradient(s) with lowest sum-of-distances to
     /// nearest neighbors.
     Krum { f: u32 },
-    /// Alternating low-rank aggregation for LoRA/QLoRA adapter deltas
-    /// (ADF-LoRA, arXiv 2511.18291). Only the low-rank adapter matrices are
+    /// Alternating low-rank aggregation for LoRA/QLoRA adapter deltas.
+    /// Only the low-rank adapter matrices are
     /// trained and transmitted; on each round the trainer freezes one of the
     /// two factors and syncs the other, so the arriving fragment tensors are a
     /// single factor per round and a plain per-coordinate mean over them is
@@ -155,9 +155,9 @@ pub enum AggregationRule {
 
 /// Wire-format quantization applied to outer-gradient tensor payloads.
 ///
-/// Streaming DiLoCo (arXiv 2501.18512) demonstrates that outer gradients
-/// tolerate aggressive low-bit quantization with no convergence loss because
-/// they are momentum-smoothed deltas, not raw activations. Quantization is
+/// Outer gradients tolerate aggressive low-bit quantization with no
+/// convergence loss because they are momentum-smoothed deltas, not raw
+/// activations. Quantization is
 /// blockwise symmetric: the tensor is split into fixed-size blocks, each
 /// block stores one little-endian `f32` scale followed by the packed integer
 /// codes. Dequantized value = `code * scale`.
@@ -186,16 +186,152 @@ impl fmt::Display for GradientQuantization {
 }
 
 // ---------------------------------------------------------------------------
+// Outer-gradient payload kind (dense vs. sparse top-k)
+// ---------------------------------------------------------------------------
+
+/// Chunked top-k sparsification parameters.
+///
+/// The flattened fragment is split into fixed-size chunks; within each chunk
+/// the `k` largest-magnitude coordinates are kept and the rest dropped. Kept
+/// values are then quantized to 2 bits against a per-chunk scale. At
+/// `chunk_size = 4096, k = 64` this is ~1.5% density, and combined with the
+/// 2-bit codec yields the >100× wire compression the frontier requires for
+/// multi-B-parameter runs over residential uplinks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SparseTopKParams {
+    /// Coordinates per chunk. Must be > 0. Default: 4096.
+    pub chunk_size: u32,
+    /// Kept coordinates per chunk. Must be > 0 and <= `chunk_size`.
+    /// Default: 64.
+    pub k: u32,
+}
+
+impl SparseTopKParams {
+    /// Defaults: 4096-element chunks, top-64 per chunk.
+    pub const DEFAULT: Self = Self {
+        chunk_size: 4096,
+        k: 64,
+    };
+
+    /// Number of chunks a length-`len` fragment splits into.
+    pub fn chunk_count(&self, len: usize) -> usize {
+        let cs = (self.chunk_size.max(1)) as usize;
+        len.div_ceil(cs)
+    }
+
+    /// Kept coordinates for a chunk of `chunk_len` elements: `min(k, chunk_len)`.
+    pub fn kept_for_chunk(&self, chunk_len: usize) -> usize {
+        (self.k.max(1) as usize).min(chunk_len)
+    }
+}
+
+impl fmt::Display for SparseTopKParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "topk/{}/{}", self.chunk_size, self.k)
+    }
+}
+
+/// How an outer-gradient payload is encoded on the wire.
+///
+/// `Dense` is the pre-existing format: the whole flattened fragment,
+/// optionally blockwise-quantized per the task's [`GradientQuantization`].
+/// `SparseTopK` is the sparse format: only the kept top-k coordinates per
+/// chunk, 2-bit-quantized, with their chunk-local indices. The syncer
+/// dispatches decode + aggregation on this discriminant; a submission whose
+/// declared kind disagrees with the task spec is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PayloadKind {
+    /// Dense payload, decoded via [`GradientQuantization`].
+    #[default]
+    Dense,
+    /// Chunked top-k sparse payload with a 2-bit value codec.
+    SparseTopK(SparseTopKParams),
+}
+
+impl fmt::Display for PayloadKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dense => write!(f, "dense"),
+            Self::SparseTopK(p) => write!(f, "sparse-{p}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Outer-update mode
+// ---------------------------------------------------------------------------
+
+/// How the syncer turns the aggregated outer gradient into the next
+/// parameter-fragment state.
+///
+/// `Nesterov` is the Nesterov-momentum outer optimizer: the syncer carries
+/// per-fragment momentum and applies `θ ← θ − η·(μ·v + g)`. `SparseEf` is the
+/// sparse error-feedback update: the syncer holds **no** momentum — it applies the aggregated sparse
+/// update directly at the outer learning rate, and the momentum-equivalent
+/// state (the error-feedback accumulator) lives trainer-side, persisted next
+/// to the optimizer checkpoint. Selected by the task spec; the syncer state
+/// machine allocates a momentum buffer only under `Nesterov`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum OuterUpdateMode {
+    /// Nesterov-momentum outer SGD. Syncer holds momentum.
+    Nesterov {
+        /// Outer learning rate η. Default: 0.7.
+        lr: f32,
+        /// Nesterov momentum μ. Default: 0.9.
+        momentum: f32,
+    },
+    /// Sparse error-feedback update. Syncer holds no momentum; applies the
+    /// aggregated sparse update directly at `lr`.
+    SparseEf {
+        /// Outer learning rate η applied to the aggregated sparse update.
+        lr: f32,
+    },
+}
+
+impl Default for OuterUpdateMode {
+    fn default() -> Self {
+        Self::Nesterov {
+            lr: 0.7,
+            momentum: 0.9,
+        }
+    }
+}
+
+impl OuterUpdateMode {
+    /// Outer learning rate for this mode.
+    pub fn lr(&self) -> f32 {
+        match self {
+            Self::Nesterov { lr, .. } => *lr,
+            Self::SparseEf { lr } => *lr,
+        }
+    }
+
+    /// Whether the syncer must carry per-fragment momentum for this mode.
+    pub fn carries_momentum(&self) -> bool {
+        matches!(self, Self::Nesterov { .. })
+    }
+}
+
+impl fmt::Display for OuterUpdateMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nesterov { lr, momentum } => write!(f, "nesterov/lr={lr}/mu={momentum}"),
+            Self::SparseEf { lr } => write!(f, "sparse-ef/lr={lr}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sync strategy
 // ---------------------------------------------------------------------------
 
 /// How fragments are scheduled for outer synchronization each round.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SyncStrategy {
-    /// Every fragment syncs every round. Classic DiLoCo.
+    /// Every fragment syncs every round.
     #[default]
     Full,
-    /// Streaming DiLoCo (arXiv 2501.18512): fragments are partitioned into
+    /// Streaming shard rotation: fragments are partitioned into
     /// `num_shards` shards and only the active shard
     /// (`round % num_shards`) syncs each round, overlapping communication
     /// of one shard with computation on the others. Peak bandwidth drops
@@ -240,7 +376,7 @@ impl SyncStrategy {
 // Pipeline config
 // ---------------------------------------------------------------------------
 
-/// DiLoCoX-style (arXiv 2506.21263) pipeline-parallel trainer groups.
+/// Pipeline-parallel trainer groups.
 ///
 /// When set, trainers enroll as `(group_id, stage)` pairs: a group of
 /// `num_stages` trainers jointly holds one model replica, each stage owning
@@ -294,7 +430,7 @@ pub struct ArchitectureSpec {
     /// Modality the architecture targets.
     pub modality: TrainingModality,
     /// Number of parameter fragments. The model is partitioned into this
-    /// many fragments for Decoupled DiLoCo–style aggregation.
+    /// many fragments for decoupled outer aggregation.
     pub fragment_count: u32,
     /// Optional dtype hint (e.g. `fp16`, `bf16`, `fp32`). Used for
     /// per-fragment byte sizing.
@@ -309,7 +445,7 @@ pub struct ArchitectureSpec {
 // Training objective
 // ---------------------------------------------------------------------------
 
-/// What the inner loop optimizes. `Supervised` is the classic DiLoCo
+/// What the inner loop optimizes. `Supervised` is the classic
 /// next-token / regression objective. `RlPostTraining` is a GRPO-style
 /// reinforcement-learning post-training objective (group-relative advantages
 /// over sampled rollouts, clipped surrogate, KL penalty against the
@@ -378,17 +514,31 @@ pub struct TrainingTaskSpec {
     /// when producing its local outer gradient, so an honest trainer never
     /// gets clipped at the syncer.
     pub clip_l2_norm: Option<f32>,
-    /// Fragment sync scheduling (full every round vs. Streaming DiLoCo
-    /// shard rotation).
+    /// Fragment sync scheduling (full every round vs. streaming shard
+    /// rotation).
     pub sync_strategy: SyncStrategy,
-    /// Quantization trainers must apply to outer-gradient payloads. The
-    /// syncer rejects submissions whose declared quantization differs.
+    /// Quantization trainers must apply to outer-gradient payloads. Applies
+    /// to `Dense` payloads and to the per-chunk 2-bit scale of `SparseTopK`
+    /// payloads. The syncer rejects submissions whose declared quantization
+    /// differs.
     pub quantization: GradientQuantization,
-    /// DiLoCoX one-step-delay: when `true`, the aggregate computed at round
+    /// Wire encoding trainers must apply to outer-gradient payloads (dense vs.
+    /// chunked top-k). The syncer rejects submissions whose declared
+    /// [`PayloadKind`] differs and dispatches decode + aggregation on it.
+    #[serde(default)]
+    pub payload_kind: PayloadKind,
+    /// How the syncer applies the aggregated outer gradient. `Nesterov` carries
+    /// per-fragment momentum in the syncer; `SparseEf` carries no
+    /// syncer momentum and applies the aggregated sparse update directly at
+    /// `lr`, with the error-feedback accumulator living trainer-side. A
+    /// `SparseEf` mode is only valid alongside a `SparseTopK` payload kind.
+    #[serde(default)]
+    pub outer_update: OuterUpdateMode,
+    /// One-step-delay: when `true`, the aggregate computed at round
     /// `r` is applied by trainers at round `r + 1`, overlapping the outer
     /// sync with the next inner-step window.
     pub delayed_apply: bool,
-    /// Pipeline-parallel trainer groups (DiLoCoX). `None` = each trainer
+    /// Pipeline-parallel trainer groups. `None` = each trainer
     /// holds a full replica.
     pub pipeline: Option<PipelineConfig>,
     /// Number of trainers (M). Total slots.
@@ -458,9 +608,14 @@ pub struct OuterGradient {
     /// Quantization applied to the payload. Must match the task spec's
     /// `quantization` policy; the syncer dequantizes before aggregation.
     pub quantization: GradientQuantization,
+    /// Wire encoding of the payload. Must match the task spec's `payload_kind`;
+    /// the syncer decodes `SparseTopK` payloads into index/value pairs and
+    /// aggregates over the union of transmitted indices.
+    #[serde(default)]
+    pub payload_kind: PayloadKind,
     /// Vector clock entry: number of inner SGD steps the trainer had
-    /// completed when this gradient was emitted. Decoupled DiLoCo's
-    /// asynchronous learner support hinges on this.
+    /// completed when this gradient was emitted. Decoupled asynchronous
+    /// learner support hinges on this.
     pub inner_step_count: u64,
     /// Submission timestamp.
     pub submitted_at: Timestamp,

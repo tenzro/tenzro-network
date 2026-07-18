@@ -308,22 +308,22 @@ impl ExternalEngine {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
-                    if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
-                        if !delta.is_empty() {
-                            assembled.push_str(delta);
-                            output_tokens += 1;
-                            // Best-effort forward; a closed receiver (client
-                            // disconnect) ends the stream early.
-                            if token_tx.send(delta.to_string()).await.is_err() {
-                                return Ok(finalize(
-                                    assembled,
-                                    usage_prompt,
-                                    usage_completion,
-                                    output_tokens,
-                                    started,
-                                    messages,
-                                ));
-                            }
+                    if let Some(delta) = v["choices"][0]["delta"]["content"].as_str()
+                        && !delta.is_empty()
+                    {
+                        assembled.push_str(delta);
+                        output_tokens += 1;
+                        // Best-effort forward; a closed receiver (client
+                        // disconnect) ends the stream early.
+                        if token_tx.send(delta.to_string()).await.is_err() {
+                            return Ok(finalize(
+                                assembled,
+                                usage_prompt,
+                                usage_completion,
+                                output_tokens,
+                                started,
+                                messages,
+                            ));
                         }
                     }
                     if let Some(p) = v["usage"]["prompt_tokens"].as_u64() {

@@ -611,8 +611,7 @@ mod ed25519_ops {
         let (key_package, _pubkey_package) = split_keys(did, surface_key)?;
         let signing_share: &SigningShare = key_package.signing_share();
 
-        let mut rng = OsRng;
-        let (nonces, commitments) = round1::commit(signing_share, &mut rng);
+        let (nonces, commitments) = round1::commit(signing_share, &mut OsRng);
 
         let commitments_bytes = commitments
             .serialize()
@@ -759,8 +758,7 @@ mod secp256k1_ops {
         let (key_package, _pubkey_package) = split_keys(did, surface_key)?;
         let signing_share: &SigningShare = key_package.signing_share();
 
-        let mut rng = OsRng;
-        let (nonces, commitments) = round1::commit(signing_share, &mut rng);
+        let (nonces, commitments) = round1::commit(signing_share, &mut OsRng);
 
         let commitments_bytes = commitments
             .serialize()

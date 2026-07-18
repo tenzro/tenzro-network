@@ -63,7 +63,7 @@ def _write_shard(tmp_path, seed: int, n_points: int = 4096) -> str:
 def _round_start_state() -> dict[str, "torch.Tensor"]:
     """The θ⁽⁰⁾ the syncer broadcasts to every trainer at round start.
 
-    In DiLoCo the trainers do not independently re-initialize — they all
+    In decoupled outer aggregation the trainers do not independently re-initialize — they all
     receive the same round-start weights. We model that faithfully: build one
     adapter and snapshot its trainable params as the shared broadcast.
     """
@@ -77,7 +77,7 @@ def _trainer_delta(
 
     Fresh adapter → fresh optimizer state, but its trainable params are first
     overwritten with the shared ``start_state`` so every trainer's ``θ⁽⁰⁾`` is
-    identical and the deltas are directly comparable — the DiLoCo round
+    identical and the deltas are directly comparable — the outer-round
     contract. The delta is ``Δθ = θ⁽ᴴ⁾ − θ⁽⁰⁾`` over that shared start.
     """
     adapter = build_adapter(ARCHITECTURE, HYPERPARAMS)
@@ -89,7 +89,7 @@ def _trainer_delta(
 def test_round_start_broadcast_is_shared():
     """Loading the broadcast θ⁽⁰⁾ makes every trainer's start bit-identical.
 
-    DiLoCo aggregation is only well-defined when all trainers share the
+    Outer aggregation is only well-defined when all trainers share the
     round-start weights. The syncer broadcasts one θ⁽⁰⁾; each trainer loads
     it. If that load ever fails to overwrite the fresh init, the aggregate
     below stops meaning anything, so it is asserted first.

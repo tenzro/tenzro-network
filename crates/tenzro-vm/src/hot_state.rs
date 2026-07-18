@@ -1,7 +1,7 @@
 //! Hot-state local fee market (Agent-Swarm Spec 6).
 //!
-//! Solana, Aptos, and Sei pioneered the observation that a single global
-//! base fee is the wrong abstraction for parallel execution chains: when one
+//! A single global base fee is the wrong abstraction for parallel execution
+//! chains: when one
 //! address is hot (everyone wants to write to it), surcharging *every*
 //! transaction in the block is over-correction. Block-STM already isolates
 //! the contention to the conflicting accounts via its per-tx reexecution

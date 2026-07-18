@@ -39,12 +39,14 @@ pub use plonky3::{
 
 // Re-export Plonky3 AIRs
 pub use circuits::{
-    InferenceAir, IdentityAir, SettlementAir,
+    InferenceAir, IdentityAir, PqQcAggregationAir, SettlementAir,
     NUM_INFERENCE_COLS, NUM_INFERENCE_PUBLIC_VALUES,
     NUM_IDENTITY_COLS, NUM_IDENTITY_PUBLIC_VALUES,
     NUM_SETTLEMENT_COLS, NUM_SETTLEMENT_PUBLIC_VALUES,
+    pq_qc_cols_for, pq_qc_message_digest, pq_qc_public_inputs, pq_qc_public_values_for,
     generate_inference_trace, inference_public_inputs,
     generate_identity_trace, identity_public_inputs,
+    generate_pq_qc_trace,
     generate_settlement_trace, settlement_public_inputs,
 };
 

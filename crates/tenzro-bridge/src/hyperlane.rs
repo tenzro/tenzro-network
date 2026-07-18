@@ -302,12 +302,12 @@ impl HyperlaneAdapter {
         storage: Arc<dyn tenzro_storage::KvStore>,
     ) -> Self {
         for key in crate::message_format::load_seen_keys(&storage, "hyperlane") {
-            if let Ok(bytes) = hex::decode(&key) {
-                if bytes.len() == 32 {
-                    let mut h = [0u8; 32];
-                    h.copy_from_slice(&bytes);
-                    self.seen_messages.insert(Hash::new(h), ());
-                }
+            if let Ok(bytes) = hex::decode(&key)
+                && bytes.len() == 32
+            {
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&bytes);
+                self.seen_messages.insert(Hash::new(h), ());
             }
         }
         self.inbound_nonce_tracker =
@@ -564,7 +564,7 @@ impl BridgeAdapter for HyperlaneAdapter {
         Ok(BridgeTokenReceipt::new(
             format!("0x{}", hex::encode(id.as_bytes())),
             id,
-            (Timestamp::now().as_secs() * 1_000) as i64,
+            Timestamp::now().as_secs() * 1_000,
             0,
             request.source_chain,
             request.dest_chain,

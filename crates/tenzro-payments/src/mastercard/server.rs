@@ -231,14 +231,14 @@ impl PaymentProtocol for MastercardAgentPayServer {
         );
 
         // 6. Verify agentic token if present
-        if let Some(token_id_value) = credential.extra.get("token_id") {
-            if let Some(token_id) = token_id_value.as_str() {
-                let token = self.token_service.verify_token(token_id)?;
-                debug!(
-                    "Verified agentic token {} for agent {}",
-                    token_id, token.agent_did
-                );
-            }
+        if let Some(token_id_value) = credential.extra.get("token_id")
+            && let Some(token_id) = token_id_value.as_str()
+        {
+            let token = self.token_service.verify_token(token_id)?;
+            debug!(
+                "Verified agentic token {} for agent {}",
+                token_id, token.agent_did
+            );
         }
 
         // 7. Verify Ed25519 signature on credential

@@ -363,3 +363,159 @@ pub enum ReleaseConditions {
     /// Custom condition
     Custom { condition: String },
 }
+
+/// Domain separation tag for [`SettlementAuthorization`] signing preimages.
+pub const SETTLEMENT_AUTHORIZATION_DOMAIN: &[u8] = b"tenzro/settlement/authorization";
+
+/// A developer-signed authorization to settle TNZO from an app wallet to a
+/// payer after an off-network fiat payment cleared on the developer's own
+/// payment provider.
+///
+/// The developer backend charges the end user through its own provider
+/// account (the network never holds provider credentials or fiat float),
+/// then signs this authorization with a key registered in the app's
+/// on-chain record. Any node can verify and execute it: the TNZO moves
+/// from the developer's app wallet to the payer's wallet, minus the
+/// network settlement commission.
+///
+/// `signature` is an Ed25519 signature over [`Self::signing_hash`], which
+/// binds every field except the signature itself — including `key_id`, so
+/// a signature cannot be re-attributed to a different registered key with
+/// a different spending ceiling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementAuthorization {
+    /// App identifier in the on-chain app registry
+    pub app_id: String,
+    /// Chain id the authorization is valid on (prevents cross-chain replay)
+    pub chain_id: u64,
+    /// Payer's DID — resolved to a wallet address at execution time
+    pub payer_did: String,
+    /// TNZO amount, fixed and quoted at charge time (never fiat-denominated)
+    pub amount_tnzo: u128,
+    /// Developer's payment-provider reference (idempotency key per app)
+    pub external_ref: String,
+    /// Random 32 bytes chosen by the signer
+    pub nonce: [u8; 32],
+    /// Expiry in unix milliseconds — a short quote-lock window
+    pub expiry: u64,
+    /// Which registered signing key produced `signature`
+    pub key_id: String,
+    /// Ed25519 signature over [`Self::signing_hash`]
+    pub signature: Vec<u8>,
+}
+
+impl SettlementAuthorization {
+    /// Canonical signing preimage: domain tag, then each field with
+    /// variable-length fields prefixed by their u32 big-endian byte length
+    /// and integers in fixed-width big-endian. The signature is excluded.
+    pub fn signing_preimage(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            SETTLEMENT_AUTHORIZATION_DOMAIN.len()
+                + self.app_id.len()
+                + self.payer_did.len()
+                + self.external_ref.len()
+                + self.key_id.len()
+                + 96,
+        );
+        out.extend_from_slice(SETTLEMENT_AUTHORIZATION_DOMAIN);
+        let write_str = |out: &mut Vec<u8>, s: &str| {
+            out.extend_from_slice(&(s.len() as u32).to_be_bytes());
+            out.extend_from_slice(s.as_bytes());
+        };
+        write_str(&mut out, &self.app_id);
+        out.extend_from_slice(&self.chain_id.to_be_bytes());
+        write_str(&mut out, &self.payer_did);
+        out.extend_from_slice(&self.amount_tnzo.to_be_bytes());
+        write_str(&mut out, &self.external_ref);
+        out.extend_from_slice(&self.nonce);
+        out.extend_from_slice(&self.expiry.to_be_bytes());
+        write_str(&mut out, &self.key_id);
+        out
+    }
+
+    /// SHA-256 of [`Self::signing_preimage`] — the exact 32 bytes the
+    /// developer key signs.
+    pub fn signing_hash(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.signing_preimage());
+        hasher.finalize().into()
+    }
+}
+
+#[cfg(test)]
+mod settlement_authorization_tests {
+    use super::*;
+
+    fn sample() -> SettlementAuthorization {
+        SettlementAuthorization {
+            app_id: "demo-app".into(),
+            chain_id: 1337,
+            payer_did: "did:tenzro:human:abc".into(),
+            amount_tnzo: 1_000_000_000_000_000_000,
+            external_ref: "pi_3Nqw8s".into(),
+            nonce: [7u8; 32],
+            expiry: 1_800_000_000_000,
+            key_id: "backend-1".into(),
+            signature: vec![],
+        }
+    }
+
+    #[test]
+    fn preimage_is_deterministic() {
+        assert_eq!(sample().signing_hash(), sample().signing_hash());
+    }
+
+    #[test]
+    fn preimage_starts_with_domain() {
+        assert!(sample().signing_preimage().starts_with(SETTLEMENT_AUTHORIZATION_DOMAIN));
+    }
+
+    #[test]
+    fn every_field_changes_hash() {
+        let base = sample().signing_hash();
+        let mut a = sample();
+        a.app_id = "other-app".into();
+        assert_ne!(a.signing_hash(), base);
+        let mut c = sample();
+        c.chain_id = 1;
+        assert_ne!(c.signing_hash(), base);
+        let mut p = sample();
+        p.payer_did = "did:tenzro:human:xyz".into();
+        assert_ne!(p.signing_hash(), base);
+        let mut m = sample();
+        m.amount_tnzo += 1;
+        assert_ne!(m.signing_hash(), base);
+        let mut r = sample();
+        r.external_ref = "pi_other".into();
+        assert_ne!(r.signing_hash(), base);
+        let mut n = sample();
+        n.nonce = [8u8; 32];
+        assert_ne!(n.signing_hash(), base);
+        let mut e = sample();
+        e.expiry += 1;
+        assert_ne!(e.signing_hash(), base);
+        let mut k = sample();
+        k.key_id = "backend-2".into();
+        assert_ne!(k.signing_hash(), base);
+    }
+
+    #[test]
+    fn signature_not_in_preimage() {
+        let mut s = sample();
+        let before = s.signing_hash();
+        s.signature = vec![1, 2, 3];
+        assert_eq!(s.signing_hash(), before);
+    }
+
+    #[test]
+    fn length_prefix_prevents_field_boundary_shift() {
+        let mut a = sample();
+        a.app_id = "ab".into();
+        a.payer_did = "cdid:tenzro:human:abc".into();
+        let mut b = sample();
+        b.app_id = "abc".into();
+        b.payer_did = "did:tenzro:human:abc".into();
+        assert_ne!(a.signing_hash(), b.signing_hash());
+    }
+}

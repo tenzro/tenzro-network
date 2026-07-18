@@ -115,10 +115,10 @@ impl ReplayCache {
         }
 
         // FIFO eviction if at capacity.
-        if self.order.len() >= REPLAY_CACHE_CAPACITY {
-            if let Some(victim) = self.order.pop_front() {
-                self.seen.remove(&victim);
-            }
+        if self.order.len() >= REPLAY_CACHE_CAPACITY
+            && let Some(victim) = self.order.pop_front()
+        {
+            self.seen.remove(&victim);
         }
 
         self.seen.insert(key.clone(), now_ms);

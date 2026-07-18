@@ -1,8 +1,8 @@
 //! Block-STM parallel transaction execution engine
 //!
 //! Implements optimistic concurrency control for parallel transaction execution,
-//! based on the Block-STM algorithm (Aptos/Diem). This is the same approach used by
-//! Aptos (160K+ TPS), Monad, Sei V2, and Starknet.
+//! based on the Block-STM algorithm — optimistic parallel execution with MVCC and
+//! deterministic conflict-driven re-execution.
 //!
 //! # Algorithm Overview
 //!
@@ -29,23 +29,19 @@
 //!
 //! # On "Block-STM v2" and typed-transaction conflict hints
 //!
-//! Two unrelated things share the "v2" name in 2026 literature:
+//! Two unrelated things share the "v2" name in current literature:
 //!
-//! 1. **Aptos `SchedulerV2`** (mainline `aptos-core` 2025–2026) — a refactored
-//!    optimistic scheduler with stall propagation, an explicit `AbortManager`,
-//!    `executed_once_max_idx` first-execution gating, and a queue-based commit
+//! 1. **A refactored optimistic scheduler** — adds stall propagation, an
+//!    explicit abort manager, first-execution gating, and a queue-based commit
 //!    pipeline. **Still purely optimistic, no declared read/write hints.** The
-//!    scheduler interface is dispatched at runtime via a `SchedulerWrapper`
-//!    enum that toggles V1/V2 — this is a useful template if/when we add stall
-//!    propagation. See `aptos-move/block-executor/src/scheduler_v2.rs` and
-//!    `scheduler_wrapper.rs`.
+//!    scheduler interface can be dispatched at runtime via a wrapper enum that
+//!    toggles V1/V2 — a useful template if/when we add stall propagation.
 //!
-//! 2. **AFT 2025 dBTM/oBTM** (Anjana et al., arXiv:2503.03203) — academic
-//!    extension that schedules transactions along a DAG of declared read/write
-//!    sets. Reports ~1.33× speedup over PEVM, max 1.75× over sequential. Not
-//!    deployed in any production chain; the construction relies on
-//!    contract/VM-layer conflict-spec inference for read-write-oblivious VMs
-//!    like the EVM.
+//! 2. **Conflict-spec DAG scheduling** — an academic extension that schedules
+//!    transactions along a DAG of declared read/write sets. Reports modest
+//!    speedups over plain parallel EVM execution. Not deployed in any
+//!    production chain; the construction relies on contract/VM-layer
+//!    conflict-spec inference for read-write-oblivious VMs like the EVM.
 //!
 //! Tenzro deliberately does **not** carry conflict hints on its typed
 //! transaction enum. The intent in `Transfer` / `Stake` / `ContractCall` is
@@ -53,20 +49,11 @@
 //! types (`Transfer`, `Stake`, `CreateEscrow`, `ReleaseEscrow`,
 //! `RefundEscrow`) — for `ContractCall`, write sets are decided by EVM/SVM
 //! bytecode and cannot be predicted at submission time without symbolic
-//! execution. The marginal AFT-2025 win does not justify forcing every tx
+//! execution. The marginal conflict-spec win does not justify forcing every tx
 //! type to carry guessed access metadata. If a fast path becomes worthwhile,
-//! the Sui-style "owned-object fast path for native transfers, plain
-//! Block-STM for everything else" is the right shape — built from
-//! deterministic native-tx fields, not from speculative hints on EVM/SVM
-//! bytecode.
-//!
-//! # References
-//!
-//! - "Block-STM: Scaling Blockchain Execution by Turning Ordering Curse to a
-//!   Performance Blessing" (Gelashvili et al., PPoPP'23, arXiv:2203.06871)
-//! - "Efficient Parallel Execution of Blockchain Transactions Leveraging
-//!   Conflict Specifications" (Anjana et al., AFT 2025, arXiv:2503.03203)
-//! - Aptos Core implementation: `aptos-move/block-executor` (V1 + V2)
+//! the "owned-object fast path for native transfers, plain Block-STM for
+//! everything else" shape is the right one — built from deterministic
+//! native-tx fields, not from speculative hints on EVM/SVM bytecode.
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -74,6 +61,44 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+/// Pre-block state reader consulted when a commutative delta lane needs a base
+/// value to fold onto. The `StateAdapter` implements this by reading balances
+/// and storage slots from its cache / RocksDB backend.
+///
+/// Only the delta-lane fold needs this — concrete `Value` writes carry their
+/// own resolved value. A block with no delta lanes never calls into it.
+pub trait BaseState: Send + Sync {
+    /// Pre-block balance for `address` (0 if the account is unknown).
+    fn base_balance(&self, address: &[u8]) -> u128;
+    /// Pre-block storage slot value for `(address, key)`.
+    fn base_storage(&self, address: &[u8], key: &[u8]) -> Option<Vec<u8>>;
+}
+
+/// A [`BaseState`] that reports every account as empty (balance 0, no storage).
+/// Used when a block is known to carry no delta lanes, or in tests, so the
+/// fold path has a valid zero base without a full `StateAdapter`.
+pub struct ZeroBaseState;
+
+impl BaseState for ZeroBaseState {
+    fn base_balance(&self, _address: &[u8]) -> u128 {
+        0
+    }
+    fn base_storage(&self, _address: &[u8], _key: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// Concrete values a block's commutative delta lanes resolved to at commit.
+/// The caller writes these back into the `StateAdapter` after `execute_block`
+/// returns — this is where "resolve the fold at commit" materializes.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedDeltas {
+    /// address -> final folded balance for every balance lane touched by a delta.
+    pub balances: HashMap<Vec<u8>, u128>,
+    /// (address, key) -> final folded value for every storage lane touched by a delta.
+    pub storage: HashMap<(Vec<u8>, Vec<u8>), Option<Vec<u8>>>,
+}
 
 /// Result of parallel block execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +139,36 @@ pub enum TxExecutionStatus {
     Skipped,
 }
 
+/// A single versioned entry in a balance lane. An entry is either a concrete
+/// value (a read-modify-write that fixes the balance) or a commutative delta
+/// that adds to whatever value a lower-indexed transaction resolved.
+///
+/// Delta lanes let two transactions that both only add/subtract from the same
+/// balance (the archetype: concurrent TNZO transfers debiting a hot sender or
+/// crediting a hot beneficiary) commute without aborting each other. The lane
+/// resolves to a concrete `u128` at read time by folding the accumulated
+/// deltas onto the base balance in transaction-index order.
+#[derive(Debug, Clone)]
+pub enum BalanceUpdate {
+    /// Concrete value — overrides any prior deltas at fold time.
+    Value(u128),
+    /// Commutative signed delta applied to the folded running balance.
+    Delta(i128),
+}
+
+/// A single versioned entry in a storage lane. Storage slots that carry a
+/// numeric counter (encoded little-endian) can accept commutative deltas the
+/// same way balances do; everything else uses `Value`.
+#[derive(Debug, Clone)]
+pub enum StorageUpdate {
+    /// Concrete byte value — overrides any prior deltas at fold time.
+    Value(Option<Vec<u8>>),
+    /// Commutative signed delta applied to the folded running counter. The
+    /// slot is interpreted as a little-endian unsigned integer whose byte
+    /// width is preserved by the fold.
+    Delta(i128),
+}
+
 /// Multi-Version Data Structure (MVCC) for parallel execution.
 ///
 /// Each storage location can have multiple versions, one per transaction index.
@@ -130,7 +185,7 @@ pub struct MultiVersionData {
 #[derive(Debug, Clone)]
 struct VersionedValue {
     tx_index: usize,
-    value: Option<Vec<u8>>,
+    update: StorageUpdate,
     /// Incarnation number (incremented on re-execution)
     incarnation: u32,
 }
@@ -138,8 +193,42 @@ struct VersionedValue {
 #[derive(Debug, Clone)]
 struct VersionedBalance {
     tx_index: usize,
-    balance: u128,
+    update: BalanceUpdate,
     incarnation: u32,
+}
+
+/// Fold a byte-slice counter interpreted as a little-endian unsigned integer by
+/// a signed delta, preserving the original byte width. Used by the storage
+/// delta lane. Saturates at 0 on underflow and at the width's max on overflow —
+/// consistent with the balance fold's saturating behaviour.
+fn fold_counter_bytes(base: &[u8], delta: i128) -> Vec<u8> {
+    let width = base.len().max(1);
+    // Interpret up to 16 bytes as u128; wider counters keep their tail as-is
+    // (delta lanes are only ever attached to counters that fit u128 by the
+    // caller — this is the defensive floor, not a supported wide path).
+    let mut buf = [0u8; 16];
+    let take = base.len().min(16);
+    buf[..take].copy_from_slice(&base[..take]);
+    let current = u128::from_le_bytes(buf);
+    let folded = if delta >= 0 {
+        current.saturating_add(delta as u128)
+    } else {
+        current.saturating_sub(delta.unsigned_abs())
+    };
+    let folded_bytes = folded.to_le_bytes();
+    let mut out = vec![0u8; width];
+    let copy = width.min(16);
+    out[..copy].copy_from_slice(&folded_bytes[..copy]);
+    out
+}
+
+/// Fold a base balance by a signed delta with saturating semantics.
+fn fold_balance(base: u128, delta: i128) -> u128 {
+    if delta >= 0 {
+        base.saturating_add(delta as u128)
+    } else {
+        base.saturating_sub(delta.unsigned_abs())
+    }
 }
 
 impl MultiVersionData {
@@ -150,41 +239,86 @@ impl MultiVersionData {
         }
     }
 
-    /// Write a storage value for a given transaction index
+    /// Write a concrete storage value for a given transaction index.
     fn write_storage(&self, address: &[u8], key: &[u8], value: Option<Vec<u8>>, tx_index: usize, incarnation: u32) {
         let map_key = (address.to_vec(), key.to_vec());
-        let entry = VersionedValue { tx_index, value, incarnation };
-
+        let entry = VersionedValue { tx_index, update: StorageUpdate::Value(value), incarnation };
         self.data.entry(map_key).or_default().push(entry);
     }
 
-    /// Read the latest storage value written by a transaction with index < tx_index
-    fn read_storage(&self, address: &[u8], key: &[u8], tx_index: usize) -> Option<Vec<u8>> {
+    /// Write a commutative storage counter delta for a given transaction index.
+    fn write_storage_delta(&self, address: &[u8], key: &[u8], delta: i128, tx_index: usize, incarnation: u32) {
         let map_key = (address.to_vec(), key.to_vec());
+        let entry = VersionedValue { tx_index, update: StorageUpdate::Delta(delta), incarnation };
+        self.data.entry(map_key).or_default().push(entry);
+    }
 
+    /// Resolve the storage lane visible to `tx_index` by folding every entry
+    /// from a lower-indexed transaction in `(tx_index, incarnation)` order.
+    ///
+    /// Fold rules, applied in ascending version order:
+    /// - `Value(v)` sets the running value to `v` (overriding prior deltas).
+    /// - `Delta(d)` folds `d` onto the running counter (base 0 if none yet).
+    ///
+    /// `base` is the pre-block value read from the `StateAdapter` — deltas
+    /// applied when no lower-indexed `Value` exists fold onto it. Returns
+    /// `None` only when there is no base and no lower-indexed entry.
+    fn read_storage(&self, address: &[u8], key: &[u8], tx_index: usize, base: Option<Vec<u8>>) -> Option<Vec<u8>> {
+        let map_key = (address.to_vec(), key.to_vec());
         self.data.get(&map_key).and_then(|versions| {
-            versions
-                .iter()
-                .filter(|v| v.tx_index < tx_index)
-                .max_by_key(|v| (v.tx_index, v.incarnation))
-                .and_then(|v| v.value.clone())
+            let mut ordered: Vec<&VersionedValue> =
+                versions.iter().filter(|v| v.tx_index < tx_index).collect();
+            if ordered.is_empty() {
+                return None;
+            }
+            // Deterministic fold order: transaction index, then incarnation.
+            ordered.sort_by_key(|v| (v.tx_index, v.incarnation));
+            let mut running: Option<Vec<u8>> = base;
+            for v in ordered {
+                match &v.update {
+                    StorageUpdate::Value(val) => running = val.clone(),
+                    StorageUpdate::Delta(d) => {
+                        let cur = running.take().unwrap_or_default();
+                        running = Some(fold_counter_bytes(&cur, *d));
+                    }
+                }
+            }
+            running
         })
     }
 
-    /// Write a balance for a given transaction index
+    /// Write a concrete balance for a given transaction index.
     fn write_balance(&self, address: &[u8], balance: u128, tx_index: usize, incarnation: u32) {
-        let entry = VersionedBalance { tx_index, balance, incarnation };
+        let entry = VersionedBalance { tx_index, update: BalanceUpdate::Value(balance), incarnation };
         self.balances.entry(address.to_vec()).or_default().push(entry);
     }
 
-    /// Read the latest balance written by a transaction with index < tx_index
-    fn read_balance(&self, address: &[u8], tx_index: usize) -> Option<u128> {
+    /// Write a commutative balance delta for a given transaction index.
+    fn write_balance_delta(&self, address: &[u8], delta: i128, tx_index: usize, incarnation: u32) {
+        let entry = VersionedBalance { tx_index, update: BalanceUpdate::Delta(delta), incarnation };
+        self.balances.entry(address.to_vec()).or_default().push(entry);
+    }
+
+    /// Resolve the balance lane visible to `tx_index` by folding every entry
+    /// from a lower-indexed transaction in `(tx_index, incarnation)` order.
+    /// `base` is the pre-block balance from the `StateAdapter`; deltas fold
+    /// onto it when no lower-indexed `Value` overrides.
+    fn read_balance(&self, address: &[u8], tx_index: usize, base: u128) -> Option<u128> {
         self.balances.get(&address.to_vec()).and_then(|versions| {
-            versions
-                .iter()
-                .filter(|v| v.tx_index < tx_index)
-                .max_by_key(|v| (v.tx_index, v.incarnation))
-                .map(|v| v.balance)
+            let mut ordered: Vec<&VersionedBalance> =
+                versions.iter().filter(|v| v.tx_index < tx_index).collect();
+            if ordered.is_empty() {
+                return None;
+            }
+            ordered.sort_by_key(|v| (v.tx_index, v.incarnation));
+            let mut running = base;
+            for v in ordered {
+                match &v.update {
+                    BalanceUpdate::Value(b) => running = *b,
+                    BalanceUpdate::Delta(d) => running = fold_balance(running, *d),
+                }
+            }
+            Some(running)
         })
     }
 
@@ -197,9 +331,58 @@ impl MultiVersionData {
             entry.value_mut().retain(|v| v.tx_index != tx_index);
         }
     }
+
+    /// Fold every balance lane down to a single concrete value at commit time.
+    ///
+    /// This is the "resolve the fold at commit" step: after all transactions
+    /// (and their re-executions) have run, each address's balance lane —
+    /// whatever mix of `Value` and `Delta` entries it accumulated — collapses
+    /// to one `u128` that the `StateAdapter` writes back. `tx_count` is used as
+    /// the exclusive upper bound so `read_balance` sees every entry.
+    /// `base_for` supplies the pre-block balance a delta-only lane folds onto.
+    fn finalize_balances(
+        &self,
+        tx_count: usize,
+        base_for: &dyn Fn(&[u8]) -> u128,
+    ) -> HashMap<Vec<u8>, u128> {
+        let mut out = HashMap::new();
+        for entry in self.balances.iter() {
+            let addr = entry.key().clone();
+            let base = base_for(&addr);
+            if let Some(resolved) = self.read_balance(&addr, tx_count, base) {
+                out.insert(addr, resolved);
+            }
+        }
+        out
+    }
+
+    /// Fold every storage lane down to a single concrete value at commit time.
+    /// Mirror of `finalize_balances` for the storage delta lanes. `base_for`
+    /// supplies the pre-block slot value a delta-only lane folds onto.
+    fn finalize_storage(
+        &self,
+        tx_count: usize,
+        base_for: &dyn Fn(&[u8], &[u8]) -> Option<Vec<u8>>,
+    ) -> HashMap<(Vec<u8>, Vec<u8>), Option<Vec<u8>>> {
+        let mut out = HashMap::new();
+        for entry in self.data.iter() {
+            let (addr, key) = entry.key().clone();
+            let base = base_for(&addr, &key);
+            let resolved = self.read_storage(&addr, &key, tx_count, base);
+            out.insert((addr, key), resolved);
+        }
+        out
+    }
 }
 
-/// Read/write set tracking for conflict detection
+/// Read/write set tracking for conflict detection.
+///
+/// Alongside the read/write sets, a transaction records *commutative deltas*
+/// on the delta lanes (`balance_deltas`, `storage_deltas`). A slot touched only
+/// by deltas across transactions does not force a re-execution: the delta lanes
+/// commute and resolve at read time (see `MultiVersionData`). A delta and a
+/// read of the same slot, or a delta and a concrete write of the same slot,
+/// still conflict — the delta changes the value the reader/writer observed.
 #[derive(Debug, Clone, Default)]
 pub struct ReadWriteSet {
     /// Storage locations read: (address, key) -> value at read time
@@ -210,6 +393,11 @@ pub struct ReadWriteSet {
     pub balance_reads: HashMap<Vec<u8>, u128>,
     /// Balances written: address -> new balance
     pub balance_writes: HashMap<Vec<u8>, u128>,
+    /// Commutative balance deltas: address -> signed delta applied this tx.
+    /// Multiple deltas from one tx to the same address accumulate.
+    pub balance_deltas: HashMap<Vec<u8>, i128>,
+    /// Commutative storage counter deltas: (address, key) -> signed delta.
+    pub storage_deltas: HashMap<(Vec<u8>, Vec<u8>), i128>,
 }
 
 impl ReadWriteSet {
@@ -238,18 +426,73 @@ impl ReadWriteSet {
         self.balance_writes.insert(address.to_vec(), balance);
     }
 
-    /// Check if this read-write set conflicts with writes from another set
-    fn has_conflict(&self, other_writes: &ReadWriteSet) -> bool {
-        // Check storage read-write conflicts
+    /// Record a commutative balance delta (add positive, subtract negative).
+    /// Repeated calls for the same address accumulate into a single delta.
+    pub fn record_balance_delta(&mut self, address: &[u8], delta: i128) {
+        let slot = self.balance_deltas.entry(address.to_vec()).or_insert(0);
+        *slot = slot.saturating_add(delta);
+    }
+
+    /// Record a commutative storage counter delta.
+    pub fn record_storage_delta(&mut self, address: &[u8], key: &[u8], delta: i128) {
+        let slot = self
+            .storage_deltas
+            .entry((address.to_vec(), key.to_vec()))
+            .or_insert(0);
+        *slot = slot.saturating_add(delta);
+    }
+
+    /// Check if this read-write set conflicts with another (lower-indexed) set.
+    ///
+    /// A conflict aborts `self` for re-execution. Delta lanes commute, so a
+    /// slot touched by deltas in both sets is *not* a conflict. The conflict
+    /// cases are:
+    ///
+    /// - `self` read a storage slot the other wrote (concrete) OR delta-updated
+    ///   — the other changed a value `self` observed.
+    /// - `self` read a balance the other wrote (concrete) OR delta-updated.
+    /// - `self` wrote a concrete storage slot the other delta-updated (and vice
+    ///   versa): a concrete write does not commute with a delta.
+    /// - `self` wrote a concrete balance the other delta-updated (and vice
+    ///   versa).
+    ///
+    /// A delta ⋈ delta on the same slot, and a write ⋈ write on the same slot
+    /// (the classic Block-STM last-writer-wins by index), do not abort here.
+    fn has_conflict(&self, other: &ReadWriteSet) -> bool {
+        // Storage: read observed a concurrent concrete write or delta.
         for key in self.reads.keys() {
-            if other_writes.writes.contains_key(key) {
+            if other.writes.contains_key(key) || other.storage_deltas.contains_key(key) {
+                return true;
+            }
+        }
+        // Storage: concrete write does not commute with the other's delta.
+        for key in self.writes.keys() {
+            if other.storage_deltas.contains_key(key) {
+                return true;
+            }
+        }
+        // Storage: our delta does not commute with the other's concrete write.
+        for key in self.storage_deltas.keys() {
+            if other.writes.contains_key(key) {
                 return true;
             }
         }
 
-        // Check balance read-write conflicts
+        // Balance: read observed a concurrent concrete write or delta.
         for addr in self.balance_reads.keys() {
-            if other_writes.balance_writes.contains_key(addr) {
+            if other.balance_writes.contains_key(addr) || other.balance_deltas.contains_key(addr) {
+                return true;
+            }
+        }
+        // Balance: concrete write vs the other's delta (non-commutative).
+        for addr in self.balance_writes.keys() {
+            if other.balance_deltas.contains_key(addr) {
+                return true;
+            }
+        }
+        // Balance: our delta vs the other's concrete write (non-commutative).
+        for addr in self.balance_deltas.keys() {
+            if other.balance_writes.contains_key(addr) {
                 return true;
             }
         }
@@ -320,36 +563,45 @@ impl BlockStmExecutor {
     /// # Arguments
     ///
     /// * `tx_count` - Number of transactions in the batch
+    /// * `base` - pre-block state consulted only when a commutative delta lane
+    ///   needs a base value to fold onto (see [`BaseState`])
     /// * `execute_fn` - Function that executes a single transaction, given its index
-    ///   and a `ReadWriteSet` to record its memory accesses
+    ///   and a `ReadWriteSet` to record its memory accesses (including delta lanes
+    ///   via `record_balance_delta` / `record_storage_delta`)
     ///
     /// # Returns
     ///
-    /// `ParallelExecutionResult` with per-transaction outcomes and metrics
+    /// The [`ParallelExecutionResult`] with per-transaction outcomes and metrics,
+    /// plus the [`ResolvedDeltas`] the delta lanes folded to at commit — the
+    /// caller writes those concrete values back into the `StateAdapter`.
     pub fn execute_block<F>(
         &self,
         tx_count: usize,
+        base: &dyn BaseState,
         execute_fn: F,
-    ) -> ParallelExecutionResult
+    ) -> (ParallelExecutionResult, ResolvedDeltas)
     where
         F: Fn(usize, &mut ReadWriteSet) -> TxExecutionStatus + Send + Sync,
     {
         if tx_count == 0 {
-            return ParallelExecutionResult {
-                total_transactions: 0,
-                successful: 0,
-                failed: 0,
-                reexecutions: 0,
-                fell_back_to_sequential: false,
-                total_gas_used: 0,
-                transaction_results: Vec::new(),
-                account_contention: std::collections::HashMap::new(),
-            };
+            return (
+                ParallelExecutionResult {
+                    total_transactions: 0,
+                    successful: 0,
+                    failed: 0,
+                    reexecutions: 0,
+                    fell_back_to_sequential: false,
+                    total_gas_used: 0,
+                    transaction_results: Vec::new(),
+                    account_contention: std::collections::HashMap::new(),
+                },
+                ResolvedDeltas::default(),
+            );
         }
 
         // For very small batches, execute sequentially (overhead not worth it)
         if tx_count <= 2 {
-            return self.execute_sequential(tx_count, &execute_fn);
+            return (self.execute_sequential(tx_count, &execute_fn), ResolvedDeltas::default());
         }
 
         let mvd = Arc::new(MultiVersionData::new());
@@ -372,7 +624,7 @@ impl BlockStmExecutor {
             let status = execute_fn(i, &mut rw_set);
             *results[i].lock() = Some(status);
 
-            // Record writes to MVCC data structure
+            // Record writes and delta lanes to the MVCC data structure.
             let incarnation = incarnations[i].load(Ordering::Relaxed) as u32;
             for ((addr, key), value) in &rw_set.writes {
                 mvd.write_storage(addr, key, value.clone(), i, incarnation);
@@ -380,42 +632,29 @@ impl BlockStmExecutor {
             for (addr, balance) in &rw_set.balance_writes {
                 mvd.write_balance(addr, *balance, i, incarnation);
             }
+            for ((addr, key), delta) in &rw_set.storage_deltas {
+                mvd.write_storage_delta(addr, key, *delta, i, incarnation);
+            }
+            for (addr, delta) in &rw_set.balance_deltas {
+                mvd.write_balance_delta(addr, *delta, i, incarnation);
+            }
         }
 
-        // Phase 2: Validation — check for read-write conflicts
+        // Phase 2: Validation — check for read-write conflicts.
+        //
+        // `has_conflict` is the delta-aware source of truth: it flags a tx for
+        // re-execution when it read a slot a lower-indexed tx wrote or
+        // delta-updated, or when its concrete write collides with a lower tx's
+        // delta (and vice versa). A slot touched only by commuting deltas
+        // across txs is never flagged — those resolve by fold at read time.
         let mut needs_reexec: HashSet<usize> = HashSet::new();
 
         for (i, rw_set_entry) in rw_sets.iter().enumerate() {
             let rw_set_i = rw_set_entry.lock();
 
-            // Check against all lower-indexed transactions that wrote
             for rw_set_j_entry in &rw_sets[..i] {
                 let rw_set_j = rw_set_j_entry.lock();
                 if rw_set_i.has_conflict(&rw_set_j) {
-                    needs_reexec.insert(i);
-                    break;
-                }
-            }
-
-            // Also validate that values read from MVCC are still current
-            // (check if any storage location read by tx i was written by a lower-indexed tx)
-            for (addr, key) in rw_set_i.reads.keys() {
-                let mvcc_value = mvd.read_storage(addr, key, i);
-                // If MVCC has a different value than what we read, we need to re-execute
-                // This uses the VersionedValue fields (tx_index, value, incarnation)
-                if mvcc_value.is_some() {
-                    // A lower-indexed transaction wrote to this location
-                    needs_reexec.insert(i);
-                    break;
-                }
-            }
-
-            // Check balance reads similarly
-            for addr in rw_set_i.balance_reads.keys() {
-                let mvcc_balance = mvd.read_balance(addr, i);
-                // If MVCC has a balance written by a lower tx, we might need re-execution
-                // This uses the VersionedBalance fields (tx_index, balance, incarnation)
-                if mvcc_balance.is_some() {
                     needs_reexec.insert(i);
                     break;
                 }
@@ -443,7 +682,7 @@ impl BlockStmExecutor {
                     "Block-STM: High conflict rate ({:.1}%), falling back to sequential",
                     conflict_rate * 100.0
                 );
-                return self.execute_sequential(tx_count, &execute_fn);
+                return (self.execute_sequential(tx_count, &execute_fn), ResolvedDeltas::default());
             }
 
             // Re-execute only conflicting transactions in order
@@ -463,12 +702,18 @@ impl BlockStmExecutor {
                 let status = execute_fn(i, &mut rw_set);
                 *results[i].lock() = Some(status);
 
-                // Record writes to MVCC data structure
+                // Record writes and delta lanes to the MVCC data structure.
                 for ((addr, key), value) in &rw_set.writes {
                     mvd.write_storage(addr, key, value.clone(), i, incarnation);
                 }
                 for (addr, balance) in &rw_set.balance_writes {
                     mvd.write_balance(addr, *balance, i, incarnation);
+                }
+                for ((addr, key), delta) in &rw_set.storage_deltas {
+                    mvd.write_storage_delta(addr, key, *delta, i, incarnation);
+                }
+                for (addr, delta) in &rw_set.balance_deltas {
+                    mvd.write_balance_delta(addr, *delta, i, incarnation);
                 }
 
                 was_reexecuted[i] = true;
@@ -510,6 +755,26 @@ impl BlockStmExecutor {
                     });
                 }
             }
+            // Delta-lane touches are writes too — attribute them so the local
+            // fee market still sees a hot cell that only ever takes deltas.
+            for (addr, _key) in rw_set.storage_deltas.keys() {
+                if seen.insert(addr.clone()) {
+                    let entry = account_contention.entry(addr.clone()).or_default();
+                    entry.merge(crate::hot_state::AccountSample {
+                        reexecutions: reex_delta,
+                        writes: 1,
+                    });
+                }
+            }
+            for addr in rw_set.balance_deltas.keys() {
+                if seen.insert(addr.clone()) {
+                    let entry = account_contention.entry(addr.clone()).or_default();
+                    entry.merge(crate::hot_state::AccountSample {
+                        reexecutions: reex_delta,
+                        writes: 1,
+                    });
+                }
+            }
         }
 
         // Collect results
@@ -543,16 +808,27 @@ impl BlockStmExecutor {
             tx_count, successful, failed, total_reexec
         );
 
-        ParallelExecutionResult {
-            total_transactions: tx_count,
-            successful,
-            failed,
-            reexecutions: total_reexec,
-            fell_back_to_sequential: false,
-            total_gas_used: total_gas,
-            transaction_results: tx_results,
-            account_contention,
-        }
+        // Commit-time fold: collapse every delta lane to a concrete value the
+        // caller writes back into the StateAdapter. Delta-only lanes fold onto
+        // the pre-block base supplied by `base`.
+        let resolved = ResolvedDeltas {
+            balances: mvd.finalize_balances(tx_count, &|addr| base.base_balance(addr)),
+            storage: mvd.finalize_storage(tx_count, &|addr, key| base.base_storage(addr, key)),
+        };
+
+        (
+            ParallelExecutionResult {
+                total_transactions: tx_count,
+                successful,
+                failed,
+                reexecutions: total_reexec,
+                fell_back_to_sequential: false,
+                total_gas_used: total_gas,
+                transaction_results: tx_results,
+                account_contention,
+            },
+            resolved,
+        )
     }
 
     /// Execute transactions sequentially (fallback)
@@ -615,6 +891,24 @@ impl BlockStmExecutor {
                     });
                 }
             }
+            for (addr, _key) in rw_set.storage_deltas.keys() {
+                if seen.insert(addr.clone()) {
+                    let entry = account_contention.entry(addr.clone()).or_default();
+                    entry.merge(crate::hot_state::AccountSample {
+                        reexecutions: 0,
+                        writes: 1,
+                    });
+                }
+            }
+            for addr in rw_set.balance_deltas.keys() {
+                if seen.insert(addr.clone()) {
+                    let entry = account_contention.entry(addr.clone()).or_default();
+                    entry.merge(crate::hot_state::AccountSample {
+                        reexecutions: 0,
+                        writes: 1,
+                    });
+                }
+            }
         }
 
         ParallelExecutionResult {
@@ -665,7 +959,7 @@ mod tests {
         let executor = BlockStmExecutor::default();
 
         // 10 transactions that don't conflict (different addresses)
-        let result = executor.execute_block(10, |i, rw_set| {
+        let (result, _) = executor.execute_block(10, &ZeroBaseState, |i, rw_set| {
             let addr = vec![i as u8; 32];
             let key = vec![0u8; 32];
             rw_set.record_read(&addr, &key, None);
@@ -689,7 +983,7 @@ mod tests {
 
         // Transactions that all write to the same address
         let shared_addr = vec![0u8; 32];
-        let result = executor.execute_block(5, |i, rw_set| {
+        let (result, _) = executor.execute_block(5, &ZeroBaseState, |i, rw_set| {
             let key = vec![0u8; 32];
             rw_set.record_read(&shared_addr, &key, Some(vec![i as u8]));
             rw_set.record_write(&shared_addr, &key, Some(vec![i as u8 + 1]));
@@ -705,7 +999,7 @@ mod tests {
     #[test]
     fn test_empty_block() {
         let executor = BlockStmExecutor::default();
-        let result = executor.execute_block(0, |_i, _rw_set| {
+        let (result, _) = executor.execute_block(0, &ZeroBaseState, |_i, _rw_set| {
             TxExecutionStatus::Success { gas_used: 0 }
         });
 
@@ -718,7 +1012,7 @@ mod tests {
         let executor = BlockStmExecutor::default();
 
         // Very small batch should go sequential
-        let result = executor.execute_block(2, |_i, _rw_set| {
+        let (result, _) = executor.execute_block(2, &ZeroBaseState, |_i, _rw_set| {
             TxExecutionStatus::Success { gas_used: 21_000 }
         });
 
@@ -731,7 +1025,7 @@ mod tests {
     fn test_mixed_success_failure() {
         let executor = BlockStmExecutor::default();
 
-        let result = executor.execute_block(6, |i, rw_set| {
+        let (result, _) = executor.execute_block(6, &ZeroBaseState, |i, rw_set| {
             let addr = vec![i as u8; 32];
             rw_set.record_write(&addr, &[0], Some(vec![1]));
 
@@ -775,7 +1069,7 @@ mod tests {
         assert_eq!(executor.total_blocks(), 0);
         assert_eq!(executor.total_reexecutions(), 0);
 
-        executor.execute_block(5, |i, rw_set| {
+        executor.execute_block(5, &ZeroBaseState, |i, rw_set| {
             let addr = vec![i as u8; 32];
             rw_set.record_write(&addr, &[0], Some(vec![1]));
             TxExecutionStatus::Success { gas_used: 21_000 }
@@ -791,7 +1085,7 @@ mod tests {
     fn test_account_contention_attribution_no_conflict() {
         let executor = BlockStmExecutor::default();
 
-        let result = executor.execute_block(4, |i, rw_set| {
+        let (result, _) = executor.execute_block(4, &ZeroBaseState, |i, rw_set| {
             let addr = vec![i as u8; 32];
             // Both storage and balance writes to the SAME address — must dedupe.
             rw_set.record_write(&addr, &[0], Some(vec![1]));
@@ -816,7 +1110,7 @@ mod tests {
         let executor = BlockStmExecutor::default();
         let shared_addr = vec![0xabu8; 32];
 
-        let result = executor.execute_block(8, |_i, rw_set| {
+        let (result, _) = executor.execute_block(8, &ZeroBaseState, |_i, rw_set| {
             let key = vec![0u8; 32];
             rw_set.record_read(&shared_addr, &key, Some(vec![0]));
             rw_set.record_write(&shared_addr, &key, Some(vec![1]));
@@ -833,5 +1127,147 @@ mod tests {
         // reexecutions <= writes; on parallel-with-conflicts path it'll be > 0,
         // on sequential fallback path it'll be 0. Either is valid.
         assert!(sample.reexecutions <= sample.writes);
+    }
+
+    /// A base state that returns a fixed balance for one address and zero
+    /// elsewhere — lets a delta-only lane fold onto a known pre-block value.
+    struct FixedBalanceBase {
+        addr: Vec<u8>,
+        balance: u128,
+    }
+    impl BaseState for FixedBalanceBase {
+        fn base_balance(&self, address: &[u8]) -> u128 {
+            if address == self.addr {
+                self.balance
+            } else {
+                0
+            }
+        }
+        fn base_storage(&self, _address: &[u8], _key: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    /// Delta lanes commute: many txs adding to the same hot balance must not
+    /// abort each other, and the folded balance must equal base + Σ deltas.
+    #[test]
+    fn test_balance_delta_lane_no_conflict_and_folds() {
+        let executor = BlockStmExecutor::default();
+        let hot = vec![0x11u8; 32];
+        let base = FixedBalanceBase { addr: hot.clone(), balance: 1_000 };
+
+        // 8 txs each credit the same hot balance by +10.
+        let (result, resolved) = executor.execute_block(8, &base, |_i, rw_set| {
+            rw_set.record_balance_delta(&hot, 10);
+            TxExecutionStatus::Success { gas_used: 21_000 }
+        });
+
+        // Delta-only lane → no read-write conflict → no re-execution.
+        assert_eq!(result.reexecutions, 0);
+        assert!(!result.fell_back_to_sequential);
+        // Fold: 1000 + 8*10 = 1080.
+        assert_eq!(resolved.balances.get(&hot).copied(), Some(1_080));
+    }
+
+    /// Mixed debits and credits still commute and fold to base + net delta.
+    #[test]
+    fn test_balance_delta_mixed_signs_fold() {
+        let executor = BlockStmExecutor::default();
+        let hot = vec![0x22u8; 32];
+        let base = FixedBalanceBase { addr: hot.clone(), balance: 500 };
+
+        let (result, resolved) = executor.execute_block(6, &base, |i, rw_set| {
+            // even txs credit +30, odd txs debit -10 → net 3*30 - 3*10 = 60.
+            if i % 2 == 0 {
+                rw_set.record_balance_delta(&hot, 30);
+            } else {
+                rw_set.record_balance_delta(&hot, -10);
+            }
+            TxExecutionStatus::Success { gas_used: 21_000 }
+        });
+
+        assert_eq!(result.reexecutions, 0);
+        assert_eq!(resolved.balances.get(&hot).copied(), Some(560));
+    }
+
+    /// A read of a slot another tx delta-updates DOES conflict — the reader
+    /// observed a value the delta invalidates.
+    #[test]
+    fn test_read_conflicts_with_delta() {
+        let hot = vec![0x33u8; 32];
+        let mut reader = ReadWriteSet::new();
+        reader.record_balance_read(&hot, 100);
+        let mut deltar = ReadWriteSet::new();
+        deltar.record_balance_delta(&hot, 5);
+        assert!(reader.has_conflict(&deltar));
+    }
+
+    /// A concrete write and a delta on the same balance do NOT commute.
+    #[test]
+    fn test_write_conflicts_with_delta() {
+        let hot = vec![0x44u8; 32];
+        let mut writer = ReadWriteSet::new();
+        writer.record_balance_write(&hot, 999);
+        let mut deltar = ReadWriteSet::new();
+        deltar.record_balance_delta(&hot, 5);
+        // Both directions must flag: write⋈delta and delta⋈write.
+        assert!(writer.has_conflict(&deltar));
+        assert!(deltar.has_conflict(&writer));
+    }
+
+    /// Two delta-only sets on the same slot commute — no conflict either way.
+    #[test]
+    fn test_delta_commutes_with_delta() {
+        let hot = vec![0x55u8; 32];
+        let mut a = ReadWriteSet::new();
+        a.record_balance_delta(&hot, 7);
+        let mut b = ReadWriteSet::new();
+        b.record_balance_delta(&hot, -3);
+        assert!(!a.has_conflict(&b));
+        assert!(!b.has_conflict(&a));
+    }
+
+    /// Storage counter delta lane folds a little-endian counter, preserving
+    /// byte width.
+    #[test]
+    fn test_storage_delta_counter_fold() {
+        let executor = BlockStmExecutor::default();
+        let addr = vec![0x66u8; 32];
+        let key = vec![0x01u8; 32];
+
+        // base counter = 100 (LE, 8 bytes); 5 txs each +2 → 110.
+        struct CounterBase {
+            addr: Vec<u8>,
+            key: Vec<u8>,
+        }
+        impl BaseState for CounterBase {
+            fn base_balance(&self, _a: &[u8]) -> u128 {
+                0
+            }
+            fn base_storage(&self, a: &[u8], k: &[u8]) -> Option<Vec<u8>> {
+                if a == self.addr && k == self.key {
+                    Some(100u64.to_le_bytes().to_vec())
+                } else {
+                    None
+                }
+            }
+        }
+        let base = CounterBase { addr: addr.clone(), key: key.clone() };
+
+        let (result, resolved) = executor.execute_block(5, &base, |_i, rw_set| {
+            rw_set.record_storage_delta(&addr, &key, 2);
+            TxExecutionStatus::Success { gas_used: 21_000 }
+        });
+
+        assert_eq!(result.reexecutions, 0);
+        let folded = resolved
+            .storage
+            .get(&(addr.clone(), key.clone()))
+            .cloned()
+            .flatten()
+            .expect("counter must resolve");
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&folded[..8]);
+        assert_eq!(u64::from_le_bytes(buf), 110);
     }
 }

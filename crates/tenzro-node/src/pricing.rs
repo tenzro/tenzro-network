@@ -198,7 +198,7 @@ pub fn clearing_price(asks: &[Order], bids: &[Order]) -> Option<u128> {
     asks.sort_by_key(|o| o.price);
 
     let mut bids: Vec<Order> = bids.to_vec();
-    bids.sort_by(|a, b| b.price.cmp(&a.price));
+    bids.sort_by_key(|o| std::cmp::Reverse(o.price));
 
     let mut cumulative_supply: u128 = 0;
     for ask in &asks {

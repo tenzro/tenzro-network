@@ -287,7 +287,7 @@ impl ModelProvisioner {
         }
 
         // Sort by priority descending
-        recommendations.sort_by(|a, b| b.priority.cmp(&a.priority));
+        recommendations.sort_by_key(|b| std::cmp::Reverse(b.priority));
 
         // Limit to max concurrent models * 2 (show some options)
         let limit = self.config.max_concurrent_models * 2;

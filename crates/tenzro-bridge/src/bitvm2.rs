@@ -60,18 +60,13 @@ pub struct BitVm2Config {
 
 /// Verifier kind. The state machine is identical; only the script-side
 /// challenge differs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ClementineVerifierKind {
     /// BitVM2 — production.
+    #[default]
     BitVm2,
     /// Garbled-Circuit + TOOP — Clementine v2 R&D.
     GarbledCircuitToop,
-}
-
-impl Default for ClementineVerifierKind {
-    fn default() -> Self {
-        ClementineVerifierKind::BitVm2
-    }
 }
 
 /// Peg-in request: user locked BTC into Clementine's federation address

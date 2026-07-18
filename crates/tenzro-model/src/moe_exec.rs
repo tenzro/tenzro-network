@@ -666,7 +666,7 @@ impl ExpertExecuteRequest {
         d_model: u32,
         rows: Vec<f32>,
     ) -> Self {
-        if d_model % 32 == 0 && !rows.is_empty() {
+        if d_model.is_multiple_of(32) && !rows.is_empty() {
             use base64::Engine;
             let blocks = crate::moe_quant::quantize_row_q8_0(&rows);
             let hidden_q8 =
@@ -710,7 +710,7 @@ impl ExpertExecuteRequest {
                         tokens: self.token_indices.len(),
                         d_model,
                     })?;
-                if d_model % 32 != 0 {
+                if !d_model.is_multiple_of(32) {
                     return Err(MoeExecError::DimensionMismatch {
                         len: blocks.len(),
                         tokens: self.token_indices.len(),
@@ -840,6 +840,19 @@ pub struct MoeExpertRuntimeStatus {
     pub compute_backend: String,
     /// True when the resolved backend runs on a GPU device.
     pub gpu: bool,
+    /// Cumulative count of experts evicted from the memory tier to the disk
+    /// tier under LRU pressure (blob retained on disk, decodable on demand).
+    pub evicted_to_disk: u64,
+    /// Cumulative count of experts dropped from the memory tier entirely (no
+    /// disk tier configured) under LRU pressure. Dropped experts must be
+    /// re-fetched from a peer holder before they can serve again.
+    pub evicted_dropped: u64,
+    /// Cumulative count of expert admissions that could not be satisfied within
+    /// the memory budget without evicting the expert being admitted — i.e. a
+    /// single expert larger than the whole budget was admitted anyway (it is
+    /// still servable, but on-tier accounting exceeds the ceiling while it is
+    /// resident).
+    pub admissions_over_budget: u64,
 }
 
 /// Bytes reserved on the memory tier when no explicit budget and no
@@ -899,15 +912,14 @@ fn auto_memory_budget_bytes() -> u64 {
     {
         if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
             for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                    if let Some(kib) = rest.split_whitespace().next() {
-                        if let Ok(kib) = kib.parse::<u64>() {
-                            let avail = kib.saturating_mul(1024);
-                            let budget = avail / AUTO_BUDGET_DEN * AUTO_BUDGET_NUM;
-                            if budget > 0 {
-                                return budget;
-                            }
-                        }
+                if let Some(rest) = line.strip_prefix("MemAvailable:")
+                    && let Some(kib) = rest.split_whitespace().next()
+                    && let Ok(kib) = kib.parse::<u64>()
+                {
+                    let avail = kib.saturating_mul(1024);
+                    let budget = avail / AUTO_BUDGET_DEN * AUTO_BUDGET_NUM;
+                    if budget > 0 {
+                        return budget;
                     }
                 }
             }
@@ -954,6 +966,13 @@ pub struct MoeExpertRuntime {
     mem_bytes: AtomicU64,
     /// Monotonic access counter driving LRU ordering.
     tick: AtomicU64,
+    /// Cumulative experts spilled to the disk tier under LRU pressure.
+    evicted_to_disk: AtomicU64,
+    /// Cumulative experts dropped (no disk tier) under LRU pressure.
+    evicted_dropped: AtomicU64,
+    /// Cumulative admissions where a single expert exceeded the whole budget
+    /// and was admitted over-budget rather than refused.
+    admissions_over_budget: AtomicU64,
     memory_budget_bytes: u64,
     disk_dir: Option<PathBuf>,
     /// Serializes eviction so concurrent loads can't over-evict.
@@ -1002,6 +1021,9 @@ impl MoeExpertRuntime {
             gates: DashMap::new(),
             mem_bytes: AtomicU64::new(0),
             tick: AtomicU64::new(0),
+            evicted_to_disk: AtomicU64::new(0),
+            evicted_dropped: AtomicU64::new(0),
+            admissions_over_budget: AtomicU64::new(0),
             memory_budget_bytes: config.memory_budget_bytes.max(1),
             disk_dir: config.disk_dir,
             evict_guard: Mutex::new(()),
@@ -1100,6 +1122,14 @@ impl MoeExpertRuntime {
         );
         self.mem_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.evict_to_budget();
+        // A single expert larger than the whole budget survives eviction (the
+        // last resident entry is never evicted to nothing) but leaves resident
+        // bytes above the ceiling. Record it so operators can see when the
+        // budget is too small for the model being served.
+        if bytes > self.memory_budget_bytes {
+            self.admissions_over_budget
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Evict coldest memory-tier experts until resident bytes fit the
@@ -1132,8 +1162,11 @@ impl MoeExpertRuntime {
                             quant: entry.ffn.quant_tag().map(str::to_string),
                         },
                     );
+                    self.evicted_to_disk.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    // No disk tier: expert is dropped (must be re-fetched).
+                    self.evicted_dropped.fetch_add(1, Ordering::Relaxed);
                 }
-                // else: no disk tier, expert is dropped (must be re-fetched).
             }
         }
     }
@@ -1189,10 +1222,10 @@ impl MoeExpertRuntime {
             if self.mem.contains_key(&key) {
                 continue;
             }
-            if self.disk.contains_key(&key) {
-                if let Ok(Some(_)) = self.resolve(&key) {
-                    promoted += 1;
-                }
+            if self.disk.contains_key(&key)
+                && let Ok(Some(_)) = self.resolve(&key)
+            {
+                promoted += 1;
             }
         }
         promoted
@@ -1389,6 +1422,9 @@ impl MoeExpertRuntime {
             disk_experts,
             compute_backend: self.compute.tag().to_string(),
             gpu: matches!(self.backend_kind, BackendKind::Cuda | BackendKind::Wgpu),
+            evicted_to_disk: self.evicted_to_disk.load(Ordering::Relaxed),
+            evicted_dropped: self.evicted_dropped.load(Ordering::Relaxed),
+            admissions_over_budget: self.admissions_over_budget.load(Ordering::Relaxed),
         }
     }
 }
@@ -1558,10 +1594,10 @@ fn view_hidden(hidden: &[f32], d_model: usize) -> MoeExecResult<ArrayView2<'_, f
     if hidden.is_empty() {
         return Err(MoeExecError::EmptyBatch);
     }
-    if d_model == 0 || hidden.len() % d_model != 0 {
+    if d_model == 0 || !hidden.len().is_multiple_of(d_model) {
         return Err(MoeExecError::DimensionMismatch {
             len: hidden.len(),
-            tokens: if d_model == 0 { 0 } else { hidden.len() / d_model },
+            tokens: hidden.len().checked_div(d_model).unwrap_or(0),
             d_model,
         });
     }
@@ -2438,6 +2474,9 @@ mod tests {
         assert!(rt.has_expert("m", 0, 2));
         assert_eq!(status.memory_bytes, EXPERT_BYTES * 2);
         assert!(status.memory_bytes <= status.memory_budget_bytes);
+        assert_eq!(status.evicted_dropped, 1, "one LRU victim was dropped");
+        assert_eq!(status.evicted_to_disk, 0, "no disk tier to spill to");
+        assert_eq!(status.admissions_over_budget, 0);
     }
 
     #[test]
@@ -2456,6 +2495,8 @@ mod tests {
         let status = rt.status();
         assert_eq!(status.memory_experts, 1);
         assert_eq!(status.disk_experts, 1);
+        assert_eq!(status.evicted_to_disk, 1, "one expert spilled to disk");
+        assert_eq!(status.evicted_dropped, 0, "disk tier => nothing dropped");
         let evicted = status.experts.iter().find(|e| e.expert == 0).unwrap();
         assert_eq!(evicted.tier, ExpertTier::Disk);
 
@@ -2517,7 +2558,12 @@ mod tests {
         rt.load_expert("m", 0, 0, &identity_expert_blob(1.0)).unwrap();
         assert!(rt.has_expert("m", 0, 0));
         assert!(rt.execute(&exec_req("m", 0, 0)).is_ok());
-        assert_eq!(rt.status().memory_experts, 1);
+        let status = rt.status();
+        assert_eq!(status.memory_experts, 1);
+        assert_eq!(
+            status.admissions_over_budget, 1,
+            "the oversized expert was admitted over budget"
+        );
     }
 
     fn exec_req(model: &str, layer: u32, expert: u32) -> ExpertExecuteRequest {

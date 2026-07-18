@@ -155,10 +155,109 @@ fn bench_gas_estimation(c: &mut Criterion) {
     group.finish();
 }
 
+/// Block-STM commutative delta lanes vs concrete read-modify-write.
+///
+/// The high-conflict batch models many transactions all crediting/debiting one
+/// hot account (the archetype: concurrent TNZO transfers hitting a shared
+/// sender or beneficiary). With concrete `read + write` on the shared balance,
+/// every tx after the first conflicts and re-executes (or the batch falls back
+/// to sequential). With commutative delta lanes, those same transactions
+/// commute — zero re-executions — and the balance folds at commit. The
+/// no-conflict batch (distinct accounts) is the baseline both paths share.
+fn bench_block_stm_delta_lanes(c: &mut Criterion) {
+    use tenzro_vm::{
+        BaseState, BlockStmExecutor, ReadWriteSet, TxExecutionStatus, ZeroBaseState,
+    };
+
+    struct HotBase(Vec<u8>, u128);
+    impl BaseState for HotBase {
+        fn base_balance(&self, address: &[u8]) -> u128 {
+            if address == self.0 { self.1 } else { 0 }
+        }
+        fn base_storage(&self, _a: &[u8], _k: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    let mut group = c.benchmark_group("block_stm");
+
+    for &tx_count in &[16usize, 64, 256] {
+        // High-conflict, concrete RMW on a shared hot balance: forces the
+        // conflict/re-execution machinery.
+        group.bench_with_input(
+            BenchmarkId::new("hot_account_concrete_rmw", tx_count),
+            &tx_count,
+            |b, &n| {
+                let executor = BlockStmExecutor::default();
+                let hot = vec![0xaau8; 32];
+                b.iter(|| {
+                    let (result, _) = executor.execute_block(
+                        black_box(n),
+                        &ZeroBaseState,
+                        |_i, rw: &mut ReadWriteSet| {
+                            rw.record_balance_read(&hot, 1_000_000);
+                            rw.record_balance_write(&hot, 999_999);
+                            TxExecutionStatus::Success { gas_used: 21_000 }
+                        },
+                    );
+                    black_box(result);
+                });
+            },
+        );
+
+        // Same hot account, commutative delta lane: commutes → no re-execution.
+        group.bench_with_input(
+            BenchmarkId::new("hot_account_delta_lane", tx_count),
+            &tx_count,
+            |b, &n| {
+                let executor = BlockStmExecutor::default();
+                let hot = vec![0xaau8; 32];
+                let base = HotBase(hot.clone(), 1_000_000);
+                b.iter(|| {
+                    let (result, resolved) = executor.execute_block(
+                        black_box(n),
+                        &base,
+                        |_i, rw: &mut ReadWriteSet| {
+                            rw.record_balance_delta(&hot, -1);
+                            TxExecutionStatus::Success { gas_used: 21_000 }
+                        },
+                    );
+                    black_box((result, resolved));
+                });
+            },
+        );
+
+        // No-conflict baseline: each tx touches a distinct account.
+        group.bench_with_input(
+            BenchmarkId::new("distinct_accounts", tx_count),
+            &tx_count,
+            |b, &n| {
+                let executor = BlockStmExecutor::default();
+                b.iter(|| {
+                    let (result, _) = executor.execute_block(
+                        black_box(n),
+                        &ZeroBaseState,
+                        |i, rw: &mut ReadWriteSet| {
+                            let addr = vec![i as u8; 32];
+                            rw.record_balance_read(&addr, 1_000);
+                            rw.record_balance_write(&addr, 900);
+                            TxExecutionStatus::Success { gas_used: 21_000 }
+                        },
+                    );
+                    black_box(result);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_evm_transfer,
     bench_state_adapter,
     bench_gas_estimation,
+    bench_block_stm_delta_lanes,
 );
 criterion_main!(benches);

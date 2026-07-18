@@ -12,10 +12,9 @@
 //!
 //! This module factors the threshold-quorum check out of the
 //! per-adapter code so we can build the LZ V2 Uln302, CCIP commit-store
-//! + RMN, and deBridge DLN inbound verifiers without copy-pasting
-//! cryptographic primitives. Per the `feedback_no_cloud_anchored_fixes`
-//! memory the implementation is universal — no cloud, no platform
-//! gating, just k256 ECDSA + Keccak-256 address derivation.
+//! and RMN, and deBridge DLN inbound verifiers without copy-pasting
+//! cryptographic primitives. The implementation is universal — no cloud,
+//! no platform gating, just k256 ECDSA and Keccak-256 address derivation.
 //!
 //! # Authorship boundary
 //!

@@ -233,10 +233,10 @@ impl SecureMintRegistry {
     }
 
     fn persist(&self, token: &[u8; 20], policy: &SecureMintPolicy) {
-        if let Some(ref storage) = self.storage {
-            if let Ok(bytes) = serde_json::to_vec(policy) {
-                let _ = storage.put(tenzro_storage::CF_TOKENS, &Self::key(token), &bytes);
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(bytes) = serde_json::to_vec(policy)
+        {
+            let _ = storage.put(tenzro_storage::CF_TOKENS, &Self::key(token), &bytes);
         }
     }
 
@@ -369,10 +369,10 @@ impl SecureMintRegistry {
         let window_minted = Self::evaluate_mint(policy, amount, now, token, global_pause)?;
         policy.circulating += amount;
         if policy.mint_window_cap > 0 {
-            // If the window rolled, restart it at `now`.
-            if window_minted == amount && policy.window_minted != 0 {
-                policy.window_started_at = now;
-            } else if policy.window_minted == 0 {
+            // Restart the window at `now` when it rolled over or was empty.
+            if (window_minted == amount && policy.window_minted != 0)
+                || policy.window_minted == 0
+            {
                 policy.window_started_at = now;
             }
             policy.window_minted = window_minted;

@@ -30,20 +30,6 @@ pub enum ComponentRuntime {
     McpTool,
 }
 
-impl ComponentRuntime {
-    /// Parse the manifest's `runtime` field. Returns `None` for
-    /// unrecognized values so the caller can produce a
-    /// `WasmError::UnsupportedRuntime`.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "wasi-component" => Some(Self::WasiComponent),
-            "agent-skill" => Some(Self::AgentSkill),
-            "mcp-tool" => Some(Self::McpTool),
-            _ => None,
-        }
-    }
-}
-
 /// Declarative manifest for a `.wasm` component.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentManifest {

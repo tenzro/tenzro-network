@@ -11,7 +11,7 @@ the finalize RPC. When A finalizes, it broadcasts the ``SyncRound`` on the
 gradients and no finalize RPC — ingests that broadcast and advances its own
 ``current_round`` to the same value with the same ``state_root``.
 
-That is the multi-syncer witness-committee shape (Psyche / INTELLECT-2): a
+That is the multi-syncer witness-committee shape: a
 round decided by one witness is observed by the others over gossip, and the
 idempotent ``finalize_round`` accepts a matching ``(round, state_root)`` and
 rejects a divergent one as a fork. This test proves the gossip transport,

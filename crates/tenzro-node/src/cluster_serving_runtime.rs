@@ -73,10 +73,11 @@ use tenzro_network::{InboundClusterTunnel, NetworkService, OutboundClusterTunnel
 /// rpc-server to a stable path and sets `TENZRO_RPC_SERVER_BIN` to point at it.
 /// Returns `None` if neither source yields an existing file.
 fn resolve_rpc_server_bin() -> Option<String> {
-    if let Ok(p) = std::env::var("TENZRO_RPC_SERVER_BIN") {
-        if !p.is_empty() && std::path::Path::new(&p).exists() {
-            return Some(p);
-        }
+    if let Ok(p) = std::env::var("TENZRO_RPC_SERVER_BIN")
+        && !p.is_empty()
+        && std::path::Path::new(&p).exists()
+    {
+        return Some(p);
     }
     let compiled = llama_cpp_2::rpc_server_bin()?;
     std::path::Path::new(compiled)

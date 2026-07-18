@@ -98,7 +98,7 @@ pub struct Vote {
     /// Highest Prepare-QC view the voter has observed at the moment they
     /// signed this vote. Must satisfy `high_qc_view < view`.
     ///
-    /// Aptos `SyncInfo` pattern (#171): every consensus message carries the
+    /// The SyncInfo pattern (#171): every consensus message carries the
     /// sender's view of the highest QC so a lagging peer can fast-forward
     /// without a separate sync RPC. Bound into the signing payload, so a
     /// Byzantine voter cannot tamper with this field after signing.
@@ -359,6 +359,8 @@ impl QuorumCertificate {
         let mut signer_pks: Vec<BlsPublicKey> = Vec::new();
         let mut total_voting_power: u128 = 0;
         let mut signed_power: u128 = 0;
+        // bit_index drives both the bitmap byte/bit math and the active-set index
+        #[allow(clippy::needless_range_loop)]
         for bit_index in 0..(expected_bitmap_bytes * 8) {
             let byte = self.signer_bitmap[bit_index / 8];
             if (byte >> (bit_index % 8)) & 1 == 0 {
@@ -390,7 +392,7 @@ impl QuorumCertificate {
             ));
         }
 
-        // Stake-weighted quorum on normalized weight (Sui model), not headcount.
+        // Stake-weighted quorum on normalized weight, not headcount.
         let quorum_power = validator_set.quorum_voting_power();
         if signed_power < quorum_power {
             return Err(ConsensusError::InvalidSignature(format!(
@@ -692,7 +694,7 @@ impl VoteCollector {
             .map(|v| v.voting_power())
             .sum();
 
-        // Quorum is decided on normalized stake weight (Sui model), not on a
+        // Quorum is decided on normalized stake weight, not on a
         // head-count of voters. Zero-stake signers add zero weight.
         let voter_addrs: Vec<Address> = votes_entry.iter().map(|v| v.voter).collect();
         let signed_power = self.validator_set.voting_power_of(voter_addrs.iter());

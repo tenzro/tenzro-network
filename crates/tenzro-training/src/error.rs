@@ -127,6 +127,20 @@ pub enum TrainingError {
         got: tenzro_types::training::GradientQuantization,
     },
 
+    #[error(
+        "payload-kind mismatch: task spec requires {expected}, submission declares {got}"
+    )]
+    PayloadKindMismatch {
+        expected: tenzro_types::training::PayloadKind,
+        got: tenzro_types::training::PayloadKind,
+    },
+
+    #[error(
+        "outer-update mode {mode} requires a SparseTopK payload kind (SparseEf momentum lives \
+         in the trainer-side error-feedback accumulator, not the syncer)"
+    )]
+    OuterUpdateRequiresSparse { mode: &'static str },
+
     #[error("malformed quantized payload: {0}")]
     QuantizedPayloadMalformed(String),
 
@@ -180,8 +194,9 @@ impl TrainingError {
     /// mismatch (a straggler submitting for a stale round, or for a fragment
     /// outside the current active shard, which honest trainers hit routinely).
     ///
-    /// Slashable: bad signature, quantization mismatch, pipeline-stage
-    /// violation, missing attestation at a tier that requires it, a missing or
+    /// Slashable: bad signature, quantization mismatch, payload-kind mismatch,
+    /// pipeline-stage violation, missing attestation at a tier that requires it,
+    /// a missing or
     /// structurally invalid activation commitment at the Open tier, and
     /// malformed / hash-mismatched payloads — all of which require the
     /// submitter to deviate from the task spec they enrolled under.
@@ -194,6 +209,7 @@ impl TrainingError {
             self,
             TrainingError::InvalidSignature { .. }
                 | TrainingError::QuantizationMismatch { .. }
+                | TrainingError::PayloadKindMismatch { .. }
                 | TrainingError::PipelineStageMismatch { .. }
                 | TrainingError::AttestationRequired(_)
                 | TrainingError::CommitmentRequired

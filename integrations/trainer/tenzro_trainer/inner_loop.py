@@ -181,11 +181,10 @@ def apply_state_delta(
 class OuterUpdateScheduler:
     """Applies outer updates immediately or with a one-round delay.
 
-    DiLoCoX (arXiv 2506.21263) one-step-delayed apply: the aggregate computed
-    at round ``r`` is applied at the *start* of round ``r + 1``, overlapping
-    the outer synchronization with the next inner-step window. When
-    ``delayed`` is ``False`` (the classic DiLoCo default), updates apply
-    as soon as they arrive.
+    One-step-delayed apply: the aggregate computed at round ``r`` is applied
+    at the *start* of round ``r + 1``, overlapping the outer synchronization
+    with the next inner-step window. When ``delayed`` is ``False`` (the
+    default), updates apply as soon as they arrive.
     """
 
     delayed: bool = False

@@ -495,8 +495,8 @@ mod onnx_backend {
                     }
                     if count > 0 {
                         let inv = 1.0 / count as f32;
-                        for d in 0..dim {
-                            acc[d] *= inv;
+                        for v in acc.iter_mut().take(dim) {
+                            *v *= inv;
                         }
                     }
                     acc
@@ -512,8 +512,8 @@ mod onnx_backend {
                         }
                     }
                     let inv = 1.0 / seq_len as f32;
-                    for d in 0..dim {
-                        acc[d] *= inv;
+                    for v in acc.iter_mut().take(dim) {
+                        *v *= inv;
                     }
                     acc
                 }

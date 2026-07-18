@@ -390,10 +390,21 @@ pub enum TransactionType {
         payer: Address,
         /// Address funds move to.
         payee: Address,
-        /// Amount to settle, in TNZO base units.
+        /// Amount to settle, in TNZO base units. When `margin_bps > 0` this
+        /// is the margin-inclusive total the payer authorized; the VM carves
+        /// `amount * margin_bps / (10_000 + margin_bps)` out of it to
+        /// `app_wallet` and credits the remainder to `payee`.
         amount: u128,
         /// x402 payment identifier — the idempotency key.
         payment_id: String,
+        /// Registered app's wallet receiving the developer-margin carve.
+        /// Snapshot taken from the on-chain `AppRegistry` at challenge
+        /// creation so the VM needs no registry access. `None` disables the
+        /// carve (requires `margin_bps == 0`).
+        app_wallet: Option<Address>,
+        /// Developer margin, in basis points, already included in `amount`.
+        /// Bounded by `MAX_DEVELOPER_MARGIN_BPS`.
+        margin_bps: u32,
     },
     /// Register the signing wallet as a Candidate validator (Dynamic Validator
     /// Set, modern permissionless join).

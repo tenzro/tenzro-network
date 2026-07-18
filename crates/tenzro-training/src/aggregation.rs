@@ -6,6 +6,20 @@
 //!
 //! Phase 1 ships only [`MeanAggregator`]. The remaining rules light up in
 //! Phase 2 once Byzantine defense is required (Verified/Confidential tiers).
+//!
+//! ## Sparse contributions
+//!
+//! Sparse outer gradients are transmitted as chunked top-k payloads
+//! ([`crate::sparse`]), but they are decoded to a **dense, zero-filled**
+//! `Vec<f32>` of the full fragment length by [`crate::sparse::sparse_decode`]
+//! before they reach an [`Aggregator`]. A coordinate that a peer did not
+//! transmit decodes to `0.0`, so the union-of-transmitted-indices semantics
+//! fall out of the dense path for free: [`MeanAggregator`] sums over all
+//! peers (absent coordinate = 0 contribution), and
+//! [`TrimmedMeanAggregator`] / [`CoordinateMedianAggregator`] / [`KrumAggregator`]
+//! operate per-coordinate over the same densified views. No separate sparse
+//! aggregator is required — the tier admission gate
+//! ([`crate::runtime::validate_aggregation_for_tier`]) is unchanged.
 
 use crate::error::{Result, TrainingError};
 use ndarray::{Array1, ArrayView1};
@@ -29,7 +43,7 @@ pub fn aggregator_for(rule: AggregationRule) -> Box<dyn Aggregator> {
         AggregationRule::TrimmedMean { alpha_bps } => Box::new(TrimmedMeanAggregator { alpha_bps }),
         AggregationRule::CoordinateMedian => Box::new(CoordinateMedianAggregator),
         AggregationRule::Krum { f } => Box::new(KrumAggregator { f }),
-        // ADF-LoRA (arXiv 2511.18291): each round only one low-rank factor is
+        // Alternating LoRA: each round only one low-rank factor is
         // live, so the fragment tensors that arrive are a single factor across
         // contributors and per-coordinate mean is the correct aggregation. The
         // "alternating" logic — which of A/B is frozen this round — lives in
@@ -295,8 +309,8 @@ mod tests {
 
     #[test]
     fn lora_alternating_means_single_factor() {
-        // Under ADF-LoRA the syncer receives one low-rank factor per round
-        // across contributors; the rule is a plain per-coordinate mean.
+        // Under alternating LoRA the syncer receives one low-rank factor per
+        // round across contributors; the rule is a plain per-coordinate mean.
         let a = arr1(&[2.0_f32, 4.0]);
         let b = arr1(&[4.0_f32, 8.0]);
         let agg = aggregator_for(AggregationRule::LoraAlternating);

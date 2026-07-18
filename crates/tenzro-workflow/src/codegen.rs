@@ -329,7 +329,7 @@ fn obligation_short_id(ob: &Obligation) -> String {
 fn short_did(did: &str) -> String {
     // Strip the `did:tenzro:human:`/`machine:` prefix for readability
     // in emitted comments; full DIDs remain in the runtime payload.
-    did.split(':').last().unwrap_or(did).to_string()
+    did.split(':').next_back().unwrap_or(did).to_string()
 }
 
 fn discharge_kind_label(k: &DischargeProofKind) -> String {
@@ -487,7 +487,7 @@ mod tests {
             ObligationKind::Pay { amount_wei: 50_000, asset: AssetRef { chain: "tenzro".into(), symbol: "USDC".into(), token_address: None } },
             DischargeProofKind::PaymentReceipt,
         );
-        let a = WorkflowDamlCodegen::emit(&wf, &map, &[ob.clone()]).unwrap();
+        let a = WorkflowDamlCodegen::emit(&wf, &map, std::slice::from_ref(&ob)).unwrap();
         let b = WorkflowDamlCodegen::emit(&wf, &map, &[ob]).unwrap();
         assert_eq!(a, b);
     }

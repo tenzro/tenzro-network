@@ -7,6 +7,7 @@
 pub mod inference;
 pub mod settlement;
 pub mod identity;
+pub mod pq_qc;
 
 pub use inference::{
     InferenceAir, NUM_INFERENCE_COLS, NUM_INFERENCE_PUBLIC_VALUES,
@@ -19,4 +20,8 @@ pub use settlement::{
 pub use identity::{
     IdentityAir, NUM_IDENTITY_COLS, NUM_IDENTITY_PUBLIC_VALUES,
     generate_identity_trace, identity_public_inputs,
+};
+pub use pq_qc::{
+    PqQcAggregationAir, cols_for, generate_pq_qc_trace, message_digest,
+    pq_qc_public_inputs, public_values_for,
 };

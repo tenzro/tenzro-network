@@ -444,7 +444,7 @@ impl BridgeAdapter for AxelarAdapter {
         Ok(BridgeTokenReceipt::new(
             format!("0x{}", hex::encode(hash.as_bytes())),
             hash,
-            (Timestamp::now().as_secs() * 1_000) as i64,
+            Timestamp::now().as_secs() * 1_000,
             0,
             request.source_chain,
             canonical_dest,

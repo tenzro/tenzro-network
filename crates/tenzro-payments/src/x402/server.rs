@@ -365,12 +365,12 @@ impl PaymentProtocol for X402PaymentServer {
         // configured, a settlement with the same `(offer commitment, payer)` is
         // a replay — return the prior receipt without charging again.
         let payment_id = self.payment_id_for(&challenge, &verification.payer_did);
-        if let (Some(ledger), Some(pid)) = (&self.idempotency, &payment_id) {
-            if let Some(prior) = ledger.get(pid) {
-                info!("x402 replay for {pid} — returning prior receipt");
-                self.challenge_store.remove(&challenge.challenge_id);
-                return Ok(prior);
-            }
+        if let (Some(ledger), Some(pid)) = (&self.idempotency, &payment_id)
+            && let Some(prior) = ledger.get(pid)
+        {
+            info!("x402 replay for {pid} — returning prior receipt");
+            self.challenge_store.remove(&challenge.challenge_id);
+            return Ok(prior);
         }
 
         // The amount to charge. For the metered schemes (`upto` /

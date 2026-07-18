@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tenzro_storage::kv::{KvStore, CF_MODELS};
 use tenzro_types::{
-    model::{ModelInfo, ModelModality, ModelStatus},
+    model::{AcceptancePolicy, ModelInfo, ModelModality, ModelStatus},
     primitives::{Address, Hash, Timestamp},
 };
 use tracing::{debug, info, warn};
@@ -143,6 +143,11 @@ pub struct ModelRegistry {
     /// Optional persistent storage backend. When set, all registry mutations
     /// are written through to `CF_MODELS` under the `info:<model_id>` key.
     storage: Option<Arc<dyn KvStore>>,
+    /// Operator license-acceptance policy. `register_model` refuses any model
+    /// whose `license_tier` is not admitted by this policy: NonCommercial
+    /// requires `accept_non_commercial`, CommercialCustom requires the
+    /// model's `license_id` to be in `accepted_license_ids`.
+    acceptance: AcceptancePolicy,
 }
 
 impl std::fmt::Debug for ModelRegistry {
@@ -163,6 +168,7 @@ impl ModelRegistry {
         Self {
             models: Arc::new(DashMap::new()),
             storage: None,
+            acceptance: AcceptancePolicy::default(),
         }
     }
 
@@ -210,7 +216,16 @@ impl ModelRegistry {
         Self {
             models,
             storage: Some(storage),
+            acceptance: AcceptancePolicy::default(),
         }
+    }
+
+    /// Sets the operator license-acceptance policy consulted by
+    /// [`ModelRegistry::register_model`]. Wired from the node's CLI flags
+    /// (`--accept-non-commercial`, `--accept-license <id>`).
+    pub fn with_acceptance_policy(mut self, acceptance: AcceptancePolicy) -> Self {
+        self.acceptance = acceptance;
+        self
     }
 
     /// Computes the storage key for a model catalog record.
@@ -268,6 +283,15 @@ impl ModelRegistry {
             return Err(ModelError::InvalidModel(
                 "Model hash cannot be zero - SHA-256 hash required for integrity verification".to_string(),
             ));
+        }
+
+        // License gate: refuse models whose tier the operator has not accepted.
+        if !self.acceptance.admits(model.license_tier, model.license_id.as_deref()) {
+            return Err(ModelError::LicenseNotAccepted {
+                model_id,
+                tier: model.license_tier,
+                license_id: model.license_id.clone(),
+            });
         }
 
         // Persist first so a restart never surfaces a model that wasn't durable.
@@ -489,7 +513,7 @@ impl Default for ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tenzro_types::model::{ModelModality, ModelParameters, PricingConfig};
+    use tenzro_types::model::{LicenseTier, ModelModality, ModelParameters, PricingConfig};
 
     #[test]
     fn test_register_and_get_model() {
@@ -658,6 +682,9 @@ mod tests {
             vision: None,
             audio: None,
             video: None,
+            license_tier: LicenseTier::Permissive,
+            license: String::new(),
+            license_id: None,
         }
     }
 }

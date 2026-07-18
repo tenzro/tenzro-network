@@ -1,6 +1,6 @@
 # tenzro-training
 
-Protocol-only Rust crate for **Tenzro Train** — decentralized, verifiable, multi-modal foundation-model training over Decoupled DiLoCo.
+Protocol-only Rust crate for **Tenzro Train** — decentralized, verifiable, multi-modal foundation-model training with decoupled outer aggregation.
 
 ## What this crate is
 
@@ -9,6 +9,7 @@ Protocol-only Rust crate for **Tenzro Train** — decentralized, verifiable, mul
 - **Aggregation rules** (`aggregation` module) — `Mean`, `TrimmedMean`, `CoordinateMedian`, `Krum`. All four are implemented and unit-tested; tier policy admits `Mean` on the Open tier and all four on Verified + Confidential.
 - **Outer optimizer** (`outer_optimizer` module) — Nesterov SGD state used between outer rounds, plus adaptive learning rate: `gradient_agreement` computes pairwise cosine agreement across submitted outer gradients and `AdaptiveLrConfig` scales the outer step accordingly.
 - **Gradient quantization** (`quantization` module) — blockwise symmetric Int8 (4× smaller than f32) and Int4 (~8×) codecs for outer-gradient payloads, byte-identical to the Python implementation in `tenzro_trainer.quantization`. Per-block 4-byte LE f32 scale followed by clamped integer codes; `GradientQuantization::None` is raw little-endian f32.
+- **Gradient sparsification** (`sparse` module) — chunked top-`k` selection plus a 2-bit codec that compresses a fragment >100× by keeping only the largest-magnitude coordinates per chunk. Dropped mass is not lost: `ErrorFeedback` accumulates the residual and folds it back into the next round's fragment (`prepare_transmit` / `commit_transmitted`), so sparse rounds converge to the same target as dense rounds. `sparse_encode` / `sparse_decode` are the wire codec; `select_transmitted` chooses the transmitted coordinate set.
 - **Witness committee** (`committee` module) — k-of-N committee selection over chain entropy for multi-syncer round finalization.
 - **Confidential-tier sealed shards** (`confidential` module) — `SealedDatasetManifest` / `SealedShardEnvelope` validation, manifest hash binding, enrollment attestation checks.
 - **Gossip codecs** (`gossip` module) — typed encode/decode for the `tenzro/training` and `tenzro/training/syncer` topics.
@@ -26,7 +27,7 @@ The inner training loop — forward/backward, optimizer step, FSDP sharding — 
 - `tenzro/training` — outer gradient submissions, fragment payloads
 - `tenzro/training/syncer` — syncer status, round transitions, finality
 
-This split mirrors how every production decentralized training run in 2026 (Prime Intellect's INTELLECT-1/2/3, Nous Research's Hermes 4.3 on Psyche/DisTrO, OpenDiLoCo) structures its stack: Python + PyTorch for the inner loop, a typed protocol crate for orchestration. See `AI.md` §7.7.1 for the full rationale.
+This split mirrors how production decentralized training runs structure their stack: Python + PyTorch for the inner loop, a typed protocol crate for orchestration. See `AI.md` §7.7.1 for the full rationale.
 
 When the protocol layer needs to "train," it dispatches to the Python reference trainer over JSON-RPC and ingests the resulting `OuterGradient` / safetensors payload. Aggregation operates over already-decoded `ndarray` views of those payloads.
 
@@ -37,10 +38,11 @@ When the protocol layer needs to "train," it dispatches to the Python reference 
 | Modality | Timeseries (TimesFM-class 200M), language (`transformers`), vision (`timm`) |
 | Trust tier | `Open` (stake bonding), `Verified` (TEE attestation), `Confidential` (TEE-resident data via sealed shards) |
 | Aggregation | `Mean` (all tiers); `TrimmedMean`, `CoordinateMedian`, `Krum` (Verified + Confidential) |
-| Sync strategy | `Full` (every fragment every round) or `Streaming { num_shards }` (one shard per round, arXiv 2501.18512) |
+| Sync strategy | `Full` (every fragment every round) or `Streaming { num_shards }` (one shard per round) |
 | Quantization | `None`, `Int8 { block_size }` (4×), `Int4 { block_size }` (~8×) |
-| Pipeline groups | `PipelineConfig { num_stages }` — a group of trainers jointly holds one replica; quorum counts distinct groups (arXiv 2506.21263) |
-| Inner optimizer | Task-selectable in the Python trainer: `muon` / `adamw` / `sgd` (arXiv 2505.23725) |
+| Sparsification | chunked top-`k` + 2-bit codec (>100×) with error-feedback residual carry-forward |
+| Pipeline groups | `PipelineConfig { num_stages }` — a group of trainers jointly holds one replica; quorum counts distinct groups |
+| Inner optimizer | Task-selectable in the Python trainer: `muon` / `adamw` / `sgd` |
 | Reference hyperparams | M=8, K=6, F=12, H=24, AdamW lr=3e-4 inner, Nesterov SGD lr=0.7 mom=0.9 outer |
 
 ## Public API surface
@@ -71,6 +73,10 @@ pub use payload_store::{
     compute_payload_hash, verify_payload, GradientPayloadStore, InMemoryGradientStore,
 };
 pub use quantization::{dequantize, encoded_len, quantize};
+pub use sparse::{
+    select_transmitted, sparse_decode, sparse_encode, sparse_encoded_len, ErrorFeedback,
+    SparseDecoded,
+};
 pub use runtime::{
     min_tier_for_rule, validate_aggregation_for_tier, FragmentBuffer, SyncerState, TrainingRuntime,
 };

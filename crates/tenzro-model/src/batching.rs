@@ -539,12 +539,11 @@ fn render_prompt(model: &LlamaModel, prompt: &BatchPrompt) -> Result<String> {
             // is missing or renders empty (some Qwen3 templates render to a
             // zero-length body on this llama.cpp build, which would tokenize to
             // zero tokens). Keeps both serving modes templating identically.
-            if let Ok(tmpl) = model.chat_template(None) {
-                if let Ok(rendered) = model.apply_chat_template(&tmpl, &llama_messages, true) {
-                    if !rendered.trim().is_empty() {
-                        return Ok(rendered);
-                    }
-                }
+            if let Ok(tmpl) = model.chat_template(None)
+                && let Ok(rendered) = model.apply_chat_template(&tmpl, &llama_messages, true)
+                && !rendered.trim().is_empty()
+            {
+                return Ok(rendered);
             }
             Ok(crate::runtime::render_chatml_prompt(messages))
         }

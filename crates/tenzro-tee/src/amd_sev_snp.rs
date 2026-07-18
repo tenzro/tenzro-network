@@ -262,7 +262,7 @@ impl AmdSevSnpProvider {
             use std::os::unix::io::AsRawFd;
 
             // Prepare snp_report_req: user_data[64] + vmpl[4] + rsvd[28] = 96 bytes
-            let mut req = vec![0u8; 96];
+            let mut req = [0u8; 96];
             let copy_len = user_data.len().min(SNP_REPORT_USER_DATA_SIZE);
             req[..copy_len].copy_from_slice(&user_data[..copy_len]);
             // vmpl = 0 (VMPL0, highest privilege) at offset 64
@@ -931,7 +931,7 @@ impl AmdSevSnpProvider {
             //   __u64 tcb_version;         // offset 24, 8 bytes
             // }                            // total = 32 bytes
             const SNP_DERIVED_KEY_REQ_SIZE: usize = 32;
-            let mut req = vec![0u8; SNP_DERIVED_KEY_REQ_SIZE];
+            let mut req = [0u8; SNP_DERIVED_KEY_REQ_SIZE];
             req[0..4].copy_from_slice(&root_key_select.to_le_bytes());
             // rsvd at offset 4 stays zero
             req[8..16].copy_from_slice(&guest_field_select.to_le_bytes());

@@ -1,0 +1,37 @@
+{
+  "tenzro_validateMandatePair": [
+    "docs:ap2/page.tsx:L25: { n: \"03\", t: \"RPC\", body: (<CodeBlock code={`tenzro_validateMandatePair({"
+  ],
+  "tenzro_chat": [
+    "docs:streaming/page.tsx:L26: { n: \"02\", t: \"JSON-RPC\", body: (<CodeBlock code={`tenzro_chat                      simple shape"
+  ],
+  "tenzro_batchSettle": [
+    "docs:batch/page.tsx:L25: { n: \"03\", t: \"RPC\", body: (<CodeBlock code={`tenzro_batchSettle({"
+  ],
+  "tenzro_visionEmbed": [
+    "docs:ai/multimodal/page.tsx:L75: tenzro_visionEmbed | tenzro_visionSimilarity | tenzro_visionClassify",
+    "tutorials:embed-images-with-dinov3/page.tsx:L74: -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tenzro_visionEmbed\",\"params\":{\"model\":\"dinov3-vitb16\",\"image_b64\":\"...\"}}'`}"
+  ],
+  "tenzro_visionSimilarity": [
+    "docs:ai/multimodal/page.tsx:L75: tenzro_visionEmbed | tenzro_visionSimilarity | tenzro_visionClassify"
+  ],
+  "eth_call_contract": [
+    "tutorials:cross-chain-arbitrage/page.tsx:L77: ethMcp.call(\"eth_call_contract\", buyLeg),"
+  ],
+  "eth_lookup_agent_8004": [
+    "tutorials:erc-8004-agents/page.tsx:L79: code={`curl -s https://ethereum-mcp.tenzro.xyz/mcp -d '{\"method\":\"eth_lookup_agent_8004\",\"params\":{\"agentId\":\"0x...\""
+  ],
+  "eth_get_transaction": [
+    "tutorials:build-institutional-aml-agent/page.tsx:L49: const txs = await eth.call(\"eth_get_transaction\", { hash: \"0x...\" });`}"
+  ],
+  "tenzro_resolveIdentity": [
+    "tutorials:a2a-over-iroh-handshake/page.tsx:L36: Per Phase C2, the iroh <code>EndpointId</code> is byte-identical to the responder&apos;s TDIP Ed25519 key. Resolve the D",
+    "cookbook:wallets/create-agentic-wallet.ts:L65: // `tenzro_resolveIdentity` returns the on-chain `TenzroIdentity` record"
+  ],
+  "eth_sendTransaction": [
+    "cookbook:security/vrf-random-nft-reveal.ts:L156: const txHash = await rpc.call<string>(\"eth_sendTransaction\", ["
+  ],
+  "tenzro_faucet": [
+    "cookbook:live-testnet/README.md:L35: `tenzro_participate`, funds each from `tenzro_faucet`, registers them with"
+  ]
+}

@@ -13,14 +13,18 @@
 //! - `"inference"` — [`InferenceAir`]
 //! - `"settlement"` — [`SettlementAir`]
 //! - `"identity"` — [`IdentityAir`]
+//! - `"pq-qc"` — [`PqQcAggregationAir`] (signer count recovered from the
+//!   public-input length)
 //!
 //! Unknown circuit IDs return [`VerifyEnvelopeError::UnknownCircuit`]. All
 //! envelope-decode errors and verifier errors are surfaced verbatim so callers
 //! can include them in audit logs.
 
+use crate::circuits::airs::pq_qc::{PqQcAggregationAir, public_values_for};
 use crate::circuits::airs::{IdentityAir, InferenceAir, SettlementAir};
 use crate::error::ZkError;
 use crate::plonky3::envelope::{decode_proof, decode_public_inputs};
+use crate::plonky3::poseidon2_hash::DIGEST_LEN;
 use crate::plonky3::verifier::Plonky3Verifier;
 use crate::proof::Proof;
 
@@ -71,6 +75,25 @@ pub fn verify_proof_envelope(proof: &Proof) -> Result<(), VerifyEnvelopeError> {
             let verifier = Plonky3Verifier::<IdentityAir>::new();
             verifier
                 .verify_air(&IdentityAir, &p3_proof, &public_values)
+                .map_err(|e| VerifyEnvelopeError::VerifierRejected(format!("{:?}", e)))
+        }
+        "pq-qc" => {
+            // Public-input layout is [bitmap(N) | count | digest(DIGEST_LEN)],
+            // so N is fully determined by the number of public values. A too-
+            // short envelope cannot name a valid certificate.
+            let min = public_values_for(1);
+            if public_values.len() < min {
+                return Err(VerifyEnvelopeError::VerifierRejected(format!(
+                    "pq-qc envelope has {} public values, need at least {}",
+                    public_values.len(),
+                    min
+                )));
+            }
+            let num_signers = public_values.len() - 1 - DIGEST_LEN;
+            let air = PqQcAggregationAir::new(num_signers);
+            let verifier = Plonky3Verifier::<PqQcAggregationAir>::new();
+            verifier
+                .verify_air(&air, &p3_proof, &public_values)
                 .map_err(|e| VerifyEnvelopeError::VerifierRejected(format!("{:?}", e)))
         }
         other => Err(VerifyEnvelopeError::UnknownCircuit(other.to_string())),
@@ -138,5 +161,42 @@ mod tests {
             verify_proof_envelope(&proof),
             Err(VerifyEnvelopeError::EnvelopeDecode(_))
         ));
+    }
+
+    fn build_pq_qc_proof() -> Proof {
+        use crate::circuits::airs::pq_qc::{
+            PqQcAggregationAir, generate_pq_qc_trace, pq_qc_public_inputs,
+        };
+
+        let bitmap = vec![true, true, false, true];
+        let verified = bitmap.clone();
+        let message = b"tenzro/qc/view=42";
+
+        let air = PqQcAggregationAir::new(bitmap.len());
+        let trace = generate_pq_qc_trace(&bitmap, &verified, message, 1 << 3);
+        let pis = pq_qc_public_inputs(&bitmap, message);
+
+        let prover = Plonky3Prover::<PqQcAggregationAir>::new();
+        let p3_proof = prover.prove_air(&air, trace, &pis);
+
+        Proof::new(
+            encode_proof(&p3_proof).unwrap(),
+            encode_public_inputs(&pis),
+            "pq-qc".to_string(),
+        )
+    }
+
+    #[test]
+    fn accepts_valid_pq_qc_proof() {
+        let proof = build_pq_qc_proof();
+        verify_proof_envelope(&proof).expect("valid pq-qc proof must verify");
+    }
+
+    #[test]
+    fn rejects_tampered_pq_qc_public_inputs() {
+        let mut proof = build_pq_qc_proof();
+        // Flip the first bitmap bit's public input to a mismatching field elem.
+        proof.public_inputs[0] = vec![0x00, 0x00, 0x00, 0x00];
+        assert!(verify_proof_envelope(&proof).is_err());
     }
 }

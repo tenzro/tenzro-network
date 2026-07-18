@@ -4,7 +4,7 @@ P2P networking layer for Tenzro Network — the AI verification and settlement p
 
 ## Overview
 
-The `tenzro-network` crate provides the networking infrastructure for **Tenzro Network**, built on [libp2p](https://libp2p.io/). It handles peer discovery, message propagation, and network topology management across the Tenzro Network protocol. This P2P layer enables communication between nodes running Tenzro Ledger (the L1 settlement layer with TNZO governance token).
+The `tenzro-network` crate provides the networking infrastructure for **Tenzro Network**, built on [libp2p](https://libp2p.io/). It handles peer discovery, message propagation, and network topology management across the Tenzro Network protocol. This P2P layer enables communication between nodes running Tenzro Ledger (the settlement layer with TNZO governance token).
 
 ## Modules
 

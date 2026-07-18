@@ -345,7 +345,7 @@ fn project_to_rar(req: &AgentAuthRequest) -> Result<AuthorizationDetails, AgentK
 /// origin + path only — query string and fragment are excluded so the
 /// proof matches regardless of pagination / cache-buster params.
 fn strip_query(url: &str) -> String {
-    match url.find(|c| c == '?' || c == '#') {
+    match url.find(['?', '#']) {
         Some(idx) => url[..idx].to_string(),
         None => url.to_string(),
     }

@@ -147,6 +147,7 @@ mod tests {
             safetensors_hash: h(1),
             payload_bytes: 1024,
             quantization: tenzro_types::training::GradientQuantization::None,
+            payload_kind: tenzro_types::training::PayloadKind::Dense,
             inner_step_count: 32,
             submitted_at: Timestamp::now(),
             signature: Signature::default(),

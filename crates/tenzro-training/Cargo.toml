@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Tenzro Train — protocol-only Rust crate for decentralized verifiable foundation-model training (Decoupled DiLoCo). Inner training loops are dispatched to the Python reference trainer (PyTorch FSDP2 + Hivemind + safetensors)."
+description = "Tenzro Train — protocol-only Rust crate for decentralized verifiable foundation-model training with decoupled outer aggregation. Inner training loops are dispatched to the Python reference trainer (PyTorch FSDP2 + Hivemind + safetensors)."
 
 [dependencies]
 tenzro-types = { workspace = true }

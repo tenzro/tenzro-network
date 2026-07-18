@@ -212,7 +212,7 @@ impl StreamCursorStore {
 
     /// Spawn the GC loop. Returns the join handle for the caller to keep
     /// alive (or drop, which aborts the task).
-    pub fn spawn_gc(self: &Self, period: Duration) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_gc(&self, period: Duration) -> tokio::task::JoinHandle<()> {
         let store = self.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(period);

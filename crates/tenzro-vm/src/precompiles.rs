@@ -187,6 +187,15 @@ impl ZkCommitmentRegistry {
         self.commitments.read().contains(hash)
     }
 
+    /// Retract a previously-attested commitment. Called when a fraud proof is
+    /// upheld against a quorum-attested commitment — the underlying proof was
+    /// shown not to verify, so the precompile must stop answering `true` for it.
+    /// Returns `true` if the commitment was present and removed, `false` if it
+    /// was not attested.
+    pub fn retract(&self, hash: &ZkCommitmentHash) -> bool {
+        self.commitments.write().remove(hash)
+    }
+
     /// Number of attested commitments. Primarily for diagnostics.
     pub fn len(&self) -> usize {
         self.commitments.read().len()

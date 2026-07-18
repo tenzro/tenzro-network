@@ -30,6 +30,11 @@ impl GossipTopics {
         topics.insert("transactions".to_string(), IdentTopic::new("tenzro/transactions"));
         topics.insert("consensus".to_string(), IdentTopic::new("tenzro/consensus"));
 
+        // Batch availability certificates — data-dissemination plane decoupled
+        // from the ordering plane. Producers fan out batches + collect k-of-N
+        // availability signatures; the ordering path references only cert hashes.
+        topics.insert("batches".to_string(), IdentTopic::new("tenzro/batches"));
+
         // Provider topics
         topics.insert("attestations".to_string(), IdentTopic::new("tenzro/attestations"));
         topics.insert("models".to_string(), IdentTopic::new("tenzro/models"));

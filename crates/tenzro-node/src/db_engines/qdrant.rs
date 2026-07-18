@@ -43,10 +43,10 @@ impl QdrantEngine {
     fn collection_name(handle: &PartitionHandle) -> String {
         // Prefer the descriptor's explicit collection name; fall back to a
         // deterministic per-partition name.
-        if let Ok(cfg) = serde_json::from_value::<QdrantCfg>(handle.engine_config.clone()) {
-            if let Some(c) = cfg.collection {
-                return format!("{c}_{}", handle.partition_index);
-            }
+        if let Ok(cfg) = serde_json::from_value::<QdrantCfg>(handle.engine_config.clone())
+            && let Some(c) = cfg.collection
+        {
+            return format!("{c}_{}", handle.partition_index);
         }
         format!("tz_{}_{}", handle.database_id, handle.partition_index)
     }

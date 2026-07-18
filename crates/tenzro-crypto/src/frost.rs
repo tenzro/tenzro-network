@@ -232,12 +232,11 @@ pub fn keygen_with_trusted_dealer(
         )));
     }
 
-    let mut rng = OsRng;
     let (shares, pubkey_pkg) = frost::keys::generate_with_dealer(
         total,
         threshold,
         frost::keys::IdentifierList::Default,
-        &mut rng,
+        OsRng,
     )
     .map_err(|e| CryptoError::MpcError(format!("FROST keygen failed: {}", e)))?;
 
@@ -307,8 +306,7 @@ impl SigningCommitments {
 /// until round 2 of the same signing session, and discarded immediately after.
 pub fn round1_commit(secret_share: &SecretShare) -> Result<(SigningNonces, SigningCommitments)> {
     let kp = secret_share.to_key_package()?;
-    let mut rng = OsRng;
-    let (nonces, commits) = frost::round1::commit(kp.signing_share(), &mut rng);
+    let (nonces, commits) = frost::round1::commit(kp.signing_share(), &mut OsRng);
     let nonces_bytes = nonces
         .serialize()
         .map_err(|e| CryptoError::MpcError(format!("SigningNonces serialize: {}", e)))?;
@@ -492,8 +490,8 @@ impl DkgRound1Public {
 /// DKG round 1: every participant runs this independently.
 pub fn dkg_part1(self_index: SignerIndex, threshold: u16, total: u16) -> Result<DkgRound1> {
     let id = self_index.to_frost()?;
-    let mut rng = OsRng;
-    let (secret, broadcast) = frost::keys::dkg::part1(id, total, threshold, &mut rng)
+    let rng = OsRng;
+    let (secret, broadcast) = frost::keys::dkg::part1(id, total, threshold, rng)
         .map_err(|e| CryptoError::MpcError(format!("DKG part1: {}", e)))?;
     let secret_bytes = secret
         .serialize()

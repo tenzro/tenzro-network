@@ -271,14 +271,14 @@ impl ComputeBondManager {
                 "compute bond amount must be greater than zero".to_string(),
             ));
         }
-        if let Some(existing) = self.bonds.get(provider_did) {
-            if !matches!(existing.status, ComputeBondStatus::Returned) {
-                return Err(TokenError::InvalidParameter(format!(
-                    "provider {} already has a compute bond (status={})",
-                    provider_did,
-                    existing.status.as_str()
-                )));
-            }
+        if let Some(existing) = self.bonds.get(provider_did)
+            && !matches!(existing.status, ComputeBondStatus::Returned)
+        {
+            return Err(TokenError::InvalidParameter(format!(
+                "provider {} already has a compute bond (status={})",
+                provider_did,
+                existing.status.as_str()
+            )));
         }
         let now = Timestamp::now();
         let state = ComputeBondState {

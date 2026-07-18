@@ -2233,6 +2233,32 @@ impl NativeExecutor {
                 "X402Settle payer and payee must differ".to_string(),
             ));
         }
+        if payload.margin_bps > tenzro_types::fees::MAX_DEVELOPER_MARGIN_BPS {
+            return Err(VmError::InvalidTransaction(format!(
+                "X402Settle margin_bps {} exceeds cap {}",
+                payload.margin_bps,
+                tenzro_types::fees::MAX_DEVELOPER_MARGIN_BPS
+            )));
+        }
+        if payload.margin_bps > 0 && payload.app_wallet.is_none() {
+            return Err(VmError::InvalidTransaction(
+                "X402Settle margin_bps > 0 requires app_wallet".to_string(),
+            ));
+        }
+
+        // Developer-margin carve out of the payer-authorized total:
+        // `amount` already includes the margin, so the app's share is
+        // `amount * margin_bps / (10_000 + margin_bps)` and the payee
+        // receives the remainder (the network cost).
+        let margin = if payload.margin_bps > 0 {
+            payload
+                .amount
+                .checked_mul(payload.margin_bps as u128)
+                .ok_or_else(|| VmError::Internal("x402 margin overflow".to_string()))?
+                / (10_000u128 + payload.margin_bps as u128)
+        } else {
+            0
+        };
 
         // Reject replay: marker exists → this payment_id already settled.
         let marker_key = x402_settle_storage_key(&payload.payment_id);
@@ -2270,13 +2296,30 @@ impl NativeExecutor {
         let new_payer_balance = old_payer_balance.saturating_sub(payload.amount);
         state.set_balance(&payer_bytes, new_payer_balance);
 
-        // Credit payee.
+        // Credit payee with the network cost (total minus the margin carve).
+        let payee_credit = payload.amount - margin;
         let payee_bytes = payload.payee.as_bytes().to_vec();
         let old_payee_balance = state.get_balance(&payee_bytes);
         let new_payee_balance = old_payee_balance
-            .checked_add(payload.amount)
+            .checked_add(payee_credit)
             .ok_or_else(|| VmError::Internal("x402 payee balance overflow".to_string()))?;
         state.set_balance(&payee_bytes, new_payee_balance);
+
+        // Credit the app wallet with the developer margin. Balance is read
+        // after the payee credit so an app_wallet == payee snapshot composes
+        // correctly.
+        let app_wallet_credit = match (&payload.app_wallet, margin) {
+            (Some(app_wallet), m) if m > 0 => {
+                let app_bytes = app_wallet.as_bytes().to_vec();
+                let old_app_balance = state.get_balance(&app_bytes);
+                let new_app_balance = old_app_balance.checked_add(m).ok_or_else(|| {
+                    VmError::Internal("x402 app wallet balance overflow".to_string())
+                })?;
+                state.set_balance(&app_bytes, new_app_balance);
+                Some((app_bytes, old_app_balance, new_app_balance))
+            }
+            _ => None,
+        };
 
         // Persist the per-payment_id "settled" marker (body: LE amount, for audit).
         let marker_blob = payload.amount.to_le_bytes().to_vec();
@@ -2285,7 +2328,7 @@ impl NativeExecutor {
         let old_nonce = state.get_nonce(&tx.from);
         state.set_nonce(&tx.from, old_nonce + 1);
 
-        let state_changes = vec![
+        let mut state_changes = vec![
             StateChange::new(
                 tx.from.clone(),
                 b"balance".to_vec(),
@@ -2317,16 +2360,30 @@ impl NativeExecutor {
                 Some((old_nonce + 1).to_le_bytes().to_vec()),
             ),
         ];
+        if let Some((app_bytes, old_app_balance, new_app_balance)) = &app_wallet_credit {
+            state_changes.push(StateChange::new(
+                app_bytes.clone(),
+                b"balance".to_vec(),
+                Some(old_app_balance.to_le_bytes().to_vec()),
+                Some(new_app_balance.to_le_bytes().to_vec()),
+            ));
+        }
 
         // Log layout (parseable by node-side scan): `payment_id_len_le(4) ||
-        //  payment_id_bytes || payer(32) || payee(32) || amount_le(16)`.
+        //  payment_id_bytes || payer(32) || payee(32) || amount_le(16) ||
+        //  margin_le(16) || app_wallet(32, zeroed when no attribution)`.
         let mut log_data =
-            Vec::with_capacity(4 + payload.payment_id.len() + 32 + 32 + 16);
+            Vec::with_capacity(4 + payload.payment_id.len() + 32 + 32 + 16 + 16 + 32);
         log_data.extend_from_slice(&(payload.payment_id.len() as u32).to_le_bytes());
         log_data.extend_from_slice(payload.payment_id.as_bytes());
         log_data.extend_from_slice(payload.payer.as_bytes());
         log_data.extend_from_slice(payload.payee.as_bytes());
         log_data.extend_from_slice(&payload.amount.to_le_bytes());
+        log_data.extend_from_slice(&margin.to_le_bytes());
+        match &payload.app_wallet {
+            Some(app_wallet) => log_data.extend_from_slice(app_wallet.as_bytes()),
+            None => log_data.extend_from_slice(&[0u8; 32]),
+        }
 
         let log = Log::new(
             SYSTEM_ADDRESS.to_vec(),
@@ -3195,6 +3252,10 @@ struct X402SettlePayload {
     payee: Address,
     amount: u128,
     payment_id: String,
+    /// App wallet receiving the developer-margin carve; `None` disables it.
+    app_wallet: Option<Address>,
+    /// Developer margin, in basis points, already included in `amount`.
+    margin_bps: u32,
 }
 
 /// Storage key for an escrow record under `SYSTEM_ADDRESS`: `escrow:<hex_id>`.
@@ -4472,7 +4533,7 @@ mod tests {
 
         let res = executor.execute_transaction(&tx, &mut state).await.unwrap();
         assert_eq!(res.gas_used, GAS_WORKFLOW_KILL_SWITCH);
-        assert!(GAS_WORKFLOW_KILL_SWITCH > GAS_WORKFLOW_TRANSITION);
+        const { assert!(GAS_WORKFLOW_KILL_SWITCH > GAS_WORKFLOW_TRANSITION) };
         assert_eq!(res.logs[0].topics[0], b"WorkflowKillSwitch");
     }
 }

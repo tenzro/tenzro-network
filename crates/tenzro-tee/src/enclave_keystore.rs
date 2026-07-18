@@ -294,6 +294,12 @@ impl EnclaveKeystore {
         self.inner.read().await.len()
     }
 
+    /// Whether the keystore holds no keys. Diagnostic only.
+    #[allow(dead_code)]
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.is_empty()
+    }
+
     fn derive_salt(&self, key_id: Uuid, algo: KeyAlgorithm) -> [u8; 32] {
         let mut h = Sha256::new();
         h.update(b"tenzro/enclave-keystore/salt/v1");

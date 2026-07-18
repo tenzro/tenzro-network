@@ -211,15 +211,15 @@ impl SiwtMessage {
 /// time. Signature verification is delegated to the caller (because it
 /// needs the registry to find the public key).
 pub fn verify_siwt_timing(msg: &SiwtMessage, now: DateTime<Utc>) -> Result<(), SiwtError> {
-    if let Some(nb) = msg.not_before {
-        if now < nb {
-            return Err(SiwtError::Expired);
-        }
+    if let Some(nb) = msg.not_before
+        && now < nb
+    {
+        return Err(SiwtError::Expired);
     }
-    if let Some(exp) = msg.expiration_time {
-        if now >= exp {
-            return Err(SiwtError::Expired);
-        }
+    if let Some(exp) = msg.expiration_time
+        && now >= exp
+    {
+        return Err(SiwtError::Expired);
     }
     Ok(())
 }

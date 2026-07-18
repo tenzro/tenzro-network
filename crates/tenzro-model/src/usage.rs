@@ -140,20 +140,14 @@ impl ModelUsageStats {
 
     /// Average latency in milliseconds
     pub fn avg_latency_ms(&self) -> u64 {
-        if self.inference_count == 0 {
-            0
-        } else {
-            self.total_latency_ms / self.inference_count
-        }
+        self.total_latency_ms
+            .checked_div(self.inference_count)
+            .unwrap_or(0)
     }
 
     /// Average cost per inference
     pub fn avg_cost(&self) -> u64 {
-        if self.inference_count == 0 {
-            0
-        } else {
-            self.total_cost / self.inference_count
-        }
+        self.total_cost.checked_div(self.inference_count).unwrap_or(0)
     }
 
     /// Total bytes (in + out) at the HTTP boundary across all inferences
@@ -223,20 +217,16 @@ impl ProviderUsageStats {
 
     /// Average latency in milliseconds
     pub fn avg_latency_ms(&self) -> u64 {
-        if self.inference_count == 0 {
-            0
-        } else {
-            self.total_latency_ms / self.inference_count
-        }
+        self.total_latency_ms
+            .checked_div(self.inference_count)
+            .unwrap_or(0)
     }
 
     /// Average revenue per inference
     pub fn avg_revenue(&self) -> u64 {
-        if self.inference_count == 0 {
-            0
-        } else {
-            self.total_revenue / self.inference_count
-        }
+        self.total_revenue
+            .checked_div(self.inference_count)
+            .unwrap_or(0)
     }
 
     /// Total bytes (in + out) at the HTTP boundary across all inferences served
@@ -322,20 +312,16 @@ impl GlobalUsageStats {
 
     /// Average latency in milliseconds
     pub fn avg_latency_ms(&self) -> u64 {
-        if self.total_inference_count == 0 {
-            0
-        } else {
-            self.total_latency_ms / self.total_inference_count
-        }
+        self.total_latency_ms
+            .checked_div(self.total_inference_count)
+            .unwrap_or(0)
     }
 
     /// Average cost per inference
     pub fn avg_cost(&self) -> u64 {
-        if self.total_inference_count == 0 {
-            0
-        } else {
-            self.total_cost / self.total_inference_count
-        }
+        self.total_cost
+            .checked_div(self.total_inference_count)
+            .unwrap_or(0)
     }
 
     /// Total bytes (in + out) at the HTTP boundary network-wide

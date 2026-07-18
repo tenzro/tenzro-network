@@ -770,7 +770,7 @@ impl SiteRegistry {
         let (_, alias) = self
             .aliases
             .remove(&hostname)
-            .ok_or_else(|| SiteError::NotFound(hostname))?;
+            .ok_or(SiteError::NotFound(hostname))?;
         Ok(alias)
     }
 
@@ -996,7 +996,7 @@ impl SiteRegistry {
         let (_, domain) = self
             .domains
             .remove(&hostname)
-            .ok_or_else(|| SiteError::NotFound(hostname))?;
+            .ok_or(SiteError::NotFound(hostname))?;
         Ok(domain)
     }
 }

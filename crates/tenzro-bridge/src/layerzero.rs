@@ -595,8 +595,8 @@ impl BridgeAdapter for LayerZeroAdapter {
         Sha3Digest::update(&mut k, guid_and_message);
         let payload_hash: [u8; 32] = k.finalize().into();
         let mut k = Keccak256::new();
-        Sha3Digest::update(&mut k, &header_hash);
-        Sha3Digest::update(&mut k, &payload_hash);
+        Sha3Digest::update(&mut k, header_hash);
+        Sha3Digest::update(&mut k, payload_hash);
         let prehash: [u8; 32] = k.finalize().into();
         set.verify_quorum(&prehash, &signatures)?;
         // Inner Tenzro-side check operates on the message bytes after

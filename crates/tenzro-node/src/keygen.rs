@@ -3,9 +3,8 @@
 //! This module is reachable only from the `tenzro-node init` subcommand
 //! (see `main.rs`). The running node's `init_consensus()` path never
 //! generates keys — it loads existing files and errors loudly if they
-//! are missing, per the universal production-BFT norm (Aptos, Sui,
-//! Cosmos/CometBFT, Solana, Monad, Ethereum CL clients, Celestia,
-//! Babylon, Berachain — none do silent daemon-side keygen on start).
+//! are missing, per the universal production-BFT norm — none of the
+//! established BFT stacks do silent daemon-side keygen on start.
 //!
 //! Silent first-boot auto-keygen on a misconfigured / empty /
 //! re-mounted volume silently forks a fresh validator identity:

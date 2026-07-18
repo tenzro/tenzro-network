@@ -1705,7 +1705,7 @@ mod tests {
 
         // Rebuild the backend over a surface where 2 members are offline, but
         // carry over the stored slivers for the online ones.
-        let mut offline_surface = MeshSurface::new(&committee, &[5, 6]);
+        let offline_surface = MeshSurface::new(&committee, &[5, 6]);
         // Copy submit-time slivers into the fetch surface for online members.
         let commitment = {
             let mut b = [0u8; 32];

@@ -6,8 +6,7 @@
 //! on-chain wins via [`crate::runtime::SyncerState::finalize_round`], which is
 //! idempotent under conflicting submissions.
 //!
-//! # Pattern (matches Nous Psyche on Solana, 2025 and Prime Intellect
-//! INTELLECT-2, May 2025)
+//! # Pattern
 //!
 //! ```text
 //! seed = sha256(
@@ -32,10 +31,10 @@
 //! - **Hash-mod-N single leader**: predictable DoS target; one bad pod stalls
 //!   the round until grace window expires.
 //! - **VRF-lowest-output single leader**: extra round-trip + synchrony
-//!   assumption; production projects prefer "smart-contract draws from chain
-//!   entropy beacon" which is what Psyche does.
-//! - **Everyone-writes + Yuma-style on-chain aggregator** (Bittensor): would
-//!   require a wholly different consensus path we don't have.
+//!   assumption; drawing committee membership from a chain entropy beacon
+//!   avoids both.
+//! - **Everyone-writes + on-chain aggregator**: would require a wholly
+//!   different consensus path we don't have.
 
 use sha2::{Digest, Sha256};
 use tenzro_types::primitives::Hash;

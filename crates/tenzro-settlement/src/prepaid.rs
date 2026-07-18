@@ -268,7 +268,10 @@ mod tests {
         fn lock(&self, account: &Address, asset: &AssetId, amount: u128) -> Result<()> {
             let mut e = self.chain.entry((*account, asset.clone())).or_insert(0);
             if *e < amount {
-                return Err(SettlementError::InvalidRequest("insufficient".into()));
+                return Err(SettlementError::InsufficientFunds {
+                    required: amount,
+                    available: *e,
+                });
             }
             *e -= amount;
             Ok(())

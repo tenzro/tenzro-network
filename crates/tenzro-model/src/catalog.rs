@@ -7,29 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// License tier for catalog entries.
-///
-/// Drives the gating logic in `ModelRegistry::register_model()`:
-///
-/// - `Permissive` (Apache-2.0, MIT, BSD-2/3): loaded by default, no friction.
-/// - `Attribution` (CC-BY-4.0): loaded by default, attribution string is logged
-///   at first load so operators stay compliant with the BY clause.
-/// - `CommercialCustom`: bespoke commercial-OK licenses with non-standard terms
-///   (DINOv3 License, SAM License with ITAR restrictions, Gemma terms). License
-///   summary + URL are logged at first load; explicit `--accept-license <id>`
-///   per family must be set on `download` / `serve` to activate.
-/// - `NonCommercial` (CC-BY-NC, OpenRAIL-M, etc.): refused unless
-///   `--accept-non-commercial` is set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum LicenseTier {
-    #[default]
-    Permissive,
-    Attribution,
-    CommercialCustom,
-    NonCommercial,
-}
+/// License tier for catalog entries. Defined in `tenzro-types` so it can be
+/// carried on `ModelInfo` and enforced in `ModelRegistry::register_model()`.
+pub use tenzro_types::LicenseTier;
 
 
 /// A model entry in the curated catalog with HuggingFace metadata.
@@ -464,18 +444,13 @@ pub struct ReasoningPolicy {
 
 /// Default mode for [`ReasoningPolicy`]. `Auto` is the common case;
 /// `Always` / `Never` are explicit overrides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningMode {
+    #[default]
     Auto,
     Always,
     Never,
-}
-
-impl Default for ReasoningMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl Default for ReasoningPolicy {
@@ -599,22 +574,17 @@ impl ReasoningPolicy {
 /// Adding a new known-broken family: add the row in
 /// [`TemplateFix::for_family`] and drop the vendored jinja in the
 /// inference client's `templates/` dir.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "spec")]
 pub enum TemplateFix {
     /// Use the GGUF's embedded jinja as-is. The common case.
+    #[default]
     None,
     /// Use a vendored fix shipped in the inference client. The string
     /// is the bundled jinja filename (e.g.
     /// `"qwen3.5-3.6-froggeric-v20.jinja"`). The catalog declares
     /// WHICH fix; the client supplies the file.
     Vendored { filename: String },
-}
-
-impl Default for TemplateFix {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl TemplateFix {
@@ -4317,7 +4287,43 @@ impl HfModelEntry {
         if let Some(shape) = self.moe {
             info = info.with_moe(shape.to_metadata());
         }
+        let (tier, license_id) = license_tier_for(&self.license, &self.family);
+        info = info.with_license(tier, self.license.clone(), license_id);
         info
+    }
+}
+
+/// Classifies an `HfModelEntry` license string into a [`LicenseTier`] plus an
+/// optional stable license id used by the operator acceptance policy. The LM
+/// catalog carries only a free-text license string, so custom-license families
+/// (Gemma terms) are recognised by name; everything else is treated as a
+/// permissive/attribution open-weight license that any operator admits.
+fn license_tier_for(license: &str, family: &str) -> (LicenseTier, Option<String>) {
+    let l = license.to_ascii_lowercase();
+    if l.contains("gemma") || family.starts_with("gemma") {
+        (LicenseTier::CommercialCustom, Some("gemma".to_string()))
+    } else if l.contains("cc-by") {
+        (LicenseTier::Attribution, None)
+    } else {
+        (LicenseTier::Permissive, None)
+    }
+}
+
+/// Stable license id for a custom-license (`CommercialCustom`) model, derived
+/// from its free-text license string. The multi-modal ONNX catalogs carry a
+/// `license_tier` but no explicit id, so the acceptance-policy check needs a
+/// canonical id to match against `--accept-license <id>`. Returns `None` for
+/// permissive/attribution licenses (no id is required to admit those).
+pub fn custom_license_id(license: &str) -> Option<String> {
+    let l = license.to_ascii_lowercase();
+    if l.contains("dinov3") {
+        Some("dinov3".to_string())
+    } else if l.contains("gemma") {
+        Some("gemma".to_string())
+    } else if l.contains("sam") {
+        Some("meta-sam".to_string())
+    } else {
+        None
     }
 }
 

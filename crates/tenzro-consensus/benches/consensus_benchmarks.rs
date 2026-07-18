@@ -261,7 +261,7 @@ fn bench_leader_selection(c: &mut Criterion) {
         });
     });
 
-    // Aptos LeaderReputation selector — stake-weighted seeded draw with
+    // reputation-weighted proposer-election selector — stake-weighted seeded draw with
     // observed-behaviour multipliers. Cold cache (no proposer/voter history
     // recorded), so this measures the seeding + draw cost.
     group.bench_function("reputation", |b| {

@@ -107,12 +107,12 @@ fn local_mac_key() -> &'static [u8; 32] {
             }
         };
         let path = home.join(".tenzro").join("local_state_mac.key");
-        if let Ok(bytes) = std::fs::read(&path) {
-            if bytes.len() == 32 {
-                let mut k = [0u8; 32];
-                k.copy_from_slice(&bytes);
-                return k;
-            }
+        if let Ok(bytes) = std::fs::read(&path)
+            && bytes.len() == 32
+        {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&bytes);
+            return k;
         }
         let mut k = [0u8; 32];
         use rand::RngCore;
@@ -120,7 +120,7 @@ fn local_mac_key() -> &'static [u8; 32] {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = std::fs::write(&path, &k) {
+        if let Err(e) = std::fs::write(&path, k) {
             tracing::warn!(error = %e, "local_mac_key: failed to persist MAC key");
         } else {
             #[cfg(unix)]
@@ -251,10 +251,10 @@ impl PendingRecoveryStore {
         for key in entries {
             if let Some(rid) = key.strip_prefix(prefix) {
                 let rid_str = std::str::from_utf8(rid).unwrap_or("").to_string();
-                if let Ok(Some(rec)) = self.get(&rid_str) {
-                    if rec.account_address.eq_ignore_ascii_case(account_address) {
-                        out.push(rec);
-                    }
+                if let Ok(Some(rec)) = self.get(&rid_str)
+                    && rec.account_address.eq_ignore_ascii_case(account_address)
+                {
+                    out.push(rec);
                 }
             }
         }
@@ -899,7 +899,7 @@ pub(crate) async fn handle_enroll_passkey(
         did: did_string,
         smart_account_address: format!("0x{}", hex::encode(&smart_account.address)),
         credential_id_hex: format!("0x{}", hex::encode(&credential_id)),
-        webauthn_validator_address: format!("0x{}", hex::encode(&webauthn_module_addr)),
+        webauthn_validator_address: format!("0x{}", hex::encode(webauthn_module_addr)),
         installed_validators: vec!["webauthn".to_string()],
     };
     serde_json::to_value(resp).map_err(|e| JsonRpcError {
@@ -942,7 +942,7 @@ pub(crate) async fn handle_sign_with_passkey(
     let pq_sig = req
         .ml_dsa_signature_hex
         .as_deref()
-        .map(|s| decode_hex(s))
+        .map(decode_hex)
         .transpose()?
         .unwrap_or_default();
     let credential_id = decode_hex(&req.credential_id_hex)?;
@@ -997,7 +997,7 @@ pub(crate) async fn handle_sign_with_passkey(
     };
     let resp = SignWithPasskeyResponse {
         verified,
-        validator: format!("0x{}", hex::encode(&webauthn_module_addr)),
+        validator: format!("0x{}", hex::encode(webauthn_module_addr)),
         op_hash_hex: req.op_hash_hex,
     };
     serde_json::to_value(resp).map_err(|e| JsonRpcError {
@@ -1693,22 +1693,21 @@ pub(crate) async fn handle_add_hardware_signer(
     // Hand the init_data to the shared HardwareSignerValidator so the
     // validator-chain actually consults the configured pubkey at
     // signing time (not just the smart-account install record).
-    if let Some(hw_validator) = node.hardware_signer_validator(&module_addr) {
-        if let Err(e) =
+    if let Some(hw_validator) = node.hardware_signer_validator(&module_addr)
+        && let Err(e) =
             hw_validator.install_from_init_data(account_addr.clone(), &module_config.init_data)
-        {
-            return Err(JsonRpcError {
-                code: -32603,
-                message: format!("hardware validator install_from_init_data: {}", e),
-                data: None,
-            });
-        }
+    {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: format!("hardware validator install_from_init_data: {}", e),
+            data: None,
+        });
     }
 
     let resp = AddHardwareSignerResponse {
         account_address: req.account_address,
         device_kind: device,
-        validator_module_address: format!("0x{}", hex::encode(&module_addr)),
+        validator_module_address: format!("0x{}", hex::encode(module_addr)),
     };
     serde_json::to_value(resp).map_err(|e| JsonRpcError {
         code: -32603,
@@ -1968,7 +1967,7 @@ pub(crate) async fn handle_add_passkey(
 
     let total = webauthn_validator.list_credentials(&account_addr).len();
 
-    Ok(serde_json::to_value(AddPasskeyResponse {
+    serde_json::to_value(AddPasskeyResponse {
         account_address: format!("0x{}", hex::encode(&account_addr)),
         credential_id_hex: format!("0x{}", hex::encode(&credential_id)),
         credentials_total: total,
@@ -1978,7 +1977,7 @@ pub(crate) async fn handle_add_passkey(
         code: -32603,
         message: format!("serialize response: {}", e),
         data: None,
-    })?)
+    })
 }
 
 // =============================================================================
@@ -2053,7 +2052,7 @@ pub(crate) async fn handle_remove_passkey(
     let credential_id = decode_hex(&req.credential_id_hex)?;
     let removed = webauthn_validator.revoke_credential(&account_addr, &credential_id);
     let remaining = webauthn_validator.list_credentials(&account_addr).len();
-    Ok(serde_json::to_value(RemovePasskeyResponse {
+    serde_json::to_value(RemovePasskeyResponse {
         account_address: format!("0x{}", hex::encode(&account_addr)),
         credential_id_hex: format!("0x{}", hex::encode(&credential_id)),
         removed,
@@ -2063,5 +2062,5 @@ pub(crate) async fn handle_remove_passkey(
         code: -32603,
         message: format!("serialize response: {}", e),
         data: None,
-    })?)
+    })
 }

@@ -162,10 +162,10 @@ pub fn generate_settlement_trace(
     // Trace cells 5..5+DIGEST_LEN = service digest, then settlement digest.
     let service_base: usize = 5;
     let settlement_base: usize = 5 + DIGEST_LEN;
-    for k in 0..DIGEST_LEN {
-        values[service_base + k] = service_digest[k];
-        values[settlement_base + k] = settlement_digest[k];
-    }
+    values[service_base..service_base + DIGEST_LEN]
+        .copy_from_slice(&service_digest[..DIGEST_LEN]);
+    values[settlement_base..settlement_base + DIGEST_LEN]
+        .copy_from_slice(&settlement_digest[..DIGEST_LEN]);
 
     RowMajorMatrix::new(values, NUM_SETTLEMENT_COLS)
 }

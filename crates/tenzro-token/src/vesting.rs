@@ -160,10 +160,10 @@ impl VestingManager {
         let mut restored = 0usize;
 
         for key in storage.get_keys_with_prefix(CF_TOKENS, VESTING_PREFIX)? {
-            let parsed = storage
+            let list = storage
                 .get(CF_TOKENS, &key)?
-                .and_then(|bytes| serde_json::from_slice::<Vec<VestingSchedule>>(&bytes).ok())
-                .and_then(|list| parse_vesting_key(&key).map(|addr| (addr, list)));
+                .and_then(|bytes| serde_json::from_slice::<Vec<VestingSchedule>>(&bytes).ok());
+            let parsed = parse_vesting_key(&key).zip(list);
             match parsed {
                 Some((address, list)) => {
                     restored += list.len();

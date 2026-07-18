@@ -75,8 +75,8 @@ pub use asset::{AssetId, AssetType, StablecoinType, AssetInfo};
 pub use network::{NetworkRole, NodeInfo, PeerInfo, RoleSet};
 pub use tee::{TeeVendor, AttestationReport, AttestationResult, TeeCapacity, TeeProviderInfo};
 pub use agent::{AgentIdentity, AgentConfig, AgentMessage, AgentMessageType, Capability};
-pub use model::{ModelInfo, ModelLoadInfo, ModelModality, MoeMetadata, MoeRoutingStrategy, MoeExpertHolding, MoeExpertResidency, MoeProviderRole, InferenceRequest, InferenceResponse, InferenceParameters, InferenceProvider, ProvenanceManifest, ProviderCapacity, AdvertisedCapacity, PricingConfig};
-pub use settlement::{SettlementRequest, SettlementReceipt, SettlementStatus, ReleaseConditions, ServiceType, PaymentIntent, ServiceProof, ProofType};
+pub use model::{AcceptancePolicy, LicenseTier, ModelInfo, ModelLoadInfo, ModelModality, MoeMetadata, MoeRoutingStrategy, MoeExpertHolding, MoeExpertResidency, MoeProviderRole, PrefixCacheSummary, PrefixCacheNode, prefix_run_hashes, PREFIX_RUN_BYTES, InferenceRequest, InferenceResponse, InferenceParameters, InferenceProvider, ProvenanceManifest, ProviderCapacity, AdvertisedCapacity, PricingConfig};
+pub use settlement::{SettlementRequest, SettlementReceipt, SettlementStatus, ReleaseConditions, ServiceType, PaymentIntent, ServiceProof, ProofType, SettlementAuthorization, SETTLEMENT_AUTHORIZATION_DOMAIN};
 pub use token::{TokenConfig, Treasury, StakingPool, ProviderStake, ProviderType, GovernanceProposal, ProposalStatus, ProposalType};
 pub use governance::{GovernanceVote, VoteType};
 pub use bridge::{BridgeMessage, BridgeProtocol, BridgeTransfer};
@@ -88,7 +88,7 @@ pub use canton::{
     SynchronizerConfig,
 };
 pub use identity::{KycTier, PaymentProtocolId, IdentityType};
-pub use fees::{ServiceFeeSchedule, NetworkCommissionRates};
+pub use fees::{ServiceFeeSchedule, NetworkCommissionRates, MAX_DEVELOPER_MARGIN_BPS, apply_developer_margin, SETTLEMENT_AUTHORIZATION_COMMISSION_BPS, split_settlement_authorization};
 pub use task::{TaskInfo, TaskStatus, TaskType, TaskPriority, TaskQuote, TaskFilter,
     AcceptanceCriteria, ProofRequirement, ReputationProof, TaskDispute, DisputeResolution};
 pub use saga::{SagaWorkflow, SagaStep, SagaStepStatus, SagaStatus, AttestedDeadline};

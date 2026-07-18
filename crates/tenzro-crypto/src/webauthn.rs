@@ -160,8 +160,7 @@ pub fn verify_webauthn_assertion(
 /// UV (User Verification) flag in `authenticatorData.flags`. Call this
 /// for any signing flow whose security model depends on user identity
 /// being proven (biometric / PIN) rather than mere physical presence
-/// (a touch). Reference: WebAuthn L3 §5.2.4, CTAP 2.2 §6.1, CTRAPS
-/// arXiv:2412.02349.
+/// (a touch). Reference: WebAuthn L3 §5.2.4, CTAP 2.2 §6.1.
 pub fn verify_webauthn_assertion_require_uv(
     assertion: &WebAuthnAssertion,
     public_key_xy: &[u8],
@@ -227,7 +226,7 @@ const AUTHENTICATOR_DATA_FLAGS_OFFSET: usize = 32;
 /// Set by platform authenticators that successfully completed a
 /// biometric / PIN ceremony with the user. UP alone (User Present)
 /// only proves a touch — UV proves identity. High-value ops must
-/// enforce UV; UP-only is insufficient (CTRAPS / arXiv 2412.02349).
+/// enforce UV; UP-only is insufficient.
 pub const AUTH_DATA_FLAG_UV: u8 = 0x04;
 
 /// authenticatorData flag bits (WebAuthn L3 §6.1).
