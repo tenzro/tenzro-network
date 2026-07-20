@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tenzro-mcp-server"
 version = "0.1.0"
-description = "MCP server for Tenzro Network — 104 blockchain tools for AI agents"
+description = "MCP server for Tenzro Network — 309 tools for AI agents"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"

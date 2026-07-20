@@ -14,6 +14,7 @@ use super::handlers::{self, WebState};
 use super::oauth;
 use super::wallet_frost;
 use super::wallet_mldsa;
+use super::wallet_new;
 use super::wallet_share;
 
 /// Configuration for the HTTP 402 payment gate, plus the set of routes
@@ -414,6 +415,28 @@ impl WebServer {
             .route(
                 "/wallet/share/escrow/unwrap",
                 post(wallet_share::unwrap_handler),
+            )
+            // Passkey-quorum wallet provisioning. A Tenzro-aware wallet mints
+            // a fresh TDIP identity whose signing key is split 2-of-2 between
+            // the device passkey and this node's TEE leg — no seed phrase.
+            // Consent for the new device is asserted by the WebAuthn
+            // attestation in `finalize`, so these stay on the open router.
+            .route("/wallet/new/start", post(wallet_new::start_handler))
+            .route("/wallet/new/finalize", post(wallet_new::finalize_handler))
+            .route("/wallet/new/confirm", post(wallet_new::confirm_handler))
+            .route("/wallet/new/cancel", post(wallet_new::cancel_handler))
+            // Browser-launch passkey ceremony (gcloud-style CLI login).
+            // The CLI creates a session over JSON-RPC, opens the page in a
+            // browser, and polls `tenzro_getPasskeySession`; the page runs
+            // the WebAuthn ceremony and posts the outcome back here.
+            .route("/auth/passkey", get(crate::web::passkey_auth::passkey_page))
+            .route(
+                "/auth/passkey/session/:session_id",
+                get(crate::web::passkey_auth::session_info),
+            )
+            .route(
+                "/auth/passkey/session/:session_id/complete",
+                post(crate::web::passkey_auth::session_complete),
             )
             // Static site serving — content-addressed blobs behind site
             // manifests. Per-site x402 gating happens inside the handler

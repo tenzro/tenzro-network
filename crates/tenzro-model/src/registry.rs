@@ -513,7 +513,9 @@ impl Default for ModelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tenzro_types::model::{LicenseTier, ModelModality, ModelParameters, PricingConfig};
+    use tenzro_types::model::{
+        LicenseTier, ModelModality, ModelParameters, ModelVisibility, PricingConfig,
+    };
 
     #[test]
     fn test_register_and_get_model() {
@@ -685,6 +687,7 @@ mod tests {
             license_tier: LicenseTier::Permissive,
             license: String::new(),
             license_id: None,
+            visibility: ModelVisibility::Network,
         }
     }
 }

@@ -114,6 +114,7 @@ pub mod chainlink_feed;
 pub mod chainlink_por;
 pub mod fee_oracle;
 pub mod fee_sponsor;
+pub mod price_oracle;
 
 // Re-export commonly used types
 pub use circuit_breaker::CircuitBreaker;
@@ -137,6 +138,7 @@ pub use fee_oracle::{
 pub use fee_sponsor::{
     BridgeFeeSponsor, BridgeSponsorshipReceipt, SponsorshipPool, WiredBridgeFeeSurface,
 };
+pub use price_oracle::{PriceOracle, SymbolFeed, UsdPrice, USD_PRICE_DECIMALS};
 pub use router::{BridgeRouter, ChainCoverage};
 pub use tnzo_cct::{CctPoolType, TnzoCctBridge, TnzoCctPool, TnzoCctRegistry};
 pub use traits::{

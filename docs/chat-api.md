@@ -109,6 +109,8 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | `seed` | uint | no | 42 | Sampling seed. Pins the generator so a streaming completion can be deterministically re-prefilled by a different provider if the serving one drops mid-stream — see [Streaming failover](#streaming-failover). |
 | `require_signed` | bool | no | false | Verified-response mode: the response must carry a `tenzro_provenance` manifest that verifies against the provider's registered signing key, otherwise the call fails with `-32022`. Off by default — unsigned providers are fully routable. |
 | `verifiable` | bool | no | false | Request a TOPLOC top-k logit commitment with the response. See [Verifiable inference](#verifiable-inference-toploc-commitments-and-challenges). Non-streaming, local single-token path only. |
+| `jurisdiction` | string | no | — | Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. `"DE,EU"`), case-insensitive. The serving node must declare a matching locality claim or the request fails with `-32024`. See [Jurisdiction-pinned inference](#jurisdiction-pinned-inference-locality-claims-and-receipts). |
+| `jurisdiction_receipt` | string | no | — | Set to `"required"` to fail the request unless the response carries a verifiable signed `tenzro_jurisdiction` receipt. Off by default — pinned routing works without receipt strictness. |
 | `caller_address` | string | no | — | TNZO address billed for the inference. If absent, no on-chain billing. |
 | `channel_id` | string | no | — | Open micropayment channel to debit instead of a direct transfer. Requires `channel_update_sig`. |
 | `channel_update_sig` | string | no | — | Hex Ed25519 signature by the payer over the next cumulative channel state, authorizing the debit. |
@@ -164,6 +166,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | `load` | object | Provider load snapshot. Useful for client-side routing decisions. Local path only. |
 | `tenzro_provenance` | object \| null | Signed provenance manifest over the output bytes. `null` when the serving node has no response signer (unsigned serving is fully supported) or, on the network path, when the provider's manifest failed verification against its registered announce key. Signature preimage: `content_hash \|\| model_id \|\| provider \|\| signed_at_ms (le_u64) \|\| assertion`. |
 | `commitment` | object \| null | Present when `verifiable: true` was requested and the serving path supports commitments: `{"hash": "<64-hex>", "k": 16, "steps": <output token count>}`. The hash retrieves the full commitment via `tenzro_getInferenceCommitment` and anchors any later challenge. |
+| `tenzro_jurisdiction` | object \| null | Signed jurisdiction receipt binding request/response hashes to the serving node's locality claim. `null` when the serving node declares no claim or, on the network path, when the provider's receipt failed verification against its registered announce key. See [Jurisdiction-pinned inference](#jurisdiction-pinned-inference-locality-claims-and-receipts). |
 
 ### Errors
 
@@ -174,6 +177,7 @@ For one-shot generation. The handler internally constructs a single-turn `[{role
 | -32000 | Model not serving / runtime error. `data.load` carries load snapshot if at capacity. |
 | -32022 | `require_signed` was set but no verifiable signed response is available — the serving node has no response signer, or the provider's provenance manifest failed verification. |
 | -32023 | Settlement failed — channel debit or token transfer rejected. `data` carries `cost_wei` and `unpaid_key` (a persisted unpaid-settlement marker for retry). Never a silent free inference. |
+| -32024 | Jurisdiction pin not satisfied — no serving node with a matching locality claim (routing found none, or the local node's claim does not match), or `jurisdiction_receipt: "required"` was set and no verifiable signed receipt is available. |
 
 ### Provenance lookup
 
@@ -205,6 +209,43 @@ Provenance signing proves *who* served a response; a TOPLOC commitment proves *w
 **Penalties on an upheld challenge.** The provider's routing reputation is decremented through the same path as a failed call (−5), and a failure is recorded against its compute bond. The finalize response carries `reputation_penalized` and `bond_failure_recorded` booleans reporting which penalty paths actually fired. Reputation only ever increases through settled payments, so a provider cannot recover by challenging itself.
 
 **Wrappers.** CLI `tenzro inference {get-commitment, verify-commitment, file-challenge, get-challenge, list-challenges, commit-vote, reveal-vote, finalize-challenge}`; MCP tools `get_inference_commitment`, `verify_inference_commitment`, `file_inference_challenge`, `get_inference_challenge`, `list_inference_challenges`, `commit_challenge_vote`, `reveal_challenge_vote`, `finalize_challenge`.
+
+### Jurisdiction-pinned inference (locality claims and receipts)
+
+Data-residency rules (GDPR transfers, sectoral regulation, sovereign-deployment policy) often require that inference run inside a specific country or regulatory bloc. Jurisdiction pinning lets a caller constrain *where* a request may be served and receive a signed record of the claim in force when it was served.
+
+**Provider-side claim.** An operator declares the node's jurisdiction in the node config: `jurisdiction_country` (ISO 3166-1 alpha-2, e.g. `DE`, `SG`) plus optional `jurisdiction_blocs` (free-form uppercase tokens such as `EU`, `EEA`, `GDPR` — the protocol imposes no bloc vocabulary). When the node runs inside a TEE, the claim is bound to the attestation report hash at announcement time; on non-TEE nodes it is operator-asserted. The claim travels with the provider announcement, so routing peers can filter on it without a round-trip.
+
+**Pin matching.** A pin is a comma-separated token list matched case-insensitively: a claim satisfies the pin if its country code equals any token or any of its bloc tokens equals any token. Matching is **fail-closed**: a node with no declared claim never satisfies any pin, and routing never falls back to unpinned providers — if no provider with a matching claim serves the model, the request fails with `-32024` rather than silently running elsewhere.
+
+**Receipt.** A satisfied pinned request (and any unpinned request served by a claim-declaring node) carries a `tenzro_jurisdiction` receipt:
+
+```json
+{
+  "request_hash": "0x...",
+  "response_hash": "0x...",
+  "model_id": "qwen3-8b",
+  "provider": "0x...",
+  "jurisdiction": {
+    "country": "DE",
+    "blocs": ["EU", "EEA"],
+    "attestation_hash": "0x...",
+    "declared_at": 1780000000000
+  },
+  "signed_at": 1780000000123,
+  "signer_public_key": [/* raw bytes */],
+  "signature": [/* raw bytes */],
+  "algorithm": "ed25519"
+}
+```
+
+`request_hash` is SHA-256 of the final user-message bytes; `response_hash` is SHA-256 of the completion text bytes. The signature covers a canonical length-prefixed preimage of every field, so a receipt pins one specific (request, response, model, provider, claim) tuple. On the network path the consuming node verifies the receipt against the provider's registered announce key and against the caller's pin before passing it through — a receipt that fails verification is stripped and the response arrives with `tenzro_jurisdiction: null` (which `jurisdiction_receipt: "required"` then converts into `-32024`).
+
+**What a receipt is — and is not.** A receipt is a signed, attestation-bound locality *claim*: it proves which provider served the request, what claim that provider had declared, and (on TEE nodes) that the claim was bound to a hardware attestation. It is **not** cryptographic proof of geographic location — no such primitive exists. The trust anchor is the provider's stake, its attestation, and the slashing/reputation cost of a false declaration.
+
+**Streaming.** SSE streams carry no receipts. For pinned streaming requests the fail-closed claim check runs before generation starts — refusal arrives as HTTP 412 (`jurisdiction_not_satisfied`) before the first token. That pre-stream check is the whole streaming contract; callers needing a receipt use the non-streaming path.
+
+**Surfaces.** Simple + rich `tenzro_chat` and `tenzro_chatByIntent` (`jurisdiction` / `jurisdiction_receipt` params); OpenAI-compatible HTTP (same field names in the request body, refusals as HTTP 412 with error codes `jurisdiction_not_satisfied` / `jurisdiction_receipt_unavailable`); MCP `chat_completion` (same params); A2A inference skill (`jurisdiction` / `jurisdiction_receipt` message metadata); CLI `tenzro chat --jurisdiction "DE,EU" [--require-jurisdiction-receipt]`, `tenzro inference route --message ... --jurisdiction ...`, `tenzro inference stream --jurisdiction ...`.
 
 ---
 
@@ -355,6 +396,8 @@ Tools are executed by the **client**, not the server. The Tenzro node never invo
 
 `tenzro_chatStream` returns a Server-Sent Events stream. The event grammar depends on the request shape.
 
+Streams carry no jurisdiction receipts. When the request carries a `jurisdiction` pin, the fail-closed locality-claim check runs before generation starts — a node whose claim does not satisfy the pin refuses with HTTP 412 (`jurisdiction_not_satisfied`) before the first token. See [Jurisdiction-pinned inference](#jurisdiction-pinned-inference-locality-claims-and-receipts).
+
 ### Initiating
 
 ```http
@@ -491,7 +534,8 @@ Each entry in `GET /v1/models` carries the OpenAI core fields plus the serving c
     "usage_in_stream": true,
     "mtp": true,
     "provenance_signing": true,
-    "supported_parameters": ["temperature", "top_p", "max_tokens", "stream", "draft_n", "verifiable"]
+    "jurisdiction_signing": true,
+    "supported_parameters": ["temperature", "top_p", "max_tokens", "stream", "draft_n", "verifiable", "jurisdiction", "jurisdiction_receipt"]
   },
   "datacenter_location": "us-central1",
   "api_endpoint": "https://…",
@@ -505,6 +549,7 @@ Each entry in `GET /v1/models` carries the OpenAI core fields plus the serving c
 - `features.mtp` — the catalog marks this model as capable of speculative decoding; opt in per request with `draft_n` (1–6).
 - `features.provenance_signing` — this node signs local responses with a provenance manifest.
 - `verifiable` — Tenzro extension on the chat request: non-streaming requests served by the local single-token path return a `commitment` object (TOPLOC top-k logit commitment — see [Verifiable inference](#verifiable-inference-toploc-commitments-and-challenges)). Streaming responses and external-engine backends carry no commitment.
+- `features.jurisdiction_signing` — this node declares a locality claim and signs responses with a `tenzro_jurisdiction` receipt. `jurisdiction` / `jurisdiction_receipt` are accepted as Tenzro extensions on the chat request body; a pinned request the node cannot satisfy is refused with HTTP 412 (`jurisdiction_not_satisfied`), and `jurisdiction_receipt: "required"` without a verifiable receipt returns 412 (`jurisdiction_receipt_unavailable`). See [Jurisdiction-pinned inference](#jurisdiction-pinned-inference-locality-claims-and-receipts).
 - `datacenter_location` — the provider's declared geography from its gossip announcement (or the node's own configured geography for local services). `null` means undeclared, not global.
 
 The list response also carries a top-level `data_policy` object — the gateway's machine-readable data-handling declaration:

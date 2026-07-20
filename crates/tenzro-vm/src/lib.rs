@@ -123,7 +123,7 @@ pub use aa_validators::{
     SELECTOR_ATTEST_MODULE, SELECTOR_INSTALL_VALIDATOR, SELECTOR_UNINSTALL_VALIDATOR,
 };
 pub use aa_webauthn_validator::{
-    HybridWebAuthnSignature, WebAuthnAccountKey, WebAuthnValidator,
+    HybridWebAuthnSignature, SecondFactorPolicy, WebAuthnAccountKey, WebAuthnValidator,
 };
 pub use aa_delegation_validator::{
     CallIntent, CallIntentDecoder, DelegationScopeValidator, EnforcedScope,

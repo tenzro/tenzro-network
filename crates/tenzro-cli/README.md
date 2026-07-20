@@ -38,6 +38,9 @@ cargo run -p tenzro-cli -- --help
 ## Quick Start
 
 ```bash
+# Guided setup — join the network, provide, validate, or bootstrap a private network
+tenzro setup
+
 # One-click network participation (provisions identity, wallet, hardware profile)
 tenzro join
 
@@ -51,13 +54,27 @@ tenzro model list
 tenzro chat
 ```
 
-## Commands (101 command modules)
+## Commands (102 command modules)
 
 All commands use real JSON-RPC calls via reqwest. No artificial delays.
 
 ### Network Onboarding
 
 ```bash
+# Guided setup wizard: pick a path (join the public network, create a local or
+# sovereign network, or join an existing private network). Every prompt has a
+# matching flag for non-interactive use:
+#   --path {network,local,private}  --mode {consume,provide,validate}
+#   --network-name --chain-id --data-dir --stake --bootstrap --genesis
+#   --name --rpc --yes
+tenzro setup
+
+# Create a self-contained network: generates the validator keyset
+# (Ed25519 + ML-DSA-65 + BLS12-381), assembles a schema-v3 genesis.toml,
+# writes a service unit, and prints the start command plus the exact
+# join command for each peer
+tenzro setup --path local --network-name lab --yes
+
 # One-click join: provisions identity, wallet, hardware profile
 tenzro join
 ```
@@ -900,6 +917,11 @@ sustained, burst 100 by default).
 tenzro bridge-fee quote --adapter layerzero --dest-chain eip155:1 \
     --native-fee 1000000
 tenzro bridge-fee list-pools
+
+# Asset prices from the node price oracle (price_usd_8dp is USD x 1e8).
+# Requires bridge.prices.enabled on the node.
+tenzro bridge-fee price --symbol TNZO
+tenzro bridge-fee price --symbols TNZO,ETH,USDC
 tenzro bridge-fee sponsor \
     --quote-id-hex 0x... --adapter layerzero --dest-chain eip155:1 \
     --native-fee-smallest-unit 1000000 --tnzo-amount-wei 5100000 \
@@ -1309,6 +1331,11 @@ The CLI stores configuration and wallet data in:
 ### Running a Validator Node
 
 ```bash
+# Guided: generates the validator keyset, writes a service unit, and prints
+# the start + stake commands
+tenzro setup --mode validate
+
+# Or step by step:
 # 1. Join network (provisions identity + wallet)
 tenzro join
 
@@ -1316,7 +1343,7 @@ tenzro join
 tenzro stake deposit 100000 --provider-type validator
 
 # 3. Start validator node (via tenzro-node binary)
-tenzro-node --role validator --data-dir ~/.tenzro/validator
+tenzro-node --roles validator --data-dir ~/.tenzro/validator
 ```
 
 ### Becoming an Inference Provider

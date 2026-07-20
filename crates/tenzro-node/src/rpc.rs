@@ -40,7 +40,7 @@ use tenzro_model::hf_download::{ArtifactSpec, DownloadProgress, DownloadState, H
 use tenzro_network::{NetworkMessage, MessagePayload, NetworkService};
 use tenzro_storage::{BlockStoreImpl, AccountStoreImpl, KvStore, CF_IDENTITIES, CF_TASKS, CF_AGENT_TEMPLATES, CF_MODELS, CF_AGENTS, CF_SKILLS, CF_TOOLS, CF_KNOWLEDGE, CF_WORKFLOW_TEMPLATES, CF_METADATA, CF_SETTLEMENTS, traits::{BlockStore, AccountStore}};
 use tenzro_types::block::Block;
-use tenzro_types::model::ModelLocation;
+use tenzro_types::model::{ModelLocation, ModelVisibility};
 use tenzro_types::primitives::{Address, BlockHeight, ChainId, Hash, Nonce};
 use tenzro_types::transaction::{Transaction, SignedTransaction, TransactionType};
 use tenzro_types::Signature;
@@ -686,6 +686,9 @@ fn requires_admin_token(method: &str) -> bool {
             | "tenzro_unfreezeAddress"
             | "tenzro_whitelistAddress"
             | "tenzro_setCountryRestriction"
+            // Trusted-issuer registration gates who may issue third-party
+            // credentials and identity claims — operator-only write.
+            | "tenzro_addTrustedIssuer"
             // ERC-7943 (uRWA) compliance mutations — token kill-switch,
             // freeze, and forced-transfer are operator-only writes.
             | "tenzro_urwaSetFrozenTokens"
@@ -705,6 +708,12 @@ fn requires_admin_token(method: &str) -> bool {
             // Delegation scope tweaks alter spend ceilings for
             // identities — must be operator-controlled or signed.
             | "tenzro_setDelegationScope"
+            // Sealed-model publication reads local model files, publishes
+            // encrypted shards, and signs the manifest with the node key;
+            // install decrypts with the node's recipient secret and writes
+            // into local model storage. Both operator-only.
+            | "tenzro_sealModel"
+            | "tenzro_installSealedModel"
             // Treasury multisig configuration: withdrawer-set and
             // threshold mutations define who can sign withdrawals.
             // Approvals + execution are NOT gated — the approver
@@ -761,6 +770,11 @@ fn requires_admin_token(method: &str) -> bool {
             | "tenzro_dvpFinalizeSaga"
             | "tenzro_nettingCompute"
             | "tenzro_nettingSettle"
+            // DKLS23 DKG orchestration: creating a threshold signing group
+            // (and reading its orchestration state) decides which parties
+            // hold bridge-signer keyshares — operator-only.
+            | "tenzro_mpcKeygen"
+            | "tenzro_mpcKeygenStatus"
             // TEE-bound autonomous-agent custody enrollment. Binding an
             // account to an enclave measurement + enclave signing key
             // makes that enclave the sole authorizer of the account's
@@ -768,6 +782,14 @@ fn requires_admin_token(method: &str) -> bool {
             // Enrolling or revoking a binding is a direct custody mutation.
             | "tenzro_enrollTeeKey"
             | "tenzro_revokeTeeKey"
+            // Identity revocation + erasure: revoking a DID invalidates
+            // its entire JWT act-chain AND cascades TDIP revocation to
+            // controlled machines with network-wide gossip fan-out;
+            // erasure hard-deletes the identity record. Both are
+            // operator-only mutations.
+            | "tenzro_revokeDid"
+            | "tenzro_revokeIdentity"
+            | "tenzro_forgetIdentity"
     )
 }
 
@@ -1801,6 +1823,12 @@ async fn dispatch_request(
         "tenzro_signWithPasskey" => {
             crate::passkey_rpc::handle_sign_with_passkey(node, request.params).await
         }
+        "tenzro_setPasskeyPolicy" => {
+            crate::passkey_rpc::handle_set_passkey_policy(node, request.params).await
+        }
+        "tenzro_getPasskeyPolicy" => {
+            crate::passkey_rpc::handle_get_passkey_policy(node, request.params).await
+        }
         "tenzro_addGuardian" => {
             crate::passkey_rpc::handle_add_guardian(node, request.params).await
         }
@@ -1833,6 +1861,15 @@ async fn dispatch_request(
         }
         "tenzro_listPendingRecoveries" => {
             crate::passkey_rpc::handle_list_pending_recoveries(node, request.params).await
+        }
+        // Browser-mediated passkey auth sessions (gcloud-style login): CLI
+        // creates a session, opens the node-served `/auth/passkey` page in a
+        // browser, and polls until the ceremony completes.
+        "tenzro_createPasskeySession" => {
+            crate::passkey_rpc::handle_create_passkey_session(node, request.params).await
+        }
+        "tenzro_getPasskeySession" => {
+            crate::passkey_rpc::handle_get_passkey_session(node, request.params).await
         }
 
         // Onboarding RPCs — provision identity + wallet, then mint a
@@ -1928,6 +1965,15 @@ async fn dispatch_request(
         "tenzro_cancelDownload" => handle_cancel_download(node, request.params).await,
         "tenzro_serveModel" | "tenzro_serveModelMcp" => handle_serve_model(node, request.params).await,
         "tenzro_stopModel" => handle_stop_model(node, request.params).await,
+        // Sealed models: private encrypted shard distribution. Seal splits a
+        // local artifact into AES-256-GCM shards published to the blob layer
+        // with per-recipient wrapped content keys; install fetches, verifies,
+        // and decrypts into local model storage.
+        "tenzro_sealModel" => handle_seal_model(node, request.params).await,
+        "tenzro_installSealedModel" => handle_install_sealed_model(node, request.params).await,
+        "tenzro_getSealedModel" => handle_get_sealed_model(node, request.params).await,
+        "tenzro_listSealedModels" => handle_list_sealed_models(node).await,
+        "tenzro_modelRecipientKey" => handle_model_recipient_key(node).await,
         "tenzro_chat" | "tenzro_chatCompletion" => handle_chat(node, request.params).await,
         // Intent routing (model selection tier). `routeIntent` is discovery
         // only — returns the chosen model and fallback chain without dispatch
@@ -2316,6 +2362,7 @@ async fn dispatch_request(
         "tenzro_recoverTokens" => handle_recover_tokens(node, request.params).await,
         "tenzro_addIdentityClaim" => handle_add_identity_claim(node, request.params).await,
         "tenzro_addTrustedIssuer" => handle_add_trusted_issuer(node, request.params).await,
+        "tenzro_listTrustedIssuers" => handle_list_trusted_issuers(node).await,
 
         // Events methods
         "tenzro_getEvents" => handle_get_events(node, request.params).await,
@@ -2397,6 +2444,7 @@ async fn dispatch_request(
         // the shipped AP2 mandate-pair validator.
         "tenzro_ap2ValidateMandatePair" | "tenzro_validateMandatePair" => crate::rpc_integrations::handle_ap2_validate_mandate_pair(node, request.params).await,
         "tenzro_ap2ProtocolInfo" => crate::rpc_integrations::handle_ap2_protocol_info(node, request.params).await,
+        "tenzro_listMandates" => crate::rpc_integrations::handle_list_mandates(node, request.params).await,
         "tenzro_ap2ReportMandateViolation" => crate::rpc_integrations::handle_ap2_report_mandate_violation(node, request.params).await,
 
         // x402 — Coinbase HTTP 402 protocol (Tenzro cross-VM + Plonky3 receipt extension)
@@ -2470,6 +2518,8 @@ async fn dispatch_request(
         // chainlink-mcp tools so SDKs and CLI can target CCIP without
         // going through the generic bridge router. `ccipBridge` routes
         // through the BridgeRouter with PreferAdapter("chainlink_ccip").
+        // Asset USD price oracle (Chainlink SYMBOL/USD feeds). Read-only, public.
+        "tenzro_getPrice" => crate::rpc_integrations::handle_get_price(node, request.params).await,
         "tenzro_ccipGetFee" => crate::rpc_integrations::handle_ccip_get_fee(node, request.params).await,
         "tenzro_ccipSend" => crate::rpc_integrations::handle_ccip_send(node, request.params).await,
         "tenzro_ccipTrack" => crate::rpc_integrations::handle_ccip_track(node, request.params).await,
@@ -2532,6 +2582,10 @@ async fn dispatch_request(
         // DKLS23 pre-signing pool + PKR scheduler stats.
         "tenzro_mpcPresignStats" => crate::rpc_integrations::handle_mpc_presign_stats(node).await,
         "tenzro_mpcPkrStatus" => crate::rpc_integrations::handle_mpc_pkr_status(node).await,
+        // DKLS23 distributed key generation — establishes the sealed keyshares
+        // in CF_MPC_KEYSHARES that NodeThresholdSigner signs with.
+        "tenzro_mpcKeygen" => crate::mpc_keygen::handle_mpc_keygen(node, request.params).await,
+        "tenzro_mpcKeygenStatus" => crate::mpc_keygen::handle_mpc_keygen_status(node, request.params).await,
         // Global supply accounting (precompile 0x1021).
         "tenzro_globalSupplyPolicy" => crate::rpc_integrations::handle_global_supply_policy(node, request.params).await,
         "tenzro_globalSupplyCirculating" => crate::rpc_integrations::handle_global_supply_circulating(node, request.params).await,
@@ -2559,6 +2613,8 @@ async fn dispatch_request(
         "tenzro_moeForward" => crate::moe::handle_moe_forward(node, request.params).await,
         "tenzro_moePrepareExperts" => crate::moe::handle_moe_prepare_experts(node, request.params).await,
         "tenzro_moePrepareStatus" => crate::moe::handle_moe_prepare_status(node, request.params).await,
+        "tenzro_moeListReceipts" => crate::moe::handle_moe_list_receipts(node, request.params).await,
+        "tenzro_moeDisputeReceipt" => crate::moe::handle_moe_dispute_receipt(node, request.params).await,
         "tenzro_modelMetadata" => crate::rpc_integrations::handle_model_metadata(request.params).await,
 
         _ => Err(JsonRpcError {
@@ -14360,6 +14416,147 @@ async fn handle_get_agent_jwk(
     })
 }
 
+// ─── Identity write authorization ───
+//
+// Identity-mutating RPCs (`tenzro_addCredential`, `tenzro_addService`,
+// `tenzro_addIdentityClaim`) require a `TenzroDidEnvelope` (hex `envelope`
+// param) signed by the authorizing DID, with `method` bound to the RPC
+// name and `params_hash` bound to the canonical params below — the same
+// convention as the app registry: u32-BE length-prefixed fields under a
+// domain tag.
+
+const IDENTITY_CREDENTIAL_DOMAIN: &[u8] = b"tenzro/identity/credential";
+const IDENTITY_SERVICE_DOMAIN: &[u8] = b"tenzro/identity/service";
+const IDENTITY_CLAIM_DOMAIN: &[u8] = b"tenzro/identity/claim";
+
+fn identity_push_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+/// Canonical params for `tenzro_addCredential`. `claims_canonical` is the
+/// `serde_json` serialization of the claims object — `Value::Object` is
+/// sorted-key, so client and server derive identical bytes.
+fn canonical_credential_params(
+    did: &str,
+    credential_type: &str,
+    issuer: &str,
+    claims_canonical: &[u8],
+) -> Vec<u8> {
+    let mut buf = IDENTITY_CREDENTIAL_DOMAIN.to_vec();
+    identity_push_bytes(&mut buf, did.as_bytes());
+    identity_push_bytes(&mut buf, credential_type.as_bytes());
+    identity_push_bytes(&mut buf, issuer.as_bytes());
+    identity_push_bytes(&mut buf, claims_canonical);
+    buf
+}
+
+/// Canonical params for `tenzro_addService`.
+fn canonical_service_params(did: &str, service_type: &str, endpoint: &str) -> Vec<u8> {
+    let mut buf = IDENTITY_SERVICE_DOMAIN.to_vec();
+    identity_push_bytes(&mut buf, did.as_bytes());
+    identity_push_bytes(&mut buf, service_type.as_bytes());
+    identity_push_bytes(&mut buf, endpoint.as_bytes());
+    buf
+}
+
+/// Canonical params for `tenzro_addIdentityClaim`. The address is the
+/// 0x-stripped lowercase hex form.
+fn canonical_claim_params(
+    address_hex_lower: &str,
+    topic: u64,
+    issuer: &str,
+    data: &str,
+    valid_from: &str,
+    valid_to: &str,
+) -> Vec<u8> {
+    let mut buf = IDENTITY_CLAIM_DOMAIN.to_vec();
+    identity_push_bytes(&mut buf, address_hex_lower.as_bytes());
+    buf.extend_from_slice(&topic.to_be_bytes());
+    identity_push_bytes(&mut buf, issuer.as_bytes());
+    identity_push_bytes(&mut buf, data.as_bytes());
+    identity_push_bytes(&mut buf, valid_from.as_bytes());
+    identity_push_bytes(&mut buf, valid_to.as_bytes());
+    buf
+}
+
+/// Verifies the DID envelope authorizing an identity write. Checks, in
+/// order: method binding, params_hash binding, signer authorization
+/// (`env.did` must be one of `authorized_dids`), cryptographic envelope
+/// verification (freshness + registered Ed25519 key), then records the
+/// nonce in the node-wide replay cache — the same cache that covers the
+/// A2A mutation surface.
+fn verify_identity_write_envelope(
+    registry: &tenzro_identity::IdentityRegistry,
+    env: &tenzro_identity::envelope::TenzroDidEnvelope,
+    method: &str,
+    canonical_params: &[u8],
+    authorized_dids: &[&str],
+) -> std::result::Result<(), JsonRpcError> {
+    use tenzro_identity::envelope::{params_hash, verify_envelope};
+
+    if env.method != method {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "envelope method '{}' does not authorize {}",
+                env.method, method
+            ),
+            data: None,
+        });
+    }
+    if env.params_hash != params_hash(canonical_params) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "envelope params_hash does not match canonical params".to_string(),
+            data: None,
+        });
+    }
+    if !authorized_dids.iter().any(|d| *d == env.did) {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!("DID '{}' is not authorized for {}", env.did, method),
+            data: None,
+        });
+    }
+    verify_envelope(env, registry).map_err(|e| JsonRpcError {
+        code: -32001,
+        message: format!("envelope verification failed: {e}"),
+        data: None,
+    })?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if !crate::a2a::did_envelope::check_and_record_nonce(&env.did, &hex::encode(env.nonce), now_ms) {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: "envelope nonce replayed".to_string(),
+            data: None,
+        });
+    }
+    Ok(())
+}
+
+/// Reads the CF_COMPLIANCE trusted-issuer entry for `did` (written by
+/// `tenzro_addTrustedIssuer`), returning the issuer's registered claim
+/// topics when the entry exists and is active. An empty topic list means
+/// the issuer is unrestricted.
+fn trusted_issuer_topics(node: &Arc<TenzroNode>, did: &str) -> Option<Vec<u64>> {
+    use tenzro_storage::{CF_COMPLIANCE, KvStore};
+    let storage = node.storage()?;
+    let key = format!("issuer:{}", did).into_bytes();
+    let bytes = storage.get(CF_COMPLIANCE, &key).ok().flatten()?;
+    let entry: Value = serde_json::from_slice(&bytes).ok()?;
+    if entry.get("active").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    Some(
+        entry
+            .get("topics")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+            .unwrap_or_default(),
+    )
+}
+
 async fn handle_add_credential(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -14396,18 +14593,94 @@ async fn handle_add_credential(
         data: None,
     })?;
 
+    // Canonical claims bytes: `Value::Object` serializes sorted-key, so
+    // this is deterministic on both client and server.
+    let claims_value = params
+        .get("claims")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let claims_canonical = serde_json::to_vec(&claims_value).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: format!("Invalid claims: {}", e),
+        data: None,
+    })?;
+
+    // Authorization: the envelope must be signed by the issuer, and the
+    // issuer must be the subject itself, the subject's controller, or a
+    // registered active trusted issuer.
+    let env = parse_envelope_param(&params)?;
+    if env.did != issuer {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: "envelope must be signed by the credential issuer".to_string(),
+            data: None,
+        });
+    }
+    let subject = registry.resolve(did).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Cannot resolve subject DID: {}", e),
+        data: None,
+    })?;
+    let issuer_is_controller = subject.controller_did() == Some(issuer);
+    let issuer_is_trusted = trusted_issuer_topics(node, issuer).is_some();
+    if issuer != did && !issuer_is_controller && !issuer_is_trusted {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!(
+                "issuer '{}' is neither the subject, the subject's controller, \
+                 nor a registered trusted issuer",
+                issuer
+            ),
+            data: None,
+        });
+    }
+    verify_identity_write_envelope(
+        registry,
+        &env,
+        "tenzro_addCredential",
+        &canonical_credential_params(did, credential_type, issuer, &claims_canonical),
+        &[issuer],
+    )?;
+
     use tenzro_identity::VerifiableCredential;
     use std::collections::HashMap;
 
     let mut claims: HashMap<String, serde_json::Value> = HashMap::new();
-    if let Some(claims_obj) = params.get("claims").and_then(|v| v.as_object()) {
+    if let Some(claims_obj) = claims_value.as_object() {
         for (k, v) in claims_obj {
             claims.insert(k.clone(), v.clone());
         }
     }
 
-    use tenzro_identity::credential::{TenzroCredentialType, CredentialSubject};
+    use tenzro_identity::credential::{TenzroCredentialType, CredentialSubject, CredentialProof};
     use chrono::Utc;
+
+    let credential_subject = CredentialSubject {
+        id: did.to_string(),
+        claims,
+    };
+
+    // Optional detached proof: the issuer signs the canonical subject
+    // bytes (`CredentialSubject::canonical_bytes`) so the credential is
+    // independently verifiable in trust-chain traversal. Verified against
+    // the issuer's assertion keys before issuance — fail-closed on a
+    // proof that does not validate.
+    let proof = match params.get("proof_value").and_then(|v| v.as_str()) {
+        Some(proof_hex) => {
+            let proof_value = hex::decode(proof_hex.strip_prefix("0x").unwrap_or(proof_hex))
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid proof_value hex: {}", e),
+                    data: None,
+                })?;
+            let proof_type = params
+                .get("proof_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Ed25519Signature2020");
+            Some(CredentialProof::new(proof_type, issuer, proof_value))
+        }
+        None => None,
+    };
 
     let credential_id = format!("urn:uuid:{}", uuid::Uuid::new_v4());
     let credential = VerifiableCredential {
@@ -14418,12 +14691,27 @@ async fn handle_add_credential(
         issuer: issuer.to_string(),
         issuance_date: Utc::now(),
         expiration_date: None,
-        credential_subject: CredentialSubject {
-            id: did.to_string(),
-            claims,
-        },
-        proof: None,
+        credential_subject,
+        proof,
     };
+
+    if credential.proof.is_some() {
+        let issuer_identity = registry.resolve(issuer).map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Cannot resolve issuer DID: {}", e),
+            data: None,
+        })?;
+        let proof_valid = issuer_identity.public_keys.iter().any(|k| {
+            matches!(credential.verify_proof(&k.public_key), Ok(true))
+        });
+        if !proof_valid {
+            return Err(JsonRpcError {
+                code: -32001,
+                message: "credential proof does not verify against any issuer key".to_string(),
+                data: None,
+            });
+        }
+    }
 
     registry.issue_credential(
         did,
@@ -14482,6 +14770,25 @@ async fn handle_add_service(
         message: "Identity registry not initialized".to_string(),
         data: None,
     })?;
+
+    let env = parse_envelope_param(&params)?;
+
+    let subject = registry.resolve(did).map_err(|e| JsonRpcError {
+        code: -32001,
+        message: format!("Failed to resolve DID '{}': {}", did, e),
+        data: None,
+    })?;
+    let mut authorized: Vec<&str> = vec![did];
+    if let Some(controller) = subject.controller_did() {
+        authorized.push(controller);
+    }
+    verify_identity_write_envelope(
+        registry,
+        &env,
+        "tenzro_addService",
+        &canonical_service_params(did, service_type, endpoint),
+        &authorized,
+    )?;
 
     use tenzro_identity::ServiceEndpoint;
     let service = ServiceEndpoint {
@@ -16803,12 +17110,17 @@ async fn handle_resolve_identity(
         }
         _ => {
             return Err(JsonRpcError {
-                code: -32000,
+                code: -32404,
                 message: format!("Identity not found on ledger: {}", did),
                 data: None,
             });
         }
     };
+
+    let include_record = params
+        .get("include_record")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Serialize public keys as structured objects
     let public_keys: Vec<serde_json::Value> = identity.public_keys.iter()
@@ -16838,7 +17150,17 @@ async fn handle_resolve_identity(
         }))
         .collect();
 
-    Ok(serde_json::json!({
+    let record = if include_record {
+        Some(serde_json::to_value(&identity).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Identity record serialization failed: {}", e),
+            data: None,
+        })?)
+    } else {
+        None
+    };
+
+    let mut response = serde_json::json!({
         "did": identity.did_string(),
         "status": format!("{}", identity.status),
         "is_human": identity.is_human(),
@@ -16851,7 +17173,13 @@ async fn handle_resolve_identity(
         "credentials": credentials,
         "services": services,
         "metadata": identity.metadata,
-    }))
+    });
+
+    if let Some(record) = record {
+        response["record"] = record;
+    }
+
+    Ok(response)
 }
 
 /// Export a portable CARv1 bundle for `did` containing the identity record
@@ -18353,32 +18681,49 @@ async fn handle_refresh_token(
     }))
 }
 
-/// `tenzro_linkWalletForAuth` — bind an existing MPC wallet to a fresh
-/// TDIP identity and mint an access JWT scoped for self-custody.
+/// `tenzro_linkWalletForAuth` — mint a DPoP-bound access JWT scoped for
+/// self-custody against an already-provisioned identity.
 ///
-/// This bridges the gap between `tenzro_createWallet` (which only
-/// returns a `wallet_id` + `address`) and the auth-mediated signing
-/// path: callers who created a wallet first can later obtain an
-/// access JWT bound to that wallet by passing back `wallet_id` and a
-/// DPoP key thumbprint. The new identity is registered with KYC tier
-/// `Unverified`; callers may upgrade tier later via the standard
-/// credential-update flow.
+/// Two entry shapes, one mint:
 ///
-/// Params: `{ wallet_id, dpop_jkt?, ttl_secs?, display_name? }`.
+/// - `wallet_id`: an MPC wallet from `tenzro_createWallet`. Bridges the
+///   gap between that call (which only returns `wallet_id` + `address`)
+///   and the auth-mediated signing path — resolve the wallet's owning
+///   DID by pubkey, registering a fresh identity (`Unverified`) only if
+///   the pubkey has none bound yet.
+/// - `did`: an identity already provisioned by the passkey-quorum
+///   `/wallet/new/*` flow. That flow registers the identity directly and
+///   has no `wallet_service` wallet, so the caller passes the DID it got
+///   from `finalize` to mint its token. The response `wallet` field is
+///   null in this shape — custody is the passkey + node-TEE 2-of-2, not
+///   an MPC wallet.
+///
+/// The token is minted against the DID in both shapes. `display_name` is
+/// used only when the `wallet_id` shape has to register a new identity.
+///
+/// Params: `{ wallet_id | did, dpop_jwk? | dpop_jkt?, ttl_secs?, display_name? }`.
 async fn handle_link_wallet_for_auth(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let params = unwrap_param_object(params);
-    let wallet_id_str = params
-        .get("wallet_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
+    // Two entry shapes:
+    //   - `wallet_id`: an MPC wallet created via `tenzro_createWallet`. We
+    //     resolve its owning DID by pubkey.
+    //   - `did`: a self-custody identity already provisioned via
+    //     `/wallet/new/*` (passkey-quorum). That flow registers the identity
+    //     directly (no `wallet_service` wallet exists for it), so we resolve
+    //     by DID and mint against it. The token is minted against the DID
+    //     either way, so both shapes converge on the same mint.
+    let wallet_id_param = params.get("wallet_id").and_then(|v| v.as_str());
+    let did_param = params.get("did").and_then(|v| v.as_str());
+    if wallet_id_param.is_none() && did_param.is_none() {
+        return Err(JsonRpcError {
             code: -32602,
-            message: "Missing required param: wallet_id".to_string(),
+            message: "Missing required param: pass either wallet_id or did".to_string(),
             data: None,
-        })?
-        .to_string();
+        });
+    }
     let dpop_jkt = resolve_dpop_jkt(&params)?;
     let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64());
     let display_name = params
@@ -18402,52 +18747,77 @@ async fn handle_link_wallet_for_auth(
         message: "Identity registry not initialized".to_string(),
         data: None,
     })?;
-    let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "Wallet service not initialized".to_string(),
-        data: None,
-    })?;
 
-    use tenzro_wallet::{WalletId, WalletService};
-    let wallet = wallet_service
-        .get_wallet(&WalletId(wallet_id_str.clone()))
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("Wallet lookup failed: {}", e),
-            data: None,
-        })?
-        .ok_or_else(|| JsonRpcError {
+    // Resolve `(identity, wallet_json)`. The `did` shape is the self-custody
+    // path: the identity is already registered (via `/wallet/new/*`) and no
+    // `wallet_service` wallet exists for it, so `wallet_json` is null. The
+    // `wallet_id` shape resolves the MPC wallet's owning identity by pubkey
+    // and echoes the wallet's address back.
+    let (identity, wallet_json) = if let Some(did_str) = did_param {
+        let identity = registry.resolve(did_str).map_err(|_| JsonRpcError {
             code: -32602,
-            message: format!("Unknown wallet_id: {}", wallet_id_str),
+            message: format!("Unknown did: {}", did_str),
+            data: None,
+        })?;
+        (identity, Value::Null)
+    } else {
+        let wallet_id_str = wallet_id_param
+            .expect("wallet_id present when did absent")
+            .to_string();
+        let wallet_service = node.wallet_service().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Wallet service not initialized".to_string(),
             data: None,
         })?;
 
-    // Resolve the wallet's existing TDIP identity, if any. A wallet has
-    // exactly one owning identity in TDIP — re-link the auth session to
-    // it instead of minting a duplicate DID. Falls back to fresh
-    // registration only when no identity is bound to this pubkey yet
-    // (e.g. wallet was created via the bare `tenzro_createWallet` path
-    // without onboarding).
-    let pubkey_bytes = wallet.public_key.to_bytes();
-    let identity = if let Some(existing) = registry.find_identity_by_pubkey(&pubkey_bytes) {
-        existing
-    } else {
-        let registered = registry
-            .register_human_with_fee(
-                pubkey_bytes,
-                display_name.clone(),
-                tenzro_types::identity::KycTier::Unverified,
-            )
+        use tenzro_wallet::{WalletId, WalletService};
+        let wallet = wallet_service
+            .get_wallet(&WalletId(wallet_id_str.clone()))
             .await
             .map_err(|e| JsonRpcError {
                 code: -32000,
-                message: format!("Identity registration failed: {}", e),
+                message: format!("Wallet lookup failed: {}", e),
                 data: None,
             })?
-            .identity;
-        persist_identity(node, &registered)?;
-        registered
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("Unknown wallet_id: {}", wallet_id_str),
+                data: None,
+            })?;
+
+        // Resolve the wallet's existing TDIP identity, if any. A wallet has
+        // exactly one owning identity in TDIP — re-link the auth session to
+        // it instead of minting a duplicate DID. Falls back to fresh
+        // registration only when no identity is bound to this pubkey yet
+        // (e.g. wallet was created via the bare `tenzro_createWallet` path
+        // without onboarding).
+        let pubkey_bytes = wallet.public_key.to_bytes();
+        let identity = if let Some(existing) = registry.find_identity_by_pubkey(&pubkey_bytes) {
+            existing
+        } else {
+            let registered = registry
+                .register_human_with_fee(
+                    pubkey_bytes,
+                    display_name.clone(),
+                    tenzro_types::identity::KycTier::Unverified,
+                )
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Identity registration failed: {}", e),
+                    data: None,
+                })?
+                .identity;
+            persist_identity(node, &registered)?;
+            registered
+        };
+
+        let wallet_json = serde_json::json!({
+            "wallet_id": wallet.wallet_id.0,
+            "address": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
+        });
+        (identity, wallet_json)
     };
 
     let did = identity.did_string();
@@ -18465,11 +18835,7 @@ async fn handle_link_wallet_for_auth(
             "display_name": identity.display_name(),
             "status": format!("{}", identity.status),
         },
-        "wallet": {
-            "wallet_id": wallet.wallet_id.0,
-            "address": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
-            "public_key": format!("0x{}", hex::encode(wallet.public_key.as_bytes())),
-        },
+        "wallet": wallet_json,
         "access_token": access_token,
         "token_type": "Bearer",
         "expires_in": expires_in,
@@ -18974,17 +19340,30 @@ async fn handle_revoke_jwt(
     }))
 }
 
-/// `tenzro_revokeDid` — revoke an entire identity by DID. Every JWT
-/// in the act-chain rooted at this DID is revoked. Useful when the
-/// caller has lost or compromised a DID's controlling key and wants to
-/// invalidate all of its tokens (and all of its children's tokens) in
-/// one shot, even if no specific JTI is known.
+/// `tenzro_revokeDid` — revoke an entire identity by DID across BOTH
+/// authority layers:
+///
+/// 1. **Auth layer** (`tenzro_auth::AuthEngine::revoke_did`): every JWT
+///    in the act-chain rooted at this DID is revoked. Useful when the
+///    caller has lost or compromised a DID's controlling key and wants
+///    to invalidate all of its tokens (and all of its children's
+///    tokens) in one shot, even if no specific JTI is known.
+/// 2. **TDIP layer** (`IdentityRegistry::revoke`): the identity record
+///    transitions to `IdentityStatus::Revoked`, cascades to controlled
+///    machines, persists the revocation entry to `CF_IDENTITIES`, and
+///    fan-outs a hybrid-signed `SignedRevocationEntry` per affected DID
+///    on the `tenzro/identity` gossipsub topic so peer registries apply
+///    the same revocation.
+///
+/// The TDIP layer is best-effort relative to the auth layer: a DID that
+/// only exists in the JWT act-chain (never registered in TDIP) still
+/// revokes cleanly, and the response reports each layer's outcome.
 ///
 /// Returns `affected_jti_count` — the number of JTIs newly added to
 /// the revocation set by this call (not counting JTIs that were
 /// already revoked).
 ///
-/// Params: `{ did: "did:tenzro:...", reason?: "..." }`
+/// Params: `{ did: "did:tenzro:...", reason?: "...", revoked_by?: "did:tenzro:..." }`
 async fn handle_revoke_did(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -18996,6 +19375,9 @@ async fn handle_revoke_did(
         data: None,
     })?;
     let reason = p["reason"].as_str().unwrap_or("revoked via tenzro_revokeDid");
+    let revoked_by = p["revoked_by"]
+        .as_str()
+        .unwrap_or("did:tenzro:system:tenzro-network");
 
     let engine = auth_engine_or_error(node)?;
     let count = engine.revoke_did(did, reason).map_err(|e| JsonRpcError {
@@ -19003,10 +19385,37 @@ async fn handle_revoke_did(
         message: format!("revoke_did failed: {}", e),
         data: None,
     })?;
+
+    let registry_status = match (node.identity_registry(), node.validator_hybrid_signer()) {
+        (Some(registry), Some(signer)) => {
+            match registry.revoke(did, reason.to_string(), revoked_by.to_string(), signer.as_ref())
+            {
+                Ok(()) => "revoked",
+                Err(tenzro_identity::IdentityError::NotFound(_)) => "not_registered",
+                Err(e) => {
+                    return Err(JsonRpcError {
+                        code: -32000,
+                        message: format!("identity registry revoke failed: {}", e),
+                        data: None,
+                    });
+                }
+            }
+        }
+        (Some(_), None) => {
+            tracing::warn!(
+                %did,
+                "TDIP registry revoke skipped: no hybrid signer on this node role"
+            );
+            "skipped_no_signer"
+        }
+        (None, _) => "skipped_no_registry",
+    };
+
     Ok(serde_json::json!({
         "did": did,
         "status": "revoked",
         "affected_jti_count": count,
+        "identity_registry": registry_status,
         "cascade": "act-chain transitive closure applied; see CF_AUDIT for cascaded events",
     }))
 }
@@ -22653,7 +23062,19 @@ async fn handle_serve_model(
                 data: None,
             })?;
 
-        node.served_models.insert(model_id.to_string(), true);
+        let visibility = match params.get("visibility").and_then(|v| v.as_str()) {
+            None => ModelVisibility::Network,
+            Some(s) => ModelVisibility::parse(s).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "Unknown visibility '{}'. Expected 'network' or 'private'",
+                    s
+                ),
+                data: None,
+            })?,
+        };
+
+        node.served_models.insert(model_id.to_string(), visibility);
 
         // Persist to RocksDB CF_MODELS so the external binding survives
         // restart. The bearer token is stored alongside the endpoint —
@@ -22668,9 +23089,10 @@ async fn handle_serve_model(
                 "base_url": base_url,
                 "upstream_model": upstream_model,
                 "api_key": api_key,
+                "visibility": visibility.as_str(),
             });
             if let Ok(bytes) = serde_json::to_vec(&record)
-                && let Err(e) = storage.put(CF_MODELS, model_id.as_bytes(), &bytes)
+                && let Err(e) = storage.put(CF_MODELS, format!("served:{}", model_id).as_bytes(), &bytes)
             {
                 tracing::warn!(model_id = %model_id, error = %e, "Failed to persist external-engine model to RocksDB");
             }
@@ -22763,13 +23185,7 @@ async fn handle_serve_model(
             &entry.parameters,
         );
 
-        let visibility = params
-            .get("visibility")
-            .and_then(|v| v.as_str())
-            .unwrap_or("network")
-            .to_string();
-
-        if visibility == "network"
+        if visibility.is_network()
             && let Some(network) = node.network()
         {
             let network = network.clone();
@@ -22816,7 +23232,7 @@ async fn handle_serve_model(
             let context_length = entry.context_length;
             let api_endpoint_c = api_endpoint.clone();
             let model_id_c = model_id.to_string();
-            let visibility_c = visibility.clone();
+            let visibility_c = visibility.as_str().to_string();
             let iroh_endpoint_id_c = node
                 .iroh_resolver
                 .as_ref()
@@ -23055,17 +23471,33 @@ async fn handle_serve_model(
         "disabled"
     };
 
+    // Provider visibility: "network" (default) gossips the model so any peer
+    // can route to it; "private" keeps the model service registered locally
+    // but skips every network announcement (registration gossip, heartbeat,
+    // provider-announcement served list), so it is reachable only over a
+    // direct/LAN connection the operator arranges. The assisted-setup UI
+    // surfaces this as a public/private toggle on the logical provider.
+    let visibility = match params.get("visibility").and_then(|v| v.as_str()) {
+        None => ModelVisibility::Network,
+        Some(s) => ModelVisibility::parse(s).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Unknown visibility '{}'. Expected 'network' or 'private'", s),
+            data: None,
+        })?,
+    };
+
     // Mark model as served
-    node.served_models.insert(model_id.to_string(), true);
+    node.served_models.insert(model_id.to_string(), visibility);
 
     // Persist to RocksDB CF_MODELS so served state survives restart
     if let Some(storage) = node.storage() {
         let record = serde_json::json!({
             "model_id": model_id,
             "served_at": chrono::Utc::now().to_rfc3339(),
+            "visibility": visibility.as_str(),
         });
         if let Ok(bytes) = serde_json::to_vec(&record) {
-            let put_result = storage.put(CF_MODELS, model_id.as_bytes(), &bytes);
+            let put_result = storage.put(CF_MODELS, format!("served:{}", model_id).as_bytes(), &bytes);
             if let Err(e) = put_result {
                 tracing::warn!(model_id = %model_id, error = %e, "Failed to persist served model to RocksDB");
             } else {
@@ -23137,17 +23569,6 @@ async fn handle_serve_model(
         &params_str,
     );
 
-    // Provider visibility: "network" (default) gossips the model so any peer
-    // can route to it; "private" keeps the model service registered locally
-    // but skips the network announcement, so it is reachable only over a
-    // direct/LAN connection the operator arranges. The assisted-setup UI
-    // surfaces this as a public/private toggle on the logical provider.
-    let visibility = params
-        .get("visibility")
-        .and_then(|v| v.as_str())
-        .unwrap_or("network")
-        .to_string();
-
     // Background publication: stream the GGUF's SHA-256 once, publish the
     // model in the shared ModelRegistry (routing's memory-fit and modality
     // checks read from it), then — when the provider opted into network
@@ -23164,7 +23585,7 @@ async fn handle_serve_model(
         // Announcement context, snapshotted before the spawn. The pricing +
         // schedule guards are parking_lot (`!Send`) and must not cross an
         // await, so they are read and dropped inside the inner block.
-        let announce = if visibility == "network" {
+        let announce = if visibility.is_network() {
             if let Some(network) = node.network() {
                 let network = network.clone();
                 let (msg_schedule, per_token) = {
@@ -23211,7 +23632,7 @@ async fn handle_serve_model(
         let provider_address_hex = provider_wallet
             .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
             .unwrap_or_default();
-        let visibility_c = visibility.clone();
+        let visibility_c = visibility.as_str().to_string();
         let api_endpoint_c = api_endpoint.clone();
         let model_id_c = model_id.to_string();
         let gguf_path_c = gguf_path.clone();
@@ -23357,13 +23778,17 @@ async fn handle_stop_model(
     }
 
     // Remove from served models, model services registry, load tracker, and RocksDB
-    node.served_models.remove(model_id);
+    let removed_visibility = node
+        .served_models
+        .remove(model_id)
+        .map(|(_, v)| v)
+        .unwrap_or_default();
     node.unregister_model_services_by_model(model_id);
     node.load_tracker.unregister_model(model_id);
 
     // Remove from RocksDB so the model isn't restored as "serving" on restart
     if let Some(storage) = node.storage() {
-        let _ = storage.delete(CF_MODELS, model_id.as_bytes());
+        let _ = storage.delete(CF_MODELS, format!("served:{}", model_id).as_bytes());
         tracing::info!(model_id = %model_id, "Removed served model from RocksDB CF_MODELS");
     }
 
@@ -23379,8 +23804,11 @@ async fn handle_stop_model(
     // Publish gossipsub withdrawal so peers remove this model. The withdrawal
     // must carry the same `provider` the serve announcement did (the consumer
     // keys entries by `model_id:provider`) and be signed, or peers reject it
-    // as unauthenticated and never evict the entry.
-    if let Some(network) = node.network() {
+    // as unauthenticated and never evict the entry. Private models were never
+    // announced, so no withdrawal is broadcast for them.
+    if removed_visibility.is_network()
+        && let Some(network) = node.network()
+    {
         let network = network.clone();
         let provider_address = node
             .identity_registry()
@@ -23434,6 +23862,416 @@ async fn handle_stop_model(
         "success": true,
         "model_id": model_id,
         "status": "stopped",
+    }))
+}
+
+/// `tenzro_sealModel` — split a local model artifact into encrypted shards
+/// and publish them to the blob layer with per-recipient wrapped content
+/// keys (`x25519-envelope-aes-256-gcm`). The manifest is signed with the
+/// node announce key and stored in the sealed-model store. Operator-only.
+///
+/// Params:
+/// - `model_id` (string, required)
+/// - `path` (string, required) — local artifact file to seal
+/// - `owner_did` (string, required) — publisher DID recorded on the manifest
+/// - `recipients` (array, required) — `{ did, x25519_pubkey (64-hex),
+///   attestation_hash? (64-hex) }`
+/// - `artifact_name` (string, optional — defaults to the file name)
+/// - `shard_bytes` (u64, optional — defaults to 256 MiB)
+async fn handle_seal_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+    let path_str = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'path' parameter".to_string(),
+            data: None,
+        })?;
+    let path = std::path::Path::new(path_str);
+    if !path.is_file() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("'path' does not point at a readable file: {}", path_str),
+            data: None,
+        });
+    }
+    let owner_did = params
+        .get("owner_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'owner_did' parameter".to_string(),
+            data: None,
+        })?;
+    let artifact_name = params
+        .get("artifact_name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        })
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'artifact_name' and file name is not valid UTF-8".to_string(),
+            data: None,
+        })?;
+    let shard_bytes = params
+        .get("shard_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(tenzro_model::DEFAULT_SHARD_BYTES);
+
+    let recipients_json = params
+        .get("recipients")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'recipients' array".to_string(),
+            data: None,
+        })?;
+    if recipients_json.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "'recipients' must contain at least one entry".to_string(),
+            data: None,
+        });
+    }
+    let mut recipients: Vec<tenzro_model::RecipientSpec> =
+        Vec::with_capacity(recipients_json.len());
+    for (i, r) in recipients_json.iter().enumerate() {
+        let did = r
+            .get("did")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("recipients[{}]: missing 'did'", i),
+                data: None,
+            })?;
+        let pk_hex = r
+            .get("x25519_pubkey")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("recipients[{}]: missing 'x25519_pubkey'", i),
+                data: None,
+            })?;
+        let pk_bytes = hex::decode(pk_hex.strip_prefix("0x").unwrap_or(pk_hex)).map_err(
+            |e| JsonRpcError {
+                code: -32602,
+                message: format!("recipients[{}]: invalid x25519_pubkey hex: {}", i, e),
+                data: None,
+            },
+        )?;
+        let x25519_pubkey: [u8; 32] = pk_bytes.try_into().map_err(|_| JsonRpcError {
+            code: -32602,
+            message: format!("recipients[{}]: x25519_pubkey must be 32 bytes", i),
+            data: None,
+        })?;
+        let attestation_hash = match r.get("attestation_hash").and_then(|v| v.as_str()) {
+            Some(h) => {
+                let bytes = hex::decode(h.strip_prefix("0x").unwrap_or(h)).map_err(|e| {
+                    JsonRpcError {
+                        code: -32602,
+                        message: format!(
+                            "recipients[{}]: invalid attestation_hash hex: {}",
+                            i, e
+                        ),
+                        data: None,
+                    }
+                })?;
+                Some(
+                    tenzro_types::Hash::from_bytes(&bytes).ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: format!(
+                            "recipients[{}]: attestation_hash must be 32 bytes",
+                            i
+                        ),
+                        data: None,
+                    })?,
+                )
+            }
+            None => None,
+        };
+        recipients.push(tenzro_model::RecipientSpec {
+            did: did.to_string(),
+            x25519_pubkey,
+            attestation_hash,
+        });
+    }
+
+    let resolver = node.iroh_resolver.as_ref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Blob layer not initialized (iroh resolver unavailable)".to_string(),
+        data: None,
+    })?;
+    let fetcher = crate::model_blob_fetcher_bridge::IrohBlobFetcher::new(resolver.clone());
+
+    let signer = node.announce_signer().cloned().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Node signing key unavailable (announce signer not initialized)".to_string(),
+        data: None,
+    })?;
+    let store = node.sealed_model_store().cloned().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Sealed-model store not initialized".to_string(),
+        data: None,
+    })?;
+
+    let mut manifest = tenzro_model::seal_model_file(
+        path,
+        model_id,
+        &artifact_name,
+        owner_did,
+        &recipients,
+        shard_bytes,
+        &fetcher,
+    )
+    .await
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to seal model: {}", e),
+        data: None,
+    })?;
+
+    let signature = signer
+        .sign(manifest.manifest_hash.as_bytes())
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to sign sealed-model manifest: {}", e),
+            data: None,
+        })?;
+    let signer_pubkey = signer.public_key().as_bytes().to_vec();
+    manifest.attach_signature(signature.to_bytes(), signer_pubkey);
+
+    store.put(manifest.clone()).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("Failed to persist sealed-model manifest: {}", e),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "model_id": manifest.model_id,
+        "artifact_name": manifest.artifact_name,
+        "model_hash": hex::encode(manifest.model_hash.as_bytes()),
+        "manifest_hash": hex::encode(manifest.manifest_hash.as_bytes()),
+        "total_bytes": manifest.total_bytes,
+        "shard_bytes": manifest.shard_bytes,
+        "shard_count": manifest.shards.len(),
+        "recipient_count": manifest.recipients.len(),
+        "wrap_alg": manifest.wrap_alg,
+        "owner_did": manifest.owner_did,
+    }))
+}
+
+/// `tenzro_installSealedModel` — fetch, verify, and decrypt a sealed model
+/// into local model storage using this node's X25519 recipient key. The
+/// manifest comes either from the local sealed-model store (`model_id`) or
+/// inline (`manifest`). Operator-only.
+///
+/// Params:
+/// - `recipient_did` (string, required) — must match a manifest recipient
+///   whose wrapped key targets this node's X25519 public key
+/// - `model_id` (string) — look up the manifest in the local store, or
+/// - `manifest` (object) — full `SealedModelManifest` JSON received
+///   out-of-band from the publisher
+async fn handle_install_sealed_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let recipient_did = params
+        .get("recipient_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'recipient_did' parameter".to_string(),
+            data: None,
+        })?;
+
+    let manifest: tenzro_model::SealedModelManifest = if let Some(m) = params.get("manifest") {
+        serde_json::from_value(m.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("Invalid 'manifest': {}", e),
+            data: None,
+        })?
+    } else {
+        let model_id = params
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Provide either 'manifest' or 'model_id'".to_string(),
+                data: None,
+            })?;
+        let store = node.sealed_model_store().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "Sealed-model store not initialized".to_string(),
+            data: None,
+        })?;
+        store.get(model_id).ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!("No sealed-model manifest stored for '{}'", model_id),
+            data: None,
+        })?
+    };
+
+    let keypair = node.model_recipient_key().cloned().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Node X25519 recipient key unavailable — cannot install sealed models"
+            .to_string(),
+        data: None,
+    })?;
+    let resolver = node.iroh_resolver.as_ref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Blob layer not initialized (iroh resolver unavailable)".to_string(),
+        data: None,
+    })?;
+    let fetcher = crate::model_blob_fetcher_bridge::IrohBlobFetcher::new(resolver.clone());
+
+    let hf = node.hf_downloader.as_ref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Model storage not initialized".to_string(),
+        data: None,
+    })?;
+    let dest = hf.model_path(&manifest.model_id);
+
+    tenzro_model::unseal_model_to_file(&manifest, recipient_did, &keypair, &dest, &fetcher)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("Failed to install sealed model: {}", e),
+            data: None,
+        })?;
+
+    // Keep the manifest resolvable locally so restarts and later
+    // re-installs can find it.
+    if let Some(store) = node.sealed_model_store() {
+        let _ = store.put(manifest.clone());
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "model_id": manifest.model_id,
+        "artifact_name": manifest.artifact_name,
+        "installed_path": dest.display().to_string(),
+        "total_bytes": manifest.total_bytes,
+        "model_hash": hex::encode(manifest.model_hash.as_bytes()),
+    }))
+}
+
+/// `tenzro_getSealedModel { "model_id": "..." }` — fetch a stored
+/// sealed-model manifest. Manifests contain only ciphertext hashes, blob
+/// URIs, and wrapped (encrypted) content keys — safe to return to any
+/// caller.
+async fn handle_get_sealed_model(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+    let store = node.sealed_model_store().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Sealed-model store not initialized".to_string(),
+        data: None,
+    })?;
+    match store.get(model_id) {
+        Some(manifest) => serde_json::to_value(&manifest).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("Failed to serialize manifest: {}", e),
+            data: None,
+        }),
+        None => Err(JsonRpcError {
+            code: -32004,
+            message: format!("No sealed-model manifest stored for '{}'", model_id),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_listSealedModels` — list stored sealed-model manifests as
+/// summaries (no shard tables or wrapped keys — fetch the full manifest
+/// via `tenzro_getSealedModel`).
+async fn handle_list_sealed_models(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let store = node.sealed_model_store().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Sealed-model store not initialized".to_string(),
+        data: None,
+    })?;
+    let manifests = store.list();
+    let summaries: Vec<Value> = manifests
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "model_id": m.model_id,
+                "artifact_name": m.artifact_name,
+                "model_hash": hex::encode(m.model_hash.as_bytes()),
+                "manifest_hash": hex::encode(m.manifest_hash.as_bytes()),
+                "total_bytes": m.total_bytes,
+                "shard_count": m.shards.len(),
+                "recipients": m.recipients.iter().map(|r| r.did.clone()).collect::<Vec<_>>(),
+                "wrap_alg": m.wrap_alg,
+                "owner_did": m.owner_did,
+                "created_at": m.created_at,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "count": summaries.len(),
+        "sealed_models": summaries,
+    }))
+}
+
+/// `tenzro_modelRecipientKey` — return this node's X25519 public key for
+/// sealed-model distribution. Publishers put this key in a `recipients`
+/// entry when sealing a model addressed to this node.
+async fn handle_model_recipient_key(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let keypair = node.model_recipient_key().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Node X25519 recipient key unavailable".to_string(),
+        data: None,
+    })?;
+    Ok(serde_json::json!({
+        "x25519_pubkey": hex::encode(keypair.public_key_bytes()),
+        "wrap_alg": tenzro_model::SEALED_WRAP_ALG,
     }))
 }
 
@@ -25379,7 +26217,7 @@ async fn handle_orchestrate(
 /// when the model was not discovered via gossip or the provider announced
 /// without a key — unsigned providers stay fully routable, and any manifest
 /// they attach is then verified against its embedded key only.
-fn pinned_announcement_pubkey(
+pub(crate) fn pinned_announcement_pubkey(
     node: &Arc<TenzroNode>,
     model_id: &str,
     provider: &str,
@@ -25424,6 +26262,132 @@ fn verify_forwarded_provenance(
                 "Provider attached a malformed provenance manifest: {}", e);
             None
         }
+    }
+}
+
+/// Verify a `tenzro_jurisdiction` receipt attached to a forwarded inference
+/// response: request/response hash binding, model-id binding, registered-key
+/// binding when an announcement pubkey is pinned, the receipt signature, and
+/// — when the caller pinned a jurisdiction — that the claimed locality
+/// satisfies the pin. Returns the receipt when it verifies; logs and returns
+/// `None` otherwise so the invalid stamp is stripped rather than passed on.
+pub(crate) fn verify_forwarded_jurisdiction(
+    value: Option<&Value>,
+    request_input: &[u8],
+    output: &[u8],
+    model_id: &str,
+    registered_pubkey: Option<&[u8]>,
+    jurisdiction_pin: Option<&str>,
+    provider_label: &str,
+) -> Option<tenzro_types::JurisdictionReceipt> {
+    let value = value.filter(|v| !v.is_null())?;
+    match serde_json::from_value::<tenzro_types::JurisdictionReceipt>(value.clone()) {
+        Ok(receipt) => {
+            let verdict = tenzro_model::verify_response_receipt(
+                &receipt,
+                request_input,
+                output,
+                model_id,
+                registered_pubkey,
+            )
+            .and_then(|()| match jurisdiction_pin {
+                Some(pin) => tenzro_model::check_receipt_satisfies_pin(&receipt, pin),
+                None => Ok(()),
+            });
+            match verdict {
+                Ok(()) => Some(receipt),
+                Err(e) => {
+                    tracing::warn!(provider = %provider_label, model = %model_id,
+                        "Provider attached an invalid jurisdiction receipt: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(provider = %provider_label, model = %model_id,
+                "Provider attached a malformed jurisdiction receipt: {}", e);
+            None
+        }
+    }
+}
+
+/// Address identity of this node as an inference provider — the announce
+/// signer's public key right-aligned into the 32-byte address form used on
+/// signed announcements and receipts.
+fn announce_provider_address(node: &Arc<TenzroNode>) -> Address {
+    node.announce_signer()
+        .map(|signer| {
+            let pk = signer.public_key();
+            let pk_bytes = pk.as_bytes();
+            let mut buf = [0u8; 32];
+            let len = pk_bytes.len().min(32);
+            buf[32 - len..].copy_from_slice(&pk_bytes[..len]);
+            Address(buf)
+        })
+        .unwrap_or_default()
+}
+
+/// Sign a locally-generated inference response with the node's jurisdiction
+/// signer, binding the attestation-backed locality claim to the request and
+/// response hashes. `None` when the node declares no jurisdiction or has no
+/// signer — serving without locality receipts stays fully supported.
+pub(crate) fn sign_local_jurisdiction(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    request_input: &[u8],
+    output: &[u8],
+) -> Option<tenzro_types::JurisdictionReceipt> {
+    let signer = node.jurisdiction_signer()?;
+    let claim = node.jurisdiction_claim()?;
+    match signer.sign(
+        request_input,
+        output,
+        model_id,
+        announce_provider_address(node),
+        claim,
+    ) {
+        Ok(receipt) => Some(receipt),
+        Err(e) => {
+            tracing::warn!(model = %model_id,
+                "Failed to sign jurisdiction receipt for local response: {}", e);
+            None
+        }
+    }
+}
+
+/// Parse the caller-facing jurisdiction knobs from chat params: the
+/// comma-separated locality pin and the `jurisdiction_receipt: "required"`
+/// strictness flag.
+fn parse_jurisdiction_params(params: &Value) -> (Option<String>, bool) {
+    let pin = params
+        .get("jurisdiction")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let required = params
+        .get("jurisdiction_receipt")
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| v.eq_ignore_ascii_case("required"));
+    (pin, required)
+}
+
+/// Whether this node's declared locality claim satisfies a caller pin.
+/// A node with no claim never satisfies any pin (fail-closed).
+pub(crate) fn local_claim_satisfies_pin(node: &Arc<TenzroNode>, pin: &str) -> bool {
+    node.jurisdiction_claim().is_some_and(|claim| {
+        claim.matches_any(pin.split(',').map(str::trim).filter(|t| !t.is_empty()))
+    })
+}
+
+fn jurisdiction_pin_rpc_error(pin: &str) -> JsonRpcError {
+    JsonRpcError {
+        code: -32024,
+        message: format!(
+            "This node does not satisfy jurisdiction pin '{}' — no matching locality claim declared",
+            pin
+        ),
+        data: None,
     }
 }
 
@@ -26008,17 +26972,7 @@ fn sign_local_response(
     output: &[u8],
 ) -> Option<tenzro_types::ProvenanceManifest> {
     let signer = node.provenance_signer()?;
-    let provider_addr = node
-        .announce_signer()
-        .map(|s| {
-            let pk = s.public_key();
-            let bytes = pk.as_bytes();
-            let mut buf = [0u8; 32];
-            let len = bytes.len().min(32);
-            buf[32 - len..].copy_from_slice(&bytes[..len]);
-            Address(buf)
-        })
-        .unwrap_or_default();
+    let provider_addr = announce_provider_address(node);
     match signer.sign(
         model_id,
         provider_addr,
@@ -26319,6 +27273,9 @@ async fn handle_chat_simple(
         ..GenerationConfig::default()
     };
 
+    // Optional jurisdiction pin + receipt strictness (locality routing).
+    let (jurisdiction_pin, jurisdiction_receipt_required) = parse_jurisdiction_params(&params);
+
     if is_local {
         // === Local inference ===
         let model_runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
@@ -26333,6 +27290,15 @@ async fn handle_chat_simple(
                 message: format!("Model '{}' is not currently serving", model_id),
                 data: None,
             });
+        }
+
+        // Fail-closed locality check: a pinned request is refused before
+        // generation unless this node's attestation-backed claim satisfies
+        // the pin. A node with no claim never satisfies any pin.
+        if let Some(pin) = &jurisdiction_pin
+            && !local_claim_satisfies_pin(node, pin)
+        {
+            return Err(jurisdiction_pin_rpc_error(pin));
         }
 
         // Acquire load slot (RAII guard auto-decrements on drop)
@@ -26419,6 +27385,21 @@ async fn handle_chat_simple(
             });
         }
 
+        // Stamp the response with a signed jurisdiction receipt binding the
+        // node's attestation-backed locality claim to the request/response
+        // hashes. Optional by default; enforced only under
+        // `jurisdiction_receipt: "required"`.
+        let jurisdiction =
+            sign_local_jurisdiction(node, &model_id, message.as_bytes(), result.text.as_bytes());
+        if jurisdiction_receipt_required && jurisdiction.is_none() {
+            return Err(JsonRpcError {
+                code: -32024,
+                message: "jurisdiction_receipt=required but this node has no jurisdiction claim or signer"
+                    .to_string(),
+                data: None,
+            });
+        }
+
         // Persist the TOPLOC commitment (when produced) and surface its
         // hash so the caller can verify or challenge the response later.
         let commitment = store_local_commitment(node, &model_id, result.commitment.as_ref());
@@ -26435,6 +27416,7 @@ async fn handle_chat_simple(
             "location": "local",
             "load": load,
             "tenzro_provenance": provenance,
+            "tenzro_jurisdiction": jurisdiction,
             "commitment": commitment,
         }))
     } else if let Some(ref svc) = service {
@@ -26446,7 +27428,7 @@ async fn handle_chat_simple(
         // `rpc_endpoint` (every non-RPC-public and every NATed node does).
         // HTTP is the fallback, and only for providers that advertise a
         // genuinely reachable `rpc_endpoint`.
-        let forward_params = serde_json::json!({
+        let mut forward_params = serde_json::json!({
             "model_id": svc.model_id,
             "message": message,
             "max_tokens": config.max_tokens,
@@ -26454,6 +27436,17 @@ async fn handle_chat_simple(
             "require_signed": require_signed,
             "verifiable": verifiable,
         });
+        if let Some(obj) = forward_params.as_object_mut() {
+            if let Some(pin) = &jurisdiction_pin {
+                obj.insert("jurisdiction".to_string(), serde_json::json!(pin));
+            }
+            if jurisdiction_receipt_required {
+                obj.insert(
+                    "jurisdiction_receipt".to_string(),
+                    serde_json::json!("required"),
+                );
+            }
+        }
         let forward_body = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "tenzro_chat",
@@ -26503,6 +27496,31 @@ async fn handle_chat_simple(
             });
         }
 
+        // Verify any provider-attached jurisdiction receipt: hash bindings,
+        // signature against the pinned announcement key, and — when the
+        // caller pinned a jurisdiction — that the claim satisfies the pin.
+        // Invalid or missing receipts are dropped; they only fail the
+        // request under `jurisdiction_receipt: "required"`.
+        let jurisdiction = verify_forwarded_jurisdiction(
+            rpc_result.get("tenzro_jurisdiction"),
+            message.as_bytes(),
+            output.as_bytes(),
+            &model_id,
+            pinned.as_deref(),
+            jurisdiction_pin.as_deref(),
+            &svc.provider_name,
+        );
+        if jurisdiction_receipt_required && jurisdiction.is_none() {
+            return Err(JsonRpcError {
+                code: -32024,
+                message: format!(
+                    "Provider {} did not return a verifiable jurisdiction receipt (jurisdiction_receipt=required)",
+                    svc.provider_name
+                ),
+                data: None,
+            });
+        }
+
         // Record Prometheus inference counter for observability
         node.metrics().record_inference();
 
@@ -26514,6 +27532,7 @@ async fn handle_chat_simple(
             "location": "network",
             "provider": svc.provider_name,
             "tenzro_provenance": provenance,
+            "tenzro_jurisdiction": jurisdiction,
             // The provider persists the commitment; the hash rides through
             // so the caller can file a challenge against that provider.
             "commitment": rpc_result.get("commitment").cloned().unwrap_or(Value::Null),
@@ -26752,6 +27771,19 @@ async fn handle_chat_rich(
         ..GenerationConfig::default()
     };
 
+    // Optional jurisdiction pin + receipt strictness (locality routing).
+    let (jurisdiction_pin, jurisdiction_receipt_required) = parse_jurisdiction_params(&params);
+
+    // Canonical request input for jurisdiction receipts: the final
+    // user-role message rendered as text — the same bytes both the local
+    // stamp and the forwarded-receipt verification hash on every surface.
+    let request_input_text = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| render_blocks_as_text(&m.content))
+        .unwrap_or_default();
+
     if is_local {
         // ── local inference path ─────────────────────────────────────
         let model_runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
@@ -26766,6 +27798,13 @@ async fn handle_chat_rich(
                 message: format!("Model '{}' is not currently serving", model_id),
                 data: None,
             });
+        }
+
+        // Fail-closed locality check before generation.
+        if let Some(pin) = &jurisdiction_pin
+            && !local_claim_satisfies_pin(node, pin)
+        {
+            return Err(jurisdiction_pin_rpc_error(pin));
         }
 
         let _load_guard = node.load_tracker.try_acquire(&model_id).map_err(|_| {
@@ -26891,6 +27930,24 @@ async fn handle_chat_rich(
         // Map the inferred string stop reason onto the typed enum.
         let stop_reason = map_stop_reason(&inferred_stop_reason);
 
+        // Stamp the response with a signed jurisdiction receipt before the
+        // content blocks consume `response_text`. Optional by default;
+        // enforced only under `jurisdiction_receipt: "required"`.
+        let jurisdiction = sign_local_jurisdiction(
+            node,
+            &model_id,
+            request_input_text.as_bytes(),
+            response_text.as_bytes(),
+        );
+        if jurisdiction_receipt_required && jurisdiction.is_none() {
+            return Err(JsonRpcError {
+                code: -32024,
+                message: "jurisdiction_receipt=required but this node has no jurisdiction claim or signer"
+                    .to_string(),
+                data: None,
+            });
+        }
+
         let usage = RichUsage {
             input_tokens,
             output_tokens,
@@ -26943,6 +28000,7 @@ async fn handle_chat_rich(
             "settlement": settlement.to_json(),
             "location": "local",
             "commitment": commitment,
+            "tenzro_jurisdiction": jurisdiction,
             "load": node.load_tracker.snapshot(&model_id).map(|s| {
                 serde_json::json!({
                     "active_requests": s.active_requests,
@@ -26988,6 +28046,15 @@ async fn handle_chat_rich(
             // rides back through the verbatim result pass-through below.
             forward_params.insert("verifiable".to_string(), serde_json::json!(true));
         }
+        if let Some(pin) = &jurisdiction_pin {
+            forward_params.insert("jurisdiction".to_string(), serde_json::json!(pin));
+        }
+        if jurisdiction_receipt_required {
+            forward_params.insert(
+                "jurisdiction_receipt".to_string(),
+                serde_json::json!("required"),
+            );
+        }
 
         let forward_body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -27010,9 +28077,57 @@ async fn handle_chat_rich(
         // Pass the provider's result through, annotating location.
         if let Some(rpc_result) = body.get("result") {
             let mut out = rpc_result.clone();
+
+            // Verify any provider-attached jurisdiction receipt against the
+            // pinned announcement key and the caller's pin; strip stamps
+            // that fail verification so no unverified locality claim rides
+            // through this surface.
+            let output_text = out
+                .get("content")
+                .and_then(|v| v.as_array())
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            let pinned = pinned_announcement_pubkey(node, &model_id, &svc.provider_name);
+            let jurisdiction = verify_forwarded_jurisdiction(
+                out.get("tenzro_jurisdiction"),
+                request_input_text.as_bytes(),
+                output_text.as_bytes(),
+                &model_id,
+                pinned.as_deref(),
+                jurisdiction_pin.as_deref(),
+                &svc.provider_name,
+            );
+            if jurisdiction_receipt_required && jurisdiction.is_none() {
+                return Err(JsonRpcError {
+                    code: -32024,
+                    message: format!(
+                        "Provider {} did not return a verifiable jurisdiction receipt (jurisdiction_receipt=required)",
+                        svc.provider_name
+                    ),
+                    data: None,
+                });
+            }
+
             if let Some(obj) = out.as_object_mut() {
                 obj.insert("location".to_string(), serde_json::json!("network"));
                 obj.insert("provider".to_string(), serde_json::json!(svc.provider_name));
+                match &jurisdiction {
+                    Some(receipt) => {
+                        obj.insert(
+                            "tenzro_jurisdiction".to_string(),
+                            serde_json::to_value(receipt).unwrap_or(Value::Null),
+                        );
+                    }
+                    None => {
+                        obj.remove("tenzro_jurisdiction");
+                    }
+                }
             }
             Ok(out)
         } else if let Some(err) = body.get("error") {
@@ -27180,7 +28295,7 @@ async fn handle_list_providers(
     // Include self as a provider if we're serving models locally
     let served: Vec<String> = node.served_models
         .iter()
-        .filter(|e| *e.value())
+        .filter(|e| e.value().is_network())
         .map(|e| e.key().clone())
         .collect();
 
@@ -27484,6 +28599,16 @@ struct OpenAIChatRequest {
     /// same value is captured for failover.
     #[serde(default)]
     seed: Option<u64>,
+    /// Tenzro extension: comma-separated jurisdiction pin (ISO 3166-1
+    /// alpha-2 country codes and/or bloc tokens, case-insensitive). The
+    /// request is refused unless the serving node declares an
+    /// attestation-backed locality claim matching at least one token.
+    #[serde(default)]
+    jurisdiction: Option<String>,
+    /// Tenzro extension: set to `"required"` to fail the request unless the
+    /// response carries a verifiable signed jurisdiction receipt.
+    #[serde(default)]
+    jurisdiction_receipt: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -27556,7 +28681,8 @@ fn openai_model_features(node: &Arc<TenzroNode>, model_id: &str, local: bool) ->
         "usage_in_stream": true,
         "mtp": mtp_capable,
         "provenance_signing": local && node.provenance_signer().is_some(),
-        "supported_parameters": ["temperature", "top_p", "max_tokens", "stream", "draft_n", "verifiable"],
+        "jurisdiction_signing": local && node.jurisdiction_signer().is_some(),
+        "supported_parameters": ["temperature", "top_p", "max_tokens", "stream", "draft_n", "verifiable", "jurisdiction", "jurisdiction_receipt"],
     })
 }
 
@@ -28018,6 +29144,28 @@ async fn handle_openai_chat_completions(
         model_query.clone()
     };
 
+    // Tenzro locality extensions: jurisdiction pin + receipt strictness.
+    let jurisdiction_pin = request
+        .jurisdiction
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let jurisdiction_receipt_required = request
+        .jurisdiction_receipt
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("required"));
+
+    // Canonical request input for jurisdiction receipts: the final
+    // user-role message content.
+    let request_input_text = request
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
     if is_local {
         // === LOCAL MODEL ===
         let model_runtime = match node.model_runtime.as_ref() {
@@ -28038,6 +29186,23 @@ async fn handle_openai_chat_completions(
                 &format!("Model '{}' is not currently serving", model_id),
                 "invalid_request_error",
                 "model_not_loaded",
+            );
+        }
+
+        // Fail-closed locality check before generation — covers both the
+        // streaming and non-streaming paths. Streams carry no receipt; this
+        // pre-generation refusal is the whole streaming locality contract.
+        if let Some(pin) = &jurisdiction_pin
+            && !local_claim_satisfies_pin(&node, pin)
+        {
+            return json_error_response(
+                StatusCode::PRECONDITION_FAILED,
+                &format!(
+                    "This node does not satisfy jurisdiction pin '{}' — no matching locality claim declared",
+                    pin
+                ),
+                "invalid_request_error",
+                "jurisdiction_not_satisfied",
             );
         }
 
@@ -28285,6 +29450,25 @@ async fn handle_openai_chat_completions(
                     let provenance_manifest =
                         sign_local_response(&node, &model_id, result.text.as_bytes());
 
+                    // Jurisdiction receipt: bind the node's attestation-backed
+                    // locality claim to the request/response hashes. This is
+                    // the field routing nodes verify against the pinned
+                    // announcement key.
+                    let jurisdiction_receipt = sign_local_jurisdiction(
+                        &node,
+                        &model_id,
+                        request_input_text.as_bytes(),
+                        result.text.as_bytes(),
+                    );
+                    if jurisdiction_receipt_required && jurisdiction_receipt.is_none() {
+                        return json_error_response(
+                            StatusCode::PRECONDITION_FAILED,
+                            "jurisdiction_receipt=required but this node has no jurisdiction claim or signer",
+                            "invalid_request_error",
+                            "jurisdiction_receipt_unavailable",
+                        );
+                    }
+
                     // TOPLOC commitment: persist and surface the hash when the
                     // caller sent `verifiable: true` and the serial path
                     // produced one; `null` otherwise (graceful degrade).
@@ -28316,6 +29500,7 @@ async fn handle_openai_chat_completions(
                         "generation_time_ms": result.generation_time_ms,
                         "tokens_per_second": result.tokens_per_second,
                         "tenzro_provenance": provenance_manifest,
+                        "tenzro_jurisdiction": jurisdiction_receipt,
                         "commitment": commitment,
                     }))
                     .into_response()
@@ -28362,6 +29547,11 @@ async fn handle_openai_chat_completions(
             // passes through verbatim — challenges are filed against the
             // provider that served.
             "verifiable": request.verifiable,
+            // Locality pin + receipt strictness forwarded so the provider
+            // fail-closes on the pin and stamps its receipt; both fields
+            // serialize as null when unset and deserialize as absent.
+            "jurisdiction": jurisdiction_pin,
+            "jurisdiction_receipt": jurisdiction_receipt_required.then_some("required"),
         });
 
         if stream_requested {
@@ -28794,6 +29984,20 @@ async fn handle_openai_chat_completions(
             .await
             {
                 Ok(mut body) => {
+                    let content = body
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("message"))
+                        .and_then(|m| m.get("content"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let pinned = pinned_announcement_pubkey(
+                        &node,
+                        &svc.model_id,
+                        &svc.provider_name,
+                    );
+
                     // Best-effort verification of any provider-attached
                     // provenance manifest against the pinned announcement key.
                     // Invalid manifests are stripped so callers never see an
@@ -28802,21 +30006,7 @@ async fn handle_openai_chat_completions(
                         .get("tenzro_provenance")
                         .filter(|v| !v.is_null())
                         .cloned()
-                    {
-                        let content = body
-                            .get("choices")
-                            .and_then(|c| c.get(0))
-                            .and_then(|c| c.get("message"))
-                            .and_then(|m| m.get("content"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let pinned = pinned_announcement_pubkey(
-                            &node,
-                            &svc.model_id,
-                            &svc.provider_name,
-                        );
-                        if verify_forwarded_provenance(
+                        && verify_forwarded_provenance(
                             Some(&prov),
                             content.as_bytes(),
                             &svc.model_id,
@@ -28824,11 +30014,49 @@ async fn handle_openai_chat_completions(
                             &svc.provider_name,
                         )
                         .is_none()
-                            && let Some(obj) = body.as_object_mut()
-                        {
-                            obj.remove("tenzro_provenance");
+                        && let Some(obj) = body.as_object_mut()
+                    {
+                        obj.remove("tenzro_provenance");
+                    }
+
+                    // Jurisdiction receipt: verify hash bindings, signature
+                    // against the pinned key, and the caller's pin. Invalid
+                    // or missing receipts are stripped; they only fail the
+                    // request under `jurisdiction_receipt: "required"`.
+                    let jurisdiction = verify_forwarded_jurisdiction(
+                        body.get("tenzro_jurisdiction"),
+                        request_input_text.as_bytes(),
+                        content.as_bytes(),
+                        &svc.model_id,
+                        pinned.as_deref(),
+                        jurisdiction_pin.as_deref(),
+                        &svc.provider_name,
+                    );
+                    if jurisdiction_receipt_required && jurisdiction.is_none() {
+                        return json_error_response(
+                            StatusCode::BAD_GATEWAY,
+                            &format!(
+                                "Provider {} did not return a verifiable jurisdiction receipt",
+                                svc.provider_name
+                            ),
+                            "server_error",
+                            "jurisdiction_receipt_unavailable",
+                        );
+                    }
+                    if let Some(obj) = body.as_object_mut() {
+                        match &jurisdiction {
+                            Some(receipt) => {
+                                obj.insert(
+                                    "tenzro_jurisdiction".to_string(),
+                                    serde_json::to_value(receipt).unwrap_or(Value::Null),
+                                );
+                            }
+                            None => {
+                                obj.remove("tenzro_jurisdiction");
+                            }
                         }
                     }
+
                     (StatusCode::OK, Json(body)).into_response()
                 }
                 Err(e) => json_error_response(
@@ -29094,8 +30322,8 @@ pub async fn handle_chat_stream_rich(
     if !is_local {
         // Network forwarding for streaming rich shape would proxy the
         // remote provider's SSE byte stream verbatim (the same way
-        // `/v1/chat/completions` does for OpenAI-shape). The current
-        // landing only supports local serving.
+        // `/v1/chat/completions` does for OpenAI-shape). Only local
+        // serving is currently supported here.
         return json_error_response(
             StatusCode::NOT_IMPLEMENTED,
             "Rich-shape streaming for network-served models is not yet implemented; \
@@ -29123,6 +30351,23 @@ pub async fn handle_chat_stream_rich(
             &format!("Model '{}' is not currently serving", model_id),
             "invalid_request_error",
             "model_not_loaded",
+        );
+    }
+
+    // Jurisdiction pin: streams carry no receipt, so the pre-stream
+    // fail-closed check is the whole contract for this surface.
+    if let Some(pin) = params.get("jurisdiction").and_then(|v| v.as_str())
+        && !pin.trim().is_empty()
+        && !local_claim_satisfies_pin(&node, pin)
+    {
+        return json_error_response(
+            StatusCode::PRECONDITION_FAILED,
+            &format!(
+                "This node does not satisfy jurisdiction pin '{}' — no matching locality claim declared",
+                pin
+            ),
+            "invalid_request_error",
+            "jurisdiction_not_satisfied",
         );
     }
 
@@ -45796,6 +47041,38 @@ async fn handle_add_identity_claim(
         code: -32602, message: format!("Invalid address: {}", e), data: None,
     })?;
 
+    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+        code: -32000, message: "Identity registry not initialized".to_string(), data: None,
+    })?;
+
+    let env = parse_envelope_param(&params)?;
+    if env.did != issuer {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: "envelope must be signed by the claim issuer".to_string(),
+            data: None,
+        });
+    }
+    let issuer_topics = trusted_issuer_topics(node, issuer).ok_or_else(|| JsonRpcError {
+        code: -32001,
+        message: "issuer is not a registered active trusted issuer".to_string(),
+        data: None,
+    })?;
+    if !issuer_topics.is_empty() && !issuer_topics.contains(&topic) {
+        return Err(JsonRpcError {
+            code: -32001,
+            message: format!("issuer is not authorized for claim topic {}", topic),
+            data: None,
+        });
+    }
+    verify_identity_write_envelope(
+        registry,
+        &env,
+        "tenzro_addIdentityClaim",
+        &canonical_claim_params(&addr_hex.to_lowercase(), topic, issuer, data, valid_from, valid_to),
+        &[issuer],
+    )?;
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -45879,6 +47156,38 @@ async fn handle_add_trusted_issuer(
         "name": name,
         "topics": topics,
         "status": "registered",
+    }))
+}
+
+/// `tenzro_listTrustedIssuers` — open read of the trusted-issuer registry
+/// so subjects and verifiers can discover who is authorized to issue
+/// third-party credentials and identity claims, and for which topics.
+async fn handle_list_trusted_issuers(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use tenzro_storage::{CF_COMPLIANCE, KvStore};
+
+    let storage = node.storage().ok_or_else(|| JsonRpcError {
+        code: -32603, message: "Storage not initialized".to_string(), data: None,
+    })?;
+
+    let keys = storage.get_keys_with_prefix(CF_COMPLIANCE, b"issuer:").map_err(|e| JsonRpcError {
+        code: -32603, message: format!("Storage error: {}", e), data: None,
+    })?;
+
+    let mut issuers = Vec::with_capacity(keys.len());
+    for key in keys {
+        if let Ok(Some(bytes)) = storage.get(CF_COMPLIANCE, &key)
+            && let Ok(entry) = serde_json::from_slice::<Value>(&bytes)
+        {
+            issuers.push(entry);
+        }
+    }
+
+    let count = issuers.len();
+    Ok(serde_json::json!({
+        "issuers": issuers,
+        "count": count,
     }))
 }
 
@@ -50466,11 +51775,19 @@ async fn handle_chat_stream(
     let max_tokens = params.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(1024) as usize;
 
     // Delegate to the existing chat handler logic (full result, streaming at transport level)
-    let chat_params = serde_json::json!({
+    let mut chat_params = serde_json::json!({
         "model_id": model_id,
         "message": message,
         "max_tokens": max_tokens,
     });
+    if let Some(obj) = chat_params.as_object_mut() {
+        if let Some(pin) = params.get("jurisdiction").filter(|v| !v.is_null()) {
+            obj.insert("jurisdiction".to_string(), pin.clone());
+        }
+        if let Some(req) = params.get("jurisdiction_receipt").filter(|v| !v.is_null()) {
+            obj.insert("jurisdiction_receipt".to_string(), req.clone());
+        }
+    }
 
     handle_chat(node, Some(chat_params)).await.map(|result| {
         // Wrap result with streaming metadata
@@ -52342,6 +53659,18 @@ mod canton_auth_gate_tests {
         // Subject self-read.
         assert!(!requires_admin_token("tenzro_canton_getMyAnalytics"));
     }
+
+    /// Trusted-issuer registration gates who may issue third-party
+    /// credentials and identity claims; the read side stays open.
+    #[test]
+    fn trusted_issuer_registration_is_admin_only() {
+        assert!(requires_admin_token("tenzro_addTrustedIssuer"));
+        assert!(!requires_admin_token("tenzro_listTrustedIssuers"));
+        // Envelope-authorized writes are not operator-gated.
+        assert!(!requires_admin_token("tenzro_addCredential"));
+        assert!(!requires_admin_token("tenzro_addService"));
+        assert!(!requires_admin_token("tenzro_addIdentityClaim"));
+    }
 }
 
 #[cfg(test)]
@@ -52395,5 +53724,15 @@ mod tee_custody_gate_tests {
     fn tee_key_mutations_are_admin_only() {
         assert!(requires_admin_token("tenzro_enrollTeeKey"));
         assert!(requires_admin_token("tenzro_revokeTeeKey"));
+    }
+
+    /// Revoking a DID invalidates its whole JWT act-chain and cascades
+    /// TDIP revocation with gossip fan-out; erasure hard-deletes the
+    /// identity record. All three are operator-only mutations.
+    #[test]
+    fn identity_revocation_and_erasure_are_admin_only() {
+        assert!(requires_admin_token("tenzro_revokeDid"));
+        assert!(requires_admin_token("tenzro_revokeIdentity"));
+        assert!(requires_admin_token("tenzro_forgetIdentity"));
     }
 }

@@ -21,6 +21,9 @@ async def rpc_call(method: str, params=None):
     forwarded as the `X-Tenzro-Api-Key` header. The RPC node holds the
     upstream credentials (Auth0 for Canton devnet) and proxies on the
     caller's behalf.
+
+    Operator-only RPCs (e.g. MPC keygen) require the node admin token. Set
+    TENZRO_ADMIN_TOKEN; it is forwarded as the `X-Tenzro-Admin-Token` header.
     """
     global _REQUEST_ID
     _REQUEST_ID += 1
@@ -34,6 +37,9 @@ async def rpc_call(method: str, params=None):
     api_key = os.environ.get("TENZRO_API_KEY")
     if api_key:
         headers["X-Tenzro-Api-Key"] = api_key
+    admin_token = os.environ.get("TENZRO_ADMIN_TOKEN")
+    if admin_token:
+        headers["X-Tenzro-Admin-Token"] = admin_token
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             TENZRO_RPC_URL,

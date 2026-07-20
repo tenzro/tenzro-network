@@ -175,14 +175,49 @@ pub(crate) async fn handle_ap2_validate_mandate_pair(
     };
 
     match outcome {
-        Ok(()) => Ok(json!({
-            "valid": true,
-            "checkout_mandate_id": checkout.mandate_id(),
-            "payment_mandate_id": payment.mandate_id(),
-            "principal_did": checkout.signer_did,
-            "agent_did": payment.signer_did,
-            "delegation_enforced": enforce_delegation,
-        })),
+        Ok(()) => {
+            // Persist the validated pair so the principal can later enumerate
+            // the mandates issued under their DID via `tenzro_listMandates`.
+            // Recording is best-effort: a store write failure must not fail a
+            // validation that already succeeded, so it is logged and swallowed.
+            if let (Some(store), Some(co), Some(pay)) = (
+                node.mandate_store(),
+                checkout.as_checkout(),
+                payment.as_payment(),
+            ) {
+                let record = crate::mandate_store::MandateRecord {
+                    mandate_id: co.mandate_id.clone(),
+                    payment_mandate_id: pay.mandate_id.clone(),
+                    controller_did: checkout.signer_did.clone(),
+                    agent_did: payment.signer_did.clone(),
+                    merchant_did: pay.merchant_did.clone(),
+                    description: co.description.clone(),
+                    max_amount: co.max_amount,
+                    total_amount: pay.total_amount,
+                    asset: co.asset.clone(),
+                    chain: pay.chain.clone(),
+                    expires_at: co.expires_at.to_rfc3339(),
+                    delegation_enforced: enforce_delegation,
+                    validated_at_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                    checkout_vdc: serde_json::to_value(&checkout).unwrap_or(Value::Null),
+                    payment_vdc: serde_json::to_value(&payment).unwrap_or(Value::Null),
+                };
+                if let Err(e) = store.record(record) {
+                    tracing::warn!("mandate record persist failed: {e}");
+                }
+            }
+            Ok(json!({
+                "valid": true,
+                "checkout_mandate_id": checkout.mandate_id(),
+                "payment_mandate_id": payment.mandate_id(),
+                "principal_did": checkout.signer_did,
+                "agent_did": payment.signer_did,
+                "delegation_enforced": enforce_delegation,
+            }))
+        }
         Err(e) => Ok(json!({
             "valid": false,
             "error": format!("{e}"),
@@ -269,6 +304,60 @@ pub(crate) async fn handle_ap2_protocol_info(
             "spt_grant_id": "stripe_shared_payment_granted_token_id",
         },
         "position": "TDIP identifies. AP2 authorizes. Tenzro settles.",
+    }))
+}
+
+/// `tenzro_listMandates` — enumerate the validated AP2 mandate pairs whose
+/// principal (CheckoutMandate `principal_did`) is the given controller DID.
+/// Ordered newest-first by validation time. Returns an empty list when the
+/// controller has no recorded mandates, or when the node has no mandate store
+/// (no persistent storage). Each row carries the projected summary plus the
+/// full signed VDCs so a relying party can re-verify independently.
+pub(crate) async fn handle_list_mandates(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| missing("Missing params"))?;
+    let params = unwrap_arr(params);
+
+    let controller_did = params
+        .get("controller_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing("Missing controller_did"))?
+        .to_string();
+
+    let mandates = match node.mandate_store() {
+        Some(store) => store.list_by_controller(&controller_did),
+        None => Vec::new(),
+    };
+
+    let items: Vec<Value> = mandates
+        .into_iter()
+        .map(|m| {
+            json!({
+                "mandate_id": m.mandate_id,
+                "payment_mandate_id": m.payment_mandate_id,
+                "controller_did": m.controller_did,
+                "agent_did": m.agent_did,
+                "merchant_did": m.merchant_did,
+                "description": m.description,
+                "max_amount": m.max_amount.to_string(),
+                "total_amount": m.total_amount.to_string(),
+                "asset": m.asset,
+                "chain": m.chain,
+                "expires_at": m.expires_at,
+                "delegation_enforced": m.delegation_enforced,
+                "validated_at_ms": m.validated_at_ms,
+                "checkout_vdc": m.checkout_vdc,
+                "payment_vdc": m.payment_vdc,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "controller_did": controller_did,
+        "count": items.len(),
+        "mandates": items,
     }))
 }
 
@@ -3123,6 +3212,70 @@ async fn ccip_api_get(
 }
 
 /// `tenzro_ccipSupportedChains` — proxy the Chainlink docs API.
+/// `tenzro_getPrice` — read-only USD price for a symbol (or list of symbols)
+/// from the node's Chainlink `SYMBOL/USD` price oracle. Public: no auth.
+///
+/// Params (object or `[object]`):
+/// - `symbol: string` — single ticker, OR
+/// - `symbols: string[]` — batch.
+///
+/// Response: `{ prices: [{ symbol, price_usd_8dp, decimals, updated_at, feed_address }],
+///              unavailable: [{ symbol, reason }] }`.
+/// Unresolvable symbols are reported in `unavailable` rather than failing the
+/// whole call, so a portfolio view can render partial USD totals.
+pub(crate) async fn handle_get_price(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let oracle = node.price_oracle().ok_or_else(|| JsonRpcError {
+        code: -32601,
+        message: "price oracle not configured on this node \
+                  (set bridge.prices.enabled + symbols)"
+            .to_string(),
+        data: None,
+    })?;
+
+    let params = params.map(unwrap_arr).unwrap_or_else(|| json!({}));
+    let mut symbols: Vec<String> = Vec::new();
+    if let Some(s) = params.get("symbol").and_then(|v| v.as_str()) {
+        symbols.push(s.to_string());
+    }
+    if let Some(arr) = params.get("symbols").and_then(|v| v.as_array()) {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                symbols.push(s.to_string());
+            }
+        }
+    }
+    if symbols.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "missing `symbol` or `symbols` param".to_string(),
+            data: None,
+        });
+    }
+
+    let mut prices = Vec::new();
+    let mut unavailable = Vec::new();
+    for sym in symbols {
+        match oracle.price(&sym).await {
+            Ok(p) => prices.push(json!({
+                "symbol": p.symbol,
+                "price_usd_8dp": p.price_usd_8dp.to_string(),
+                "decimals": p.decimals,
+                "updated_at": p.updated_at,
+                "feed_address": p.feed_address,
+            })),
+            Err(e) => unavailable.push(json!({
+                "symbol": sym.to_uppercase(),
+                "reason": e.to_string(),
+            })),
+        }
+    }
+
+    Ok(json!({ "prices": prices, "unavailable": unavailable }))
+}
+
 pub(crate) async fn handle_ccip_supported_chains(
     _node: &Arc<TenzroNode>,
     params: Option<Value>,

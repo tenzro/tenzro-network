@@ -289,6 +289,29 @@ impl IdentityRegistry {
         let revocations = DashMap::new();
         let seen_credential_ids = DashSet::new();
 
+        // Hydrate persisted revocation records first — these carry the real
+        // reason / revoked_by / revoked_at, so the identity scan below only
+        // synthesizes a fallback entry when no persisted record exists.
+        match storage.get_keys_with_prefix(CF_IDENTITIES, b"revocation:") {
+            Ok(keys) => {
+                let mut loaded_revocations = 0usize;
+                for key in &keys {
+                    if let Ok(Some(data)) = storage.get(CF_IDENTITIES, key)
+                        && let Ok(entry) = bincode::deserialize::<RevocationEntry>(&data)
+                    {
+                        revocations.insert(entry.did.clone(), entry);
+                        loaded_revocations += 1;
+                    }
+                }
+                if loaded_revocations > 0 {
+                    info!("Loaded {} revocation records from storage", loaded_revocations);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load revocation records from storage: {}", e);
+            }
+        }
+
         // Load existing identities from storage
         match storage.get_keys_with_prefix(CF_IDENTITIES, b"did:") {
             Ok(keys) => {
@@ -298,7 +321,9 @@ impl IdentityRegistry {
                         && let Ok(identity) = bincode::deserialize::<TenzroIdentity>(&data)
                     {
                         let did_string = identity.did.to_string();
-                        if identity.status == IdentityStatus::Revoked {
+                        if identity.status == IdentityStatus::Revoked
+                            && !revocations.contains_key(&did_string)
+                        {
                             revocations.insert(did_string.clone(), RevocationEntry {
                                 did: did_string.clone(),
                                 revoked_at: identity.updated_at,
@@ -545,6 +570,25 @@ impl IdentityRegistry {
                 }
                 Err(e) => {
                     warn!("Failed to serialize identity {}: {}", did, e);
+                }
+            }
+        }
+    }
+
+    /// Persists a revocation record under `revocation:<did>` so the reason,
+    /// revoker, and timestamp survive restarts (hydrated in `with_storage`
+    /// before the identity scan).
+    fn persist_revocation(&self, entry: &RevocationEntry) {
+        if let Some(ref store) = self.storage {
+            let key = format!("revocation:{}", entry.did);
+            match bincode::serialize(entry) {
+                Ok(data) => {
+                    if let Err(e) = store.put(CF_IDENTITIES, key.as_bytes(), &data) {
+                        warn!("Failed to persist revocation for {}: {}", entry.did, e);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to serialize revocation for {}: {}", entry.did, e);
                 }
             }
         }
@@ -2004,8 +2048,10 @@ impl IdentityRegistry {
             revoked_by,
         };
         self.revocations.insert(did.to_string(), entry.clone());
+        self.persist_revocation(&entry);
         for c in &cascaded {
             self.revocations.insert(c.did.clone(), c.clone());
+            self.persist_revocation(c);
         }
 
         // HIGH #96: broadcast to peers (best effort — failures are logged
@@ -2066,6 +2112,7 @@ impl IdentityRegistry {
             identity.updated_at = Utc::now();
             self.persist_identity(&entry.did, &identity);
         }
+        self.persist_revocation(&entry);
         self.revocations.insert(entry.did.clone(), entry);
         Ok(())
     }
@@ -3135,7 +3182,7 @@ mod tests {
         );
 
         // Sign the credential subject with issuer's key
-        let message = serde_json::to_vec(&cred.credential_subject).unwrap();
+        let message = cred.credential_subject.canonical_bytes().unwrap();
         let signature = issuer_signer.sign(&message).unwrap();
         cred = cred.with_proof(CredentialProof::new(
             "Ed25519Signature2020",
@@ -3190,7 +3237,7 @@ mod tests {
         .with_claim("status", serde_json::json!("verified"));
 
         // Sign the credential
-        let message = serde_json::to_vec(&cred.credential_subject).unwrap();
+        let message = cred.credential_subject.canonical_bytes().unwrap();
         let signature = issuer_signer.sign(&message).unwrap();
         cred = cred.with_proof(CredentialProof::new(
             "Ed25519Signature2020",
@@ -3413,7 +3460,7 @@ mod tests {
         .with_claim("tier", serde_json::json!(KycTier::Full as u64));
 
         // Sign the credential subject.
-        let msg = serde_json::to_vec(&cred.credential_subject).unwrap();
+        let msg = cred.credential_subject.canonical_bytes().unwrap();
         let sig = issuer_signer.sign(&msg).unwrap();
         cred = cred.with_proof(CredentialProof::new(
             "Ed25519Signature2020",
@@ -3460,7 +3507,7 @@ mod tests {
         )
         .with_claim("tier", serde_json::json!(KycTier::Enhanced as u64));
 
-        let msg = serde_json::to_vec(&cred.credential_subject).unwrap();
+        let msg = cred.credential_subject.canonical_bytes().unwrap();
         let sig = issuer_signer.sign(&msg).unwrap();
         cred = cred.with_proof(CredentialProof::new(
             "Ed25519Signature2020",

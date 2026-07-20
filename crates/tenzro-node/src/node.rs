@@ -45,7 +45,7 @@ use tenzro_tee::{detect_tee, TeeProvider, TeeRegistry};
 use tenzro_token::{TnzoToken, StakingManager, GovernanceEngine, NetworkTreasury, TokenRegistry};
 use tenzro_types::{primitives::Address, RoleSet};
 use tenzro_types::block::Block;
-use tenzro_types::model::{ModelServiceInstance, ModelLocation, ServiceStatus};
+use tenzro_types::model::{ModelServiceInstance, ModelLocation, ModelVisibility, ServiceStatus};
 use tenzro_vm::{eip1559::FeeMarket, MultiVmRuntime, VmConfig};
 use tenzro_wallet::TenzroWalletService;
 
@@ -1557,6 +1557,12 @@ pub struct TenzroNode {
     /// `None` when no Stripe API key is configured.
     spt_ceiling_cache: Option<Arc<crate::spt_ceiling_bridge::SptCeilingResolverAdapter>>,
 
+    /// Write-through store for validated AP2 mandate pairs. Populated by
+    /// `handle_ap2_validate_mandate_pair` on a successful cross-validation
+    /// and read by `tenzro_listMandates` for principal-scoped listing.
+    /// `None` until `init_payments` runs with persistent storage.
+    mandate_store: Option<Arc<crate::mandate_store::MandateStore>>,
+
     // Execution layer
     vm_runtime: Option<Arc<MultiVmRuntime>>,
 
@@ -1605,6 +1611,11 @@ pub struct TenzroNode {
     /// Empty on non-validator nodes.
     sla_outstanding_probes:
         Arc<DashMap<String, tenzro_model::SlaProbe>>,
+    /// In-flight + completed DKLS23 DKG sessions keyed by hex instance id.
+    /// Populated by `tenzro_mpcKeygen`, polled by `tenzro_mpcKeygenStatus`.
+    /// Orchestration state only — the durable output of a successful run is
+    /// the sealed `KeyshareEnvelope` in `CF_MPC_KEYSHARES`.
+    mpc_keygen_sessions: Arc<crate::mpc_keygen::KeygenSessionRegistry>,
     /// Workflow runtime — typed mirror of the privileged-VM workflow
     /// selectors (`0x01000040`–`0x0100004B`). Bundles `WorkflowManager`
     /// (workflows / obligations / approvals / lifecycle) and
@@ -1679,6 +1690,13 @@ pub struct TenzroNode {
     /// deadline. Persists to `CF_VALIDATOR_MODULES / erc7579/recovery_pending/`
     /// so an interrupted recovery survives node restart.
     recovery_pending: Option<Arc<crate::passkey_rpc::PendingRecoveryStore>>,
+    /// Pending browser-mediated passkey auth sessions (CLI → browser →
+    /// node), indexed by session_id. The CLI creates a session over RPC,
+    /// the node-served `/auth/passkey` page completes the WebAuthn ceremony
+    /// and posts the outcome back, the CLI polls until terminal. Persists to
+    /// `CF_VALIDATOR_MODULES / erc7579/auth_session/` so sessions survive
+    /// node restart.
+    passkey_sessions: Option<Arc<crate::passkey_rpc::PasskeySessionStore>>,
     /// Shared `IdentityScopeOracle` consulted by every installed
     /// `DelegationScopeValidator` (Phase B Thread 3 / B.3.5). Held on Node
     /// so #164 (per-machine validator install) can clone the same Arc into
@@ -1897,6 +1915,31 @@ pub struct TenzroNode {
     /// long-term Ed25519 key so the manifest verifies against the
     /// announcement pubkey consumers pinned.
     provenance_signer: Option<tenzro_model::SharedProvenanceSigner>,
+    /// Sealed-model manifest store — write-through cache of
+    /// `SealedModelManifest` records under the `sealed:` prefix in
+    /// CF_MODELS. Written by the seal/install RPC handlers, read by the
+    /// get/list handlers and the unseal path.
+    sealed_model_store: Option<Arc<tenzro_model::SealedModelStore>>,
+    /// This node's X25519 recipient keypair for sealed model shards.
+    /// Publishers wrap the per-artifact AES-256-GCM content key to this
+    /// key's public half (`x25519-envelope-aes-256-gcm`); the install
+    /// path uses the secret half to unwrap. Silent-generated at
+    /// `{data_dir}/model_recipient_x25519_key` on first use.
+    model_recipient_key: Option<Arc<tenzro_crypto::encryption::X25519KeyPair>>,
+    /// Jurisdiction signer used when this node serves a model itself — the
+    /// chat handlers stamp a `tenzro_jurisdiction` receipt on locally-
+    /// generated responses with it. Built from the same long-term Ed25519
+    /// key as the provenance signer so receipts verify against the
+    /// announcement pubkey consumers pinned. `None` when the operator
+    /// declared no jurisdiction or no node key is available.
+    jurisdiction_signer: Option<tenzro_model::SharedJurisdictionSigner>,
+    /// This node's operator-declared jurisdiction claim, built once at
+    /// startup from `NodeConfig::jurisdiction_country` / `jurisdiction_blocs`
+    /// and — when TEE hardware is present — bound to a fresh attestation
+    /// report. Rides every provider announcement and every locally-signed
+    /// jurisdiction receipt. `None` means this node never satisfies a
+    /// jurisdiction pin (fail-closed).
+    jurisdiction_claim: Option<tenzro_types::JurisdictionClaim>,
     agent_runtime: Option<Arc<AgentRuntime>>,
     swarm_manager: Option<Arc<SwarmManager>>,
 
@@ -2078,6 +2121,11 @@ pub struct TenzroNode {
 
     // Interoperability
     bridge_router: Option<Arc<BridgeRouter>>,
+
+    /// Asset USD price oracle (Chainlink `SYMBOL/USD` feeds). Backs the
+    /// read-only `tenzro_getPrice` RPC used by wallet portfolio views.
+    /// `None` when `bridge.prices` is unset / disabled.
+    price_oracle: Option<Arc<tenzro_bridge::PriceOracle>>,
 
     /// Canton bridge adapter — exposes the Workflow / Obligation / Approval /
     /// Lifecycle DAML mirror methods used by `tenzro_mirror*` RPCs and the
@@ -2311,7 +2359,7 @@ pub struct TenzroNode {
     /// Background MoE expert-extraction jobs keyed by job id
     /// (`tenzro_moePrepareExperts` / `tenzro_moePrepareStatus`).
     pub moe_prepare_jobs: Arc<DashMap<String, crate::moe::MoePrepareJob>>,
-    pub served_models: Arc<DashMap<String, bool>>,
+    pub served_models: Arc<DashMap<String, ModelVisibility>>,
     pub model_services: Arc<DashMap<String, ModelServiceInstance>>,
     pub load_tracker: Arc<tenzro_model::LoadTracker>,
     /// In-memory store of recent chat-completion SSE streams keyed by
@@ -2467,6 +2515,7 @@ impl TenzroNode {
             da_possession_challenger: None,
             announce_signer: None,
             spt_ceiling_cache: None,
+            mandate_store: None,
             vm_runtime: None,
             wallet_service: None,
             token: None,
@@ -2476,6 +2525,7 @@ impl TenzroNode {
             challenge_manager: None,
             sla_manager: None,
             sla_outstanding_probes: Arc::new(DashMap::new()),
+            mpc_keygen_sessions: Arc::new(DashMap::new()),
             workflow_runtime: None,
             validator_registry: None,
             aa_validator_registry: None,
@@ -2486,6 +2536,7 @@ impl TenzroNode {
             webauthn_validator: None,
             hardware_signer_validators: None,
             recovery_pending: None,
+            passkey_sessions: None,
             identity_scope_oracle: None,
             aa_entry_point: None,
             tee_key_oracle: None,
@@ -2528,6 +2579,10 @@ impl TenzroNode {
             usage_tracker: None,
             provenance_store: None,
             provenance_signer: None,
+            sealed_model_store: None,
+            model_recipient_key: None,
+            jurisdiction_signer: None,
+            jurisdiction_claim: None,
             agent_runtime: None,
             swarm_manager: None,
             liveness_sweeper: None,
@@ -2580,6 +2635,7 @@ impl TenzroNode {
             agent_kit: None,
             token_registry: None,
             bridge_router: None,
+            price_oracle: None,
             canton_adapter: None,
             cct_bridge: None,
             hyperlane_adapter: Arc::new(HyperlaneAdapter::new(HyperlaneConfig::new(
@@ -5333,6 +5389,50 @@ impl TenzroNode {
         };
         self.usage_tracker = Some(usage_tracker.clone());
 
+        // Sealed-model infrastructure: the manifest store hydrates
+        // `sealed:`-prefixed records from CF_MODELS so sealed models
+        // installed before a restart remain resolvable, and the X25519
+        // recipient key is this node's decryption identity for
+        // per-recipient wrapped content keys. Key failure is non-fatal:
+        // the node can still seal (publisher role needs only recipients'
+        // public keys) but cannot install sealed models addressed to it.
+        let sealed_store = if let Some(ref storage) = self.storage {
+            Arc::new(tenzro_model::SealedModelStore::with_storage(
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ))
+        } else {
+            Arc::new(tenzro_model::SealedModelStore::new())
+        };
+        self.sealed_model_store = Some(sealed_store);
+        match crate::keygen::load_or_generate_model_recipient_key(&self.config.data_dir) {
+            Ok(secret) => {
+                match tenzro_crypto::encryption::X25519KeyPair::from_secret_bytes(&secret) {
+                    Ok(kp) => {
+                        info!(
+                            "Sealed-model recipient key ready (x25519 pubkey {})",
+                            hex::encode(kp.public_key_bytes())
+                        );
+                        self.model_recipient_key = Some(Arc::new(kp));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Sealed-model recipient key on disk is invalid ({}); \
+                             this node cannot install sealed models until the key \
+                             file is removed and regenerated",
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load or generate sealed-model recipient key ({}); \
+                     this node cannot install sealed models",
+                    e
+                );
+            }
+        }
+
         // EU AI Act Art. 50(2): every node that serves inference produces a
         // signed provenance manifest for each response. The signer uses the
         // node's long-term Ed25519 key — the same key that signs gossip
@@ -5378,6 +5478,99 @@ impl TenzroNode {
                 },
             };
         self.provenance_signer = provenance_signer.clone();
+
+        // Operator-declared jurisdiction claim, built once here so the
+        // provider announcement and the local response stamp agree on a
+        // single claim. When the node has TEE hardware, the claim is bound
+        // to a fresh attestation report whose user_data commits to the
+        // declared country + blocs; the SHA-256 of the attestation evidence
+        // rides the claim so relying parties can tie it back to the enclave.
+        // Without TEE hardware the claim is operator-asserted only
+        // (attestation_hash = None) — receipts still verify, they just
+        // carry a weaker trust story. This is an attestation-bound locality
+        // claim, not cryptographic proof of location: false declarations
+        // are punished economically (slashing / reputation), not prevented
+        // mathematically.
+        if let Some(country) = &self.config.jurisdiction_country {
+            let country = country.trim().to_ascii_uppercase();
+            let blocs: Vec<String> = self
+                .config
+                .jurisdiction_blocs
+                .iter()
+                .map(|b| b.trim().to_ascii_uppercase())
+                .filter(|b| !b.is_empty())
+                .collect();
+            let attestation_hash = if let Some(tee) = &self.tee_provider {
+                let mut binding = b"tenzro/jurisdiction".to_vec();
+                binding.extend_from_slice(country.as_bytes());
+                for b in &blocs {
+                    binding.push(0);
+                    binding.extend_from_slice(b.as_bytes());
+                }
+                let user_data = tenzro_crypto::sha256(&binding);
+                match tee.generate_attestation(user_data.as_bytes()).await {
+                    Ok(report) => tenzro_types::Hash::from_bytes(
+                        tenzro_crypto::sha256(&report.attestation_data).as_bytes(),
+                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to bind jurisdiction claim to TEE attestation ({}); \
+                             claim will be operator-asserted only",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            tracing::info!(
+                country = %country,
+                blocs = ?blocs,
+                attested = attestation_hash.is_some(),
+                "Jurisdiction claim declared"
+            );
+            self.jurisdiction_claim = Some(tenzro_types::JurisdictionClaim {
+                country,
+                blocs,
+                attestation_hash,
+                declared_at: tenzro_types::Timestamp::now(),
+            });
+
+            // Jurisdiction signer: same node key as the provenance signer so
+            // `tenzro_jurisdiction` receipts verify against the announcement
+            // pubkey consumers pinned. No ephemeral fallback — a locality
+            // claim that can't be bound to a registered provider key is not
+            // worth stamping.
+            self.jurisdiction_signer =
+                match crate::keygen::load_validator_keypair(&self.config.data_dir) {
+                    Ok(keypair) => {
+                        match tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair) {
+                            Ok(signer) => Some(
+                                tenzro_model::Ed25519JurisdictionSigner::new(signer)
+                                    .into_shared(),
+                            ),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to construct jurisdiction signer from node key \
+                                     ({}); locally served responses will not carry \
+                                     jurisdiction receipts",
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Jurisdiction declared but no node key available ({}); locally \
+                             served responses will not carry jurisdiction receipts",
+                            e
+                        );
+                        None
+                    }
+                };
+        }
 
         // Initialize inference router with the tracker attached so every
         // successful inference flows through `record_usage` for durable
@@ -5558,10 +5751,18 @@ impl TenzroNode {
         self.iroh_mcp_handler = Some(mcp_deferred.clone());
         let mcp_handler: Arc<dyn tenzro_iroh::McpStreamHandler> = mcp_deferred;
 
-        // MoE-over-iroh: unlike A2A/MCP, the dispatcher only needs the
-        // expert runtime, which already exists — register the real one.
+        // MoE-over-iroh: unlike A2A/MCP, the dispatcher needs only the
+        // expert runtime and the announce-signer receipt identity, both of
+        // which already exist — register the real one. Without a signer on
+        // disk the holder serves receiptless and remote routers reject it,
+        // matching the fail-closed provider-announcement policy.
+        let moe_receipt_identity = self
+            .announce_signer
+            .clone()
+            .zip(self.self_provider_address())
+            .map(|(signer, provider)| crate::moe::MoeReceiptIdentity { signer, provider });
         let moe_dispatcher: Arc<dyn tenzro_iroh::JsonRpcDispatcher> = Arc::new(
-            crate::moe::MoeIrohDispatcher::new(Arc::clone(&self.moe_runtime)),
+            crate::moe::MoeIrohDispatcher::new(Arc::clone(&self.moe_runtime), moe_receipt_identity),
         );
 
         // Inference-over-iroh: same trampoline pattern as A2A. The real
@@ -6665,12 +6866,27 @@ impl TenzroNode {
         // The existing gossipsub heartbeat will re-announce restored models to peers.
         // ═══════════════════════════════════════════════════════════════════════
         if let Some(ref storage) = self.storage {
-            match storage.get_keys_with_prefix(CF_MODELS, b"") {
+            match storage.get_keys_with_prefix(CF_MODELS, b"served:") {
                 Ok(keys) => {
                     let mut restored = 0usize;
                     for key_bytes in &keys {
-                        if let Ok(model_id) = std::str::from_utf8(key_bytes) {
-                            self.served_models.insert(model_id.to_string(), true);
+                        if let Ok(key_str) = std::str::from_utf8(key_bytes) {
+                            let Some(model_id) = key_str.strip_prefix("served:") else {
+                                continue;
+                            };
+                            let visibility = storage
+                                .get(CF_MODELS, key_bytes)
+                                .ok()
+                                .flatten()
+                                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+                                .and_then(|record| {
+                                    record
+                                        .get("visibility")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(ModelVisibility::parse)
+                                })
+                                .unwrap_or_default();
+                            self.served_models.insert(model_id.to_string(), visibility);
                             restored += 1;
                         }
                     }
@@ -7678,6 +7894,42 @@ impl TenzroNode {
         );
         let bridge_router = Arc::new(BridgeRouter::new().with_fee_surface(fee_surface));
 
+        // Asset USD price oracle (independent of the fee oracle above). Backs
+        // `tenzro_getPrice` for wallet portfolio views. Registers each
+        // configured `SYMBOL/USD` feed; failures are non-fatal (that symbol is
+        // simply unpriceable until the feed responds).
+        if let Some(pc) = bridge_cfg.prices.as_ref().filter(|c| c.enabled) {
+            let rpc = pc
+                .rpc_url
+                .clone()
+                .unwrap_or_else(|| "https://eth.llamarpc.com".to_string());
+            let client = Arc::new(tenzro_bridge::ChainlinkFeedClient::new(rpc.clone()));
+            let oracle = Arc::new(tenzro_bridge::PriceOracle::new(client));
+            let mut registered = 0usize;
+            for s in &pc.symbols {
+                let feed = tenzro_bridge::SymbolFeed {
+                    symbol: s.symbol.clone(),
+                    feed_address: s.feed_address.clone(),
+                    tier: s.tier.clone().unwrap_or_else(|| "major".to_string()),
+                };
+                match oracle.register_symbol(&feed).await {
+                    Ok(()) => registered += 1,
+                    Err(e) => tracing::warn!(
+                        "failed to register price feed for {}: {}",
+                        s.symbol,
+                        e
+                    ),
+                }
+            }
+            info!(
+                "Asset price oracle: PriceOracle (rpc={}, symbols={}/{})",
+                rpc,
+                registered,
+                pc.symbols.len()
+            );
+            self.price_oracle = Some(oracle);
+        }
+
         if !bridge_cfg.enabled {
             info!("Bridge subsystem disabled — router initialized with no adapters");
             self.bridge_router = Some(bridge_router);
@@ -8192,6 +8444,38 @@ impl TenzroNode {
             }
         }
 
+        // Wire remote DID fallback resolution: when a DID is absent from
+        // the local registry, `resolve()` consults the configured upstream
+        // node's `tenzro_resolveIdentity` (with `include_record: true`) and
+        // caches successful resolutions locally. Pointing this at the node's
+        // own endpoint cannot recurse — the RPC handler reads CF_IDENTITIES
+        // directly, never `registry.resolve()`.
+        if let Some(endpoint) = self.config.did_fallback_rpc.clone() {
+            let backend = Arc::new(crate::did_resolution::RemoteDidResolutionBackend::new(
+                endpoint.clone(),
+            ));
+            registry = registry.with_resolution_backend(backend);
+            info!(endpoint = %endpoint, "Remote DID resolution fallback wired");
+        }
+
+        // Wire the revocation broadcaster: local `revoke()` calls sign each
+        // entry with the validator hybrid key and fan it out on the
+        // `tenzro/identity` gossipsub topic. The channel-backed forwarder
+        // decouples the registry's sync trait call from the async publish.
+        // Receivers apply entries via `apply_remote_revocation` (signature-
+        // verified, idempotent) in the event loop.
+        if let Some(network) = self.network.clone() {
+            let broadcaster =
+                Arc::new(crate::identity_gossip::GossipRevocationBroadcaster::spawn(network));
+            registry = registry.with_revocation_broadcaster(broadcaster);
+            info!(
+                topic = tenzro_identity::IDENTITY_TOPIC,
+                "Identity revocation broadcaster wired to gossipsub"
+            );
+        } else {
+            warn!("Identity revocation broadcaster NOT wired: network unavailable");
+        }
+
         // Parallel SVM mirror wiring: every TDIP machine registration is
         // also reflected into the canonical QuantuLabs
         // `agent_registry_8004` Anchor program. Storage-only (no Solana
@@ -8375,6 +8659,26 @@ impl TenzroNode {
             TenzroPaymentGateway::new()
         };
         let challenge_store = gateway.challenge_store();
+
+        // Validated-AP2-mandate store — write-through + hydrate when the node
+        // has persistent storage; `handle_ap2_validate_mandate_pair` records a
+        // pair here on successful cross-validation and `tenzro_listMandates`
+        // reads it back scoped by controller DID.
+        if let Some(storage) = &self.storage {
+            match crate::mandate_store::MandateStore::with_storage(
+                storage.clone() as Arc<dyn KvStore>
+            ) {
+                Ok(store) => self.mandate_store = Some(Arc::new(store)),
+                Err(e) => warn!("Mandate store hydration failed ({e}); mandate listing disabled"),
+            }
+        } else {
+            warn!(
+                "Mandate store initialized without persistent storage — \
+                 validated mandates will not be listable"
+            );
+            self.mandate_store =
+                Some(Arc::new(crate::mandate_store::MandateStore::new()));
+        }
 
         // Register MPP protocol server (session-based streaming payments)
         let mpp_server = MppPaymentServer::new("0x0000000000000000000000000000000000000001")
@@ -9095,6 +9399,10 @@ impl TenzroNode {
                     storage.clone() as Arc<dyn tenzro_storage::KvStore>,
                 ));
                 self.recovery_pending = Some(store);
+                self.passkey_sessions =
+                    Some(Arc::new(crate::passkey_rpc::PasskeySessionStore::with_storage(
+                        storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                    )));
             }
 
             info!(
@@ -9625,6 +9933,10 @@ impl TenzroNode {
             // configuration. Models served through external engines return
             // no commitment per-request regardless of this flag.
             capacity.verifiable_inference = self.config.roles.serves_ai();
+            // Operator-declared jurisdiction rides the announcement so remote
+            // routers can hard-filter on it. Absent claim = this node never
+            // satisfies a jurisdiction pin (fail-closed).
+            capacity.jurisdiction = self.jurisdiction_claim.clone();
 
             let ctx = crate::event_loop::ProviderAnnouncementContext {
                 hardware,
@@ -10958,6 +11270,59 @@ impl TenzroNode {
                 );
             }
 
+            // Wire the identity revocation gossipsub bridge: subscribe to
+            // `tenzro/identity` and forward opaque payloads to the event
+            // loop for decode + signature-verified, idempotent application
+            // via `IdentityRegistry::apply_remote_revocation`.
+            {
+                let event_tx_identity = event_loop.event_sender();
+                let net_identity = network.clone();
+                let topic_owned = tenzro_identity::IDENTITY_TOPIC.to_string();
+                tokio::spawn(async move {
+                    match net_identity.subscribe(&topic_owned).await {
+                        Ok(mut rx) => {
+                            tracing::info!(
+                                topic = %topic_owned,
+                                "Identity: subscribed to gossipsub topic"
+                            );
+                            while let Some(msg) = rx.recv().await {
+                                if let tenzro_network::MessagePayload::Custom { topic, data } =
+                                    msg.payload
+                                {
+                                    if topic != topic_owned {
+                                        continue;
+                                    }
+                                    if let Err(e) = event_tx_identity
+                                        .send(NodeEvent::IdentityGossipReceived {
+                                            topic: topic.clone(),
+                                            bytes: data,
+                                        })
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            "Failed to forward identity gossip to event loop: {}",
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                topic = %topic_owned,
+                                error = %e,
+                                "Failed to subscribe to identity gossipsub topic"
+                            );
+                        }
+                    }
+                });
+                info!(
+                    topic = tenzro_identity::IDENTITY_TOPIC,
+                    "Identity revocation propagation wired to gossipsub"
+                );
+            }
+
             // Wire the distributed-database gossipsub bridge: subscribe to
             // `tenzro/databases` and forward opaque payloads to the event loop
             // for decode + idempotent upsert into the local `DatabaseRegistry`.
@@ -11050,6 +11415,12 @@ impl TenzroNode {
         &self,
     ) -> Option<Arc<crate::spt_ceiling_bridge::SptCeilingResolverAdapter>> {
         self.spt_ceiling_cache.clone()
+    }
+
+    /// Returns the validated-AP2-mandate store when persistent storage was
+    /// available at `init_payments`. `tenzro_listMandates` reads from it.
+    pub fn mandate_store(&self) -> Option<&Arc<crate::mandate_store::MandateStore>> {
+        self.mandate_store.as_ref()
     }
 
     /// Returns the per-node `erc8004-system` secp256k1 signer used by
@@ -11498,6 +11869,33 @@ impl TenzroNode {
     /// responses with a `tenzro_provenance` manifest.
     pub fn provenance_signer(&self) -> Option<&tenzro_model::SharedProvenanceSigner> {
         self.provenance_signer.as_ref()
+    }
+
+    /// Returns the jurisdiction signer used to stamp locally-served
+    /// inference responses with a `tenzro_jurisdiction` receipt.
+    pub fn jurisdiction_signer(&self) -> Option<&tenzro_model::SharedJurisdictionSigner> {
+        self.jurisdiction_signer.as_ref()
+    }
+
+    /// Returns the sealed-model manifest store (write-through to the
+    /// `sealed:` prefix in CF_MODELS).
+    pub fn sealed_model_store(&self) -> Option<&Arc<tenzro_model::SealedModelStore>> {
+        self.sealed_model_store.as_ref()
+    }
+
+    /// Returns this node's X25519 recipient keypair for sealed model
+    /// shards. `None` when the key file could not be loaded or minted.
+    pub fn model_recipient_key(
+        &self,
+    ) -> Option<&Arc<tenzro_crypto::encryption::X25519KeyPair>> {
+        self.model_recipient_key.as_ref()
+    }
+
+    /// Returns this node's operator-declared jurisdiction claim, if any.
+    /// Built once at startup; `None` means the node never satisfies a
+    /// jurisdiction pin.
+    pub fn jurisdiction_claim(&self) -> Option<&tenzro_types::JurisdictionClaim> {
+        self.jurisdiction_claim.as_ref()
     }
 
     /// Returns the event loop sender for submitting transactions
@@ -12010,6 +12408,12 @@ impl TenzroNode {
         &self.sla_outstanding_probes
     }
 
+    /// Returns the DKG session registry. Always present; populated by
+    /// `tenzro_mpcKeygen` and polled by `tenzro_mpcKeygenStatus`.
+    pub fn mpc_keygen_sessions(&self) -> &Arc<crate::mpc_keygen::KeygenSessionRegistry> {
+        &self.mpc_keygen_sessions
+    }
+
     /// Returns the WorkflowRuntime if initialized — typed mirror of the
     /// privileged-VM workflow selectors (`0x01000040`–`0x0100004B`).
     pub fn workflow_runtime(&self) -> Option<&Arc<crate::workflow_runtime::WorkflowRuntime>> {
@@ -12126,6 +12530,14 @@ impl TenzroNode {
         &self,
     ) -> Option<&Arc<crate::passkey_rpc::PendingRecoveryStore>> {
         self.recovery_pending.as_ref()
+    }
+
+    /// Returns the pending passkey auth-session store used by the
+    /// browser-mediated CLI login flow.
+    pub fn passkey_sessions(
+        &self,
+    ) -> Option<&Arc<crate::passkey_rpc::PasskeySessionStore>> {
+        self.passkey_sessions.as_ref()
     }
 
     /// Returns the BurnQuota manager if initialized (Agent-Swarm Spec 3).
@@ -12332,6 +12744,11 @@ impl TenzroNode {
     /// Returns the bridge router if initialized
     pub fn bridge_router(&self) -> Option<&Arc<BridgeRouter>> {
         self.bridge_router.as_ref()
+    }
+
+    /// Returns the asset USD price oracle if configured + enabled.
+    pub fn price_oracle(&self) -> Option<&Arc<tenzro_bridge::PriceOracle>> {
+        self.price_oracle.as_ref()
     }
 
     /// Returns the Canton bridge adapter if Canton is enabled in config.
@@ -12792,7 +13209,7 @@ impl TenzroNode {
                     self.served_models.remove(&model_id);
                     self.load_tracker.unregister_model(&model_id);
                     if let Some(ref storage) = self.storage {
-                        let _ = storage.delete(CF_MODELS, model_id.as_bytes());
+                        let _ = storage.delete(CF_MODELS, format!("served:{}", model_id).as_bytes());
                     }
                     cleared_served.push(model_id);
                 }
@@ -12939,7 +13356,7 @@ impl TenzroNode {
             // weights from disk. A dead upstream clears the serve flag.
             let external_record = self.storage.as_ref().and_then(|storage| {
                 storage
-                    .get(CF_MODELS, model_id.as_bytes())
+                    .get(CF_MODELS, format!("served:{}", model_id).as_bytes())
                     .ok()
                     .flatten()
                     .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -12956,7 +13373,7 @@ impl TenzroNode {
                     self.served_models.remove(model_id);
                     self.load_tracker.unregister_model(model_id);
                     if let Some(ref storage) = self.storage {
-                        let _ = storage.delete(CF_MODELS, model_id.as_bytes());
+                        let _ = storage.delete(CF_MODELS, format!("served:{}", model_id).as_bytes());
                     }
                     cleared_models += 1;
                     let svc_ids: Vec<String> = self
@@ -13076,7 +13493,7 @@ impl TenzroNode {
                 self.served_models.remove(model_id);
                 self.load_tracker.unregister_model(model_id);
                 if let Some(ref storage) = self.storage {
-                    let _ = storage.delete(CF_MODELS, model_id.as_bytes());
+                    let _ = storage.delete(CF_MODELS, format!("served:{}", model_id).as_bytes());
                 }
                 // A hydrated ModelRegistry row from the previous process
                 // lifetime would still say Active — flip it so routing stops

@@ -217,6 +217,17 @@ pub enum NodeEvent {
     /// local `DatabaseRegistry` idempotently — re-receiving a descriptor a node
     /// already holds is a no-op.
     DatabaseGossipReceived { topic: String, bytes: Vec<u8> },
+    /// TDIP identity gossip message received on `tenzro/identity`.
+    ///
+    /// Carries a bincode-encoded
+    /// [`tenzro_identity::IdentityGossipMessage`] — currently the single
+    /// `RevocationBroadcast` variant wrapping a
+    /// [`tenzro_identity::registry::SignedRevocationEntry`]. The event loop
+    /// decodes via `tenzro_identity::decode_identity_for_topic` and applies
+    /// the entry through `IdentityRegistry::apply_remote_revocation`, which
+    /// verifies both hybrid signature legs and is idempotent for
+    /// already-revoked DIDs.
+    IdentityGossipReceived { topic: String, bytes: Vec<u8> },
     /// Shutdown signal
     Shutdown,
 }
@@ -409,7 +420,7 @@ pub struct EventLoop {
     /// Shared reference to the node's network_models map for gossipsub model discovery
     network_models: Option<Arc<DashMap<String, crate::node::NetworkModelEntry>>>,
     /// Shared reference to the node's served_models for heartbeat re-announcements
-    served_models: Option<Arc<DashMap<String, bool>>>,
+    served_models: Option<Arc<DashMap<String, tenzro_types::model::ModelVisibility>>>,
     /// Shared reference to the node's provider pricing for heartbeat announcements
     provider_pricing: Option<Arc<parking_lot::RwLock<crate::node::ProviderPricing>>>,
     /// Shared reference to the node's provider schedule for heartbeat announcements
@@ -786,7 +797,7 @@ impl EventLoop {
     pub fn with_model_discovery(
         mut self,
         network_models: Arc<DashMap<String, crate::node::NetworkModelEntry>>,
-        served_models: Arc<DashMap<String, bool>>,
+        served_models: Arc<DashMap<String, tenzro_types::model::ModelVisibility>>,
         provider_pricing: Arc<parking_lot::RwLock<crate::node::ProviderPricing>>,
         provider_schedule: Arc<parking_lot::RwLock<crate::node::ProviderSchedule>>,
         rpc_addr: String,
@@ -1679,7 +1690,7 @@ impl EventLoop {
                                 }
                                 let _ = self.storage.delete(
                                     CF_MODELS,
-                                    model_id.as_bytes(),
+                                    format!("served:{}", model_id).as_bytes(),
                                 );
                                 info!(
                                     "Cleared idle local serving state for model: {}",
@@ -1720,6 +1731,11 @@ impl EventLoop {
                         let rpc_addr = self.rpc_addr.clone();
 
                         for entry in served.iter() {
+                            // Private models are never announced — no heartbeat,
+                            // no TTL refresh on remote nodes, no discovery.
+                            if !entry.value().is_network() {
+                                continue;
+                            }
                             let model_id = entry.key().clone();
                             let pricing_info = tenzro_network::PricingInfo {
                                 per_request: 0,
@@ -1909,9 +1925,16 @@ impl EventLoop {
                         &self.provider_announcement_ctx,
                         &self.announce_signer,
                     ) {
+                        // Private models are excluded from provider announcements —
+                        // the served list on the wire only carries network-visible ids.
                         let served: Vec<String> = self.served_models
                             .as_ref()
-                            .map(|m| m.iter().map(|e| e.key().clone()).collect())
+                            .map(|m| {
+                                m.iter()
+                                    .filter(|e| e.value().is_network())
+                                    .map(|e| e.key().clone())
+                                    .collect()
+                            })
                             .unwrap_or_default();
 
                         let local_peer_id = match network.local_peer_id().await {
@@ -1952,6 +1975,10 @@ impl EventLoop {
                                 let mut c = p.capacity.advertised();
                                 c.verifiable_inference =
                                     c.verifiable_inference || ctx.capacity.verifiable_inference;
+                                // Node config is the single source of truth for
+                                // this node's jurisdiction claim — a self
+                                // provider entry never overrides it.
+                                c.jurisdiction = ctx.capacity.jurisdiction.clone();
                                 c
                             })
                             .unwrap_or_else(|| ctx.capacity.clone());
@@ -3207,6 +3234,38 @@ impl EventLoop {
                                     %topic,
                                     error = %e,
                                     "Failed to decode DatabaseGossip payload"
+                                ),
+                            }
+                        }
+                        NodeEvent::IdentityGossipReceived { topic, bytes } => {
+                            match tenzro_identity::decode_identity_for_topic(&topic, &bytes) {
+                                Ok(tenzro_identity::IdentityGossipMessage::RevocationBroadcast(
+                                    signed,
+                                )) => {
+                                    let did = signed.entry.did.clone();
+                                    if let Some(ref registry) = self.identity_registry {
+                                        match registry.apply_remote_revocation(signed) {
+                                            Ok(()) => info!(
+                                                %did,
+                                                "Applied gossiped identity revocation"
+                                            ),
+                                            Err(e) => warn!(
+                                                %did,
+                                                error = %e,
+                                                "Rejected gossiped identity revocation"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %did,
+                                            "Dropping gossiped identity revocation (identity registry not wired)"
+                                        );
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    %topic,
+                                    error = %e,
+                                    "Failed to decode IdentityGossip payload"
                                 ),
                             }
                         }

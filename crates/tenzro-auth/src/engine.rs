@@ -36,9 +36,10 @@
 //! # Concurrency
 //!
 //! `AuthEngine` is `Send + Sync`. All methods take `&self`. Hot caches
-//! (recent JWT validation results, DPoP `jti` replay set) live in
-//! `dashmap::DashMap`; durable state is written through to RocksDB via
-//! [`tenzro_storage::KvStore::write_batch_sync`].
+//! live in `dashmap::DashMap`; durable state — including the DPoP `jti`
+//! replay window — is written through to RocksDB via
+//! [`tenzro_storage::KvStore::write_batch_sync`] and hydrated back into
+//! memory at construction.
 
 use crate::aap::{
     AapAgentClaim, AapAuditClaim, AapCapabilityClaim, AapContextClaim, AapDelegationClaim,
@@ -225,8 +226,9 @@ pub enum AuthorityAction {
 pub struct AuthEngine {
     cfg: AuthEngineConfig,
     storage: Arc<dyn KvStore>,
-    /// Replay cache: DPoP `jti` → expiry instant (Unix seconds). The
-    /// engine sweeps this opportunistically inside `validate_jwt`.
+    /// Replay cache: DPoP `jti` → expiry instant (Unix seconds). Written
+    /// through to `CF_AUDIT` (`auth_dpop_jti:` rows) and hydrated at
+    /// construction; swept opportunistically inside `validate_jwt`.
     dpop_replay: DashMap<String, u64>,
     /// Direct revocation set: JWT `jti` → reason. Populated by
     /// [`Self::revoke`]. Cascading revocation also tags entries here
@@ -246,7 +248,8 @@ pub struct AuthEngine {
 impl AuthEngine {
     /// Construct a new engine with the given configuration and
     /// durable backing store. Hydrates the in-memory revocation set
-    /// from `CF_AUDIT` so revocations survive node restart.
+    /// and the DPoP replay window from `CF_AUDIT` so both survive
+    /// node restart.
     pub fn new(cfg: AuthEngineConfig, storage: Arc<dyn KvStore>) -> Result<Self> {
         if cfg.signing_secret.len() < 32 {
             return Err(AuthError::Internal(format!(
@@ -267,6 +270,7 @@ impl AuthEngine {
             decoding_key,
         };
         engine.hydrate_revocations()?;
+        engine.hydrate_dpop_replay()?;
         Ok(engine)
     }
 
@@ -1425,10 +1429,24 @@ impl AuthEngine {
 
     fn guard_replay(&self, verification: &DpopVerification) -> Result<()> {
         let now = unix_now();
-        // Opportunistic GC: drop any expired entries before inserting.
-        // Iterating a DashMap and removing within the same iter is
-        // ok because retain takes a closure.
-        self.dpop_replay.retain(|_k, exp| *exp > now);
+        // Opportunistic GC: drop any expired entries before inserting,
+        // and delete their durable rows so the cache and CF_AUDIT stay
+        // in step. Iterating a DashMap and removing within the same
+        // iter is ok because retain takes a closure.
+        let mut swept: Vec<String> = Vec::new();
+        self.dpop_replay.retain(|jti, exp| {
+            let live = *exp > now;
+            if !live {
+                swept.push(jti.clone());
+            }
+            live
+        });
+        for jti in &swept {
+            // Best-effort — a stale row is re-swept on the next call.
+            let _ = self
+                .storage
+                .delete(CF_AUDIT, crate::storage::dpop_replay_key(jti).as_bytes());
+        }
 
         let exp = now.saturating_add(DPOP_REPLAY_CACHE_TTL_SECS);
         if let Some(prev) = self.dpop_replay.insert(verification.jti.clone(), exp) {
@@ -1441,6 +1459,49 @@ impl AuthEngine {
                     "DPoP jti {} replayed within {}s window",
                     verification.jti, DPOP_REPLAY_CACHE_TTL_SECS
                 )));
+            }
+        }
+        // Write-through so a node restart inside the replay window
+        // cannot be used to replay a previously-seen proof.
+        self.storage
+            .write_batch_sync(vec![WriteOp::Put {
+                cf: CF_AUDIT.to_string(),
+                key: crate::storage::dpop_replay_key(&verification.jti).into_bytes(),
+                value: exp.to_le_bytes().to_vec(),
+            }])
+            .map_err(|e| AuthError::Storage(format!("dpop replay write: {}", e)))?;
+        Ok(())
+    }
+
+    /// Rebuild the DPoP replay window from `CF_AUDIT` at construction
+    /// so proofs seen before a restart stay rejected for the remainder
+    /// of [`DPOP_REPLAY_CACHE_TTL_SECS`]. Expired rows are deleted as
+    /// they are encountered; malformed rows are skipped.
+    fn hydrate_dpop_replay(&self) -> Result<()> {
+        let now = unix_now();
+        let entries = self
+            .storage
+            .scan_prefix(CF_AUDIT, crate::storage::DPOP_REPLAY_PREFIX)
+            .map_err(|e| AuthError::Storage(format!("dpop replay hydrate: {}", e)))?;
+        for (key, value) in entries {
+            let Some(suffix) = key.strip_prefix(crate::storage::DPOP_REPLAY_PREFIX) else {
+                continue;
+            };
+            let Ok(jti) = std::str::from_utf8(suffix) else {
+                continue;
+            };
+            let raw: [u8; 8] = match value.as_slice().try_into() {
+                Ok(r) => r,
+                Err(_) => {
+                    let _ = self.storage.delete(CF_AUDIT, &key);
+                    continue;
+                }
+            };
+            let exp = u64::from_le_bytes(raw);
+            if exp > now {
+                self.dpop_replay.insert(jti.to_string(), exp);
+            } else {
+                let _ = self.storage.delete(CF_AUDIT, &key);
             }
         }
         Ok(())

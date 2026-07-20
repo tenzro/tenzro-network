@@ -63,6 +63,9 @@ impl GossipTopics {
         // Distributed database registration and rescale events
         topics.insert("databases".to_string(), IdentTopic::new("tenzro/databases"));
 
+        // TDIP identity revocation broadcast (signed revocation entries)
+        topics.insert("identity".to_string(), IdentTopic::new("tenzro/identity"));
+
         Self { topics }
     }
 

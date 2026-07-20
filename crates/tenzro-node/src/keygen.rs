@@ -279,6 +279,52 @@ pub fn load_or_generate_erc8004_system_key(data_dir: &Path) -> Result<[u8; 32]> 
     Ok(out)
 }
 
+/// Load the per-node X25519 sealed-model recipient key from
+/// `{data_dir}/model_recipient_x25519_key`, generating it in place if
+/// the file does not exist.
+///
+/// This key is the node's decryption identity for sealed model shards:
+/// publishers wrap the per-artifact content key to this key's public
+/// half via `tenzro_crypto::envelope_encrypt`. Like the ERC-8004 system
+/// key it is silent-generate on miss — rotating it only means the node
+/// must be re-added as a recipient on manifests sealed after rotation;
+/// it carries no consensus stake.
+///
+/// Returns the raw 32-byte X25519 secret, suitable for
+/// [`tenzro_crypto::encryption::X25519KeyPair::from_secret_bytes`].
+pub fn load_or_generate_model_recipient_key(data_dir: &Path) -> Result<[u8; 32]> {
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| NodeError::Other(format!("create data_dir {}: {}", data_dir.display(), e)))?;
+
+    let key_path = data_dir.join("model_recipient_x25519_key");
+
+    if key_path.exists() {
+        let bytes = std::fs::read(&key_path)
+            .map_err(|e| NodeError::Other(format!("read {}: {}", key_path.display(), e)))?;
+        if bytes.len() != 32 {
+            return Err(NodeError::Other(format!(
+                "{} has wrong length {} (expected 32)",
+                key_path.display(),
+                bytes.len()
+            )));
+        }
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(&bytes);
+        return Ok(buf);
+    }
+
+    let mut buf = [0u8; 32];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut buf);
+    write_secret(&key_path, &buf)?;
+    tracing::info!(
+        target: "tenzro::keygen",
+        path = %key_path.display(),
+        "generated fresh sealed-model X25519 recipient key"
+    );
+    Ok(buf)
+}
+
 fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(path, bytes)
         .map_err(|e| NodeError::Other(format!("write {}: {}", path.display(), e)))?;

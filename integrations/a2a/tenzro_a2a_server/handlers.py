@@ -393,6 +393,23 @@ def _build_route_intent_params(text: str, metadata: dict = None) -> dict:
     return params
 
 
+def _apply_jurisdiction_params(params: dict, metadata: dict = None) -> None:
+    """Forwards the caller's jurisdiction pin and receipt-strictness flag.
+
+    metadata["jurisdiction"] is a comma-separated pin of ISO 3166-1 alpha-2
+    country codes and/or bloc tokens (case-insensitive); the serving node must
+    declare a matching attestation-bound locality claim or the request is
+    refused. metadata["jurisdiction_receipt"] set to "required" fails the
+    request unless the response carries a verifiable signed jurisdiction
+    receipt (returned under "tenzro_jurisdiction").
+    """
+    metadata = metadata or {}
+    for key in ("jurisdiction", "jurisdiction_receipt"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            params[key] = value.strip()
+
+
 async def handle_inference(text: str, metadata: dict = None) -> str:
     t = text.lower()
 
@@ -427,6 +444,7 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
         params = _build_route_intent_params(text, metadata)
         params["message"] = prompt
         params["max_tokens"] = (metadata or {}).get("max_tokens", 256)
+        _apply_jurisdiction_params(params, metadata)
         result = await rpc_call("tenzro_chatByIntent", params)
         return json.dumps(result, indent=2)
 
@@ -438,7 +456,9 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
             if idx >= 0:
                 prompt = text[idx + len(kw):].strip().lstrip(":").strip()
                 break
-        result = await rpc_call("tenzro_chat", {"model_id": "default", "message": prompt, "max_tokens": 100})
+        params = {"model_id": "default", "message": prompt, "max_tokens": 100}
+        _apply_jurisdiction_params(params, metadata)
+        result = await rpc_call("tenzro_chat", params)
         return json.dumps(result, indent=2)
 
     if "endpoint" in t:
@@ -676,37 +696,9 @@ async def handle_payment(text: str, metadata: dict = None) -> str:
         return f"Payment challenge created ({protocol}):\n{json.dumps(result, indent=2)}"
 
     if "ap2" in t:
-        amount = _extract_amount(text)
-        if "create" in t and amount:
-            return (
-                f"To create an AP2 payment for {amount} TNZO, provide:\n"
-                f"  - Payer DID\n"
-                f"  - Payee DID\n"
-                f"  - Amount: {amount} TNZO\n"
-                f"Use JSON format for full AP2 payment creation."
-            )
-        if "authorize" in t:
-            return (
-                "AP2 authorization requires:\n"
-                "  - Agent DID\n"
-                "  - Spending limit (TNZO)\n"
-                "  - Time window (seconds)"
-            )
-        if "status" in t:
-            pay_id = _extract_id(text)
-            if pay_id:
-                return f"AP2 payment status lookup for {pay_id} -- use tenzro_getSettlement RPC."
-            return "Provide a payment ID to check status."
-        if "cancel" in t:
-            pay_id = _extract_id(text)
-            if pay_id:
-                return f"AP2 payment cancellation for {pay_id} -- submit cancel via settlement RPC."
-            return "Provide a payment ID to cancel."
-        if "execute" in t:
-            pay_id = _extract_id(text)
-            if pay_id:
-                return f"AP2 payment execution for {pay_id} -- submit via settlement RPC."
-            return "Provide a payment ID to execute."
+        # The AP2 v0.2 lifecycle (sessions, mandate sign/verify/validate) is
+        # handled by `handle_ap2`, which drives the real `tenzro_ap2*` RPCs.
+        return await handle_ap2(text, metadata)
 
     if "mpp" in t:
         result = await rpc_call("tenzro_createPaymentChallenge", ["mpp", "/resource"])
@@ -722,7 +714,7 @@ async def handle_payment(text: str, metadata: dict = None) -> str:
         "  - 'Create x402 payment challenge'\n"
         "  - 'List x402 schemes'\n"
         "  - 'List payment sessions'\n"
-        "  - 'AP2 create payment for 100 TNZO'\n"
+        "  - 'AP2 protocol info' (routes to the AP2 v0.2 session/mandate handler)\n"
         "  - 'Payment gateway info'\n"
         "  - 'x402 protocol info'\n"
         "  - 'x402 register resource' (metadata: sellerDid, resource, payTo, "
@@ -1827,6 +1819,164 @@ async def handle_tee(text: str, metadata: dict = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Passkey-first custody
+# ---------------------------------------------------------------------------
+
+async def handle_passkey(text: str, metadata: dict = None) -> str:
+    """Passkey-bound ERC-4337 smart-account onboarding and custody.
+
+    Query and session-launch operations dispatch to real RPCs. Ceremonies that
+    require structured WebAuthn material (enroll, add device credential,
+    add-guardian, recovery, session-key grant) are guided: the P-256 public
+    key, credential id, and ML-DSA-65 key are produced by the caller's secure
+    element and cannot be derived from free text, so the handler either opens a
+    browser-launch ceremony session or returns the exact params to supply.
+    """
+    t = text.lower()
+    addr = _extract_address(text)
+
+    # List enrolled credentials on an account.
+    if "list" in t and ("passkey" in t or "credential" in t):
+        if addr:
+            result = await rpc_call("tenzro_listPasskeys", {"account_address": addr})
+            return f"Enrolled passkeys for {addr}:\n{json.dumps(result, indent=2)}"
+        return "Provide an account address. Example: 'List passkeys for 0xabc...'"
+
+    # Second-factor policy: get or set.
+    if "policy" in t or "second factor" in t or "two credential" in t:
+        if "set" in t and addr:
+            factor = (
+                "two_credentials"
+                if any(k in t for k in ["two", "2fa", "dual"])
+                else "single_credential"
+            )
+            result = await rpc_call("tenzro_setPasskeyPolicy", {
+                "account_address": addr,
+                "second_factor": factor,
+            })
+            return f"Passkey policy for {addr} set to {factor}:\n{json.dumps(result, indent=2)}"
+        if addr:
+            result = await rpc_call("tenzro_getPasskeyPolicy", {"account_address": addr})
+            return f"Passkey policy for {addr}:\n{json.dumps(result, indent=2)}"
+        return "Provide an account address. Example: 'Get passkey policy for 0xabc...'"
+
+    # Pending guardian-quorum recoveries on an account.
+    if "recovery" in t or "recover" in t:
+        if "finalize" in t or "complete" in t:
+            rid = _extract_id(text)
+            if rid:
+                result = await rpc_call("tenzro_finalizeRecovery", {"recovery_id": rid})
+                return f"Recovery {rid} finalized:\n{json.dumps(result, indent=2)}"
+            return "Provide a recovery id to finalize. Example: 'Finalize recovery <uuid>'"
+        if "list" in t or "pending" in t or "status" in t:
+            if addr:
+                result = await rpc_call(
+                    "tenzro_listPendingRecoveries", {"account_address": addr}
+                )
+                return f"Pending recoveries for {addr}:\n{json.dumps(result, indent=2)}"
+            return "Provide an account address. Example: 'List pending recoveries for 0xabc...'"
+        return (
+            "To initiate a guardian-quorum recovery (rotate to a new passkey), "
+            "call tenzro_initiateRecovery with:\n"
+            "  - account_address\n"
+            "  - new_passkey_public_key_hex (P-256 key from the new device)\n"
+            "  - new_credential_id_hex\n"
+            "  - new_ml_dsa_public_key_hex (optional PQ leg)\n"
+            "  - ttl_secs (optional, default 86400, max 604800)\n"
+            "Guardians then submit composite signatures over the returned "
+            "recovery_op_hash_hex; finalize once quorum is reached."
+        )
+
+    # Add a social-recovery guardian.
+    if "guardian" in t:
+        return (
+            "To add a social-recovery guardian, call tenzro_addGuardian with:\n"
+            "  - account_address\n"
+            "  - guardian_ed25519_pubkey_hex\n"
+            "  - guardian_ml_dsa_pubkey_hex\n"
+            "  - label (optional)\n"
+            "  - threshold (optional new N-of-M quorum)"
+        )
+
+    # Grant a scoped session key to an agent.
+    if "session key" in t or ("session" in t and "grant" in t):
+        return (
+            "To grant a scoped session key, call tenzro_grantSessionKey with:\n"
+            "  - account_address\n"
+            "  - session_pubkey_hex (32-byte Ed25519 verifying key)\n"
+            "  - allowed_selectors_hex (4-byte function selectors)\n"
+            "  - allowed_targets (20-byte addresses; empty = any)\n"
+            "  - per-tx and validity bounds\n"
+            "Session keys let an agent transact within limits without the "
+            "user's passkey."
+        )
+
+    # Add a device credential to an existing account.
+    if "add" in t and ("passkey" in t or "device" in t or "credential" in t):
+        if addr:
+            return (
+                f"To add a device credential to {addr}, register a WebAuthn "
+                "credential on the new device, then call tenzro_addPasskey with "
+                "account_address, new_passkey_public_key_hex, "
+                "new_credential_id_hex, and an optional label. The node mints "
+                "the new credential's ML-DSA-65 post-quantum leg in its TEE. "
+                "Or say 'browser add passkey for "
+                f"{addr}' to launch the ceremony in a browser."
+            )
+        if "browser" in t:
+            # Fall through to session launch below.
+            pass
+        else:
+            return "Provide an account address. Example: 'Add a device credential to 0xabc...'"
+
+    # Browser-launch WebAuthn ceremony (gcloud-style device flow).
+    if "browser" in t or "launch" in t or "open" in t:
+        if "add" in t and addr:
+            result = await rpc_call("tenzro_createPasskeySession", {
+                "kind": "add",
+                "account_address": addr,
+                "salt": 0,
+            })
+        else:
+            result = await rpc_call("tenzro_createPasskeySession", {
+                "kind": "enroll",
+                "salt": 0,
+            })
+        return (
+            "Passkey ceremony session created. Open the returned auth URL in a "
+            "browser to run the WebAuthn ceremony, then poll "
+            f"tenzro_getPasskeySession:\n{json.dumps(result, indent=2)}"
+        )
+
+    # Enroll a new passkey-bound smart account.
+    if "enroll" in t or ("new" in t and ("account" in t or "passkey" in t)) or "onboard" in t:
+        return (
+            "To enroll a passkey-bound ERC-4337 smart account, register a "
+            "WebAuthn credential in the browser, then either:\n"
+            "  - say 'browser enroll passkey' to launch the ceremony "
+            "(tenzro_createPasskeySession kind=enroll), or\n"
+            "  - call tenzro_enrollPasskey directly with "
+            "passkey_public_key_hex, credential_id_hex, ml_dsa_public_key_hex, "
+            "an optional display_name, and a salt.\n"
+            "The signing key never leaves the hardware secure element; the "
+            "WebAuthnValidator is installed as the account's primary signer."
+        )
+
+    return (
+        "Passkey-first custody (Coinbase / Daimo / Argent pattern):\n"
+        "  - 'Enroll a passkey-bound smart account'\n"
+        "  - 'Browser enroll passkey' (gcloud-style device flow)\n"
+        "  - 'Add a device credential to 0xabc...'\n"
+        "  - 'List passkeys for 0xabc...'\n"
+        "  - 'Get passkey policy for 0xabc...' / 'Set two-credential policy for 0xabc...'\n"
+        "  - 'Add a guardian to my account'\n"
+        "  - 'Initiate a recovery ceremony to rotate my passkey'\n"
+        "  - 'List pending recoveries for 0xabc...' / 'Finalize recovery <uuid>'\n"
+        "  - 'Grant a session key to my trading agent'"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Custody
 # ---------------------------------------------------------------------------
 
@@ -2078,6 +2228,15 @@ async def handle_ap2(text: str, metadata: dict = None) -> str:
             "tenzro_ap2GetSession", [{"session_id": session_id}]
         )
         return f"AP2 session:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t and "mandate" in t:
+        controller_did = md.get("controller_did") or _extract_did(text)
+        if controller_did:
+            result = await rpc_call(
+                "tenzro_listMandates", [{"controller_did": controller_did}]
+            )
+            return f"AP2 mandates for {controller_did}:\n{json.dumps(result, indent=2)}"
+        return "Provide a controller DID (metadata.controller_did) to list persisted mandates."
 
     if "list" in t:
         agent_did = md.get("agent_did") or _extract_did(text)
@@ -2698,6 +2857,7 @@ async def handle_help(text: str, metadata: dict = None) -> str:
         "    tee          - TEE detection, attestation, seal/unseal data\n"
         "    zk           - ZK proof creation, verification, circuits\n"
         "    custody      - FROST-Ed25519 threshold wallets, keystore, sessions, limits\n"
+        "    passkey      - Passkey-bound ERC-4337 accounts, social recovery, session keys\n"
         "    verification - ZK proofs, TEE attestations\n"
         "    compliance   - ERC-3643 T-REX KYC\n"
         "    crosschain   - ERC-7802 cross-chain tokens\n"
@@ -3918,6 +4078,32 @@ async def handle_database(text: str, metadata: dict = None) -> str:
     )
 
 
+async def handle_oracle(text: str, metadata: dict = None) -> str:
+    """Read asset prices from the node's price oracle (tenzro_getPrice).
+
+    `price_usd_8dp` is the USD price as an integer scaled by 1e8. Symbols with
+    no live feed come back under `unavailable`. Requires bridge.prices.enabled
+    on the node.
+    """
+    md = metadata or {}
+    params: dict = {}
+    symbol = md.get("symbol")
+    symbols = md.get("symbols")
+    if symbol:
+        params["symbol"] = symbol
+    if symbols:
+        params["symbols"] = symbols
+    if not params:
+        return (
+            "Read asset prices from the node's price oracle:\n"
+            "  metadata.symbol   (single symbol, e.g. 'TNZO')\n"
+            "  metadata.symbols  (list, e.g. ['TNZO','ETH','USDC'])\n"
+            "  RPC: tenzro_getPrice — price_usd_8dp is USD × 1e8."
+        )
+    result = await rpc_call("tenzro_getPrice", [params])
+    return f"Asset prices:\n{json.dumps(result, indent=2)}"
+
+
 # ---------------------------------------------------------------------------
 # Handler dispatch table
 # ---------------------------------------------------------------------------
@@ -3959,6 +4145,7 @@ HANDLERS: dict[str, callable] = {
     "crypto": handle_crypto,
     "tee": handle_tee,
     "custody": handle_custody,
+    "passkey-wallet": handle_passkey,
     "zk": handle_zk,
     "ap2": handle_ap2,
     "erc8004": handle_erc8004,
@@ -3976,6 +4163,7 @@ HANDLERS: dict[str, callable] = {
     "axelar": handle_axelar,
     "babylon": handle_babylon,
     "caip": handle_caip,
+    "oracle": handle_oracle,
     "storage": handle_storage,
     "database": handle_database,
     "compute": handle_compute,

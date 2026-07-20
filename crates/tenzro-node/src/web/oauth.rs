@@ -136,17 +136,18 @@ pub struct TokenExchangeResponseBody {
 ///
 /// **DPoP**: the parent JWT was bound to a key (its `cnf.jkt`); the
 /// caller proves possession of that key via the `DPoP` header on this
-/// request. (The MCP `/token` endpoint accepts code/refresh grants
-/// without DPoP because those flows mint the original key binding.)
-/// V1 implementation note: the DPoP proof on the exchange call is
-/// **not** verified here yet — we accept the parent's signature as the
-/// gating credential for V1 testnet. Item 7 of Phase A includes
-/// wiring DPoP-on-exchange when we land the AS endpoints in the
-/// production deployment; the engine's `validate_jwt(token, None)`
-/// call below establishes the parent's JTI/revocation status, and
-/// `exchange_token` then narrows the RAR/AAP envelope.
+/// request — a fresh proof over `(POST, "<base>/oauth/token")` signed
+/// by the parent's confirmation key, checked against the replay
+/// window. A DPoP-bound parent presented without a proof header is
+/// rejected. Bearer-only parents (no `cnf` claim — onboarding-minted
+/// tokens that predate any key binding) may exchange without a proof;
+/// the child they mint is DPoP-bound to `child_dpop_jkt` from that
+/// point forward. (The MCP `/token` endpoint accepts code/refresh
+/// grants without DPoP because those flows mint the original key
+/// binding.)
 pub async fn token_exchange_handler(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(body): Json<TokenExchangeRequestBody>,
 ) -> Response {
     let engine = match auth_engine(&state) {
@@ -169,12 +170,56 @@ pub async fn token_exchange_handler(
         );
     }
 
-    // Validate the parent JWT (signature, exp, revocation). DPoP
-    // proof verification on /oauth/token is deferred to a follow-up
-    // pass — see the rustdoc above.
-    let parent_claims: AuthClaims = match engine.validate_jwt(&body.subject_token, None) {
-        Ok(c) => c,
-        Err(e) => return auth_error_to_response(e),
+    // Validate the parent JWT (signature, exp, revocation) plus proof
+    // of possession of its confirmation key. When a `DPoP` header is
+    // present the proof is verified over (POST, <base>/oauth/token)
+    // and the jti replay window; when it is absent, only a bearer-only
+    // parent (no `cnf` claim) may exchange.
+    let parent_claims: AuthClaims = match headers.get("dpop").and_then(|v| v.to_str().ok()) {
+        Some(dpop_header) => {
+            let (dpop_proof, signed_input, signature) =
+                match tenzro_auth::DpopProof::parse_with_signed_input(dpop_header) {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        return oauth_error(
+                            StatusCode::UNAUTHORIZED,
+                            "invalid_dpop_proof",
+                            &format!("DPoP proof parse failed: {}", e),
+                        )
+                    }
+                };
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let htu = full_request_uri(&headers, "/oauth/token");
+            let dpop_validation = tenzro_auth::DpopValidation {
+                proof: &dpop_proof,
+                expected_htm: "POST",
+                expected_htu: &htu,
+                now_unix,
+                signed_input: &signed_input,
+                signature: &signature,
+            };
+            match engine.validate_jwt(&body.subject_token, Some(dpop_validation)) {
+                Ok(c) => c,
+                Err(e) => return auth_error_to_response(e),
+            }
+        }
+        None => {
+            let claims = match engine.validate_jwt(&body.subject_token, None) {
+                Ok(c) => c,
+                Err(e) => return auth_error_to_response(e),
+            };
+            if claims.cnf.is_some() {
+                return oauth_error(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_dpop_proof",
+                    "subject_token is DPoP-bound (cnf.jkt); a DPoP proof header over (POST, /oauth/token) is required",
+                );
+            }
+            claims
+        }
     };
 
     let req = TokenExchangeRequest {
@@ -264,12 +309,15 @@ pub struct RevokeRequestBody {
 
 /// `POST /oauth/revoke` — RFC 7009 token revocation.
 ///
-/// Decodes the JWT *without* signature verification to extract its
-/// `jti`, then calls [`tenzro_auth::AuthEngine::revoke`] which records
-/// a `Revoked` audit event and cascades through the `controller_did`
-/// chain. Always returns 200 per RFC 7009 §2.2 — revocation is
-/// idempotent and we don't want to leak token validity through
-/// timing.
+/// Routes on token shape. A JWT (access token) is decoded *without*
+/// signature verification to extract its `jti`, then
+/// [`tenzro_auth::AuthEngine::revoke`] records a `Revoked` audit
+/// event and cascades through the `controller_did` chain. Anything
+/// that is not JWT-shaped is treated as an opaque refresh token and
+/// deleted from the store via
+/// [`tenzro_auth::AuthEngine::revoke_refresh_token`]. Both paths are
+/// idempotent and always return 200 per RFC 7009 §2.2 — we don't
+/// want to leak token validity through timing.
 pub async fn revoke_handler(
     State(state): State<Arc<WebState>>,
     Json(body): Json<RevokeRequestBody>,
@@ -285,21 +333,27 @@ pub async fn revoke_handler(
         return StatusCode::OK.into_response();
     };
 
-    let Some(jti) = peek_unverified_jti(&body.token) else {
-        // Not a JWT shape; nothing to do. Per RFC 7009 §2.2, return 200.
-        return StatusCode::OK.into_response();
-    };
-
-    // The hint is advisory — we always treat the token as a JWT.
+    // The hint is advisory — we route on token shape, not the hint.
     if let Some(hint) = &body.token_type_hint {
         tracing::trace!(token_type_hint = %hint, "revoke: client supplied advisory hint");
     }
 
-    let reason = body.reason.unwrap_or_else(|| "client revocation".into());
-    if let Err(e) = engine.revoke(&jti, reason) {
-        // Engine-level errors (storage failure) are logged but not
-        // surfaced to the caller — RFC 7009 §2.2 always 200.
-        tracing::warn!(jti = %jti, error = %e, "revoke failed");
+    match peek_unverified_jti(&body.token) {
+        Some(jti) => {
+            let reason = body.reason.unwrap_or_else(|| "client revocation".into());
+            if let Err(e) = engine.revoke(&jti, reason) {
+                // Engine-level errors (storage failure) are logged but not
+                // surfaced to the caller — RFC 7009 §2.2 always 200.
+                tracing::warn!(jti = %jti, error = %e, "revoke failed");
+            }
+        }
+        None => {
+            // Opaque (non-JWT) tokens are refresh tokens. Deletion is
+            // idempotent — unknown tokens are a no-op.
+            if let Err(e) = engine.revoke_refresh_token(&body.token) {
+                tracing::warn!(error = %e, "refresh token revoke failed");
+            }
+        }
     }
     StatusCode::OK.into_response()
 }
@@ -463,7 +517,7 @@ fn auth_engine(
 /// Derive the public base URL of this node from the incoming `Host`
 /// and `X-Forwarded-Proto` headers. Caddy / our reverse proxy sets
 /// these; for direct hits we default to `http`.
-fn derive_base_url(headers: &HeaderMap) -> String {
+pub(super) fn derive_base_url(headers: &HeaderMap) -> String {
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())

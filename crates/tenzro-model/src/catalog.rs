@@ -3399,6 +3399,43 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
+    // Kimi K3 — checkpoint publication expected 2026-07-27. The entry
+    // exists so distributed expert extraction (`moe_safetensors_repo`)
+    // can pick the model up the day the safetensors repo goes live; no
+    // GGUF serving artifact exists yet, so hf_filename is empty,
+    // size/RAM are unset, and the entry is not promotable. Fill the
+    // GGUF fields + flip promotable once a proper sharded quant is
+    // published upstream.
+    catalog.push(HfModelEntry {
+        id: "kimi-k3".into(),
+        name: "Kimi K3 (MoE)".into(),
+        family: "kimi".into(),
+        hf_repo: "moonshotai/Kimi-K3".into(),
+        hf_filename: String::new(),
+        parameters: "MoE, 896 experts / 16 active per token".into(),
+        architecture: ModelArchitecture::Kimi,
+        context_length: 262144,
+        quantization: "FP8".into(),
+        size_bytes: 0,
+        min_ram_gb: 0,
+        license: "MIT".into(),
+        description: "Moonshot AI Kimi K3 MoE — 896 routed experts, 16 active per token, one fused shared expert. Catalog entry serves distributed expert extraction; whole-model GGUF serving pending upstream quant publication.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 896,
+            experts_per_token: 16,
+            shared_experts: 1,
+            params_per_expert_x10: None,
+        }),
+        promotable: false,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
 
     // ── MiniMax M1 (superseded — Unsloth jumped to M2.x/M3) ──────────
     catalog.push(HfModelEntry {
@@ -4342,6 +4379,12 @@ pub fn get_model_by_id(id: &str) -> Option<HfModelEntry> {
 pub fn moe_safetensors_repo(model_id: &str) -> Option<&'static str> {
     match model_id {
         "qwen3-30b-a3b" => Some("Qwen/Qwen3-30B-A3B"),
+        "deepseek-v3-0324" => Some("deepseek-ai/DeepSeek-V3-0324"),
+        "deepseek-v4-flash" => Some("deepseek-ai/DeepSeek-V4-Flash"),
+        "deepseek-v4-pro" => Some("deepseek-ai/DeepSeek-V4-Pro"),
+        "kimi-k2-instruct" => Some("moonshotai/Kimi-K2-Instruct"),
+        "kimi-k2.6" => Some("moonshotai/Kimi-K2.6"),
+        "kimi-k3" => Some("moonshotai/Kimi-K3"),
         _ => None,
     }
 }
@@ -4372,9 +4415,32 @@ mod tests {
             assert!(!entry.id.is_empty(), "Model ID empty");
             assert!(!entry.name.is_empty(), "Model name empty for {}", entry.id);
             assert!(!entry.hf_repo.is_empty(), "HF repo empty for {}", entry.id);
-            assert!(!entry.hf_filename.is_empty(), "HF filename empty for {}", entry.id);
-            assert!(entry.size_bytes > 0, "Size is 0 for {}", entry.id);
-            assert!(entry.min_ram_gb > 0, "Min RAM is 0 for {}", entry.id);
+            // Extraction-only MoE entries carry no whole-model GGUF
+            // serving artifact yet: hf_filename is empty, size/RAM are
+            // unset, and the entry is not promotable. They must instead
+            // map to a safetensors checkpoint source for per-expert
+            // extraction.
+            let extraction_only = entry.hf_filename.is_empty();
+            if extraction_only {
+                assert!(
+                    !entry.promotable,
+                    "{} has no serving artifact but is promotable",
+                    entry.id
+                );
+                assert!(
+                    entry.moe.is_some(),
+                    "{} has no serving artifact and no MoE shape",
+                    entry.id
+                );
+                assert!(
+                    moe_safetensors_repo(&entry.id).is_some(),
+                    "{} has no serving artifact and no safetensors source",
+                    entry.id
+                );
+            } else {
+                assert!(entry.size_bytes > 0, "Size is 0 for {}", entry.id);
+                assert!(entry.min_ram_gb > 0, "Min RAM is 0 for {}", entry.id);
+            }
             assert!(entry.context_length > 0, "Context length is 0 for {}", entry.id);
             // Serving profile must be stamped (the build pass overwrites the
             // literal placeholder). Sampler values must be plausible.
@@ -4988,6 +5054,7 @@ mod tests {
         gated_sorted.sort();
         let expected = vec![
             "deepseek-v4-pro".to_string(),
+            "kimi-k3".to_string(),
             "minimax-m1-40b".to_string(),
         ];
         assert_eq!(

@@ -431,6 +431,35 @@ async def get_fee_history(
 
 
 @mcp.tool
+async def get_price(symbol: str = "", symbols: list[str] | None = None) -> dict:
+    """Read one or more asset prices from the node's price oracle.
+
+    Pass a single `symbol` (e.g. "ETH") or a `symbols` list. `price_usd_8dp`
+    is the USD price as an integer scaled by 1e8, encoded as a decimal
+    string. Symbols with no live feed are returned under `unavailable`
+    rather than failing the whole call. Requires `bridge.prices.enabled` on
+    the node.
+    """
+    params: dict = {}
+    if symbol:
+        params["symbol"] = symbol
+    if symbols:
+        params["symbols"] = symbols
+    return await rpc_call("tenzro_getPrice", [params])
+
+
+@mcp.tool
+async def list_mandates(controller_did: str) -> dict:
+    """List the persisted AP2 mandates authorized by a controller DID.
+
+    Each record captures the validated intent/cart pair — amounts, asset,
+    chain, merchant, expiry, and the stored checkout/payment VDCs — so a
+    controller can audit what its agents were authorized to spend.
+    """
+    return await rpc_call("tenzro_listMandates", [{"controller_did": controller_did}])
+
+
+@mcp.tool
 async def get_svm_cross_vm_program_info() -> dict:
     """Return the canonical Tenzro Cross-VM SVM-native program ID and instruction
     discriminators. The program ID is deterministically derived as
@@ -3549,7 +3578,7 @@ async def caip19(
 
 
 # ---------------------------------------------------------------------------
-# Canton / DAML (15 tools — Canton 3.5+ JSON Ledger API)
+# Canton / DAML (18 tools — Canton 3.5+ JSON Ledger API)
 # ---------------------------------------------------------------------------
 
 

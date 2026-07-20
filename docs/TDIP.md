@@ -63,6 +63,8 @@ TDIP DIDs resolve to DID Documents via the Tenzro Ledger's identity registry. Re
 - Via RPC: `tenzro_resolveIdentity` and `tenzro_resolveDidDocument`
 - Via SDK: `client.identity.resolve(did)`
 
+A DID not held in the node's local registry can fall through to an upstream resolver. The upstream is configured with the `did_fallback_rpc` node configuration field (unset by default — resolution stays local-only). When set, the node forwards the resolution to the upstream with `{ "did": "<did>", "include_record": true }`; an upstream that supports `include_record` returns the identity record alongside the DID Document, which the node re-includes in its own response. An upstream that predates the field errors so the caller knows to reach a newer node. A DID that resolves neither locally nor upstream returns JSON-RPC error `-32404`.
+
 ---
 
 ## 3. Identity Types

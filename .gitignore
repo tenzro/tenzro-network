@@ -50,12 +50,7 @@ docs/upstream-staging/
 docs/upstream-registrations.md
 docs/recognition-commands.md
 docs/recognition-roadmap.md
-docs/architecture/agentic-internet.md
-docs/architecture/meta-router-plan.md
-docs/architecture/gap-matrix.md
-docs/architecture/prior-art.md
-docs/architecture/tokenomics-economic-model.md
-docs/architecture/sponsorship-campaign.md
+docs/architecture/
 docs/operators/
 docs/agent-launch-test-plan.md
 docs/landscape-2026.md
@@ -119,12 +114,19 @@ deploy/kubernetes/*-secret.yaml
 deploy/kubernetes/*-credentials.yaml
 
 # Operator-specific deployment artifacts (belong in the operator's own tree)
+deploy/terraform/
+deploy/kubernetes/
 cloudbuild-*.yaml
 config/genesis-prod.toml
 deploy/rpc-node/
 scripts/deploy-testnet.sh
 scripts/rollout-validators.sh
 scripts/stop-the-world-cutover.sh
+
+# Internal-only tooling (audit, smoke tests, mirror-sync management)
+tools/doc-audit/
+tools/testnet-smoke/
+tools/sync/
 
 # Coverage
 *.profraw

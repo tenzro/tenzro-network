@@ -42,8 +42,8 @@ use std::sync::Arc;
 use tenzro_crypto::webauthn::WebAuthnAssertion;
 use tenzro_storage::{CF_VALIDATOR_MODULES, KvStore};
 use tenzro_vm::{
-    HybridWebAuthnSignature, SessionKeyConfig, SocialRecoveryConfig,
-    SpendingLimitConfig, WebAuthnAccountKey,
+    HybridWebAuthnSignature, SecondFactorPolicy, SessionKeyConfig,
+    SocialRecoveryConfig, SpendingLimitConfig, WebAuthnAccountKey,
 };
 use tenzro_crypto::composite::CompositePublicKey;
 use tenzro_crypto::pq::ML_DSA_65_VK_LEN;
@@ -423,6 +423,16 @@ pub struct SignWithPasskeyRequest {
     /// Optional ML-DSA-65 signature when the account has a hybrid PQ leg.
     #[serde(default)]
     pub ml_dsa_signature_hex: Option<String>,
+    /// Second-credential leg — required when the account's second-factor
+    /// policy is `two_credentials`. All three `second_*` fields must be
+    /// supplied together and must address a different enrolled
+    /// credential than the primary leg.
+    #[serde(default)]
+    pub second_assertion: Option<WebAuthnAssertion>,
+    #[serde(default)]
+    pub second_credential_id_hex: Option<String>,
+    #[serde(default)]
+    pub second_ml_dsa_signature_hex: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -946,12 +956,36 @@ pub(crate) async fn handle_sign_with_passkey(
         .transpose()?
         .unwrap_or_default();
     let credential_id = decode_hex(&req.credential_id_hex)?;
-    let payload = HybridWebAuthnSignature {
+    let mut legs = vec![HybridWebAuthnSignature {
         assertion: req.assertion,
         ml_dsa_signature: pq_sig,
         credential_id,
-    };
-    let sig_bytes = payload.encode().map_err(|e| JsonRpcError {
+    }];
+    // Second-credential leg: all three fields travel together.
+    match (
+        req.second_assertion,
+        req.second_credential_id_hex.as_deref(),
+        req.second_ml_dsa_signature_hex.as_deref(),
+    ) {
+        (Some(assertion), Some(cred_hex), Some(pq_hex)) => {
+            legs.push(HybridWebAuthnSignature {
+                assertion,
+                ml_dsa_signature: decode_hex(pq_hex)?,
+                credential_id: decode_hex(cred_hex)?,
+            });
+        }
+        (None, None, None) => {}
+        _ => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "second_assertion, second_credential_id_hex and \
+                          second_ml_dsa_signature_hex must be supplied together"
+                    .to_string(),
+                data: None,
+            });
+        }
+    }
+    let sig_bytes = HybridWebAuthnSignature::encode_bundle(&legs).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("encode hybrid sig: {}", e),
         data: None,
@@ -1855,8 +1889,6 @@ pub struct AddPasskeyRequest {
     pub new_passkey_public_key_hex: String,
     /// WebAuthn credential id of the new credential.
     pub new_credential_id_hex: String,
-    /// ML-DSA-65 verifying key for the new credential's hybrid PQ leg.
-    pub new_ml_dsa_public_key_hex: String,
     /// Optional display label (e.g. "Phone 1", "YubiKey").
     #[serde(default)]
     pub label: Option<String>,
@@ -1926,8 +1958,11 @@ pub(crate) async fn handle_add_passkey(
         });
     }
 
-    // Normalise the new pubkey + decode the ML-DSA-65 vk + construct the
-    // WebAuthnAccountKey, same as the bootstrap enrolment path.
+    // Normalise the new pubkey + node-mint the ML-DSA-65 leg + construct the
+    // WebAuthnAccountKey, same as the bootstrap provisioning path. A browser
+    // (or a phone reached over WebAuthn hybrid transport) can only produce the
+    // P-256 credential; the post-quantum leg is minted in the node here, so
+    // the second device never has to carry an ML-DSA key.
     let passkey_pubkey_bytes = decode_hex(&req.new_passkey_public_key_hex)?;
     let p256_xy = normalize_p256_pubkey_to_raw_xy(&passkey_pubkey_bytes)?;
     let mut pubkey_x = [0u8; 32];
@@ -1935,18 +1970,8 @@ pub(crate) async fn handle_add_passkey(
     pubkey_x.copy_from_slice(&p256_xy[..32]);
     pubkey_y.copy_from_slice(&p256_xy[32..]);
 
-    let ml_dsa_vk = decode_hex(&req.new_ml_dsa_public_key_hex)?;
-    if ml_dsa_vk.len() != tenzro_crypto::pq::ML_DSA_65_VK_LEN {
-        return Err(JsonRpcError {
-            code: -32602,
-            message: format!(
-                "new_ml_dsa_public_key must be {} bytes, got {}",
-                tenzro_crypto::pq::ML_DSA_65_VK_LEN,
-                ml_dsa_vk.len()
-            ),
-            data: None,
-        });
-    }
+    let ml_dsa = tenzro_crypto::pq::MlDsaSigningKey::generate();
+    let ml_dsa_vk = ml_dsa.verifying_key_bytes().to_vec();
 
     let account_key = tenzro_vm::aa_webauthn_validator::WebAuthnAccountKey::new(
         pubkey_x, pubkey_y, ml_dsa_vk,
@@ -2050,7 +2075,13 @@ pub(crate) async fn handle_remove_passkey(
     })?;
     let account_addr = decode_hex(&req.account_address)?;
     let credential_id = decode_hex(&req.credential_id_hex)?;
-    let removed = webauthn_validator.revoke_credential(&account_addr, &credential_id);
+    let removed = webauthn_validator
+        .revoke_credential(&account_addr, &credential_id)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("cannot remove credential: {}", e),
+            data: None,
+        })?;
     let remaining = webauthn_validator.list_credentials(&account_addr).len();
     serde_json::to_value(RemovePasskeyResponse {
         account_address: format!("0x{}", hex::encode(&account_addr)),
@@ -2063,4 +2094,653 @@ pub(crate) async fn handle_remove_passkey(
         message: format!("serialize response: {}", e),
         data: None,
     })
+}
+
+// =============================================================================
+// Handlers: tenzro_setPasskeyPolicy / tenzro_getPasskeyPolicy
+//
+// Per-account second-factor policy on WebAuthnValidator. `two_credentials`
+// requires every UserOp signature bundle to carry assertions from two
+// distinct enrolled passkeys (e.g. phone + laptop). `single_credential`
+// is the default and is stored as absence of a policy row. Upgrading to
+// `two_credentials` requires at least two enrolled credentials; while the
+// policy is active, `tenzro_removePasskey` refuses removals that would
+// drop the enrolled count below the floor.
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct SetPasskeyPolicyRequest {
+    pub account_address: String,
+    /// `"single_credential"` or `"two_credentials"`.
+    pub second_factor: SecondFactorPolicy,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PasskeyPolicyResponse {
+    pub account_address: String,
+    pub second_factor: SecondFactorPolicy,
+    pub required_signatures: usize,
+    pub credentials_enrolled: usize,
+}
+
+pub(crate) async fn handle_set_passkey_policy(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: SetPasskeyPolicyRequest = parse_params(params)?;
+    let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "WebAuthnValidator not initialized on this node".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    webauthn_validator
+        .set_second_factor_policy(account_addr.clone(), req.second_factor)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("cannot set second-factor policy: {}", e),
+            data: None,
+        })?;
+    let enrolled = webauthn_validator.list_credentials(&account_addr).len();
+    serde_json::to_value(PasskeyPolicyResponse {
+        account_address: format!("0x{}", hex::encode(&account_addr)),
+        second_factor: req.second_factor,
+        required_signatures: req.second_factor.required_signatures(),
+        credentials_enrolled: enrolled,
+    })
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetPasskeyPolicyRequest {
+    pub account_address: String,
+}
+
+pub(crate) async fn handle_get_passkey_policy(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: GetPasskeyPolicyRequest = parse_params(params)?;
+    let webauthn_validator = node.webauthn_validator().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "WebAuthnValidator not initialized on this node".to_string(),
+        data: None,
+    })?;
+    let account_addr = decode_hex(&req.account_address)?;
+    let policy = webauthn_validator.second_factor_policy(&account_addr);
+    let enrolled = webauthn_validator.list_credentials(&account_addr).len();
+    serde_json::to_value(PasskeyPolicyResponse {
+        account_address: format!("0x{}", hex::encode(&account_addr)),
+        second_factor: policy,
+        required_signatures: policy.required_signatures(),
+        credentials_enrolled: enrolled,
+    })
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// PasskeySessionStore — browser-launch WebAuthn ceremony sessions
+//
+// Backs the `tenzro passkey login`-style flow: the CLI creates a pending
+// session over JSON-RPC, opens the node-served page at
+// `/auth/passkey?session=<id>` in the user's browser, the page runs the
+// WebAuthn ceremony (`navigator.credentials.create()` / `get()`) and posts
+// the outcome back against the session, and the CLI polls
+// `tenzro_getPasskeySession` until the session reaches a terminal state.
+//
+// Sessions persist to `CF_VALIDATOR_MODULES / erc7579/auth_session/<id>`
+// with the same MAC-tagged row layout as pending recoveries, so an
+// in-flight login survives a node restart and a tampered row is refused
+// at read time. Expired rows are swept opportunistically on every store
+// interaction.
+// =============================================================================
+
+/// What the browser ceremony is expected to produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthSessionKind {
+    /// `navigator.credentials.create()` → new smart account via
+    /// `tenzro_enrollPasskey`.
+    Enroll,
+    /// `navigator.credentials.create()` → additional device credential on
+    /// an existing account via `tenzro_addPasskey`.
+    Add,
+    /// `navigator.credentials.get()` over an op hash → verified assertion
+    /// via `tenzro_signWithPasskey`.
+    Sign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthSessionStatus {
+    /// Waiting for the browser ceremony.
+    Pending,
+    /// A completion request claimed the session and is executing. A session
+    /// stuck here (crash mid-execution) expires like any other — it can
+    /// never be claimed twice.
+    InFlight,
+    /// Ceremony executed successfully; `result` carries the handler response.
+    Completed,
+    /// Ceremony executed and the underlying handler rejected it; `error`
+    /// carries the reason. Terminal — start a fresh session to retry.
+    Failed,
+    /// TTL elapsed before completion.
+    Expired,
+}
+
+/// One browser-launch ceremony session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingAuthSession {
+    /// 32 random bytes, hex. Capability token: knowing the id is the
+    /// authorization to complete the ceremony, exactly like the device-code
+    /// string in an OAuth device flow.
+    pub session_id: String,
+    pub kind: AuthSessionKind,
+    pub status: AuthSessionStatus,
+    /// WebAuthn challenge, base64url no-pad. Random 32 bytes for
+    /// `Enroll`/`Add`; the raw op-hash bytes for `Sign` (the assertion's
+    /// clientDataJSON challenge must equal the op hash for the validator
+    /// to accept it).
+    pub challenge_b64: String,
+    /// Kind-specific parameters supplied by the CLI at creation time
+    /// (display name, account address, ML-DSA verifying key / signature,
+    /// salt, label, op hash). Merged with the browser payload when the
+    /// ceremony completes.
+    pub params: Value,
+    /// Handler response once `Completed`.
+    pub result: Option<Value>,
+    /// Failure reason once `Failed`.
+    pub error: Option<String>,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+/// Session TTL — 10 minutes, generous enough for a user to find their
+/// phone / security key, short enough that an abandoned link dies.
+const AUTH_SESSION_TTL_MS: u64 = 10 * 60 * 1000;
+
+/// How long a terminal (Completed / Failed) session row survives so the
+/// CLI poll loop can read the outcome before the sweep removes it.
+const AUTH_SESSION_LINGER_MS: u64 = 10 * 60 * 1000;
+
+/// Persistent store for browser-launch ceremony sessions.
+pub struct PasskeySessionStore {
+    storage: Arc<dyn KvStore>,
+}
+
+impl PasskeySessionStore {
+    const PREFIX: &'static [u8] = b"erc7579/auth_session/";
+
+    pub fn with_storage(storage: Arc<dyn KvStore>) -> Self {
+        Self { storage }
+    }
+
+    fn key(session_id: &str) -> Vec<u8> {
+        let mut k = Self::PREFIX.to_vec();
+        k.extend_from_slice(session_id.as_bytes());
+        k
+    }
+
+    pub(crate) fn put(&self, session: &PendingAuthSession) -> Result<(), JsonRpcError> {
+        let bytes = serde_json::to_vec(session).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("serialize auth session: {}", e),
+            data: None,
+        })?;
+        let tagged = mac_wrap(&bytes);
+        self.storage
+            .put(CF_VALIDATOR_MODULES, &Self::key(&session.session_id), &tagged)
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("persist auth session: {}", e),
+                data: None,
+            })
+    }
+
+    /// Read a session, transparently flipping `Pending`/`InFlight` rows
+    /// past their expiry to `Expired` (persisted).
+    pub(crate) fn get(&self, session_id: &str) -> Result<Option<PendingAuthSession>, JsonRpcError> {
+        let bytes = self
+            .storage
+            .get(CF_VALIDATOR_MODULES, &Self::key(session_id))
+            .map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("read auth session: {}", e),
+                data: None,
+            })?;
+        let Some(b) = bytes else { return Ok(None) };
+        let payload = mac_verify(&b).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("tampered auth session row: {}", e),
+            data: None,
+        })?;
+        let mut session: PendingAuthSession =
+            serde_json::from_slice(payload).map_err(|e| JsonRpcError {
+                code: -32603,
+                message: format!("deserialize auth session: {}", e),
+                data: None,
+            })?;
+        if matches!(
+            session.status,
+            AuthSessionStatus::Pending | AuthSessionStatus::InFlight
+        ) && now_ms() > session.expires_at_ms
+        {
+            session.status = AuthSessionStatus::Expired;
+            self.put(&session)?;
+        }
+        Ok(Some(session))
+    }
+
+    pub(crate) fn delete(&self, session_id: &str) {
+        let _ = self
+            .storage
+            .delete(CF_VALIDATOR_MODULES, &Self::key(session_id));
+    }
+
+    /// Drop expired rows: non-terminal past expiry + terminal past
+    /// expiry + linger. Called opportunistically on session creation.
+    pub(crate) fn sweep(&self) {
+        let Ok(keys) = self
+            .storage
+            .get_keys_with_prefix(CF_VALIDATOR_MODULES, Self::PREFIX)
+        else {
+            return;
+        };
+        let now = now_ms();
+        for full_key in keys {
+            let Some(sid) = full_key.strip_prefix(Self::PREFIX) else {
+                continue;
+            };
+            let sid = String::from_utf8_lossy(sid).to_string();
+            match self.get(&sid) {
+                Ok(Some(s)) => {
+                    let cutoff = match s.status {
+                        AuthSessionStatus::Completed
+                        | AuthSessionStatus::Failed
+                        | AuthSessionStatus::Expired => s.expires_at_ms + AUTH_SESSION_LINGER_MS,
+                        _ => s.expires_at_ms,
+                    };
+                    if now > cutoff {
+                        self.delete(&sid);
+                    }
+                }
+                // Tampered / undecodable rows are dead weight — remove.
+                Err(_) => self.delete(&sid),
+                Ok(None) => {}
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Handler: tenzro_createPasskeySession
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePasskeySessionRequest {
+    /// "enroll" | "add" | "sign".
+    pub kind: AuthSessionKind,
+    /// Enroll: optional display name for the new identity.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Enroll: ML-DSA-65 verifying key for the hybrid PQ leg (CLI enroll
+    /// path). Add sessions do NOT carry this — the node mints the second
+    /// credential's ML-DSA leg itself, so a browser/phone that can only
+    /// produce a P-256 passkey can still add a device.
+    #[serde(default)]
+    pub ml_dsa_public_key_hex: Option<String>,
+    /// Enroll: CREATE2 salt (defaults to 0).
+    #[serde(default)]
+    pub salt: u64,
+    /// Add + Sign: target smart-account address.
+    #[serde(default)]
+    pub account_address: Option<String>,
+    /// Add: display label for the new credential.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Sign: 32-byte op hash the assertion must attest to.
+    #[serde(default)]
+    pub op_hash_hex: Option<String>,
+    /// Sign: ML-DSA-65 signature over the op-hash bytes, pre-signed
+    /// client-side for accounts with a hybrid PQ leg.
+    #[serde(default)]
+    pub ml_dsa_signature_hex: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreatePasskeySessionResponse {
+    pub session_id: String,
+    /// Path on the node's web server the CLI should open in a browser.
+    pub verification_path: String,
+    pub status: AuthSessionStatus,
+    pub challenge_b64: String,
+    pub expires_at_ms: u64,
+}
+
+pub(crate) async fn handle_create_passkey_session(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: CreatePasskeySessionRequest = parse_params(params)?;
+    let store = node.passkey_sessions().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "PasskeySessionStore not initialized on this node".to_string(),
+        data: None,
+    })?;
+    store.sweep();
+
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rand::RngCore;
+
+    // Per-kind validation up front so the user gets an immediate error at
+    // the CLI instead of a dead browser page.
+    let (challenge_b64, params_value) = match req.kind {
+        AuthSessionKind::Enroll => {
+            let vk_hex = req.ml_dsa_public_key_hex.as_deref().ok_or_else(|| {
+                JsonRpcError {
+                    code: -32602,
+                    message: "ml_dsa_public_key_hex is required for enroll sessions".to_string(),
+                    data: None,
+                }
+            })?;
+            let vk = decode_hex(vk_hex)?;
+            if vk.len() != ML_DSA_65_VK_LEN {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "ml_dsa_public_key must be {} bytes (ML-DSA-65 vk), got {}",
+                        ML_DSA_65_VK_LEN,
+                        vk.len()
+                    ),
+                    data: None,
+                });
+            }
+            let mut challenge = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut challenge);
+            (
+                URL_SAFE_NO_PAD.encode(challenge),
+                serde_json::json!({
+                    "display_name": req.display_name,
+                    "ml_dsa_public_key_hex": vk_hex,
+                    "salt": req.salt,
+                }),
+            )
+        }
+        AuthSessionKind::Add => {
+            let account = req.account_address.as_deref().ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "account_address is required for add sessions".to_string(),
+                data: None,
+            })?;
+            let account_addr = decode_hex(account)?;
+            // Add sessions do NOT require a client-supplied ML-DSA vk — the
+            // node mints the new credential's PQ leg when the ceremony
+            // completes (see handle_add_passkey). The browser/phone performs
+            // only the standard WebAuthn ceremony.
+            let webauthn_validator =
+                node.webauthn_validator().ok_or_else(|| JsonRpcError {
+                    code: -32603,
+                    message: "WebAuthnValidator not initialized on this node".to_string(),
+                    data: None,
+                })?;
+            if webauthn_validator.list_credentials(&account_addr).is_empty() {
+                return Err(JsonRpcError {
+                    code: -32404,
+                    message: format!(
+                        "No existing passkey enrolled on account 0x{} — bootstrap via an enroll session first",
+                        hex::encode(&account_addr)
+                    ),
+                    data: None,
+                });
+            }
+            let mut challenge = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut challenge);
+            (
+                URL_SAFE_NO_PAD.encode(challenge),
+                serde_json::json!({
+                    "account_address": format!("0x{}", hex::encode(&account_addr)),
+                    "label": req.label,
+                }),
+            )
+        }
+        AuthSessionKind::Sign => {
+            let account = req.account_address.as_deref().ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "account_address is required for sign sessions".to_string(),
+                data: None,
+            })?;
+            let account_addr = decode_hex(account)?;
+            let op_hash_hex = req.op_hash_hex.as_deref().ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "op_hash_hex is required for sign sessions".to_string(),
+                data: None,
+            })?;
+            let op_hash = decode_hex(op_hash_hex)?;
+            if op_hash.len() != 32 {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("op_hash must be 32 bytes, got {}", op_hash.len()),
+                    data: None,
+                });
+            }
+            let webauthn_validator =
+                node.webauthn_validator().ok_or_else(|| JsonRpcError {
+                    code: -32603,
+                    message: "WebAuthnValidator not initialized on this node".to_string(),
+                    data: None,
+                })?;
+            if webauthn_validator.list_credentials(&account_addr).is_empty() {
+                return Err(JsonRpcError {
+                    code: -32404,
+                    message: format!(
+                        "No passkey enrolled on account 0x{}",
+                        hex::encode(&account_addr)
+                    ),
+                    data: None,
+                });
+            }
+            // The WebAuthn challenge IS the op hash — the validator binds
+            // the assertion's clientDataJSON challenge to the op it signs.
+            (
+                URL_SAFE_NO_PAD.encode(&op_hash),
+                serde_json::json!({
+                    "account_address": format!("0x{}", hex::encode(&account_addr)),
+                    "op_hash_hex": format!("0x{}", hex::encode(&op_hash)),
+                    "ml_dsa_signature_hex": req.ml_dsa_signature_hex,
+                }),
+            )
+        }
+    };
+
+    let mut sid_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut sid_bytes);
+    let session_id = hex::encode(sid_bytes);
+    let now = now_ms();
+    let session = PendingAuthSession {
+        session_id: session_id.clone(),
+        kind: req.kind,
+        status: AuthSessionStatus::Pending,
+        challenge_b64: challenge_b64.clone(),
+        params: params_value,
+        result: None,
+        error: None,
+        created_at_ms: now,
+        expires_at_ms: now + AUTH_SESSION_TTL_MS,
+    };
+    store.put(&session)?;
+
+    serde_json::to_value(CreatePasskeySessionResponse {
+        verification_path: format!("/auth/passkey?session={}", session_id),
+        session_id,
+        status: AuthSessionStatus::Pending,
+        challenge_b64,
+        expires_at_ms: session.expires_at_ms,
+    })
+    .map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize response: {}", e),
+        data: None,
+    })
+}
+
+// =============================================================================
+// Handler: tenzro_getPasskeySession
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct GetPasskeySessionRequest {
+    pub session_id: String,
+}
+
+pub(crate) async fn handle_get_passkey_session(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let req: GetPasskeySessionRequest = parse_params(params)?;
+    let store = node.passkey_sessions().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "PasskeySessionStore not initialized on this node".to_string(),
+        data: None,
+    })?;
+    let session = store.get(&req.session_id)?.ok_or_else(|| JsonRpcError {
+        code: -32404,
+        message: "Unknown or swept auth session".to_string(),
+        data: None,
+    })?;
+    // The CLI poll surface deliberately excludes `params` (which can carry
+    // an ML-DSA signature) and `challenge_b64` — the poller only needs the
+    // outcome.
+    Ok(serde_json::json!({
+        "session_id": session.session_id,
+        "kind": session.kind,
+        "status": session.status,
+        "result": session.result,
+        "error": session.error,
+        "expires_at_ms": session.expires_at_ms,
+    }))
+}
+
+/// Claim a pending session for execution and run the underlying handler.
+/// Called by the web completion endpoint, never dispatched over JSON-RPC.
+///
+/// Single-use discipline: the session row is flipped to `InFlight` and
+/// persisted **before** the handler runs, so a second completion attempt
+/// (double-submit, replayed request, concurrent tab) is refused even if
+/// the first one is still executing — and a crash mid-execution leaves an
+/// unclaimable row that simply expires.
+pub(crate) async fn complete_passkey_session(
+    node: &Arc<TenzroNode>,
+    session_id: &str,
+    browser_payload: Value,
+) -> Result<Value, JsonRpcError> {
+    let store = node.passkey_sessions().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "PasskeySessionStore not initialized on this node".to_string(),
+        data: None,
+    })?;
+    let mut session = store.get(session_id)?.ok_or_else(|| JsonRpcError {
+        code: -32404,
+        message: "Unknown or swept auth session".to_string(),
+        data: None,
+    })?;
+    if session.status != AuthSessionStatus::Pending {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!(
+                "auth session is not pending (status: {})",
+                serde_json::to_string(&session.status).unwrap_or_default()
+            ),
+            data: None,
+        });
+    }
+    session.status = AuthSessionStatus::InFlight;
+    store.put(&session)?;
+
+    let handler_params = match build_completion_params(&session, browser_payload) {
+        Ok(p) => p,
+        Err(e) => {
+            session.status = AuthSessionStatus::Failed;
+            session.error = Some(e.message.clone());
+            let _ = store.put(&session);
+            return Err(e);
+        }
+    };
+
+    let outcome = match session.kind {
+        AuthSessionKind::Enroll => handle_enroll_passkey(node, Some(handler_params)).await,
+        AuthSessionKind::Add => handle_add_passkey(node, Some(handler_params)).await,
+        AuthSessionKind::Sign => handle_sign_with_passkey(node, Some(handler_params)).await,
+    };
+
+    match outcome {
+        Ok(result) => {
+            session.status = AuthSessionStatus::Completed;
+            session.result = Some(result.clone());
+            store.put(&session)?;
+            Ok(result)
+        }
+        Err(e) => {
+            session.status = AuthSessionStatus::Failed;
+            session.error = Some(e.message.clone());
+            let _ = store.put(&session);
+            Err(e)
+        }
+    }
+}
+
+/// Merge the CLI-supplied session params with the browser ceremony payload
+/// into the exact request shape the underlying handler expects.
+fn build_completion_params(
+    session: &PendingAuthSession,
+    browser_payload: Value,
+) -> Result<Value, JsonRpcError> {
+    let str_field = |v: &Value, key: &str| -> Result<String, JsonRpcError> {
+        v.get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("completion payload missing `{}`", key),
+                data: None,
+            })
+    };
+    match session.kind {
+        AuthSessionKind::Enroll => Ok(serde_json::json!({
+            "display_name": session.params.get("display_name"),
+            "passkey_public_key_hex": str_field(&browser_payload, "passkey_public_key_hex")?,
+            "credential_id_hex": str_field(&browser_payload, "credential_id_hex")?,
+            "ml_dsa_public_key_hex": session.params.get("ml_dsa_public_key_hex"),
+            "salt": session.params.get("salt"),
+        })),
+        AuthSessionKind::Add => Ok(serde_json::json!({
+            "account_address": session.params.get("account_address"),
+            "new_passkey_public_key_hex": str_field(&browser_payload, "passkey_public_key_hex")?,
+            "new_credential_id_hex": str_field(&browser_payload, "credential_id_hex")?,
+            "label": session.params.get("label"),
+        })),
+        AuthSessionKind::Sign => {
+            let assertion = browser_payload.get("assertion").cloned().ok_or_else(|| {
+                JsonRpcError {
+                    code: -32602,
+                    message: "completion payload missing `assertion`".to_string(),
+                    data: None,
+                }
+            })?;
+            Ok(serde_json::json!({
+                "account_address": session.params.get("account_address"),
+                "op_hash_hex": session.params.get("op_hash_hex"),
+                "assertion": assertion,
+                "credential_id_hex": str_field(&browser_payload, "credential_id_hex")?,
+                "ml_dsa_signature_hex": session.params.get("ml_dsa_signature_hex"),
+            }))
+        }
+    }
 }

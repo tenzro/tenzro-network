@@ -10,7 +10,7 @@ use crate::output::{self};
 pub enum WalletCommand {
     /// Create a new MPC wallet
     Create(WalletCreateCmd),
-    /// Import a wallet from seed phrase or private key
+    /// Import a wallet from a private key
     Import(WalletImportCmd),
     /// Check wallet balance
     Balance(WalletBalanceCmd),

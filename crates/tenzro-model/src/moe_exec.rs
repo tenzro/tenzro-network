@@ -31,6 +31,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
@@ -42,6 +43,7 @@ use thiserror::Error;
 
 use crate::moe_compute::{BackendKind, ComputeBackend, ExpertCompute, Weight};
 use crate::moe_quant::{QuantKind, QuantMatrix};
+use crate::moe_receipt::ExpertExecutionReceipt;
 use crate::moe_router::TokenRouting;
 use crate::moe_shard::ExpertId;
 
@@ -53,6 +55,18 @@ pub const TENSOR_UP_PROJ: &str = "up_proj.weight";
 pub const TENSOR_DOWN_PROJ: &str = "down_proj.weight";
 /// Canonical tensor name for the gating network in a router blob.
 pub const TENSOR_ROUTER: &str = "router.weight";
+/// Canonical tensor name for the router's expert-selection bias in a router
+/// blob. Present only for sigmoid-scored checkpoints (DeepSeek layout); its
+/// presence switches [`GatingNetwork`] from softmax to sigmoid routing.
+pub const TENSOR_ROUTER_BIAS: &str = "router.bias";
+
+/// `__metadata__` key on a router blob: scaling factor multiplied into the
+/// renormalized routed-expert weights (DeepSeek layout; defaults to 1.0).
+pub const META_ROUTED_SCALING_FACTOR: &str = "routed_scaling_factor";
+/// `__metadata__` key on a router blob: the checkpoint's shared-expert count.
+/// Non-zero means one fused shared-expert FFN rides at expert index
+/// `num_experts` and every token receives it with weight 1.0.
+pub const META_SHARED_EXPERTS: &str = "shared_experts";
 
 /// `__metadata__` key prefix for a quantized projection's kind tag. A blob
 /// carries `"<tensor>.quant" = "q4_k" | "q6_k" | "q8_0"` when the tensor's
@@ -201,6 +215,41 @@ fn tensor_to_f32_matrix(name: &str, view: &TensorView<'_>) -> MoeExecResult<Arra
         }
     };
     Array2::from_shape_vec((rows, cols), values).map_err(|e| MoeExecError::Parse(e.to_string()))
+}
+
+/// Decode a safetensors tensor view into an `f32` vector.
+/// Accepts F32 (little-endian per the safetensors spec), F16, and BF16.
+fn tensor_to_f32_vector(name: &str, view: &TensorView<'_>) -> MoeExecResult<Array1<f32>> {
+    let shape = view.shape();
+    if shape.len() != 1 {
+        return Err(MoeExecError::BadShape {
+            name: name.to_string(),
+            got: shape.to_vec(),
+            expected: "a 1-D vector".to_string(),
+        });
+    }
+    let data = view.data();
+    let values: Vec<f32> = match view.dtype() {
+        Dtype::F32 => data
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect(),
+        Dtype::F16 => data
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+            .collect(),
+        Dtype::BF16 => data
+            .chunks_exact(2)
+            .map(|b| half::bf16::from_le_bytes([b[0], b[1]]).to_f32())
+            .collect(),
+        other => {
+            return Err(MoeExecError::UnsupportedDtype {
+                name: name.to_string(),
+                dtype: other,
+            })
+        }
+    };
+    Ok(Array1::from_vec(values))
 }
 
 fn required_tensor<'a>(
@@ -463,18 +512,63 @@ fn silu(x: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Per-layer gating (router) network, decoded to `f32`.
+///
+/// Two scoring modes, selected by the blob's contents:
+///
+/// - **Softmax** (Qwen layout): `router.weight` only. Top-k by logit,
+///   softmax-renormalized over the selection.
+/// - **Sigmoid** (DeepSeek layout): `router.bias` present. Scores are
+///   `sigmoid(W h)`; the bias steers *selection only* (top-k by
+///   `score + bias`); combine weights are the selected raw scores
+///   renormalized to sum 1 and multiplied by `routed_scaling_factor`.
+///   When `shared_experts > 0`, every token additionally receives the
+///   fused shared-expert FFN at expert index `num_experts` with weight
+///   1.0, so the combiner's `Σ wᵢ·expertᵢ(h)` reproduces
+///   `shared(h) + scale·Σ wᵢ·expertᵢ(h)`.
 #[derive(Debug, Clone)]
 pub struct GatingNetwork {
     weight: Array2<f32>,
+    bias: Option<Array1<f32>>,
+    routed_scaling_factor: f32,
+    shared_experts: u32,
 }
 
 impl GatingNetwork {
-    /// Parse a router blob (single-tensor safetensors layout,
-    /// `router.weight` `[num_experts, d_model]`).
+    /// Parse a router blob: `router.weight` `[num_experts, d_model]`,
+    /// optionally `router.bias` `[num_experts]` plus the
+    /// [`META_ROUTED_SCALING_FACTOR`] / [`META_SHARED_EXPERTS`]
+    /// `__metadata__` keys (DeepSeek layout).
     pub fn from_safetensors(bytes: &[u8]) -> MoeExecResult<Self> {
+        let meta = safetensors_metadata(bytes);
         let st = SafeTensors::deserialize(bytes).map_err(|e| MoeExecError::Parse(e.to_string()))?;
         let weight = tensor_to_f32_matrix(TENSOR_ROUTER, &required_tensor(&st, TENSOR_ROUTER)?)?;
-        Ok(Self { weight })
+        let bias = match st.tensor(TENSOR_ROUTER_BIAS) {
+            Ok(view) => Some(tensor_to_f32_vector(TENSOR_ROUTER_BIAS, &view)?),
+            Err(_) => None,
+        };
+        if let Some(b) = &bias
+            && b.len() != weight.nrows()
+        {
+            return Err(MoeExecError::BadShape {
+                name: TENSOR_ROUTER_BIAS.to_string(),
+                got: vec![b.len()],
+                expected: format!("[{}] (one entry per routed expert)", weight.nrows()),
+            });
+        }
+        let routed_scaling_factor = meta
+            .get(META_ROUTED_SCALING_FACTOR)
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(1.0);
+        let shared_experts = meta
+            .get(META_SHARED_EXPERTS)
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        Ok(Self {
+            weight,
+            bias,
+            routed_scaling_factor,
+            shared_experts,
+        })
     }
 
     /// Number of routed experts this gate selects over.
@@ -487,59 +581,105 @@ impl GatingNetwork {
         self.weight.ncols()
     }
 
-    /// Approximate resident bytes for the decoded `f32` weight.
+    /// Approximate resident bytes for the decoded `f32` weight and bias.
     pub fn approx_bytes(&self) -> u64 {
-        (self.weight.len() * 4) as u64
+        let bias_len = self.bias.as_ref().map_or(0, |b| b.len());
+        ((self.weight.len() + bias_len) * 4) as u64
     }
 
-    /// Top-k routing for one token: expert logits `W h`, select the k
-    /// highest, renormalize with softmax over the selected logits.
+    /// Top-k routing for one token. Softmax mode: select the k highest
+    /// logits, renormalize with softmax over the selection. Sigmoid mode
+    /// (bias present): select the k highest `sigmoid(logit) + bias`,
+    /// weight by the selected sigmoid scores renormalized to sum 1 and
+    /// scaled by `routed_scaling_factor`.
     /// Returns `(expert_index, weight)` pairs sorted by descending weight.
     pub fn route(&self, hidden: ArrayView1<'_, f32>, top_k: usize) -> Vec<(u32, f32)> {
         debug_assert_eq!(hidden.len(), self.d_model());
         let logits: Array1<f32> = self.weight.dot(&hidden);
         let k = top_k.clamp(1, logits.len());
 
-        let mut indexed: Vec<(u32, f32)> = logits
-            .iter()
-            .enumerate()
-            .map(|(i, &l)| (i as u32, l))
-            .collect();
-        indexed.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        indexed.truncate(k);
+        match &self.bias {
+            Some(bias) => {
+                // Sigmoid scoring: the bias steers selection only; combine
+                // weights come from the raw sigmoid scores.
+                let mut indexed: Vec<(u32, f32)> = logits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &l)| (i as u32, 1.0 / (1.0 + (-l).exp())))
+                    .collect();
+                indexed.sort_by(|a, b| {
+                    let ka = a.1 + bias[a.0 as usize];
+                    let kb = b.1 + bias[b.0 as usize];
+                    kb.total_cmp(&ka).then(a.0.cmp(&b.0))
+                });
+                indexed.truncate(k);
+                let sum = indexed
+                    .iter()
+                    .map(|(_, s)| *s)
+                    .sum::<f32>()
+                    .max(f32::EPSILON);
+                for (_, s) in indexed.iter_mut() {
+                    *s = *s / sum * self.routed_scaling_factor;
+                }
+                indexed.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                indexed
+            }
+            None => {
+                let mut indexed: Vec<(u32, f32)> = logits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &l)| (i as u32, l))
+                    .collect();
+                indexed.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                indexed.truncate(k);
 
-        // Softmax over the selected logits (max-subtracted for stability).
-        let max = indexed
-            .iter()
-            .map(|(_, l)| *l)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        for (_, l) in indexed.iter_mut() {
-            *l = (*l - max).exp();
-            sum += *l;
+                // Softmax over the selected logits (max-subtracted for
+                // stability).
+                let max = indexed
+                    .iter()
+                    .map(|(_, l)| *l)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0.0f32;
+                for (_, l) in indexed.iter_mut() {
+                    *l = (*l - max).exp();
+                    sum += *l;
+                }
+                for (_, l) in indexed.iter_mut() {
+                    *l /= sum;
+                }
+                indexed
+            }
         }
-        for (_, l) in indexed.iter_mut() {
-            *l /= sum;
-        }
-        indexed
     }
 
     /// Batched routing: one [`RoutedToken`] per row of `hidden`
-    /// (`[n_tokens, d_model]`), with token indices `0..n`.
+    /// (`[n_tokens, d_model]`), with token indices `0..n`. When the blob
+    /// declares shared experts, every token gets one extra slot for the
+    /// fused shared-expert FFN at expert index `num_experts`, weight 1.0.
     pub fn route_batch(&self, layer: u32, hidden: ArrayView2<'_, f32>, top_k: usize) -> Vec<RoutedToken> {
+        let shared_slot = (self.shared_experts > 0).then(|| RoutedSlot {
+            expert: ExpertId::new(layer, self.num_experts() as u32),
+            weight: 1.0,
+        });
         hidden
             .axis_iter(Axis(0))
             .enumerate()
-            .map(|(i, row)| RoutedToken {
-                token_index: i as u32,
-                slots: self
+            .map(|(i, row)| {
+                let mut slots: Vec<RoutedSlot> = self
                     .route(row, top_k)
                     .into_iter()
                     .map(|(expert, weight)| RoutedSlot {
                         expert: ExpertId::new(layer, expert),
                         weight,
                     })
-                    .collect(),
+                    .collect();
+                if let Some(s) = shared_slot {
+                    slots.push(s);
+                }
+                RoutedToken {
+                    token_index: i as u32,
+                    slots,
+                }
             })
             .collect()
     }
@@ -550,7 +690,8 @@ impl GatingNetwork {
 pub struct RoutedToken {
     /// Token index inside the request.
     pub token_index: u32,
-    /// Selected `(expert, weight)` slots, descending by weight.
+    /// Selected `(expert, weight)` slots, descending by weight; when the
+    /// checkpoint has a fused shared expert, its weight-1.0 slot rides last.
     pub slots: Vec<RoutedSlot>,
 }
 
@@ -726,6 +867,36 @@ impl ExpertExecuteRequest {
             None => Ok(self.hidden_states.clone()),
         }
     }
+
+    /// SHA-256 over the wire carrier bytes of the hidden states — the Q8_0
+    /// block bytes when [`hidden_q8`](Self::hidden_q8) carries the batch, the
+    /// raw f32 LE bytes otherwise. Router and holder hash the identical bytes
+    /// they exchanged, so the hash is stable across the lossy Q8_0 leg. A
+    /// leading tag byte separates the two carrier encodings.
+    pub fn carrier_hash(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"tenzro/moe/carrier");
+        match &self.hidden_q8 {
+            Some(b64) => {
+                use base64::Engine;
+                hasher.update([1u8]);
+                let blocks = base64::engine::general_purpose::STANDARD
+                    .decode(b64.as_bytes())
+                    .unwrap_or_default();
+                hasher.update(&blocks);
+            }
+            None => {
+                hasher.update([0u8]);
+                for v in &self.hidden_states {
+                    hasher.update(v.to_le_bytes());
+                }
+            }
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&hasher.finalize());
+        hash
+    }
 }
 
 /// Response to an [`ExpertExecuteRequest`] — expert-FFN outputs for the
@@ -746,6 +917,12 @@ pub struct ExpertExecuteResponse {
     /// serialized as base64 f32 LE bytes (see [`f32_base64`]).
     #[serde(with = "f32_base64")]
     pub outputs: Vec<f32>,
+    /// Signed execution receipt binding the input carrier hash and the
+    /// activation commitment of these outputs to the holder's provider
+    /// identity. `None` only for local self-execution, where no receipt is
+    /// needed — remote holders always attach one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ExpertExecutionReceipt>,
 }
 
 // ---------------------------------------------------------------------------
@@ -853,6 +1030,11 @@ pub struct MoeExpertRuntimeStatus {
     /// still servable, but on-tier accounting exceeds the ceiling while it is
     /// resident).
     pub admissions_over_budget: u64,
+    /// Measured expert-forward throughput in tokens per second: the larger of
+    /// the current and previous one-minute buckets, divided by 60. Host-level
+    /// aggregate across every resident expert; the declaration layer stamps it
+    /// onto each advertised holding as `committed_tps`.
+    pub measured_tps: u32,
 }
 
 /// Bytes reserved on the memory tier when no explicit budget and no
@@ -973,6 +1155,14 @@ pub struct MoeExpertRuntime {
     /// Cumulative admissions where a single expert exceeded the whole budget
     /// and was admitted over-budget rather than refused.
     admissions_over_budget: AtomicU64,
+    /// Wall-clock minute (`now_ms / 60_000`) the current throughput bucket
+    /// covers.
+    served_bucket_minute: AtomicU64,
+    /// Tokens served by [`Self::execute`] during the current minute bucket.
+    served_bucket_tokens: AtomicU64,
+    /// Tokens served during the immediately preceding minute bucket. Zeroed
+    /// when a minute is skipped entirely (idle host).
+    served_prev_tokens: AtomicU64,
     memory_budget_bytes: u64,
     disk_dir: Option<PathBuf>,
     /// Serializes eviction so concurrent loads can't over-evict.
@@ -1024,6 +1214,9 @@ impl MoeExpertRuntime {
             evicted_to_disk: AtomicU64::new(0),
             evicted_dropped: AtomicU64::new(0),
             admissions_over_budget: AtomicU64::new(0),
+            served_bucket_minute: AtomicU64::new(0),
+            served_bucket_tokens: AtomicU64::new(0),
+            served_prev_tokens: AtomicU64::new(0),
             memory_budget_bytes: config.memory_budget_bytes.max(1),
             disk_dir: config.disk_dir,
             evict_guard: Mutex::new(()),
@@ -1354,6 +1547,7 @@ impl MoeExpertRuntime {
         }
 
         let y = ffn.forward(x, self.compute.as_ref());
+        self.record_served(req.token_indices.len() as u64);
         Ok(ExpertExecuteResponse {
             model_id: req.model_id.clone(),
             layer: req.layer,
@@ -1361,7 +1555,45 @@ impl MoeExpertRuntime {
             token_indices: req.token_indices.clone(),
             d_model: req.d_model,
             outputs: y.into_raw_vec_and_offset().0,
+            receipt: None,
         })
+    }
+
+    /// Fold `tokens` served into the per-minute throughput buckets. On a
+    /// minute boundary the current bucket rotates into the previous slot;
+    /// skipping a minute (idle host) zeroes the previous slot so stale
+    /// throughput never inflates the advertised rate.
+    fn record_served(&self, tokens: u64) {
+        let minute = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64 / 60_000)
+            .unwrap_or(0);
+        let mut cur = self.served_bucket_minute.load(Ordering::Acquire);
+        while minute > cur {
+            match self.served_bucket_minute.compare_exchange(
+                cur,
+                minute,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let finished = self.served_bucket_tokens.swap(0, Ordering::AcqRel);
+                    let prev = if minute == cur + 1 { finished } else { 0 };
+                    self.served_prev_tokens.store(prev, Ordering::Release);
+                    cur = minute;
+                }
+                Err(actual) => cur = actual,
+            }
+        }
+        self.served_bucket_tokens.fetch_add(tokens, Ordering::AcqRel);
+    }
+
+    /// Measured expert-forward throughput in tokens per second: the larger
+    /// of the current and previous minute buckets divided by 60.
+    pub fn measured_tps(&self) -> u32 {
+        let cur = self.served_bucket_tokens.load(Ordering::Acquire);
+        let prev = self.served_prev_tokens.load(Ordering::Acquire);
+        (cur.max(prev) / 60).min(u32::MAX as u64) as u32
     }
 
     /// Snapshot of resident experts and gates across both tiers.
@@ -1425,6 +1657,7 @@ impl MoeExpertRuntime {
             evicted_to_disk: self.evicted_to_disk.load(Ordering::Relaxed),
             evicted_dropped: self.evicted_dropped.load(Ordering::Relaxed),
             admissions_over_budget: self.admissions_over_budget.load(Ordering::Relaxed),
+            measured_tps: self.measured_tps(),
         }
     }
 }
@@ -1764,6 +1997,76 @@ impl MoeCombiner {
         }
         Ok(self.combined)
     }
+
+    /// Finalize tolerating missing contributions. Each token whose slots
+    /// only partially arrived is renormalized: the accumulated row is
+    /// scaled by `total_selected_weight / arrived_weight`, so the combined
+    /// output keeps the gate's magnitude despite the absent experts. Fails
+    /// with [`MoeExecError::MissingContribution`] only when a token
+    /// received no contribution at all — there is nothing to renormalize.
+    pub fn finish_partial(mut self) -> MoeExecResult<PartialCombine> {
+        if self.outstanding.is_empty() {
+            return Ok(PartialCombine {
+                outputs: self.combined,
+                missing: Vec::new(),
+            });
+        }
+
+        let mut total_weight: HashMap<u32, f32> = HashMap::new();
+        for (&(_, tok), &w) in &self.weight_of {
+            *total_weight.entry(tok).or_insert(0.0) += w;
+        }
+        let mut missing_weight: HashMap<u32, f32> = HashMap::new();
+        for key in &self.outstanding {
+            let w = self.weight_of.get(key).copied().unwrap_or(0.0);
+            *missing_weight.entry(key.1).or_insert(0.0) += w;
+        }
+
+        for (&tok, &miss) in &missing_weight {
+            let total = total_weight.get(&tok).copied().unwrap_or(0.0);
+            let arrived = total - miss;
+            if arrived <= 0.0 {
+                let (expert, token_index) = self
+                    .outstanding
+                    .iter()
+                    .find(|(_, t)| *t == tok)
+                    .copied()
+                    .expect("token with missing weight has an outstanding slot");
+                return Err(MoeExecError::MissingContribution {
+                    token_index,
+                    layer: expert.layer,
+                    expert: expert.expert,
+                });
+            }
+            let scale = total / arrived;
+            if let Some(&row_idx) = self.row_of_token.get(&tok) {
+                let out =
+                    &mut self.combined[row_idx * self.d_model..(row_idx + 1) * self.d_model];
+                for o in out.iter_mut() {
+                    *o *= scale;
+                }
+            }
+        }
+
+        let mut missing: Vec<(ExpertId, u32)> = self.outstanding.into_iter().collect();
+        missing.sort_by_key(|&(e, t)| (e.layer, e.expert, t));
+        Ok(PartialCombine {
+            outputs: self.combined,
+            missing,
+        })
+    }
+}
+
+/// Result of [`MoeCombiner::finish_partial`]: the combined buffer plus the
+/// `(expert, token)` contributions that never arrived and were renormalized
+/// around.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartialCombine {
+    /// Row-major `[routed.len(), d_model]` combined hidden states.
+    pub outputs: Vec<f32>,
+    /// Gate-selected `(expert, token)` pairs with no contribution, sorted by
+    /// `(layer, expert, token)`.
+    pub missing: Vec<(ExpertId, u32)>,
 }
 
 #[cfg(test)]
@@ -2033,6 +2336,98 @@ mod tests {
         assert_eq!(plans[1].experts, vec![ExpertId::new(5, 1)]);
     }
 
+    fn sigmoid_router_blob(
+        num_experts: usize,
+        d_model: usize,
+        weight: &[f32],
+        bias: &[f32],
+        scale: f32,
+        shared: u32,
+    ) -> Vec<u8> {
+        let w = f32_bytes(weight);
+        let b = f32_bytes(bias);
+        let tensors = vec![
+            (
+                TENSOR_ROUTER,
+                TensorView::new(Dtype::F32, vec![num_experts, d_model], &w).unwrap(),
+            ),
+            (
+                TENSOR_ROUTER_BIAS,
+                TensorView::new(Dtype::F32, vec![num_experts], &b).unwrap(),
+            ),
+        ];
+        let meta = HashMap::from([
+            (META_ROUTED_SCALING_FACTOR.to_string(), scale.to_string()),
+            (META_SHARED_EXPERTS.to_string(), shared.to_string()),
+        ]);
+        serialize(tensors, Some(meta)).unwrap()
+    }
+
+    #[test]
+    fn sigmoid_gate_bias_steers_selection_not_weights() {
+        // 3 experts, d_model = 1, h = [1] → logits [2, 1, 0] →
+        // sigmoid scores [0.8808, 0.7311, 0.5]. Bias [0, 0, 1] pushes
+        // expert 2's selection key to 1.5, above expert 1's 0.7311 —
+        // top-2 selection = experts 0 and 2. Combine weights renormalize
+        // the raw scores 0.8808 / 0.5 (bias excluded) and scale by 2.5.
+        let blob = sigmoid_router_blob(3, 1, &[2.0, 1.0, 0.0], &[0.0, 0.0, 1.0], 2.5, 0);
+        let gate = GatingNetwork::from_safetensors(&blob).unwrap();
+        assert_eq!(gate.num_experts(), 3);
+        let h = Array1::from_vec(vec![1.0f32]);
+        let routed = gate.route(h.view(), 2);
+        assert_eq!(routed.len(), 2);
+        assert_eq!(routed[0].0, 0);
+        assert_eq!(routed[1].0, 2);
+        let s0 = 1.0 / (1.0 + (-2.0f32).exp());
+        let s2 = 0.5f32;
+        let sum = s0 + s2;
+        assert!((routed[0].1 - s0 / sum * 2.5).abs() < 1e-5, "{}", routed[0].1);
+        assert!((routed[1].1 - s2 / sum * 2.5).abs() < 1e-5, "{}", routed[1].1);
+    }
+
+    #[test]
+    fn route_batch_appends_shared_expert_slot() {
+        let blob = sigmoid_router_blob(2, 1, &[1.0, -1.0], &[0.0, 0.0], 1.0, 1);
+        let gate = GatingNetwork::from_safetensors(&blob).unwrap();
+        let hidden = Array2::from_shape_vec((1, 1), vec![1.0f32]).unwrap();
+        let routed = gate.route_batch(3, hidden.view(), 1);
+        assert_eq!(routed[0].slots.len(), 2);
+        assert_eq!(routed[0].slots[0].expert, ExpertId::new(3, 0));
+        // Fused shared expert rides at index num_experts with weight 1.0.
+        assert_eq!(routed[0].slots[1].expert, ExpertId::new(3, 2));
+        assert_eq!(routed[0].slots[1].weight, 1.0);
+    }
+
+    #[test]
+    fn softmax_gate_ignores_deepseek_metadata_defaults() {
+        // A plain Qwen-layout blob parses with the sigmoid machinery off.
+        let blob = router_blob(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+        let gate = GatingNetwork::from_safetensors(&blob).unwrap();
+        let hidden = Array2::from_shape_vec((1, 2), vec![1.0f32, 0.0]).unwrap();
+        let routed = gate.route_batch(0, hidden.view(), 1);
+        assert_eq!(routed[0].slots.len(), 1);
+        assert_eq!(routed[0].slots[0].expert, ExpertId::new(0, 0));
+    }
+
+    #[test]
+    fn router_bias_length_mismatch_rejected() {
+        let w = f32_bytes(&[1.0, 0.0, 0.0, 1.0]);
+        let b = f32_bytes(&[0.5]);
+        let tensors = vec![
+            (
+                TENSOR_ROUTER,
+                TensorView::new(Dtype::F32, vec![2, 2], &w).unwrap(),
+            ),
+            (
+                TENSOR_ROUTER_BIAS,
+                TensorView::new(Dtype::F32, vec![1], &b).unwrap(),
+            ),
+        ];
+        let blob = serialize(tensors, None).unwrap();
+        let err = GatingNetwork::from_safetensors(&blob).unwrap_err();
+        assert!(matches!(err, MoeExecError::BadShape { .. }));
+    }
+
     // ---- runtime ----
 
     fn identity_expert_blob(scale: f32) -> Vec<u8> {
@@ -2178,6 +2573,7 @@ mod tests {
                 token_indices: vec![0],
                 d_model: 2,
                 outputs: vec![4.0, 8.0],
+                receipt: None,
             },
             ExpertExecuteResponse {
                 model_id: "qwen".into(),
@@ -2186,6 +2582,7 @@ mod tests {
                 token_indices: vec![0],
                 d_model: 2,
                 outputs: vec![-4.0, 0.0],
+                receipt: None,
             },
         ];
         let combined = combine_expert_outputs(2, &routed, &responses).unwrap();
@@ -2236,6 +2633,7 @@ mod tests {
                 token_indices: vec![0],
                 d_model: 2,
                 outputs: vec![4.0, 8.0],
+                receipt: None,
             },
             ExpertExecuteResponse {
                 model_id: "qwen".into(),
@@ -2244,6 +2642,7 @@ mod tests {
                 token_indices: vec![0],
                 d_model: 2,
                 outputs: vec![-4.0, 0.0],
+                receipt: None,
             },
         ];
         // Feed responses out of routed order — order must not matter.
@@ -2277,6 +2676,155 @@ mod tests {
     }
 
     #[test]
+    fn finish_partial_renormalizes_missing_slot() {
+        // Token 0 selected experts (0,1) w=0.75 and (0,2) w=0.25; only
+        // expert 1 responds. The arrived accumulation is 0.75*[4,8] =
+        // [3,6]; renormalization scales by 1.0/0.75 → [4,8].
+        let routed = vec![RoutedToken {
+            token_index: 0,
+            slots: vec![
+                RoutedSlot {
+                    expert: ExpertId::new(0, 1),
+                    weight: 0.75,
+                },
+                RoutedSlot {
+                    expert: ExpertId::new(0, 2),
+                    weight: 0.25,
+                },
+            ],
+        }];
+        let resp = ExpertExecuteResponse {
+            model_id: "qwen".into(),
+            layer: 0,
+            expert: 1,
+            token_indices: vec![0],
+            d_model: 2,
+            outputs: vec![4.0, 8.0],
+            receipt: None,
+        };
+        let mut combiner = MoeCombiner::new(2, &routed).unwrap();
+        combiner.accumulate(&resp).unwrap();
+        let partial = combiner.finish_partial().unwrap();
+        assert_eq!(partial.outputs, vec![4.0, 8.0]);
+        assert_eq!(partial.missing, vec![(ExpertId::new(0, 2), 0)]);
+    }
+
+    #[test]
+    fn finish_partial_complete_batch_has_no_missing() {
+        let routed = vec![RoutedToken {
+            token_index: 0,
+            slots: vec![RoutedSlot {
+                expert: ExpertId::new(0, 1),
+                weight: 1.0,
+            }],
+        }];
+        let resp = ExpertExecuteResponse {
+            model_id: "qwen".into(),
+            layer: 0,
+            expert: 1,
+            token_indices: vec![0],
+            d_model: 2,
+            outputs: vec![1.0, 2.0],
+            receipt: None,
+        };
+        let mut combiner = MoeCombiner::new(2, &routed).unwrap();
+        combiner.accumulate(&resp).unwrap();
+        let partial = combiner.finish_partial().unwrap();
+        assert_eq!(partial.outputs, vec![1.0, 2.0]);
+        assert!(partial.missing.is_empty());
+    }
+
+    #[test]
+    fn finish_partial_errors_when_token_has_no_contribution() {
+        // Both selected slots missing → nothing to renormalize.
+        let routed = vec![RoutedToken {
+            token_index: 5,
+            slots: vec![
+                RoutedSlot {
+                    expert: ExpertId::new(2, 3),
+                    weight: 0.5,
+                },
+                RoutedSlot {
+                    expert: ExpertId::new(2, 4),
+                    weight: 0.5,
+                },
+            ],
+        }];
+        let err = MoeCombiner::new(2, &routed)
+            .unwrap()
+            .finish_partial()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MoeExecError::MissingContribution { token_index: 5, layer: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn finish_partial_only_scales_affected_tokens() {
+        // Token 0 complete, token 1 partial — token 0's row must be
+        // untouched by token 1's renormalization.
+        let routed = vec![
+            RoutedToken {
+                token_index: 0,
+                slots: vec![RoutedSlot {
+                    expert: ExpertId::new(0, 1),
+                    weight: 1.0,
+                }],
+            },
+            RoutedToken {
+                token_index: 1,
+                slots: vec![
+                    RoutedSlot {
+                        expert: ExpertId::new(0, 1),
+                        weight: 0.5,
+                    },
+                    RoutedSlot {
+                        expert: ExpertId::new(0, 2),
+                        weight: 0.5,
+                    },
+                ],
+            },
+        ];
+        let resp = ExpertExecuteResponse {
+            model_id: "qwen".into(),
+            layer: 0,
+            expert: 1,
+            token_indices: vec![0, 1],
+            d_model: 2,
+            outputs: vec![1.0, 2.0, 6.0, 10.0],
+            receipt: None,
+        };
+        let mut combiner = MoeCombiner::new(2, &routed).unwrap();
+        combiner.accumulate(&resp).unwrap();
+        let partial = combiner.finish_partial().unwrap();
+        // Token 0: 1.0*[1,2] unscaled. Token 1: 0.5*[6,10]=[3,5], scaled
+        // by 1.0/0.5 → [6,10].
+        assert_eq!(partial.outputs, vec![1.0, 2.0, 6.0, 10.0]);
+        assert_eq!(partial.missing, vec![(ExpertId::new(0, 2), 1)]);
+    }
+
+    #[test]
+    fn throughput_meter_counts_served_tokens() {
+        let rt = MoeExpertRuntime::new();
+        rt.load_expert("qwen", 0, 0, &identity_expert_blob(1.0)).unwrap();
+        let req = ExpertExecuteRequest {
+            model_id: "qwen".into(),
+            layer: 0,
+            expert: 0,
+            token_indices: vec![0, 1, 2],
+            d_model: 2,
+            hidden_states: vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            hidden_q8: None,
+        };
+        rt.execute(&req).unwrap();
+        // Current-minute bucket holds 3 tokens; tps floors to 0 (<60/min)
+        // but the raw bucket must have registered the tokens.
+        assert_eq!(rt.served_bucket_tokens.load(Ordering::Relaxed), 3);
+        assert_eq!(rt.status().measured_tps, rt.measured_tps());
+    }
+
+    #[test]
     fn incremental_combiner_ignores_unrouted_rows() {
         // Gate selected only (0,1) for token 0. A holder response that
         // also carries an unrouted (expert,token) must not corrupt output
@@ -2295,6 +2843,7 @@ mod tests {
             token_indices: vec![0, 9], // token 9 was never routed
             d_model: 2,
             outputs: vec![1.0, 2.0, 5.0, 5.0],
+            receipt: None,
         };
         let mut combiner = MoeCombiner::new(2, &routed).unwrap();
         combiner.accumulate(&resp).unwrap();
@@ -2363,6 +2912,7 @@ mod tests {
             token_indices: vec![0, 5, 9],
             d_model: 2,
             outputs: vec![0.5; 6],
+            receipt: None,
         };
         let back: ExpertExecuteResponse =
             serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();

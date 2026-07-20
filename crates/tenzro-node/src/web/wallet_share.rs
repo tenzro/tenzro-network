@@ -354,8 +354,21 @@ fn derive_salt(credential_id: &str, surface_key: &str) -> Vec<u8> {
 /// Returns `nonce(12) || ciphertext || tag(16)` per the project's
 /// AES-GCM convention.
 fn wrap_share(credential_id: &str, surface_key: &str) -> Result<Vec<u8>, WalletApiError> {
-    let key_bytes = derive_wrap_key(credential_id, surface_key);
     let plaintext = derive_plaintext_share(credential_id, surface_key);
+    wrap_share_bytes(credential_id, surface_key, &plaintext)
+}
+
+/// Wraps arbitrary share plaintext under the same deterministic key /
+/// nonce / AAD derivation the escrow-unwrap path expects. Used by the
+/// `/wallet/new/finalize` provisioning path to wrap the REAL serialized
+/// FROST device key-package (not the deterministic stub plaintext).
+/// Returns `nonce(12) || ciphertext || tag(16)`.
+pub(crate) fn wrap_share_bytes(
+    credential_id: &str,
+    surface_key: &str,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, WalletApiError> {
+    let key_bytes = derive_wrap_key(credential_id, surface_key);
     let aad = wrap_aad(credential_id, surface_key);
 
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
@@ -364,7 +377,7 @@ fn wrap_share(credential_id: &str, surface_key: &str) -> Result<Vec<u8>, WalletA
         .encrypt(
             nonce,
             Payload {
-                msg: &plaintext,
+                msg: plaintext,
                 aad: &aad,
             },
         )
@@ -380,6 +393,13 @@ fn wrap_share(credential_id: &str, surface_key: &str) -> Result<Vec<u8>, WalletA
     out.extend_from_slice(&WRAP_NONCE);
     out.extend_from_slice(&ciphertext);
     Ok(out)
+}
+
+/// Salt for `(credential_id, surface_key)`, exposed for the provisioning
+/// finalize path so its `wrapped_share.salt_b64` matches the escrow
+/// envelope the wallet later fetches for unwrapping.
+pub(crate) fn provisioning_salt(credential_id: &str, surface_key: &str) -> Vec<u8> {
+    derive_salt(credential_id, surface_key)
 }
 
 /// Deterministic Ed25519 verifying key for the testnet `credential_id`

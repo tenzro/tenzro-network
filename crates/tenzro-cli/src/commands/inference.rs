@@ -103,6 +103,18 @@ pub struct RouteCmd {
     #[arg(long, default_value_t = 256)]
     max_tokens: u64,
 
+    /// Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes
+    /// and/or bloc tokens (e.g. "DE,EU"), case-insensitive. The serving
+    /// node must declare a matching attestation-bound locality claim or
+    /// the request is refused. Only used with --message.
+    #[arg(long)]
+    jurisdiction: Option<String>,
+
+    /// Fail the request unless the response carries a verifiable signed
+    /// jurisdiction receipt. Only used with --message.
+    #[arg(long)]
+    require_jurisdiction_receipt: bool,
+
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
     format: String,
@@ -158,6 +170,18 @@ impl RouteCmd {
                 serde_json::Value::String(message.clone()),
             );
             params.insert("max_tokens".to_string(), serde_json::json!(self.max_tokens));
+            if let Some(pin) = &self.jurisdiction {
+                params.insert(
+                    "jurisdiction".to_string(),
+                    serde_json::Value::String(pin.clone()),
+                );
+            }
+            if self.require_jurisdiction_receipt {
+                params.insert(
+                    "jurisdiction_receipt".to_string(),
+                    serde_json::Value::String("required".to_string()),
+                );
+            }
 
             let spinner = output::create_spinner("Routing intent and dispatching...");
             let result: serde_json::Value = rpc
@@ -904,6 +928,13 @@ pub struct InferenceStreamCmd {
     #[arg(long, default_value_t = 1024)]
     max_tokens: u64,
 
+    /// Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes
+    /// and/or bloc tokens (e.g. "DE,EU"), case-insensitive. The serving
+    /// node must declare a matching attestation-bound locality claim or
+    /// the stream is refused before generation starts.
+    #[arg(long)]
+    jurisdiction: Option<String>,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -934,6 +965,12 @@ impl InferenceStreamCmd {
             params.insert(
                 "channel_id".to_string(),
                 serde_json::Value::String(ch.clone()),
+            );
+        }
+        if let Some(pin) = &self.jurisdiction {
+            params.insert(
+                "jurisdiction".to_string(),
+                serde_json::Value::String(pin.clone()),
             );
         }
 

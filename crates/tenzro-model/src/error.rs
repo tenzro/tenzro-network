@@ -132,6 +132,11 @@ pub enum ModelError {
         license_id: Option<String>,
     },
 
+    /// Sealed-model (encrypted shard) error: sealing, unsealing, manifest
+    /// signature verification, recipient lookup, or shard integrity failure.
+    #[error("Sealed model error: {0}")]
+    SealedModel(String),
+
     /// Runtime / catch-all error
     #[error("{0}")]
     Other(String),

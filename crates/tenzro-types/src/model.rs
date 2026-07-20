@@ -60,6 +60,48 @@ impl AcceptancePolicy {
     }
 }
 
+/// Visibility of a model on the network.
+///
+/// Governs whether the model is announced over gossip and listed to peers:
+///
+/// - `Network`: announced on `tenzro/models`, included in provider
+///   announcements and heartbeats, discoverable by any peer.
+/// - `Private`: never announced, never heartbeated, excluded from provider
+///   served-model lists. Served only to callers of this node. Weights for
+///   private models are distributed as encrypted shards to named recipients
+///   via a signed sealed-model manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelVisibility {
+    #[default]
+    Network,
+    Private,
+}
+
+impl ModelVisibility {
+    /// Stable string form used on wire messages and persisted records.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModelVisibility::Network => "network",
+            ModelVisibility::Private => "private",
+        }
+    }
+
+    /// Parses the string form; unknown values are refused.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "network" => Some(ModelVisibility::Network),
+            "private" => Some(ModelVisibility::Private),
+            _ => None,
+        }
+    }
+
+    /// Whether the model may be announced/listed to peers.
+    pub fn is_network(&self) -> bool {
+        matches!(self, ModelVisibility::Network)
+    }
+}
+
 /// Information about an AI model on Tenzro Network
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -131,6 +173,12 @@ pub struct ModelInfo {
     /// (e.g. "dinov3", "meta-sam", "gemma"). `None` for permissive models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license_id: Option<String>,
+    /// Network visibility. `Network` models are announced over gossip and
+    /// listed to peers; `Private` models are served only to callers of this
+    /// node and never leave it via announcement, heartbeat, or provider
+    /// served-model lists.
+    #[serde(default)]
+    pub visibility: ModelVisibility,
 }
 
 impl ModelInfo {
@@ -164,7 +212,14 @@ impl ModelInfo {
             license_tier: LicenseTier::Permissive,
             license: String::new(),
             license_id: None,
+            visibility: ModelVisibility::Network,
         }
+    }
+
+    /// Sets the network visibility of the model.
+    pub fn with_visibility(mut self, visibility: ModelVisibility) -> Self {
+        self.visibility = visibility;
+        self
     }
 
     /// Attach license metadata (tier, human-readable name, and stable id used
@@ -716,6 +771,12 @@ pub struct InferenceResponse {
     /// responses returned to RPC/MCP/A2A clients have this populated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ProvenanceManifest>,
+    /// Signed jurisdiction receipt attesting where this inference ran.
+    /// Present when the request pinned a jurisdiction
+    /// (`parameters.custom["jurisdiction"]`) and the serving node holds a
+    /// declared [`JurisdictionClaim`] plus a receipt signer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jurisdiction_receipt: Option<JurisdictionReceipt>,
 }
 
 fn default_synthetic_content() -> bool {
@@ -747,6 +808,7 @@ impl InferenceResponse {
             timestamp: Timestamp::now(),
             synthetic_content: true,
             provenance: None,
+            jurisdiction_receipt: None,
         }
     }
 
@@ -754,6 +816,13 @@ impl InferenceResponse {
     /// response leaves the inference router.
     pub fn with_provenance(mut self, manifest: ProvenanceManifest) -> Self {
         self.provenance = Some(manifest);
+        self
+    }
+
+    /// Builder helper to attach a signed jurisdiction receipt before the
+    /// response leaves the inference router.
+    pub fn with_jurisdiction_receipt(mut self, receipt: JurisdictionReceipt) -> Self {
+        self.jurisdiction_receipt = Some(receipt);
         self
     }
 }
@@ -811,6 +880,120 @@ impl ProvenanceManifest {
         buf.extend_from_slice(&self.provider.0);
         buf.extend_from_slice(&self.signed_at.as_millis().to_le_bytes());
         buf.extend_from_slice(self.assertion.as_bytes());
+        buf
+    }
+}
+
+/// A provider's declared serving jurisdiction — an attestation-bound
+/// locality claim, not a cryptographic proof of geographic location.
+///
+/// The claim states the legal jurisdiction the operator asserts the node
+/// runs under (ISO 3166-1 alpha-2 country code, plus optional regulatory
+/// bloc memberships such as `EU` or `EEA`). When the node runs inside a
+/// TEE, `attestation_hash` binds the claim to a specific enclave's
+/// attestation report, so the claim cannot be replayed onto different
+/// hardware. Relying parties should treat the claim as
+/// operator-asserted-and-attestation-pinned: the attestation proves *which
+/// enclave* made the claim, and slashing/reputation punishes false
+/// declarations — it does not geolocate the machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JurisdictionClaim {
+    /// ISO 3166-1 alpha-2 country code, uppercase (e.g. `"DE"`, `"SG"`).
+    pub country: String,
+    /// Regulatory bloc memberships the country claim implies, uppercase
+    /// free-form tokens (e.g. `["EU", "EEA"]`). Matched verbatim against
+    /// request pins — the protocol hard-codes no bloc vocabulary.
+    #[serde(default)]
+    pub blocs: Vec<String>,
+    /// SHA-256 of the TEE attestation report the claim is bound to.
+    /// `None` for non-TEE nodes: the claim is then operator-asserted only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_hash: Option<Hash>,
+    /// When the operator declared (or last re-attested) this claim.
+    pub declared_at: Timestamp,
+}
+
+impl JurisdictionClaim {
+    /// Whether this claim satisfies one request pin token. Tokens are
+    /// compared case-insensitively against the country code and every
+    /// declared bloc.
+    pub fn matches(&self, token: &str) -> bool {
+        let token = token.trim();
+        if token.is_empty() {
+            return false;
+        }
+        self.country.eq_ignore_ascii_case(token)
+            || self.blocs.iter().any(|b| b.eq_ignore_ascii_case(token))
+    }
+
+    /// Whether this claim satisfies any of the request's pin tokens.
+    pub fn matches_any<'a, I: IntoIterator<Item = &'a str>>(&self, tokens: I) -> bool {
+        tokens.into_iter().any(|t| self.matches(t))
+    }
+}
+
+/// Signed jurisdiction receipt for one inference — the provider's
+/// attestation-bound statement of *where* a specific request was served.
+/// Embeds in the [`InferenceResponse`] and verifies offline given the
+/// signer's public key, mirroring [`ProvenanceManifest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JurisdictionReceipt {
+    /// SHA-256 of the request input bytes (`InferenceRequest.input`).
+    pub request_hash: Hash,
+    /// SHA-256 of the inference output bytes (`InferenceResponse.output`).
+    pub response_hash: Hash,
+    /// Model that served the request.
+    pub model_id: String,
+    /// Provider that served the request.
+    pub provider: Address,
+    /// The jurisdiction claim in force when the request was served.
+    pub jurisdiction: JurisdictionClaim,
+    /// Wall-clock timestamp at which the receipt was signed.
+    pub signed_at: Timestamp,
+    /// Signer's public key (raw bytes — Ed25519 = 32B, secp256k1 = 33B).
+    pub signer_public_key: Vec<u8>,
+    /// Detached signature over [`canonical_preimage`].
+    ///
+    /// [`canonical_preimage`]: JurisdictionReceipt::canonical_preimage
+    pub signature: Vec<u8>,
+    /// Algorithm tag matching `signature` — `"ed25519"` or `"secp256k1"`.
+    pub algorithm: String,
+}
+
+impl JurisdictionReceipt {
+    /// Canonical preimage used to verify [`signature`]. Variable-length
+    /// fields are length-prefixed (le_u32) so the encoding is unambiguous.
+    ///
+    /// Layout: `request_hash(32) || response_hash(32) || len(model_id) ||
+    /// model_id || provider || len(country) || country || bloc_count ||
+    /// (len(bloc) || bloc)* || attestation_flag(1) || [attestation_hash(32)]
+    /// || declared_at_ms(le_u64) || signed_at_ms(le_u64)`.
+    ///
+    /// [`signature`]: JurisdictionReceipt::signature
+    pub fn canonical_preimage(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(160 + self.model_id.len());
+        buf.extend_from_slice(&self.request_hash.0);
+        buf.extend_from_slice(&self.response_hash.0);
+        buf.extend_from_slice(&(self.model_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(self.model_id.as_bytes());
+        buf.extend_from_slice(&self.provider.0);
+        let j = &self.jurisdiction;
+        buf.extend_from_slice(&(j.country.len() as u32).to_le_bytes());
+        buf.extend_from_slice(j.country.as_bytes());
+        buf.extend_from_slice(&(j.blocs.len() as u32).to_le_bytes());
+        for bloc in &j.blocs {
+            buf.extend_from_slice(&(bloc.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bloc.as_bytes());
+        }
+        match &j.attestation_hash {
+            Some(h) => {
+                buf.push(1);
+                buf.extend_from_slice(&h.0);
+            }
+            None => buf.push(0),
+        }
+        buf.extend_from_slice(&j.declared_at.as_millis().to_le_bytes());
+        buf.extend_from_slice(&self.signed_at.as_millis().to_le_bytes());
         buf
     }
 }
@@ -1010,6 +1193,12 @@ pub struct ProviderCapacity {
     /// observed metrics alone (neutral bias).
     #[serde(default)]
     pub hardware: HardwareCapabilities,
+    /// Declared serving jurisdiction (attestation-bound locality claim).
+    /// `None` means undeclared — the provider is excluded from any request
+    /// that pins a jurisdiction (fail-closed; sovereignty never degrades
+    /// silently).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jurisdiction: Option<JurisdictionClaim>,
 }
 
 /// Compact advertised capacity envelope broadcast over the
@@ -1053,6 +1242,11 @@ pub struct AdvertisedCapacity {
     /// KV bytes.
     #[serde(default)]
     pub prefix_cache: PrefixCacheSummary,
+    /// Declared serving jurisdiction. Must ride the announcement so
+    /// discovery consumers can rank providers for jurisdiction-pinned
+    /// requests without a direct round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jurisdiction: Option<JurisdictionClaim>,
 }
 
 impl ProviderCapacity {
@@ -1070,6 +1264,7 @@ impl ProviderCapacity {
             moe_roles: self.moe_roles.clone(),
             moe_gpu: self.moe_gpu,
             prefix_cache: self.prefix_cache.clone(),
+            jurisdiction: self.jurisdiction.clone(),
         }
     }
 }
@@ -1399,6 +1594,7 @@ impl Default for ProviderCapacity {
             iroh_endpoint_id: None,
             lan_cluster: None,
             hardware: HardwareCapabilities::default(),
+            jurisdiction: None,
         }
     }
 }

@@ -35,6 +35,10 @@ pub enum IdentityCommand {
     JwksGet(IdentityJwksGetCmd),
     /// Revoke an identity by DID (logical delete, cascades through act-chain)
     Revoke(IdentityRevokeCmd),
+    /// Revoke a single JWT by its `jti` (cascades through the act-chain)
+    RevokeJwt(IdentityRevokeJwtCmd),
+    /// Register a trusted credential/claim issuer (admin-token-gated)
+    AddTrustedIssuer(IdentityAddTrustedIssuerCmd),
     /// Hard-delete a revoked identity (TDIP/GDPR Article 17 right-to-erasure)
     Forget(IdentityForgetCmd),
     /// Export a portable CARv1 identity bundle (DID + credentials + encrypted keystore files)
@@ -59,6 +63,8 @@ impl IdentityCommand {
             Self::Jwks(cmd) => cmd.execute().await,
             Self::JwksGet(cmd) => cmd.execute().await,
             Self::Revoke(cmd) => cmd.execute().await,
+            Self::RevokeJwt(cmd) => cmd.execute().await,
+            Self::AddTrustedIssuer(cmd) => cmd.execute().await,
             Self::Forget(cmd) => cmd.execute().await,
             Self::ExportCar(cmd) => cmd.execute().await,
             Self::ImportCar(cmd) => cmd.execute().await,
@@ -317,6 +323,39 @@ impl IdentityDocumentCmd {
     }
 }
 
+/// Canonical params for `tenzro_addCredential` — must match the node's
+/// `canonical_credential_params` byte-for-byte.
+fn canonical_credential_params(
+    did: &str,
+    credential_type: &str,
+    issuer: &str,
+    claims_canonical: &[u8],
+) -> Vec<u8> {
+    let mut buf = b"tenzro/identity/credential".to_vec();
+    push_bytes(&mut buf, did.as_bytes());
+    push_bytes(&mut buf, credential_type.as_bytes());
+    push_bytes(&mut buf, issuer.as_bytes());
+    push_bytes(&mut buf, claims_canonical);
+    buf
+}
+
+/// Canonical params for `tenzro_addService` — must match the node's
+/// `canonical_service_params` byte-for-byte.
+fn canonical_service_params(did: &str, service_type: &str, endpoint: &str) -> Vec<u8> {
+    let mut buf = b"tenzro/identity/service".to_vec();
+    push_bytes(&mut buf, did.as_bytes());
+    push_bytes(&mut buf, service_type.as_bytes());
+    push_bytes(&mut buf, endpoint.as_bytes());
+    buf
+}
+
+/// u32-BE length-prefixed field push shared by the canonical params
+/// builders above.
+fn push_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    buf.extend_from_slice(bytes);
+}
+
 /// Add a verifiable credential to an identity
 #[derive(Debug, Parser)]
 pub struct IdentityAddCredentialCmd {
@@ -331,6 +370,15 @@ pub struct IdentityAddCredentialCmd {
     #[arg(long)]
     issuer: String,
 
+    /// Claim set as a JSON object, e.g. '{"kyc_tier":2}'
+    #[arg(long, default_value = "{}")]
+    claims: String,
+
+    /// Issuer Ed25519 signing key (32-byte hex seed) — signs both the
+    /// authorization envelope and the durable credential proof
+    #[arg(long)]
+    signing_key: String,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -339,8 +387,51 @@ pub struct IdentityAddCredentialCmd {
 impl IdentityAddCredentialCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
+        use tenzro_crypto::signatures::Signer;
 
         output::print_header("Add Verifiable Credential");
+
+        let claims_value: serde_json::Value = serde_json::from_str(&self.claims)
+            .map_err(|e| anyhow::anyhow!("invalid --claims JSON: {e}"))?;
+        if !claims_value.is_object() {
+            anyhow::bail!("--claims must be a JSON object");
+        }
+        // `serde_json::Value` objects serialize sorted-key, so these bytes
+        // match what the node re-derives from the same claims object.
+        let claims_canonical = serde_json::to_vec(&claims_value)?;
+
+        let envelope = super::app::sign_envelope(
+            &self.issuer,
+            "tenzro_addCredential",
+            tenzro_identity::envelope::params_hash(&canonical_credential_params(
+                &self.did,
+                &self.credential_type,
+                &self.issuer,
+                &claims_canonical,
+            )),
+            &self.signing_key,
+        )?;
+
+        // Durable credential proof: sign the canonical subject bytes so the
+        // credential verifies in trust-chain traversal independently of the
+        // transport envelope.
+        let claims_map: std::collections::HashMap<String, serde_json::Value> = claims_value
+            .as_object()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        let subject = tenzro_identity::credential::CredentialSubject {
+            id: self.did.clone(),
+            claims: claims_map,
+        };
+        let subject_bytes = subject
+            .canonical_bytes()
+            .map_err(|e| anyhow::anyhow!("failed to canonicalize subject: {e}"))?;
+        let signer = super::app::ed25519_signer(&self.signing_key)?;
+        let proof_value = signer
+            .sign(&subject_bytes)
+            .map_err(|e| anyhow::anyhow!("proof signing failed: {e}"))?
+            .as_bytes()
+            .to_vec();
 
         let spinner = output::create_spinner("Adding credential...");
 
@@ -348,8 +439,12 @@ impl IdentityAddCredentialCmd {
 
         let result: serde_json::Value = rpc.call("tenzro_addCredential", serde_json::json!([{
             "did": self.did,
-            "credential_type": self.credential_type,
+            "type": self.credential_type,
             "issuer": self.issuer,
+            "claims": claims_value,
+            "envelope": envelope,
+            "proof_value": hex::encode(proof_value),
+            "proof_type": "Ed25519Signature2020",
         }])).await?;
 
         spinner.finish_and_clear();
@@ -384,6 +479,15 @@ pub struct IdentityAddServiceCmd {
     #[arg(long)]
     endpoint: String,
 
+    /// DID that signs the authorization envelope — the subject itself or
+    /// its controller. Defaults to the subject DID.
+    #[arg(long)]
+    signer_did: Option<String>,
+
+    /// Ed25519 signing key (32-byte hex seed) for the signer DID
+    #[arg(long)]
+    signing_key: String,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -395,14 +499,27 @@ impl IdentityAddServiceCmd {
 
         output::print_header("Add Service Endpoint");
 
+        let signer_did = self.signer_did.as_deref().unwrap_or(&self.did);
+        let envelope = super::app::sign_envelope(
+            signer_did,
+            "tenzro_addService",
+            tenzro_identity::envelope::params_hash(&canonical_service_params(
+                &self.did,
+                &self.service_type,
+                &self.endpoint,
+            )),
+            &self.signing_key,
+        )?;
+
         let spinner = output::create_spinner("Adding service...");
 
         let rpc = RpcClient::new(&self.rpc);
 
         let result: serde_json::Value = rpc.call("tenzro_addService", serde_json::json!([{
             "did": self.did,
-            "service_type": self.service_type,
+            "type": self.service_type,
             "endpoint": self.endpoint,
+            "envelope": envelope,
         }])).await?;
 
         spinner.finish_and_clear();
@@ -701,6 +818,16 @@ pub struct IdentityRevokeCmd {
     #[arg(long)]
     reason: Option<String>,
 
+    /// DID recorded as the revoker inside the signed revocation entry
+    /// (defaults to `did:tenzro:system:tenzro-network` on the node)
+    #[arg(long)]
+    revoked_by: Option<String>,
+
+    /// Operator admin token (sent as X-Tenzro-Admin-Token; falls back
+    /// to the TENZRO_ADMIN_TOKEN env var when omitted)
+    #[arg(long, default_value = "")]
+    admin_token: String,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -713,10 +840,13 @@ impl IdentityRevokeCmd {
         output::print_header("Revoke Identity");
         let spinner = output::create_spinner("Revoking DID...");
 
-        let rpc = RpcClient::new(&self.rpc);
+        let rpc = RpcClient::new(&self.rpc).with_admin_token(&self.admin_token);
         let mut params = serde_json::json!({ "did": self.did });
         if let Some(reason) = &self.reason {
             params["reason"] = serde_json::Value::String(reason.clone());
+        }
+        if let Some(revoked_by) = &self.revoked_by {
+            params["revoked_by"] = serde_json::Value::String(revoked_by.clone());
         }
         let result: serde_json::Value = rpc.call("tenzro_revokeDid", params).await?;
 
@@ -727,8 +857,148 @@ impl IdentityRevokeCmd {
         if let Some(count) = result.get("affected_jti_count").and_then(|v| v.as_u64()) {
             output::print_field("Affected JTIs", &count.to_string());
         }
+        if let Some(registry) = result.get("identity_registry").and_then(|v| v.as_str()) {
+            output::print_field("Registry", registry);
+        }
         if let Some(cascade) = result.get("cascade").and_then(|v| v.as_str()) {
             output::print_field("Cascade", cascade);
+        }
+        Ok(())
+    }
+}
+
+/// Revoke a single JWT by its `jti`. Unlike `revoke` (which invalidates
+/// every token in an entire DID's act-chain), this targets one specific
+/// token id — the revocation still cascades transitively to any tokens
+/// that were issued *by* the revoked token's act-chain. Admin-token-gated.
+#[derive(Debug, Parser)]
+pub struct IdentityRevokeJwtCmd {
+    /// The JWT id (`jti`) to revoke.
+    jti: String,
+
+    /// Optional reason for revocation (recorded in the audit log).
+    #[arg(long)]
+    reason: Option<String>,
+
+    /// Operator admin token (sent as X-Tenzro-Admin-Token; falls back
+    /// to the TENZRO_ADMIN_TOKEN env var when omitted)
+    #[arg(long, default_value = "")]
+    admin_token: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl IdentityRevokeJwtCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Revoke JWT");
+        let spinner = output::create_spinner("Revoking token...");
+
+        let rpc = RpcClient::new(&self.rpc).with_admin_token(&self.admin_token);
+        let mut params = serde_json::json!({ "jti": self.jti });
+        if let Some(reason) = &self.reason {
+            params["reason"] = serde_json::Value::String(reason.clone());
+        }
+        let result: serde_json::Value = rpc.call("tenzro_revokeJwt", params).await?;
+
+        spinner.finish_and_clear();
+        output::print_success("Token revoked");
+        println!();
+        output::print_field("JTI", &self.jti);
+        if let Some(status) = result.get("status").and_then(|v| v.as_str()) {
+            output::print_field("Status", status);
+        }
+        if let Some(cascade) = result.get("cascade").and_then(|v| v.as_str()) {
+            output::print_field("Cascade", cascade);
+        }
+        Ok(())
+    }
+}
+
+/// Register a trusted credential/claim issuer. Credential, service, and
+/// claim issuance RPCs verify the issuer against this set — an issuance
+/// from an unlisted issuer is refused. Optionally scope the issuer to a
+/// set of topic ids. Admin-token-gated.
+#[derive(Debug, Parser)]
+pub struct IdentityAddTrustedIssuerCmd {
+    /// The issuer DID to trust.
+    issuer_did: String,
+
+    /// Human-readable label for the issuer (shown in the registry).
+    #[arg(long, default_value = "")]
+    name: String,
+
+    /// Topic ids this issuer is trusted for (comma-separated u64 list).
+    /// Empty means trusted for all topics.
+    #[arg(long)]
+    topics: Option<String>,
+
+    /// Operator admin token (sent as X-Tenzro-Admin-Token; falls back
+    /// to the TENZRO_ADMIN_TOKEN env var when omitted)
+    #[arg(long, default_value = "")]
+    admin_token: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl IdentityAddTrustedIssuerCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Add Trusted Issuer");
+
+        let topics: Vec<u64> = match &self.topics {
+            Some(s) => s
+                .split(',')
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+                .map(|t| {
+                    t.parse::<u64>()
+                        .map_err(|e| anyhow::anyhow!("invalid topic id '{t}': {e}"))
+                })
+                .collect::<Result<_>>()?,
+            None => Vec::new(),
+        };
+
+        let spinner = output::create_spinner("Registering issuer...");
+        let rpc = RpcClient::new(&self.rpc).with_admin_token(&self.admin_token);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_addTrustedIssuer",
+                serde_json::json!({
+                    "issuer_did": self.issuer_did,
+                    "name": self.name,
+                    "topics": topics,
+                }),
+            )
+            .await?;
+
+        spinner.finish_and_clear();
+        output::print_success("Trusted issuer registered");
+        println!();
+        output::print_field("Issuer DID", &self.issuer_did);
+        if !self.name.is_empty() {
+            output::print_field("Name", &self.name);
+        }
+        output::print_field(
+            "Topics",
+            &if topics.is_empty() {
+                "all".to_string()
+            } else {
+                topics
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        );
+        if let Some(status) = result.get("status").and_then(|v| v.as_str()) {
+            output::print_field("Status", status);
         }
         Ok(())
     }
@@ -743,6 +1013,11 @@ pub struct IdentityForgetCmd {
     /// The DID to erase. Must already be in `Revoked` status.
     did: String,
 
+    /// Operator admin token (sent as X-Tenzro-Admin-Token; falls back
+    /// to the TENZRO_ADMIN_TOKEN env var when omitted)
+    #[arg(long, default_value = "")]
+    admin_token: String,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -755,7 +1030,7 @@ impl IdentityForgetCmd {
         output::print_header("Forget Identity (Article 17)");
         let spinner = output::create_spinner("Erasing identity record...");
 
-        let rpc = RpcClient::new(&self.rpc);
+        let rpc = RpcClient::new(&self.rpc).with_admin_token(&self.admin_token);
         let result: serde_json::Value = rpc
             .call("tenzro_forgetIdentity", serde_json::json!({ "did": self.did }))
             .await?;

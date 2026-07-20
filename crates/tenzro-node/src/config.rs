@@ -388,6 +388,13 @@ pub struct BridgeConfig {
     /// instead of falling back to the governance-set rate table.
     #[serde(default)]
     pub chainlink_feeds: Option<ChainlinkFeedsConfig>,
+
+    /// Asset USD price oracle configuration. When set + `enabled = true`, the
+    /// node exposes `tenzro_getPrice` backed by Chainlink `SYMBOL/USD` feeds.
+    /// Independent of the fee oracle above (this surfaces raw per-symbol USD
+    /// prices for portfolio views, not bridge fee cross-rates).
+    #[serde(default)]
+    pub prices: Option<PriceFeedsConfig>,
 }
 
 /// Chainlink Data Feeds configuration for the bridge fee oracle.
@@ -445,6 +452,36 @@ pub struct DestNativeFeedConfig {
     pub tier: Option<String>,
 }
 
+/// Asset USD price oracle configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PriceFeedsConfig {
+    /// Master switch. Off by default; operators opt in.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Ethereum mainnet RPC URL for `eth_call` against the AggregatorV3 proxy
+    /// contracts. Point at a private dRPC endpoint or self-hosted node.
+    #[serde(default)]
+    pub rpc_url: Option<String>,
+
+    /// `SYMBOL/USD` feeds to register. Each priced by ticker via
+    /// `tenzro_getPrice`.
+    #[serde(default)]
+    pub symbols: Vec<SymbolFeedConfig>,
+}
+
+/// One `SYMBOL/USD` Chainlink feed registration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SymbolFeedConfig {
+    /// Ticker (e.g. `TNZO`, `ETH`, `BTC`).
+    pub symbol: String,
+    /// AggregatorV3 proxy address for `(symbol / USD)`.
+    pub feed_address: String,
+    /// Optional staleness tier: `major` | `longtail`. Default `major`.
+    #[serde(default)]
+    pub tier: Option<String>,
+}
+
 impl BridgeConfig {
     fn default_enabled() -> bool {
         true
@@ -476,6 +513,7 @@ impl Default for BridgeConfig {
             hyperlane: Self::default_adapter_enabled(),
             axelar: Self::default_adapter_enabled(),
             chainlink_feeds: None,
+            prices: None,
         }
     }
 }
@@ -1318,6 +1356,13 @@ pub struct NodeConfig {
     #[serde(default)]
     pub external_mcp_addr: Option<String>,
 
+    /// Upstream JSON-RPC endpoint consulted when a DID is absent from the
+    /// local identity registry (remote fallback resolution). Typically a
+    /// bootstrap validator, e.g. `Some("https://rpc.tenzro.xyz".to_string())`.
+    /// `None` disables remote fallback — unknown DIDs resolve to NotFound.
+    #[serde(default)]
+    pub did_fallback_rpc: Option<String>,
+
     /// Geographic locality of this node (free-form identifier such as
     /// `us-east`, `eu-west`, `ap-southeast`). Carried through to
     /// the gossiped `ProviderAnnouncementMessage::geography` so peers can
@@ -1326,6 +1371,23 @@ pub struct NodeConfig {
     /// not as a wildcard.
     #[serde(default)]
     pub geography: Option<String>,
+
+    /// Declared jurisdiction of this node: ISO 3166-1 alpha-2 country
+    /// code (e.g. `DE`, `SG`, `US`). Unlike `geography` (a free-form
+    /// routing hint), this is the machine-checkable locality claim that
+    /// jurisdiction-pinned inference filters on and that jurisdiction
+    /// receipts attest. When the node runs inside a TEE, the claim is
+    /// bound to the attestation report hash at announcement time. `None`
+    /// means the node never satisfies a jurisdiction pin (fail-closed).
+    #[serde(default)]
+    pub jurisdiction_country: Option<String>,
+
+    /// Regulatory blocs this node's jurisdiction belongs to, as free-form
+    /// uppercase tokens (e.g. `EU`, `EEA`, `GDPR`). Matched verbatim
+    /// (case-insensitive) against jurisdiction pins — the protocol imposes
+    /// no bloc vocabulary. Ignored unless `jurisdiction_country` is set.
+    #[serde(default)]
+    pub jurisdiction_blocs: Vec<String>,
 
     /// Tenzro iroh integration. The node always constructs a single
     /// `IrohBackedResolver` at startup and shares it across every consumer
@@ -1594,7 +1656,10 @@ impl NodeConfig {
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
+            did_fallback_rpc: None,
             geography: None,
+            jurisdiction_country: None,
+            jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
@@ -1637,7 +1702,10 @@ impl NodeConfig {
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
+            did_fallback_rpc: None,
             geography: None,
+            jurisdiction_country: None,
+            jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
@@ -1680,7 +1748,10 @@ impl NodeConfig {
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
+            did_fallback_rpc: None,
             geography: None,
+            jurisdiction_country: None,
+            jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             da_backend: DaBackendSelector::default(),
             erc8004_daml: None,
@@ -1723,7 +1794,10 @@ impl NodeConfig {
             cors_allowed_origins: Vec::new(),
             external_rpc_addr: None,
             external_mcp_addr: None,
+            did_fallback_rpc: None,
             geography: None,
+            jurisdiction_country: None,
+            jurisdiction_blocs: Vec::new(),
             iroh: tenzro_iroh::TenzroIrohConfig::default(),
             da_backend: DaBackendSelector::default(),
             erc8004_daml: None,

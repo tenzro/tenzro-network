@@ -10,6 +10,8 @@ use crate::rpc::RpcClient;
 pub enum BridgeFeeCommand {
     /// Quote a destination-native bridge fee in TNZO
     Quote(QuoteCmd),
+    /// Read asset prices from the node's price oracle (tenzro_getPrice)
+    Price(PriceCmd),
     /// Enumerate per-adapter sponsorship-pool vault addresses
     ListPools(ListPoolsCmd),
     /// (Admin) Register a governance-set rate row
@@ -28,6 +30,7 @@ impl BridgeFeeCommand {
     pub async fn execute(&self) -> Result<()> {
         match self {
             Self::Quote(c) => c.execute().await,
+            Self::Price(c) => c.execute().await,
             Self::ListPools(c) => c.execute().await,
             Self::SetRate(c) => c.execute().await,
             Self::Sponsor(c) => c.execute().await,
@@ -70,6 +73,37 @@ impl QuoteCmd {
                     "native_fee_smallest_unit": self.native_fee,
                 }),
             )
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct PriceCmd {
+    /// Single symbol to price (e.g. TNZO). Mutually usable with --symbols.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Comma-separated symbols (e.g. TNZO,ETH,USDC)
+    #[arg(long, value_delimiter = ',')]
+    symbols: Vec<String>,
+    #[arg(long, default_value_t = default_rpc())]
+    rpc: String,
+}
+
+impl PriceCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Asset Prices — Oracle");
+        let rpc = RpcClient::new(&self.rpc);
+        let mut params = serde_json::Map::new();
+        if let Some(s) = &self.symbol {
+            params.insert("symbol".into(), serde_json::json!(s));
+        }
+        if !self.symbols.is_empty() {
+            params.insert("symbols".into(), serde_json::json!(self.symbols));
+        }
+        let v: serde_json::Value = rpc
+            .call("tenzro_getPrice", serde_json::Value::Object(params))
             .await?;
         println!("{}", serde_json::to_string_pretty(&v)?);
         Ok(())

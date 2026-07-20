@@ -1,0 +1,397 @@
+//! Browser-launch passkey ceremony endpoints.
+//!
+//! Serves the WebAuthn half of the CLI login flow (gcloud-style device
+//! authorization): `tenzro passkey login` creates a pending session over
+//! JSON-RPC, opens `/auth/passkey?session=<id>` in the user's browser, the
+//! page below runs `navigator.credentials.create()` / `get()` against the
+//! session's challenge and posts the ceremony outcome back, and the CLI
+//! polls `tenzro_getPasskeySession` until the session is terminal.
+//!
+//! Three endpoints on the public Web API (port 8080):
+//!
+//! - `GET  /auth/passkey` — HTML+JS ceremony page. Reads the session id
+//!   from the `session` query parameter client-side. When the query
+//!   parameter is present and well-formed, the server also renders an
+//!   inline SVG QR code of the page's own URL so the user can hand the
+//!   ceremony off to a phone (where the passkey usually lives). This is
+//!   safe because the session is only claimed single-use at the
+//!   completion POST — any number of devices may *view* the session;
+//!   the first to complete wins and the page polls session state so the
+//!   other devices learn the outcome.
+//! - `GET  /auth/passkey/session/:id` — ceremony parameters for the page:
+//!   kind, challenge, and (for `add`/`sign`) the account's enrolled
+//!   credential ids so the page can populate
+//!   `excludeCredentials`/`allowCredentials`. Never exposes CLI-supplied
+//!   secrets (ML-DSA signatures stay server-side).
+//! - `POST /auth/passkey/session/:id/complete` — accepts the browser
+//!   payload and drives `passkey_rpc::complete_passkey_session`, which
+//!   claims the session single-use and executes the underlying
+//!   enroll/add/sign handler.
+//!
+//! The session id itself is the capability: 32 random bytes, 10-minute
+//! TTL, single-use claim — the same trust model as an OAuth device code.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::{
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{Html, IntoResponse, Response},
+    Json,
+};
+use serde_json::{json, Value};
+
+use super::handlers::WebState;
+use crate::rpc::JsonRpcError;
+
+/// Map a JSON-RPC error from the passkey layer onto an HTTP response.
+fn rpc_error_response(e: JsonRpcError) -> Response {
+    let status = match e.code {
+        -32404 => StatusCode::NOT_FOUND,
+        -32602 => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(json!({ "error": e.message, "code": e.code }))).into_response()
+}
+
+fn node_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "node not attached to web server" })),
+    )
+        .into_response()
+}
+
+/// `GET /auth/passkey/session/:id` — ceremony parameters for the browser
+/// page. Includes the challenge (the page needs it to run the ceremony)
+/// and, for `add`/`sign` sessions, the enrolled credential ids on the
+/// target account. Excludes everything else in `params` — in particular
+/// a pre-signed ML-DSA signature never crosses to the browser.
+pub async fn session_info(
+    State(state): State<Arc<WebState>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let Some(node) = state.node.as_ref() else {
+        return node_unavailable();
+    };
+    let Some(store) = node.passkey_sessions() else {
+        return node_unavailable();
+    };
+    let session = match store.get(&session_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return rpc_error_response(JsonRpcError {
+                code: -32404,
+                message: "Unknown or swept auth session".to_string(),
+                data: None,
+            });
+        }
+        Err(e) => return rpc_error_response(e),
+    };
+
+    let mut info = json!({
+        "session_id": session.session_id,
+        "kind": session.kind,
+        "status": session.status,
+        "challenge_b64": session.challenge_b64,
+        "expires_at_ms": session.expires_at_ms,
+        "display_name": session.params.get("display_name"),
+        "account_address": session.params.get("account_address"),
+        "label": session.params.get("label"),
+    });
+
+    // Enrolled credential ids for allowCredentials (sign) /
+    // excludeCredentials (add).
+    if let Some(account_hex) = session
+        .params
+        .get("account_address")
+        .and_then(Value::as_str)
+        && let (Some(validator), Ok(account)) = (
+            node.webauthn_validator(),
+            hex::decode(account_hex.trim_start_matches("0x")),
+        )
+    {
+        let ids: Vec<String> = validator
+            .list_credentials(&account)
+            .iter()
+            .map(hex::encode)
+            .collect();
+        info["credential_ids_hex"] = json!(ids);
+    }
+
+    (StatusCode::OK, Json(info)).into_response()
+}
+
+/// `POST /auth/passkey/session/:id/complete` — browser posts the ceremony
+/// outcome. Claims the session (single-use) and runs the underlying
+/// enroll/add/sign handler; the result is persisted on the session row for
+/// the CLI poller and also returned here so the page can render it.
+pub async fn session_complete(
+    State(state): State<Arc<WebState>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Response {
+    let Some(node) = state.node.as_ref() else {
+        return node_unavailable();
+    };
+    match crate::passkey_rpc::complete_passkey_session(node, &session_id, payload).await {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({ "status": "completed", "result": result })),
+        )
+            .into_response(),
+        Err(e) => rpc_error_response(e),
+    }
+}
+
+/// `GET /auth/passkey` — the ceremony page. Session-specific ceremony
+/// data is fetched client-side from the session-info endpoint using the
+/// `session` query parameter; the only server-side templating is the
+/// device-handoff QR code, rendered when a well-formed session id is
+/// present so the user can continue the ceremony on a phone.
+pub async fn passkey_page(
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Html<String> {
+    let qr_block = query
+        .get("session")
+        .filter(|sid| sid.len() == 64 && sid.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|sid| {
+            let url = format!(
+                "{}/auth/passkey?session={}",
+                super::oauth::derive_base_url(&headers),
+                sid
+            );
+            qrcode::QrCode::new(url.as_bytes()).ok()
+        })
+        .map(|code| {
+            let svg = code
+                .render::<qrcode::render::svg::Color>()
+                .min_dimensions(168, 168)
+                .quiet_zone(true)
+                .dark_color(qrcode::render::svg::Color("#e5e5e5"))
+                .light_color(qrcode::render::svg::Color("#111111"))
+                .build();
+            format!(
+                "<div id=\"qr\">{}<p>Or scan with your phone to continue there.</p></div>",
+                svg
+            )
+        })
+        .unwrap_or_default();
+    Html(PASSKEY_PAGE_HTML.replace("<!--QR-->", &qr_block))
+}
+
+const PASSKEY_PAGE_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tenzro Passkey</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; background: #0a0a0a; color: #e5e5e5;
+    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  .card {
+    max-width: 26rem; width: 100%; padding: 2rem; border-radius: 0.75rem;
+    border: 1px solid #262626; background: #111111;
+  }
+  h1 { font-size: 1.1rem; margin: 0 0 0.5rem; font-weight: 600; }
+  p { font-size: 0.9rem; line-height: 1.5; color: #a3a3a3; margin: 0.5rem 0; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.8rem;
+    color: #d4d4d4; word-break: break-all;
+  }
+  button {
+    margin-top: 1rem; width: 100%; padding: 0.65rem 1rem; border-radius: 0.5rem;
+    border: 1px solid #404040; background: #fafafa; color: #0a0a0a;
+    font-size: 0.9rem; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .ok { color: #4ade80; }
+  .err { color: #f87171; }
+  #qr { margin-top: 1.25rem; text-align: center; }
+  #qr svg { border-radius: 0.5rem; }
+  #qr p { font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 id="title">Tenzro Passkey</h1>
+  <p id="msg">Loading session&hellip;</p>
+  <p id="detail"></p>
+  <button id="go" hidden></button>
+  <!--QR-->
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const msg = (t, cls) => { const el = $('msg'); el.textContent = t; el.className = cls || ''; };
+  const detail = (t) => { $('detail').innerHTML = t; };
+
+  const b64urlToBytes = (s) => {
+    const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64 + '='.repeat((4 - b64.length % 4) % 4);
+    return Uint8Array.from(atob(pad), (c) => c.charCodeAt(0));
+  };
+  const hexToBytes = (h) => {
+    const s = h.replace(/^0x/, '');
+    const out = new Uint8Array(s.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
+    return out;
+  };
+  const bytesToHex = (buf) =>
+    Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+  const bytesToArray = (buf) => Array.from(new Uint8Array(buf));
+
+  const sessionId = new URLSearchParams(location.search).get('session');
+  if (!sessionId) { msg('Missing session parameter in the URL.', 'err'); return; }
+  if (!window.PublicKeyCredential) {
+    msg('This browser does not support WebAuthn passkeys.', 'err'); return;
+  }
+
+  const infoUrl = `/auth/passkey/session/${encodeURIComponent(sessionId)}`;
+
+  const extractP256 = (cred) => {
+    // response.getPublicKey() returns SPKI DER; the SEC1 point is the
+    // trailing 65 bytes and must start with 0x04 (uncompressed).
+    const spki = new Uint8Array(cred.response.getPublicKey());
+    const sec1 = spki.slice(spki.length - 65);
+    if (sec1[0] !== 0x04) throw new Error('unexpected public-key encoding (want uncompressed P-256)');
+    return bytesToHex(sec1);
+  };
+
+  const run = async (info) => {
+    const challenge = b64urlToBytes(info.challenge_b64);
+    if (info.kind === 'enroll' || info.kind === 'add') {
+      const name = info.kind === 'add'
+        ? (info.label || info.account_address || 'Tenzro account')
+        : (info.display_name || 'Tenzro account');
+      const opts = {
+        challenge,
+        rp: { name: 'Tenzro', id: location.hostname },
+        user: {
+          id: hexToBytes(info.session_id).slice(0, 16),
+          name,
+          displayName: name,
+        },
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+        authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+        timeout: 120000,
+      };
+      if (info.kind === 'add' && Array.isArray(info.credential_ids_hex)) {
+        opts.excludeCredentials = info.credential_ids_hex.map((h) => ({
+          type: 'public-key', id: hexToBytes(h),
+        }));
+      }
+      const cred = await navigator.credentials.create({ publicKey: opts });
+      return {
+        credential_id_hex: bytesToHex(cred.rawId),
+        passkey_public_key_hex: extractP256(cred),
+      };
+    }
+    // sign — the challenge IS the op hash.
+    const opts = {
+      challenge,
+      userVerification: 'required',
+      timeout: 120000,
+    };
+    if (Array.isArray(info.credential_ids_hex) && info.credential_ids_hex.length) {
+      opts.allowCredentials = info.credential_ids_hex.map((h) => ({
+        type: 'public-key', id: hexToBytes(h),
+      }));
+    }
+    const cred = await navigator.credentials.get({ publicKey: opts });
+    const r = cred.response;
+    return {
+      credential_id_hex: bytesToHex(cred.rawId),
+      assertion: {
+        authenticator_data: bytesToArray(r.authenticatorData),
+        client_data_json: bytesToArray(r.clientDataJSON),
+        signature: bytesToArray(r.signature),
+        user_handle: r.userHandle ? bytesToArray(r.userHandle) : null,
+      },
+    };
+  };
+
+  // Another device (a phone that scanned the QR) may complete the
+  // ceremony first. Poll session state so this page can report the
+  // outcome instead of failing a doomed local attempt.
+  let localDone = false;
+  let poller = null;
+  const stopPolling = () => { if (poller) { clearInterval(poller); poller = null; } };
+  const hideQr = () => { const q = $('qr'); if (q) q.hidden = true; };
+  const startPolling = () => {
+    poller = setInterval(async () => {
+      try {
+        const res = await fetch(infoUrl);
+        if (!res.ok) return;
+        const s = await res.json();
+        if (localDone || s.status === 'pending' || s.status === 'in_flight') return;
+        stopPolling();
+        hideQr();
+        $('go').hidden = true;
+        if (s.status === 'completed') {
+          msg('Completed on another device. You can return to your terminal.', 'ok');
+        } else {
+          msg(`Session ${s.status} — start a new one from the CLI.`, 'err');
+        }
+      } catch (_) { /* transient network error — keep polling */ }
+    }, 2500);
+  };
+
+  const start = async () => {
+    const res = await fetch(infoUrl);
+    const info = await res.json();
+    if (!res.ok) throw new Error(info.error || `session lookup failed (${res.status})`);
+    if (info.status !== 'pending') {
+      hideQr();
+      throw new Error(`session is ${info.status} — start a new one from the CLI`);
+    }
+    startPolling();
+
+    const verbs = {
+      enroll: 'Create a passkey to open your new Tenzro account.',
+      add: `Add a passkey to account ${info.account_address || ''}.`,
+      sign: `Approve the operation on account ${info.account_address || ''}.`,
+    };
+    msg(verbs[info.kind] || 'Ready.');
+    const go = $('go');
+    go.hidden = false;
+    go.textContent = info.kind === 'sign' ? 'Use passkey to approve' : 'Create passkey';
+    go.onclick = async () => {
+      go.disabled = true;
+      msg('Waiting for your authenticator…');
+      try {
+        const payload = await run(info);
+        msg('Submitting to the node…');
+        const done = await fetch(`${infoUrl}/complete`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const body = await done.json();
+        if (!done.ok) throw new Error(body.error || `completion failed (${done.status})`);
+        localDone = true;
+        stopPolling();
+        hideQr();
+        msg('Done. You can return to your terminal.', 'ok');
+        const acct = body.result && (body.result.account_address || body.result.accountAddress);
+        if (acct) detail(`Account: <code>${acct}</code>`);
+        go.hidden = true;
+      } catch (e) {
+        msg(e.message || String(e), 'err');
+        go.disabled = false;
+      }
+    };
+  };
+
+  start().catch((e) => msg(e.message || String(e), 'err'));
+})();
+</script>
+</body>
+</html>
+"#;

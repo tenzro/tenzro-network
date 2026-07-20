@@ -297,11 +297,12 @@ impl NodeThresholdSigner {
     }
 }
 
-/// `Arc`-wrapping adapter so `SignSession` can take the store by value
-/// without forcing `dyn KeyshareStore: Clone`.
+/// `Arc`-wrapping adapter so `SignSession` / `KeygenSession` can take the
+/// store by value without forcing `dyn KeyshareStore: Clone`. Shared with
+/// the DKG orchestration in [`crate::mpc_keygen`].
 #[derive(Clone)]
-struct StoreHandle {
-    inner: Arc<NodeKeyshareStore>,
+pub(crate) struct StoreHandle {
+    pub(crate) inner: Arc<NodeKeyshareStore>,
 }
 
 #[async_trait]
@@ -346,11 +347,12 @@ impl KeyshareStore for StoreHandle {
     }
 }
 
-/// `Arc`-wrapping adapter so `SignSession` can take the sealer by value
-/// without forcing `dyn KeyshareSealer: Clone`.
+/// `Arc`-wrapping adapter so `SignSession` / `KeygenSession` can take the
+/// sealer by value without forcing `dyn KeyshareSealer: Clone`. Shared with
+/// the DKG orchestration in [`crate::mpc_keygen`].
 #[derive(Clone)]
-struct SealerHandle {
-    inner: Arc<dyn KeyshareSealer>,
+pub(crate) struct SealerHandle {
+    pub(crate) inner: Arc<dyn KeyshareSealer>,
 }
 
 #[async_trait]

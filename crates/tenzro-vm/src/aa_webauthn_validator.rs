@@ -26,14 +26,21 @@
 //!
 //! # Signature wire format
 //!
-//! `userOp.signature` is the bincode encoding of [`HybridWebAuthnSignature`]:
+//! `userOp.signature` is the bincode encoding of
+//! `Vec<HybridWebAuthnSignature>` — one entry per contributing credential:
 //!
 //! ```text
-//! HybridWebAuthnSignature {
+//! [HybridWebAuthnSignature {
 //!     assertion: WebAuthnAssertion,   // raw authenticatorData / clientDataJSON / DER sig
 //!     ml_dsa_signature: Vec<u8>,       // 3309 bytes (ML-DSA-65)
-//! }
+//!     credential_id: Vec<u8>,          // which enrolled passkey signed
+//! }, ..]
 //! ```
+//!
+//! The entry count must equal the account's [`SecondFactorPolicy`]
+//! requirement exactly: one for the default
+//! [`SecondFactorPolicy::SingleCredential`], two distinct credentials for
+//! [`SecondFactorPolicy::TwoCredentials`].
 //!
 //! # Challenge binding
 //!
@@ -124,6 +131,41 @@ impl WebAuthnAccountKey {
 }
 
 // -----------------------------------------------------------------------------
+// Second-factor policy
+// -----------------------------------------------------------------------------
+
+/// Per-account signing policy: how many distinct enrolled passkey
+/// credentials must co-sign a UserOperation.
+///
+/// The default is [`SecondFactorPolicy::SingleCredential`] — any one
+/// enrolled credential authorises. Accounts opt into two-factor signing
+/// (e.g. laptop passkey + phone passkey) via
+/// [`WebAuthnValidator::set_second_factor_policy`]. Pairing a passkey
+/// with a hardware Ed25519 signer instead is expressed by installing the
+/// hardware-signer validator module alongside this one —
+/// `ValidatorRegistry::validate_user_op` AND-combines every installed
+/// module, so no policy variant is needed for that combination.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecondFactorPolicy {
+    /// Any single enrolled credential authorises (default).
+    #[default]
+    SingleCredential,
+    /// Two distinct enrolled credentials must both sign the same op hash.
+    TwoCredentials,
+}
+
+impl SecondFactorPolicy {
+    /// Exact number of signature-bundle entries the policy demands.
+    pub fn required_signatures(&self) -> usize {
+        match self {
+            Self::SingleCredential => 1,
+            Self::TwoCredentials => 2,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Wire-format hybrid signature
 // -----------------------------------------------------------------------------
 
@@ -144,17 +186,19 @@ pub struct HybridWebAuthnSignature {
 }
 
 impl HybridWebAuthnSignature {
-    /// Encode for embedding in `userOp.signature`. Uses bincode 1.x default
-    /// config (fixint-encoded lengths, little-endian) — matches the
-    /// workspace-pinned bincode version.
-    pub fn encode(&self) -> Result<Vec<u8>, ValidatorError> {
-        bincode::serialize(self)
+    /// Encode a signature bundle for embedding in `userOp.signature`.
+    /// One entry per contributing credential — the entry count must match
+    /// the account's [`SecondFactorPolicy`] exactly. Uses bincode 1.x
+    /// default config (fixint-encoded lengths, little-endian) — matches
+    /// the workspace-pinned bincode version.
+    pub fn encode_bundle(signatures: &[Self]) -> Result<Vec<u8>, ValidatorError> {
+        bincode::serialize(signatures)
             .map_err(|e| ValidatorError::InvalidInput(format!("bincode encode: {}", e)))
     }
 
-    /// Decode from `userOp.signature` bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Self, ValidatorError> {
-        bincode::deserialize::<Self>(bytes)
+    /// Decode a signature bundle from `userOp.signature` bytes.
+    pub fn decode_bundle(bytes: &[u8]) -> Result<Vec<Self>, ValidatorError> {
+        bincode::deserialize::<Vec<Self>>(bytes)
             .map_err(|e| ValidatorError::InvalidInput(format!("bincode decode: {}", e)))
     }
 }
@@ -185,11 +229,17 @@ pub struct WebAuthnValidator {
     /// validator can dispatch a signature directly to the credential
     /// that produced it in O(1).
     enrollments: DashMap<Vec<u8>, DashMap<Vec<u8>, WebAuthnAccountKey>>,
+    /// Per-account [`SecondFactorPolicy`]. Absent entry = default
+    /// [`SecondFactorPolicy::SingleCredential`]; only the opt-in
+    /// `TwoCredentials` value is stored (and persisted).
+    policies: DashMap<Vec<u8>, SecondFactorPolicy>,
     /// Optional persistent storage. When present, every `enroll` /
-    /// `revoke_credential` / `revoke_account` writes through to
+    /// `revoke_credential` / `revoke_account` /
+    /// `set_second_factor_policy` writes through to
     /// `CF_VALIDATOR_MODULES` under the
-    /// `erc7579/webauthn/<account_hex>/<credential_id_hex>` prefix and
-    /// the constructor hydrates `enrollments` from the same prefix.
+    /// `erc7579/webauthn/<account_hex>/<credential_id_hex>` (enrollments)
+    /// and `erc7579/webauthn_policy/<account_hex>` (policies) prefixes,
+    /// and the constructor hydrates both maps from the same prefixes.
     /// Production constructor `with_storage()` always wires this; tests
     /// use `new()` for the in-memory-only path.
     storage: Option<Arc<dyn tenzro_storage::KvStore>>,
@@ -204,6 +254,7 @@ impl WebAuthnValidator {
             address,
             expected_origin,
             enrollments: DashMap::new(),
+            policies: DashMap::new(),
             storage: None,
         }
     }
@@ -222,6 +273,7 @@ impl WebAuthnValidator {
             address,
             expected_origin,
             enrollments: DashMap::new(),
+            policies: DashMap::new(),
             storage: Some(storage),
         };
         v.hydrate();
@@ -239,6 +291,16 @@ impl WebAuthnValidator {
         k.extend_from_slice(account);
         k.push(b'/');
         k.extend_from_slice(credential_id);
+        k
+    }
+
+    /// Persistence key for the per-account second-factor policy:
+    /// `erc7579/webauthn_policy/<account_bytes>`. The `_policy` suffix
+    /// keeps this prefix disjoint from the enrollment scan prefix
+    /// (`erc7579/webauthn/` — byte after "webauthn" is `/` vs `_`).
+    fn policy_key(account: &[u8]) -> Vec<u8> {
+        let mut k = b"erc7579/webauthn_policy/".to_vec();
+        k.extend_from_slice(account);
         k
     }
 
@@ -268,6 +330,22 @@ impl WebAuthnValidator {
                     .entry(account)
                     .or_default();
                 inner.insert(credential_id, record);
+            }
+        }
+        // Second scan: per-account second-factor policies.
+        let policy_prefix = b"erc7579/webauthn_policy/";
+        let policy_entries =
+            match storage.scan_prefix(tenzro_storage::CF_VALIDATOR_MODULES, policy_prefix) {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+        for (key, value) in policy_entries {
+            if key.len() <= policy_prefix.len() {
+                continue;
+            }
+            let account = key[policy_prefix.len()..].to_vec();
+            if let Ok(policy) = bincode::deserialize::<SecondFactorPolicy>(&value) {
+                self.policies.insert(account, policy);
             }
         }
     }
@@ -324,12 +402,40 @@ impl WebAuthnValidator {
         Ok(())
     }
 
-    /// Remove a single credential from an account. Returns `true` if a
-    /// record was removed. The account itself is removed from the
-    /// outer map only when its last credential is revoked.
-    pub fn revoke_credential(&self, account: &[u8], credential_id: &[u8]) -> bool {
+    /// Remove a single credential from an account. Returns `Ok(true)` if
+    /// a record was removed, `Ok(false)` if no such credential exists.
+    /// The account itself is removed from the outer map only when its
+    /// last credential is revoked.
+    ///
+    /// **Policy floor.** When the account's [`SecondFactorPolicy`]
+    /// requires more than one credential, a revoke that would leave the
+    /// account below that floor is refused with `Err` — the caller must
+    /// downgrade the policy explicitly first. This prevents both silent
+    /// two-factor weakening and bricking (a `TwoCredentials` account
+    /// with one credential could never sign again). Removing the *last*
+    /// credential under the default `SingleCredential` policy remains
+    /// allowed: the account becomes recoverable-only (guardian recovery
+    /// or fresh enrollment), which is the intended lost-device path.
+    pub fn revoke_credential(
+        &self,
+        account: &[u8],
+        credential_id: &[u8],
+    ) -> Result<bool, ValidatorError> {
         let mut last_credential_removed = false;
         let removed = if let Some(inner) = self.enrollments.get(account) {
+            let required = self.second_factor_policy(account).required_signatures();
+            if required > 1
+                && inner.contains_key(credential_id)
+                && inner.len() - 1 < required
+            {
+                return Err(ValidatorError::InvalidInput(format!(
+                    "revoking this credential would leave {} enrolled but the \
+                     account's second-factor policy requires {}; downgrade the \
+                     policy first",
+                    inner.len() - 1,
+                    required
+                )));
+            }
             let r = inner.remove(credential_id).is_some();
             if r && inner.is_empty() {
                 last_credential_removed = true;
@@ -344,13 +450,21 @@ impl WebAuthnValidator {
         if removed {
             self.forget(account, credential_id);
         }
-        removed
+        Ok(removed)
     }
 
     /// Remove every credential for an account at once (e.g. an account
     /// closure). Returns the number of credentials revoked. Persisted
-    /// rows for the removed credentials are also deleted.
+    /// rows for the removed credentials are also deleted, along with the
+    /// account's second-factor policy.
     pub fn revoke_account(&self, account: &[u8]) -> usize {
+        self.policies.remove(account);
+        if let Some(ref storage) = self.storage {
+            let _ = storage.delete(
+                tenzro_storage::CF_VALIDATOR_MODULES,
+                &Self::policy_key(account),
+            );
+        }
         let credentials: Vec<Vec<u8>> = if let Some(inner) = self.enrollments.get(account) {
             inner.iter().map(|e| e.key().clone()).collect()
         } else {
@@ -361,6 +475,64 @@ impl WebAuthnValidator {
         }
         self.enrollments.remove(account);
         credentials.len()
+    }
+
+    /// Set the account's [`SecondFactorPolicy`].
+    ///
+    /// `TwoCredentials` requires at least two credentials already
+    /// enrolled — otherwise the account could never satisfy its own
+    /// policy. `SingleCredential` (the default) is stored as *absence*:
+    /// the map entry and the persisted row are removed.
+    pub fn set_second_factor_policy(
+        &self,
+        account: Vec<u8>,
+        policy: SecondFactorPolicy,
+    ) -> Result<(), ValidatorError> {
+        match policy {
+            SecondFactorPolicy::SingleCredential => {
+                self.policies.remove(&account);
+                if let Some(ref storage) = self.storage {
+                    let _ = storage.delete(
+                        tenzro_storage::CF_VALIDATOR_MODULES,
+                        &Self::policy_key(&account),
+                    );
+                }
+            }
+            SecondFactorPolicy::TwoCredentials => {
+                let enrolled = self
+                    .enrollments
+                    .get(&account)
+                    .map(|inner| inner.len())
+                    .unwrap_or(0);
+                if enrolled < 2 {
+                    return Err(ValidatorError::InvalidInput(format!(
+                        "two-credential policy requires at least 2 enrolled \
+                         credentials, account has {}",
+                        enrolled
+                    )));
+                }
+                if let Some(ref storage) = self.storage
+                    && let Ok(bytes) = bincode::serialize(&policy)
+                {
+                    let _ = storage.put(
+                        tenzro_storage::CF_VALIDATOR_MODULES,
+                        &Self::policy_key(&account),
+                        &bytes,
+                    );
+                }
+                self.policies.insert(account, policy);
+            }
+        }
+        Ok(())
+    }
+
+    /// The account's current [`SecondFactorPolicy`]. Accounts with no
+    /// stored policy default to `SingleCredential`.
+    pub fn second_factor_policy(&self, account: &[u8]) -> SecondFactorPolicy {
+        self.policies
+            .get(account)
+            .map(|e| *e.value())
+            .unwrap_or_default()
     }
 
     /// Look up a specific credential by `(account, credential_id)`.
@@ -399,6 +571,65 @@ impl WebAuthnValidator {
     pub fn expected_challenge_for(op_hash: &[u8; 32]) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(op_hash)
     }
+
+    /// Verify a decoded signature bundle against `account` and `hash`.
+    ///
+    /// Fail-closed checks, in order:
+    /// 1. bundle length must EXACTLY equal the account policy's
+    ///    [`SecondFactorPolicy::required_signatures`] — over-supplying
+    ///    signatures is as invalid as under-supplying (a strict count
+    ///    keeps the wire format canonical);
+    /// 2. every entry must address a *distinct* credential — the same
+    ///    passkey signing twice does not satisfy a two-factor policy;
+    /// 3. per entry: ML-DSA length gate, credential lookup (unknown
+    ///    `(account, credential_id)` fails closed with no fallback),
+    ///    the WebAuthn P-256 leg over the derived challenge, and the
+    ///    ML-DSA-65 leg over the raw hash.
+    fn verify_bundle(
+        &self,
+        account: &[u8],
+        bundle: &[HybridWebAuthnSignature],
+        hash: &[u8; 32],
+    ) -> bool {
+        let required = self.second_factor_policy(account).required_signatures();
+        if bundle.len() != required {
+            return false;
+        }
+        // Pairwise-distinct credential ids. Bundles are 1–2 entries, so
+        // the quadratic scan is the cheapest correct check.
+        for i in 0..bundle.len() {
+            for j in (i + 1)..bundle.len() {
+                if bundle[i].credential_id == bundle[j].credential_id {
+                    return false;
+                }
+            }
+        }
+        let expected_challenge = Self::expected_challenge_for(hash);
+        for entry in bundle {
+            if entry.ml_dsa_signature.len() != ML_DSA_65_SIG_LEN {
+                return false;
+            }
+            let Some(key) = self.get_credential(account, &entry.credential_id) else {
+                return false;
+            };
+            let pubkey_xy = key.p256_public_key_xy();
+            if verify_webauthn_assertion(
+                &entry.assertion,
+                &pubkey_xy,
+                &expected_challenge,
+                &self.expected_origin,
+                WebAuthnCeremonyType::Get,
+            )
+            .is_err()
+            {
+                return false;
+            }
+            if ml_dsa_verify(&key.pq_pubkey, hash, &entry.ml_dsa_signature).is_err() {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 impl IValidator for WebAuthnValidator {
@@ -411,50 +642,19 @@ impl IValidator for WebAuthnValidator {
         op: &UserOperation,
         op_hash: &[u8; 32],
     ) -> Result<ValidationData, ValidatorError> {
-        // 1. Decode the hybrid signature wire format. The credential_id
-        //    inside identifies *which* enrolled passkey signed.
-        let hybrid = match HybridWebAuthnSignature::decode(&op.signature) {
-            Ok(h) => h,
+        // Decode the signature bundle — one entry per contributing
+        // credential — then run the policy-aware verification: exact
+        // entry count per the account's SecondFactorPolicy, distinct
+        // credential ids, both hybrid legs per entry.
+        let bundle = match HybridWebAuthnSignature::decode_bundle(&op.signature) {
+            Ok(b) => b,
             Err(_) => return Ok(ValidationData::failure()),
         };
-
-        // 2. Length-check the ML-DSA leg before doing any expensive crypto.
-        if hybrid.ml_dsa_signature.len() != ML_DSA_65_SIG_LEN {
-            return Ok(ValidationData::failure());
+        if self.verify_bundle(&op.sender, &bundle, op_hash) {
+            Ok(ValidationData::success())
+        } else {
+            Ok(ValidationData::failure())
         }
-
-        // 3. Dispatch to the specific enrolled credential. Unknown
-        //    `(sender, credential_id)` fails closed — no fallback to any
-        //    other credential on the account, because we want the
-        //    signature's identification of which device signed to be
-        //    cryptographically meaningful.
-        let Some(key) = self.get_credential(&op.sender, &hybrid.credential_id) else {
-            return Ok(ValidationData::failure());
-        };
-
-        // 4. Verify the WebAuthn (P-256) leg. Challenge derives from op_hash
-        // — the relying party must have issued exactly this challenge.
-        let expected_challenge = Self::expected_challenge_for(op_hash);
-        let pubkey_xy = key.p256_public_key_xy();
-        if verify_webauthn_assertion(
-            &hybrid.assertion,
-            &pubkey_xy,
-            &expected_challenge,
-            &self.expected_origin,
-            WebAuthnCeremonyType::Get,
-        )
-        .is_err()
-        {
-            return Ok(ValidationData::failure());
-        }
-
-        // 5. Verify the ML-DSA-65 leg over the same op_hash.
-        if ml_dsa_verify(&key.pq_pubkey, op_hash, &hybrid.ml_dsa_signature).is_err() {
-            return Ok(ValidationData::failure());
-        }
-
-        // Both legs passed against the addressed credential.
-        Ok(ValidationData::success())
     }
 
     fn is_valid_signature_with_sender(
@@ -463,32 +663,14 @@ impl IValidator for WebAuthnValidator {
         hash: &[u8; 32],
         signature: &[u8],
     ) -> [u8; 4] {
-        let Ok(hybrid) = HybridWebAuthnSignature::decode(signature) else {
+        let Ok(bundle) = HybridWebAuthnSignature::decode_bundle(signature) else {
             return ERC1271_FAILURE_VALUE;
         };
-        if hybrid.ml_dsa_signature.len() != ML_DSA_65_SIG_LEN {
-            return ERC1271_FAILURE_VALUE;
+        if self.verify_bundle(sender, &bundle, hash) {
+            ERC1271_MAGIC_VALUE
+        } else {
+            ERC1271_FAILURE_VALUE
         }
-        let Some(key) = self.get_credential(sender, &hybrid.credential_id) else {
-            return ERC1271_FAILURE_VALUE;
-        };
-        let expected_challenge = Self::expected_challenge_for(hash);
-        let pubkey_xy = key.p256_public_key_xy();
-        if verify_webauthn_assertion(
-            &hybrid.assertion,
-            &pubkey_xy,
-            &expected_challenge,
-            &self.expected_origin,
-            WebAuthnCeremonyType::Get,
-        )
-        .is_err()
-        {
-            return ERC1271_FAILURE_VALUE;
-        }
-        if ml_dsa_verify(&key.pq_pubkey, hash, &hybrid.ml_dsa_signature).is_err() {
-            return ERC1271_FAILURE_VALUE;
-        }
-        ERC1271_MAGIC_VALUE
     }
 }
 
@@ -509,11 +691,13 @@ mod tests {
 
     const ORIGIN: &str = "https://keys.tenzro.xyz";
 
-    /// Build a self-consistent enrollment + assertion + ML-DSA sig over `op_hash`.
-    /// Returns (credential_id, enrollment, hybrid_signature_bytes). The
+    /// Build a self-consistent enrollment + assertion + ML-DSA sig over
+    /// `op_hash`. Returns (credential_id, enrollment, signature_leg). The
     /// credential id is a freshly-generated 16-byte identifier so each
-    /// call to `make_hybrid_sig` represents a distinct passkey credential.
-    fn make_hybrid_sig(op_hash: &[u8; 32]) -> (Vec<u8>, WebAuthnAccountKey, Vec<u8>) {
+    /// call represents a distinct passkey credential.
+    fn make_hybrid_leg(
+        op_hash: &[u8; 32],
+    ) -> (Vec<u8>, WebAuthnAccountKey, HybridWebAuthnSignature) {
         // Synthesize a per-credential id. In production the id comes
         // from the authenticator; tests just need uniqueness, so any
         // 16-byte unique value works.
@@ -587,7 +771,15 @@ mod tests {
             ml_dsa_signature: ml_dsa_sig,
             credential_id: credential_id.clone(),
         };
-        let bytes = hybrid.encode().expect("encode");
+        (credential_id, enrollment, hybrid)
+    }
+
+    /// Single-credential convenience: leg wrapped as a one-entry bundle,
+    /// already wire-encoded for `userOp.signature`.
+    fn make_hybrid_sig(op_hash: &[u8; 32]) -> (Vec<u8>, WebAuthnAccountKey, Vec<u8>) {
+        let (credential_id, enrollment, leg) = make_hybrid_leg(op_hash);
+        let bytes =
+            HybridWebAuthnSignature::encode_bundle(std::slice::from_ref(&leg)).expect("encode");
         (credential_id, enrollment, bytes)
     }
 
@@ -691,9 +883,9 @@ mod tests {
         let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
         // Decode, truncate the ML-DSA leg, re-encode.
-        let mut hybrid = HybridWebAuthnSignature::decode(&sig_bytes).unwrap();
-        hybrid.ml_dsa_signature.truncate(100);
-        let bad_bytes = hybrid.encode().unwrap();
+        let mut bundle = HybridWebAuthnSignature::decode_bundle(&sig_bytes).unwrap();
+        bundle[0].ml_dsa_signature.truncate(100);
+        let bad_bytes = HybridWebAuthnSignature::encode_bundle(&bundle).unwrap();
 
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
@@ -711,9 +903,9 @@ mod tests {
         let op_hash = [0x42u8; 32];
         let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 
-        let mut hybrid = HybridWebAuthnSignature::decode(&sig_bytes).unwrap();
-        hybrid.ml_dsa_signature[100] ^= 0x01;
-        let bad_bytes = hybrid.encode().unwrap();
+        let mut bundle = HybridWebAuthnSignature::decode_bundle(&sig_bytes).unwrap();
+        bundle[0].ml_dsa_signature[100] ^= 0x01;
+        let bad_bytes = HybridWebAuthnSignature::encode_bundle(&bundle).unwrap();
 
         let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
         let account = vec![0x01; 20];
@@ -760,11 +952,11 @@ mod tests {
         assert_eq!(validator.enrolled_credential_count(), 1);
         assert!(validator.get_credential(&account, &cred_id).is_some());
 
-        assert!(validator.revoke_credential(&account, &cred_id));
+        assert!(validator.revoke_credential(&account, &cred_id).unwrap());
         assert_eq!(validator.enrolled_account_count(), 0);
         assert!(validator.get_credential(&account, &cred_id).is_none());
         assert!(
-            !validator.revoke_credential(&account, &cred_id),
+            !validator.revoke_credential(&account, &cred_id).unwrap(),
             "second revoke is a no-op"
         );
     }
@@ -855,7 +1047,7 @@ mod tests {
 
         // Revoking credential A: signature A no longer validates, but
         // credential B is unaffected — the account is still usable.
-        assert!(validator.revoke_credential(&account, &cred_id_a));
+        assert!(validator.revoke_credential(&account, &cred_id_a).unwrap());
         let op_a_again = dummy_user_op(account.clone(), sig_a);
         assert!(
             validator
@@ -885,6 +1077,198 @@ mod tests {
         assert_eq!(validator.enrolled_account_count(), 0);
         assert_eq!(validator.enrolled_credential_count(), 0);
         assert!(validator.list_credentials(&account).is_empty());
+    }
+
+    #[test]
+    fn two_credential_policy_requires_both_signatures() {
+        let op_hash = [0x42u8; 32];
+        let (cred_a, key_a, leg_a) = make_hybrid_leg(&op_hash);
+        let (cred_b, key_b, leg_b) = make_hybrid_leg(&op_hash);
+        assert_ne!(cred_a, cred_b);
+
+        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let account = vec![0x01; 20];
+        validator.enroll(account.clone(), cred_a, key_a).unwrap();
+        validator.enroll(account.clone(), cred_b, key_b).unwrap();
+        validator
+            .set_second_factor_policy(account.clone(), SecondFactorPolicy::TwoCredentials)
+            .unwrap();
+        assert_eq!(
+            validator.second_factor_policy(&account),
+            SecondFactorPolicy::TwoCredentials
+        );
+
+        // Both credentials signing the same op hash → success.
+        let both =
+            HybridWebAuthnSignature::encode_bundle(&[leg_a.clone(), leg_b.clone()]).unwrap();
+        let op = dummy_user_op(account.clone(), both);
+        assert!(!validator.validate_user_op(&op, &op_hash).unwrap().is_failure());
+
+        // A single credential no longer satisfies the policy.
+        let single =
+            HybridWebAuthnSignature::encode_bundle(std::slice::from_ref(&leg_a)).unwrap();
+        let op_single = dummy_user_op(account.clone(), single);
+        assert!(
+            validator
+                .validate_user_op(&op_single, &op_hash)
+                .unwrap()
+                .is_failure(),
+            "one signature must not satisfy a two-credential policy"
+        );
+
+        // The same credential twice is not two factors.
+        let duplicated =
+            HybridWebAuthnSignature::encode_bundle(&[leg_a.clone(), leg_a]).unwrap();
+        let op_dup = dummy_user_op(account.clone(), duplicated);
+        assert!(
+            validator
+                .validate_user_op(&op_dup, &op_hash)
+                .unwrap()
+                .is_failure(),
+            "duplicate credential ids must fail"
+        );
+
+        // Over-supplying against the default single-credential policy also
+        // fails: exact count is enforced both ways.
+        let other_account = vec![0x02; 20];
+        let (cred_c, key_c, leg_c) = make_hybrid_leg(&op_hash);
+        let (cred_d, key_d, leg_d) = make_hybrid_leg(&op_hash);
+        validator.enroll(other_account.clone(), cred_c, key_c).unwrap();
+        validator.enroll(other_account.clone(), cred_d, key_d).unwrap();
+        let two_on_single =
+            HybridWebAuthnSignature::encode_bundle(&[leg_c, leg_d]).unwrap();
+        let op_two = dummy_user_op(other_account, two_on_single);
+        assert!(
+            validator
+                .validate_user_op(&op_two, &op_hash)
+                .unwrap()
+                .is_failure(),
+            "two signatures must not satisfy a single-credential policy"
+        );
+    }
+
+    #[test]
+    fn set_two_credential_policy_requires_two_enrollments() {
+        let op_hash = [0x42u8; 32];
+        let (cred_id, key, _leg) = make_hybrid_leg(&op_hash);
+        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let account = vec![0x01; 20];
+
+        // Zero enrolled → refuse.
+        let err = validator
+            .set_second_factor_policy(account.clone(), SecondFactorPolicy::TwoCredentials)
+            .unwrap_err();
+        assert!(matches!(err, ValidatorError::InvalidInput(_)));
+
+        // One enrolled → still refuse.
+        validator.enroll(account.clone(), cred_id, key).unwrap();
+        assert!(validator
+            .set_second_factor_policy(account.clone(), SecondFactorPolicy::TwoCredentials)
+            .is_err());
+        assert_eq!(
+            validator.second_factor_policy(&account),
+            SecondFactorPolicy::SingleCredential
+        );
+    }
+
+    #[test]
+    fn revoke_below_policy_floor_refused_until_downgrade() {
+        let op_hash = [0x42u8; 32];
+        let (cred_a, key_a, _leg_a) = make_hybrid_leg(&op_hash);
+        let (cred_b, key_b, _leg_b) = make_hybrid_leg(&op_hash);
+
+        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let account = vec![0x01; 20];
+        validator.enroll(account.clone(), cred_a.clone(), key_a).unwrap();
+        validator.enroll(account.clone(), cred_b, key_b).unwrap();
+        validator
+            .set_second_factor_policy(account.clone(), SecondFactorPolicy::TwoCredentials)
+            .unwrap();
+
+        // Revoking either credential would leave 1 < 2 required → refused.
+        assert!(validator.revoke_credential(&account, &cred_a).is_err());
+        assert_eq!(validator.enrolled_credential_count(), 2);
+
+        // Explicit downgrade first, then the revoke goes through.
+        validator
+            .set_second_factor_policy(account.clone(), SecondFactorPolicy::SingleCredential)
+            .unwrap();
+        assert!(validator.revoke_credential(&account, &cred_a).unwrap());
+        assert_eq!(validator.enrolled_credential_count(), 1);
+    }
+
+    #[test]
+    fn revoke_account_clears_policy() {
+        let op_hash = [0x42u8; 32];
+        let (cred_a, key_a, _leg_a) = make_hybrid_leg(&op_hash);
+        let (cred_b, key_b, _leg_b) = make_hybrid_leg(&op_hash);
+
+        let validator = WebAuthnValidator::new([0xCCu8; 20], ORIGIN.to_string());
+        let account = vec![0x01; 20];
+        validator.enroll(account.clone(), cred_a, key_a).unwrap();
+        validator.enroll(account.clone(), cred_b, key_b).unwrap();
+        validator
+            .set_second_factor_policy(account.clone(), SecondFactorPolicy::TwoCredentials)
+            .unwrap();
+
+        assert_eq!(validator.revoke_account(&account), 2);
+        assert_eq!(
+            validator.second_factor_policy(&account),
+            SecondFactorPolicy::SingleCredential,
+            "account closure must clear the stored policy"
+        );
+    }
+
+    #[test]
+    fn second_factor_policy_persists_across_restart() {
+        use std::sync::Arc;
+        let store: Arc<dyn tenzro_storage::KvStore> =
+            Arc::new(tenzro_storage::MemoryStore::new());
+        let module_addr = [0x10u8; 20];
+        let origin = ORIGIN.to_string();
+        let account = vec![0xA1u8; 20];
+        let cred_a = vec![0xC1u8; 16];
+        let cred_b = vec![0xC2u8; 16];
+        let key_a = WebAuthnAccountKey::new(
+            [0x11u8; 32],
+            [0x22u8; 32],
+            vec![0x33u8; ML_DSA_65_VK_LEN],
+        )
+        .unwrap();
+        let key_b = WebAuthnAccountKey::new(
+            [0x44u8; 32],
+            [0x55u8; 32],
+            vec![0x66u8; ML_DSA_65_VK_LEN],
+        )
+        .unwrap();
+
+        {
+            let v = WebAuthnValidator::with_storage(module_addr, origin.clone(), store.clone());
+            v.enroll(account.clone(), cred_a.clone(), key_a).unwrap();
+            v.enroll(account.clone(), cred_b, key_b).unwrap();
+            v.set_second_factor_policy(account.clone(), SecondFactorPolicy::TwoCredentials)
+                .unwrap();
+        }
+
+        let v2 = WebAuthnValidator::with_storage(module_addr, origin.clone(), store.clone());
+        assert_eq!(
+            v2.second_factor_policy(&account),
+            SecondFactorPolicy::TwoCredentials,
+            "policy must hydrate"
+        );
+        // Floor guard active after restart too.
+        assert!(v2.revoke_credential(&account, &cred_a).is_err());
+
+        // Downgrade persists as row deletion.
+        v2.set_second_factor_policy(account.clone(), SecondFactorPolicy::SingleCredential)
+            .unwrap();
+        drop(v2);
+        let v3 = WebAuthnValidator::with_storage(module_addr, origin, store);
+        assert_eq!(
+            v3.second_factor_policy(&account),
+            SecondFactorPolicy::SingleCredential
+        );
+        assert!(v3.revoke_credential(&account, &cred_a).unwrap());
     }
 
     // Explicitly test that NoOpValidator is NOT this validator — sanity check
@@ -952,7 +1336,7 @@ mod tests {
         assert_eq!(restored_a2.pubkey_x, key_a2.pubkey_x);
 
         // Revoke only credential A1; A2 must still be reachable after restart.
-        assert!(v2.revoke_credential(&account_a, &cred_a1));
+        assert!(v2.revoke_credential(&account_a, &cred_a1).unwrap());
         drop(v2);
         let v3 = WebAuthnValidator::with_storage(module_addr, origin, store);
         assert_eq!(v3.enrolled_credential_count(), 2);

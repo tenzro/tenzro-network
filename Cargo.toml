@@ -255,11 +255,14 @@ parking_lot = "0.12"
 clap = { version = "4", features = ["derive", "env"] }
 indicatif = "0.17"
 dialoguer = "0.11"
+console = "0.15"
 
 # Web server
 axum = "0.7"
 tower-http = { version = "0.6", features = ["cors", "limit"] }
 tower = { version = "0.5", features = ["limit"] }
+# Server-rendered SVG QR codes for the passkey device-handoff page.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 # HTTP client — pinned to rustls + aws-lc-rs so it inherits the PQ-hybrid TLS named group.
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-manual-roots", "http2", "charset"] }

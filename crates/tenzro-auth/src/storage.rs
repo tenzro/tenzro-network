@@ -218,6 +218,15 @@ pub fn refresh_token_key(token: &str) -> String {
     format!("auth_refresh:{}", token)
 }
 
+/// Helper: storage key for a DPoP replay-window entry. The value is
+/// the entry's expiry as 8 little-endian bytes (Unix seconds).
+pub fn dpop_replay_key(jti: &str) -> String {
+    format!("auth_dpop_jti:{}", jti)
+}
+
+/// Prefix for [`dpop_replay_key`] rows — used by the hydrate scan.
+pub const DPOP_REPLAY_PREFIX: &[u8] = b"auth_dpop_jti:";
+
 /// Helper: storage key for an audit event by its primary id.
 pub fn audit_key(event_id: &str) -> String {
     format!("audit:{}", event_id)
