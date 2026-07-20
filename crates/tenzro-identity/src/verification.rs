@@ -1020,7 +1020,7 @@ mod tests {
             id.did_string(),
             id.did_string(),
         );
-        let msg = serde_json::to_vec(&cred.credential_subject).unwrap();
+        let msg = cred.credential_subject.canonical_bytes().unwrap();
         let sig = Ed25519SignerImpl::new(kp).unwrap().sign(&msg).unwrap();
         cred = cred.with_proof(CredentialProof::new(
             "Ed25519",

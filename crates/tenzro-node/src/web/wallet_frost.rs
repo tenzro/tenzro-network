@@ -47,10 +47,16 @@
 //!                          (TTL 5min)──▶ expired
 //! ```
 //!
-//! Sessions live in an in-memory [`FrostCoordinator`] keyed by
-//! `session_id`. A background sweeper drops sessions older than 5
-//! minutes (`SESSION_TTL_SECS`). Durable persistence is a follow-up
-//! once we're ready to survive node restarts mid-signing.
+//! Sessions live in a [`FrostCoordinator`] keyed by `session_id`. The
+//! coordinator keeps a `DashMap` of live sessions (each behind its own
+//! `Mutex` so long-polls don't block sibling sessions) backed by a
+//! durable `KvStore` row under `CF_VALIDATOR_MODULES`. Every state
+//! transition writes through to storage; aborts and TTL expiry delete
+//! the row. A restart mid-ceremony repopulates the in-memory cache
+//! lazily: the first handler that touches a `session_id` not in the
+//! `DashMap` reloads it from storage, so a signing round survives a
+//! node restart without the wallet having to start over. A background
+//! sweeper drops sessions older than 5 minutes (`SESSION_TTL_SECS`).
 //!
 //! ## Auth
 //!
@@ -109,6 +115,7 @@ use parking_lot::Mutex;
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tenzro_storage::{KvStore, CF_VALIDATOR_MODULES};
 
 use super::error::WalletApiError;
 use super::handlers::WebState;
@@ -145,7 +152,8 @@ const DEVICE_IDENTIFIER_TAG: &[u8] = b"device";
 /// whole module, because each scheme uses a different concrete crate
 /// (`frost_ed25519` / `frost_secp256k1`) with no shared trait surface
 /// at the wire-bytes level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum FrostScheme {
     Ed25519,
     Secp256k1,
@@ -183,7 +191,7 @@ impl FrostScheme {
 // ---------------------------------------------------------------------------
 
 /// State machine — see module docs for the transition diagram.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FrostSessionState {
     /// Created by `start`; awaiting device commitments.
@@ -199,7 +207,10 @@ pub enum FrostSessionState {
 
 /// One in-flight FROST session. All FROST byte-blobs are stored in
 /// already-serialized form so the coordinator never has to keep a
-/// curve-specific type alive across awaits.
+/// curve-specific type alive across awaits — and so the whole session
+/// serializes to a single durable `KvStore` row without any
+/// curve-specific `serde` glue.
+#[derive(Serialize, Deserialize)]
 struct FrostSession {
     scheme: FrostScheme,
     did: String,
@@ -256,7 +267,10 @@ impl FrostSession {
 
 /// Keyed by `session_id`. `parking_lot::Mutex` per session keeps the
 /// long-poll endpoints from blocking other sessions. The outer
-/// `DashMap` is fine for cross-session concurrency.
+/// `DashMap` is the live cache; the durable copy lives in a
+/// `KvStore` row (see [`SessionStore`]). The cache is repopulated
+/// lazily from storage — a session absent from the map is reloaded on
+/// first touch, so a node restart mid-round doesn't drop it.
 pub struct FrostCoordinator {
     sessions: DashMap<String, Arc<Mutex<FrostSession>>>,
 }
@@ -268,12 +282,48 @@ impl FrostCoordinator {
         }
     }
 
-    /// Drop sessions strictly older than `SESSION_TTL_SECS`. Called on
-    /// every coordinator interaction; we don't run a separate task
-    /// for testnet load.
+    /// Drop expired sessions from the in-memory cache. Storage rows for
+    /// the same sessions are pruned by [`SessionStore::sweep`], which
+    /// the handlers invoke alongside this. Called on every coordinator
+    /// interaction; no separate task for testnet load.
     fn sweep(&self, now_ms: u64) {
         self.sessions
             .retain(|_, sess| !sess.lock().is_expired(now_ms));
+    }
+
+    /// Return the live session for `session_id`, loading it from
+    /// durable storage into the cache if it isn't resident (e.g. after
+    /// a restart). Expired rows are treated as absent and their storage
+    /// row is deleted. `None` means genuinely unknown / expired.
+    fn resolve(
+        &self,
+        store: Option<&SessionStore>,
+        session_id: &str,
+        now_ms: u64,
+    ) -> Option<Arc<Mutex<FrostSession>>> {
+        if let Some(existing) = self.sessions.get(session_id) {
+            return Some(existing.clone());
+        }
+        // Cold cache — try to rehydrate from storage.
+        let store = store?;
+        match store.get(session_id) {
+            Ok(Some(sess)) if !sess.is_expired(now_ms) => {
+                let arc = Arc::new(Mutex::new(sess));
+                self.sessions
+                    .insert(session_id.to_string(), arc.clone());
+                Some(arc)
+            }
+            Ok(Some(_)) => {
+                // Expired: evict the stale row so it can't be replayed.
+                store.delete(session_id);
+                None
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(error = %e.description, "frost session hydrate failed");
+                None
+            }
+        }
     }
 }
 
@@ -281,6 +331,164 @@ impl Default for FrostCoordinator {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Durable session store (KvStore-backed, MAC-tagged — mirrors
+// wallet_new.rs::SessionStore and passkey_rpc.rs::PendingRecoveryStore)
+// ---------------------------------------------------------------------------
+
+/// Key prefix for FROST session rows in `CF_VALIDATOR_MODULES`.
+const SESSION_PREFIX: &[u8] = b"wallet/frost/session/";
+
+struct SessionStore {
+    storage: Arc<dyn KvStore>,
+}
+
+impl SessionStore {
+    fn new(storage: Arc<dyn KvStore>) -> Self {
+        Self { storage }
+    }
+
+    fn key(session_id: &str) -> Vec<u8> {
+        let mut k = SESSION_PREFIX.to_vec();
+        k.extend_from_slice(session_id.as_bytes());
+        k
+    }
+
+    fn put(&self, session_id: &str, sess: &FrostSession) -> Result<(), WalletApiError> {
+        let bytes = serde_json::to_vec(sess).map_err(|e| {
+            internal("frost_session_serialize", format!("serialize session: {e}"))
+        })?;
+        let tagged = mac_wrap(&bytes);
+        self.storage
+            .put(CF_VALIDATOR_MODULES, &Self::key(session_id), &tagged)
+            .map_err(|e| internal("frost_session_persist", format!("persist session: {e}")))
+    }
+
+    fn get(&self, session_id: &str) -> Result<Option<FrostSession>, WalletApiError> {
+        let bytes = self
+            .storage
+            .get(CF_VALIDATOR_MODULES, &Self::key(session_id))
+            .map_err(|e| internal("frost_session_read", format!("read session: {e}")))?;
+        match bytes {
+            Some(b) => {
+                let payload = mac_verify(&b).map_err(|e| {
+                    internal("frost_session_tampered", format!("tampered session row: {e}"))
+                })?;
+                let sess: FrostSession = serde_json::from_slice(payload).map_err(|e| {
+                    internal("frost_session_deserialize", format!("deserialize session: {e}"))
+                })?;
+                Ok(Some(sess))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn delete(&self, session_id: &str) {
+        let _ = self
+            .storage
+            .delete(CF_VALIDATOR_MODULES, &Self::key(session_id));
+    }
+
+    /// Drop every persisted session whose TTL has elapsed. Keeps the
+    /// column family from accumulating rows for sessions the wallet
+    /// never came back to finalize/abort.
+    fn sweep(&self, now_ms: u64) {
+        let keys = match self
+            .storage
+            .get_keys_with_prefix(CF_VALIDATOR_MODULES, SESSION_PREFIX)
+        {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(error = %e, "frost session sweep scan failed");
+                return;
+            }
+        };
+        for key in keys {
+            let sid = match std::str::from_utf8(&key[SESSION_PREFIX.len()..]) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            };
+            if let Ok(Some(sess)) = self.get(&sid)
+                && sess.is_expired(now_ms)
+            {
+                self.delete(&sid);
+            }
+        }
+    }
+}
+
+/// Per-process MAC key at `~/.tenzro/local_state_mac.key` (0600) —
+/// the same file and threat model as `wallet_new` / `passkey_rpc`:
+/// detects accidental corruption + cross-process tampering of session
+/// rows; does not defend against in-process malware inside the same
+/// trust boundary.
+fn local_mac_key() -> &'static [u8; 32] {
+    use std::sync::OnceLock;
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let home = match std::env::var("HOME").ok().map(std::path::PathBuf::from) {
+            Some(p) => p,
+            None => {
+                tracing::warn!("wallet_frost local_mac_key: no $HOME — using zero key (tests only)");
+                return [0u8; 32];
+            }
+        };
+        let path = home.join(".tenzro").join("local_state_mac.key");
+        if let Ok(bytes) = std::fs::read(&path)
+            && bytes.len() == 32
+        {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&bytes);
+            return k;
+        }
+        let mut k = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut k);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, k) {
+            tracing::warn!(error = %e, "wallet_frost local_mac_key: failed to persist MAC key");
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+        k
+    })
+}
+
+fn mac_wrap(payload: &[u8]) -> Vec<u8> {
+    let mut h = Sha256::new();
+    h.update(local_mac_key());
+    h.update(payload);
+    let tag = h.finalize();
+    let mut out = Vec::with_capacity(32 + payload.len());
+    out.extend_from_slice(&tag);
+    out.extend_from_slice(payload);
+    out
+}
+
+fn mac_verify(blob: &[u8]) -> Result<&[u8], &'static str> {
+    if blob.len() < 32 {
+        return Err("row too short");
+    }
+    let (tag, payload) = blob.split_at(32);
+    let mut h = Sha256::new();
+    h.update(local_mac_key());
+    h.update(payload);
+    let expected = h.finalize();
+    if &expected[..] != tag {
+        return Err("tag mismatch (row tampered or foreign)");
+    }
+    Ok(payload)
+}
+
+fn internal(code: &'static str, msg: impl Into<String>) -> WalletApiError {
+    WalletApiError::new(StatusCode::INTERNAL_SERVER_ERROR, code, msg.into())
 }
 
 fn now_ms() -> u64 {
@@ -292,6 +500,15 @@ fn now_ms() -> u64 {
 
 fn coordinator(state: &Arc<WebState>) -> &FrostCoordinator {
     &state.frost_coordinator
+}
+
+/// Resolve the durable session store from the node's `KvStore`. Returns
+/// `None` when storage isn't wired (light client, boot race) — in that
+/// case the coordinator degrades to an in-memory-only cache, matching
+/// prior behaviour, but a full node always has storage.
+fn frost_store(state: &Arc<WebState>) -> Option<SessionStore> {
+    let storage = state.node.as_ref()?.storage()?;
+    Some(SessionStore::new(storage.clone() as Arc<dyn KvStore>))
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +665,61 @@ fn require_session_owner(
 struct NodeRound1 {
     commitments: Vec<u8>,
     nonces: Vec<u8>,
+}
+
+/// Output of the deterministic provisioning split for one curve.
+/// `verifying_key` is the joint (public) group verifying key that
+/// becomes the DID's on-surface key material; `device_key_package` is
+/// wrapped under the passkey and handed to the wallet as the device leg
+/// of the 2-of-2. The node's own leg is re-derived on demand from
+/// `(did, surface_key, scheme)` at sign time, so it is not carried here.
+pub(crate) struct ProvisionedShares {
+    pub verifying_key: Vec<u8>,
+    pub device_key_package: Vec<u8>,
+}
+
+/// Signing scheme selector exposed to the provisioning path so
+/// `wallet_new` can request a split per curve without touching the
+/// private `FrostScheme`. Ed25519 covers native/SVM/Canton surfaces;
+/// Secp256k1 covers the EVM surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProvisionScheme {
+    Ed25519,
+    Secp256k1,
+}
+
+impl ProvisionScheme {
+    fn to_frost(self) -> FrostScheme {
+        match self {
+            ProvisionScheme::Ed25519 => FrostScheme::Ed25519,
+            ProvisionScheme::Secp256k1 => FrostScheme::Secp256k1,
+        }
+    }
+}
+
+/// Shared "share missing from split output" error used by both
+/// per-curve provisioning helpers.
+fn missing_share() -> WalletApiError {
+    wallet_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "frost_internal_error",
+        "secret share missing from split output",
+    )
+}
+
+/// Deterministically split a fresh joint key into the node + device
+/// 2-of-2 for `(did, surface_key, scheme)`, returning both legs'
+/// serialized `KeyPackage`s and the joint verifying key. Delegates to
+/// the same `keys::split` used by the signing path.
+pub(crate) fn provision_split(
+    scheme: ProvisionScheme,
+    did: &str,
+    surface_key: &str,
+) -> Result<ProvisionedShares, WalletApiError> {
+    match scheme.to_frost() {
+        FrostScheme::Ed25519 => ed25519_ops::provision_split(did, surface_key),
+        FrostScheme::Secp256k1 => secp256k1_ops::provision_split(did, surface_key),
+    }
 }
 
 /// Run Round 1 on the node side using the deterministic stub
@@ -607,6 +879,53 @@ mod ed25519_ops {
         Ok((key_package, pubkey_package))
     }
 
+    /// Run the deterministic split and return both legs' material for
+    /// provisioning: the joint verifying key (public), the node's
+    /// serialized `KeyPackage` (retained by the node), and the device's
+    /// serialized `KeyPackage` (wrapped under the passkey and handed
+    /// back to the device). Same `keys::split` primitive as the signing
+    /// path — no separate keygen.
+    pub(super) fn provision_split(
+        did: &str,
+        surface_key: &str,
+    ) -> Result<ProvisionedShares, WalletApiError> {
+        let seed = derive_seed(did, surface_key, FrostScheme::Ed25519);
+        let mut rng = StubRng::from_seed(seed);
+        let signing_key = SigningKey::new(&mut rng);
+
+        let identifiers: Vec<Identifier> = vec![node_identifier()?, device_identifier()?];
+        let (shares, pubkey_package) = keys::split(
+            &signing_key,
+            2,
+            2,
+            IdentifierList::Custom(&identifiers),
+            &mut rng,
+        )
+        .map_err(internal_err("split keys"))?;
+
+        let device_share = shares
+            .get(&device_identifier()?)
+            .ok_or_else(missing_share)?
+            .clone();
+
+        let device_key_package: KeyPackage = device_share
+            .try_into()
+            .map_err(internal_err("verify device secret share"))?;
+
+        let verifying_key = pubkey_package
+            .verifying_key()
+            .serialize()
+            .map_err(internal_err("serialize verifying key"))?;
+        let device_key_package_bytes = device_key_package
+            .serialize()
+            .map_err(internal_err("serialize device key package"))?;
+
+        Ok(ProvisionedShares {
+            verifying_key,
+            device_key_package: device_key_package_bytes,
+        })
+    }
+
     pub(super) fn node_round1(did: &str, surface_key: &str) -> Result<NodeRound1, WalletApiError> {
         let (key_package, _pubkey_package) = split_keys(did, surface_key)?;
         let signing_share: &SigningShare = key_package.signing_share();
@@ -752,6 +1071,49 @@ mod secp256k1_ops {
             .map_err(internal_err("verify secret share"))?;
 
         Ok((key_package, pubkey_package))
+    }
+
+    /// See `ed25519_ops::provision_split`. Same shape for the
+    /// secp256k1 ciphersuite (FROST-secp256k1 / threshold ECDSA).
+    pub(super) fn provision_split(
+        did: &str,
+        surface_key: &str,
+    ) -> Result<ProvisionedShares, WalletApiError> {
+        let seed = derive_seed(did, surface_key, FrostScheme::Secp256k1);
+        let mut rng = StubRng::from_seed(seed);
+        let signing_key = SigningKey::new(&mut rng);
+
+        let identifiers: Vec<Identifier> = vec![node_identifier()?, device_identifier()?];
+        let (shares, pubkey_package) = keys::split(
+            &signing_key,
+            2,
+            2,
+            IdentifierList::Custom(&identifiers),
+            &mut rng,
+        )
+        .map_err(internal_err("split keys"))?;
+
+        let device_share = shares
+            .get(&device_identifier()?)
+            .ok_or_else(missing_share)?
+            .clone();
+
+        let device_key_package: KeyPackage = device_share
+            .try_into()
+            .map_err(internal_err("verify device secret share"))?;
+
+        let verifying_key = pubkey_package
+            .verifying_key()
+            .serialize()
+            .map_err(internal_err("serialize verifying key"))?;
+        let device_key_package_bytes = device_key_package
+            .serialize()
+            .map_err(internal_err("serialize device key package"))?;
+
+        Ok(ProvisionedShares {
+            verifying_key,
+            device_key_package: device_key_package_bytes,
+        })
     }
 
     pub(super) fn node_round1(did: &str, surface_key: &str) -> Result<NodeRound1, WalletApiError> {
@@ -958,7 +1320,14 @@ pub async fn start_handler(
     };
 
     let coord = coordinator(&state);
+    let store = frost_store(&state);
     coord.sweep(now);
+    if let Some(s) = store.as_ref() {
+        s.sweep(now);
+        if let Err(e) = s.put(&session_id, &session) {
+            return e.into_response();
+        }
+    }
     coord
         .sessions
         .insert(session_id.clone(), Arc::new(Mutex::new(session)));
@@ -1025,10 +1394,11 @@ pub async fn commit_handler(
     };
 
     let coord = coordinator(&state);
+    let store = frost_store(&state);
     let now = now_ms();
     coord.sweep(now);
-    let sess_arc = match coord.sessions.get(&body.session_id) {
-        Some(s) => s.clone(),
+    let sess_arc = match coord.resolve(store.as_ref(), &body.session_id, now) {
+        Some(s) => s,
         None => return session_not_found().into_response(),
     };
 
@@ -1071,6 +1441,11 @@ pub async fn commit_handler(
     sess.device_commitments = Some(device_commitments);
     sess.signing_package = Some(signing_package);
     sess.state = FrostSessionState::Committed;
+    if let Some(s) = store.as_ref()
+        && let Err(e) = s.put(&body.session_id, &sess)
+    {
+        return e.into_response();
+    }
 
     Json(CommitResponse { state: sess.state }).into_response()
 }
@@ -1095,20 +1470,23 @@ pub async fn await_challenge_handler(
     };
 
     let coord = coordinator(&state);
+    let store = frost_store(&state);
     let deadline = SystemTime::now() + LONG_POLL_TIMEOUT;
     loop {
-        let sess_arc = match coord.sessions.get(&body.session_id) {
-            Some(s) => s.clone(),
+        let now = now_ms();
+        let sess_arc = match coord.resolve(store.as_ref(), &body.session_id, now) {
+            Some(s) => s,
             None => return session_not_found().into_response(),
         };
-        let now = now_ms();
-        let (effective, package, sess_scheme, sess_sub) = {
+        let (effective, package, sess_scheme, sess_sub, expired) = {
             let mut sess = sess_arc.lock();
+            let expired = sess.is_expired(now);
             (
                 sess.effective_state(now),
                 sess.signing_package.clone(),
                 sess.scheme,
                 sess.initiating_sub.clone(),
+                expired,
             )
         };
         if let Err(e) = require_session_owner(&sess_sub, &claims.sub) {
@@ -1118,6 +1496,12 @@ pub async fn await_challenge_handler(
             return wallet_error(StatusCode::BAD_REQUEST,
                 "scheme_mismatch",
                 "session scheme does not match request path",).into_response();
+        }
+        // A session that lapsed its TTL was just flipped to Aborted
+        // in-memory by `effective_state`; drop its durable row so it
+        // can't be rehydrated later.
+        if expired && let Some(s) = store.as_ref() {
+            s.delete(&body.session_id);
         }
 
         match effective {
@@ -1171,10 +1555,11 @@ pub async fn respond_handler(
     };
 
     let coord = coordinator(&state);
+    let store = frost_store(&state);
     let now = now_ms();
     coord.sweep(now);
-    let sess_arc = match coord.sessions.get(&body.session_id) {
-        Some(s) => s.clone(),
+    let sess_arc = match coord.resolve(store.as_ref(), &body.session_id, now) {
+        Some(s) => s,
         None => return session_not_found().into_response(),
     };
 
@@ -1240,6 +1625,11 @@ pub async fn respond_handler(
     }
     sess.signature = Some(signature);
     sess.state = FrostSessionState::Finalized;
+    if let Some(s) = store.as_ref()
+        && let Err(e) = s.put(&body.session_id, &sess)
+    {
+        return e.into_response();
+    }
 
     Json(RespondResponse { state: sess.state }).into_response()
 }
@@ -1264,20 +1654,23 @@ pub async fn finalize_handler(
     };
 
     let coord = coordinator(&state);
+    let store = frost_store(&state);
     let deadline = SystemTime::now() + LONG_POLL_TIMEOUT;
     loop {
-        let sess_arc = match coord.sessions.get(&body.session_id) {
-            Some(s) => s.clone(),
+        let now = now_ms();
+        let sess_arc = match coord.resolve(store.as_ref(), &body.session_id, now) {
+            Some(s) => s,
             None => return session_not_found().into_response(),
         };
-        let now = now_ms();
-        let (effective, signature, sess_scheme, sess_sub) = {
+        let (effective, signature, sess_scheme, sess_sub, expired) = {
             let mut sess = sess_arc.lock();
+            let expired = sess.is_expired(now);
             (
                 sess.effective_state(now),
                 sess.signature.clone(),
                 sess.scheme,
                 sess.initiating_sub.clone(),
+                expired,
             )
         };
         if let Err(e) = require_session_owner(&sess_sub, &claims.sub) {
@@ -1287,6 +1680,11 @@ pub async fn finalize_handler(
             return wallet_error(StatusCode::BAD_REQUEST,
                 "scheme_mismatch",
                 "session scheme does not match request path",).into_response();
+        }
+        // TTL-lapsed session was flipped to Aborted in-memory; evict
+        // its durable row.
+        if expired && let Some(s) = store.as_ref() {
+            s.delete(&body.session_id);
         }
 
         match effective {
@@ -1330,29 +1728,44 @@ pub async fn abort_handler(
     };
 
     let coord = coordinator(&state);
+    let store = frost_store(&state);
     let now = now_ms();
     coord.sweep(now);
-    let sess_arc = match coord.sessions.get(&body.session_id) {
-        Some(s) => s.clone(),
+    let sess_arc = match coord.resolve(store.as_ref(), &body.session_id, now) {
+        Some(s) => s,
         None => return session_not_found().into_response(),
     };
 
-    let mut sess = sess_arc.lock();
-    if let Err(e) = require_session_owner(&sess.initiating_sub, &claims.sub) {
-        return e.into_response();
-    }
-    if sess.scheme != scheme {
-        return wallet_error(StatusCode::BAD_REQUEST,
-            "scheme_mismatch",
-            "session scheme does not match request path",).into_response();
-    }
-    // Finalized sessions stay Finalized — we don't undo a successful
-    // signature. Everything else collapses to Aborted (idempotent).
-    if sess.state != FrostSessionState::Finalized {
-        sess.state = FrostSessionState::Aborted;
+    let final_state = {
+        let mut sess = sess_arc.lock();
+        if let Err(e) = require_session_owner(&sess.initiating_sub, &claims.sub) {
+            return e.into_response();
+        }
+        if sess.scheme != scheme {
+            return wallet_error(StatusCode::BAD_REQUEST,
+                "scheme_mismatch",
+                "session scheme does not match request path",).into_response();
+        }
+        // Finalized sessions stay Finalized — we don't undo a successful
+        // signature. Everything else collapses to Aborted (idempotent).
+        if sess.state != FrostSessionState::Finalized {
+            sess.state = FrostSessionState::Aborted;
+        }
+        sess.state
+    };
+
+    // An aborted session is terminal and carries no reusable material —
+    // drop it from both the cache and durable storage. A finalized
+    // session keeps its row so a re-`finalize` can still fetch the
+    // signature.
+    if final_state == FrostSessionState::Aborted {
+        coord.sessions.remove(&body.session_id);
+        if let Some(s) = store.as_ref() {
+            s.delete(&body.session_id);
+        }
     }
 
-    Json(AbortResponse { state: sess.state }).into_response()
+    Json(AbortResponse { state: final_state }).into_response()
 }
 
 // ---------------------------------------------------------------------------

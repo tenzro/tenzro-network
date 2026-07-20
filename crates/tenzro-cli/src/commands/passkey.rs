@@ -5,6 +5,15 @@
 //! commands. Examples:
 //!
 //! ```text
+//! tenzro passkey login --display-name "My laptop"
+//!
+//! tenzro passkey add --account-address 0x... --label "My phone"
+//!
+//! tenzro passkey sign \
+//!     --account-address 0x... \
+//!     --op-hash-hex 0x... \
+//!     --ml-dsa-seed-file ~/.tenzro/passkey/<account>-<cred>.mldsa.seed
+//!
 //! tenzro passkey enroll \
 //!     --passkey-pubkey-hex 0x... \
 //!     --credential-id-hex 0x... \
@@ -39,16 +48,25 @@
 //!     --required-always
 //! ```
 //!
-//! Note: this CLI does NOT acquire the WebAuthn assertion itself — the
-//! passkey signature must come from a platform authenticator (Tauri
-//! desktop, browser, mobile app). The CLI is the *network* surface;
-//! local-signing is done by `apps/tenzro-desktop` or `sdk/tenzro-ts-sdk`.
+//! WebAuthn ceremonies run in the browser: `login` / `add` / `sign`
+//! create a pending session on the node (`tenzro_createPasskeySession`),
+//! open the node-served `/auth/passkey` page, and poll
+//! `tenzro_getPasskeySession` until the ceremony is terminal — the same
+//! device-login pattern as `gcloud auth login`. The ML-DSA-65 hybrid PQ
+//! leg is generated CLI-side and its seed stored under
+//! `~/.tenzro/passkey/` (mode 0600); the browser never sees
+//! post-quantum key material. The raw `enroll` subcommand remains for
+//! callers that already hold ceremony outputs (Tauri desktop,
+//! `sdk/tenzro-ts-sdk`).
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use crate::output;
 use crate::rpc::RpcClient;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tenzro_crypto::pq::MlDsaSigningKey;
 
 fn default_rpc_url(override_url: Option<&str>) -> String {
     override_url
@@ -59,7 +77,21 @@ fn default_rpc_url(override_url: Option<&str>) -> String {
 
 #[derive(Debug, Subcommand)]
 pub enum PasskeyCommand {
-    /// Enroll a passkey-bound smart account
+    /// Create a passkey account via the browser (gcloud-style login)
+    Login(LoginCmd),
+    /// Add a passkey to an existing account via the browser
+    Add(AddCmd),
+    /// List enrolled passkey credentials on an account
+    List(ListCmd),
+    /// Remove a passkey credential from an account
+    Remove(RemoveCmd),
+    /// Set the account's second-factor policy (single_credential | two_credentials)
+    SetPolicy(SetPolicyCmd),
+    /// Show the account's second-factor policy
+    GetPolicy(GetPolicyCmd),
+    /// Approve an operation hash with a passkey via the browser
+    Sign(SignCmd),
+    /// Enroll a passkey-bound smart account from pre-acquired ceremony output
     Enroll(EnrollCmd),
     /// Add a social-recovery guardian
     AddGuardian(AddGuardianCmd),
@@ -90,6 +122,13 @@ impl PasskeyCommand {
         let url = default_rpc_url(rpc_url);
         let rpc = RpcClient::new(&url);
         match self {
+            Self::Login(cmd) => cmd.execute(&rpc, &url).await,
+            Self::Add(cmd) => cmd.execute(&rpc, &url).await,
+            Self::List(cmd) => cmd.execute(&rpc).await,
+            Self::Remove(cmd) => cmd.execute(&rpc).await,
+            Self::SetPolicy(cmd) => cmd.execute(&rpc).await,
+            Self::GetPolicy(cmd) => cmd.execute(&rpc).await,
+            Self::Sign(cmd) => cmd.execute(&rpc, &url).await,
             Self::Enroll(cmd) => cmd.execute(&rpc).await,
             Self::AddGuardian(cmd) => cmd.execute(&rpc).await,
             Self::InitiateRecovery(cmd) => cmd.execute(&rpc).await,
@@ -610,6 +649,457 @@ impl ListPendingRecoveriesCmd {
                 println!();
             }
         }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Browser-mediated ceremony flow (gcloud-style device login)
+// ---------------------------------------------------------------------------
+
+/// Resolve the web-API base URL that serves `/auth/passkey`. The web API
+/// listens on a different port/host than JSON-RPC, so it cannot be
+/// derived mechanically — only the two well-known layouts are inferred.
+fn derive_web_url(explicit: Option<&str>, rpc_url: &str) -> Result<String> {
+    if let Some(url) = explicit {
+        return Ok(url.trim_end_matches('/').to_string());
+    }
+    if rpc_url.contains("127.0.0.1") || rpc_url.contains("localhost") {
+        return Ok("http://127.0.0.1:8080".to_string());
+    }
+    if rpc_url.contains("rpc.tenzro.xyz") {
+        return Ok("https://api.tenzro.xyz".to_string());
+    }
+    bail!(
+        "cannot derive the browser-ceremony URL from RPC URL {rpc_url}; \
+         pass --web-url with the node's web API base (default port 8080)"
+    )
+}
+
+fn launch_browser(url: &str) {
+    println!("Open this link in your browser to continue:");
+    println!("  {url}");
+    println!();
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    let _ = std::process::Command::new(opener)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Poll `tenzro_getPasskeySession` until the session is terminal.
+/// Returns the handler result on completion.
+async fn poll_session(rpc: &RpcClient, session_id: &str) -> Result<Value> {
+    println!("Waiting for the browser ceremony to complete (Ctrl-C to abort)…");
+    loop {
+        let session: Value = rpc
+            .call("tenzro_getPasskeySession", json!({ "session_id": session_id }))
+            .await?;
+        match session.get("status").and_then(|v| v.as_str()).unwrap_or("") {
+            "completed" => return Ok(session.get("result").cloned().unwrap_or(Value::Null)),
+            "failed" => {
+                let err = session
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                bail!("passkey ceremony failed: {err}");
+            }
+            "expired" => bail!("passkey session expired before the ceremony completed — run the command again"),
+            _ => tokio::time::sleep(Duration::from_secs(2)).await,
+        }
+    }
+}
+
+fn passkey_state_dir() -> Result<PathBuf> {
+    let dir = dirs::home_dir()
+        .context("cannot resolve home directory for ~/.tenzro/passkey")?
+        .join(".tenzro")
+        .join("passkey");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Write an ML-DSA seed (hex) to a fresh file with owner-only permissions.
+fn write_seed_file(path: &Path, seed_hex: &str) -> Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(path)
+        .with_context(|| format!("creating ML-DSA seed file {}", path.display()))?;
+    file.write_all(seed_hex.as_bytes())?;
+    Ok(())
+}
+
+/// Rename a `pending-*` seed file to its account/credential-keyed name
+/// once the ceremony has bound the key to an account.
+fn finalize_seed_file(pending: &Path, account_address: &str, credential_id_hex: &str) -> Result<PathBuf> {
+    let account = account_address.trim_start_matches("0x");
+    let cred8: String = credential_id_hex
+        .trim_start_matches("0x")
+        .chars()
+        .take(8)
+        .collect();
+    let final_path = pending.with_file_name(format!("{account}-{cred8}.mldsa.seed"));
+    std::fs::rename(pending, &final_path)
+        .with_context(|| format!("renaming seed file to {}", final_path.display()))?;
+    Ok(final_path)
+}
+
+fn load_ml_dsa_seed(path: &Path) -> Result<MlDsaSigningKey> {
+    let seed_hex = std::fs::read_to_string(path)
+        .with_context(|| format!("reading ML-DSA seed file {}", path.display()))?;
+    let seed = hex::decode(seed_hex.trim())
+        .with_context(|| format!("ML-DSA seed file {} is not valid hex", path.display()))?;
+    MlDsaSigningKey::from_seed(&seed)
+        .with_context(|| format!("ML-DSA seed file {} has the wrong length", path.display()))
+}
+
+#[derive(Debug, Args)]
+pub struct LoginCmd {
+    /// Optional display name for the new identity
+    #[arg(long)]
+    pub display_name: Option<String>,
+    /// CREATE2 salt
+    #[arg(long, default_value_t = 0)]
+    pub salt: u64,
+    /// Web API base serving /auth/passkey (derived from the RPC URL when omitted)
+    #[arg(long)]
+    pub web_url: Option<String>,
+}
+
+impl LoginCmd {
+    async fn execute(&self, rpc: &RpcClient, rpc_url: &str) -> Result<()> {
+        let web_base = derive_web_url(self.web_url.as_deref(), rpc_url)?;
+        let ml_dsa = MlDsaSigningKey::generate();
+        let session: Value = rpc
+            .call(
+                "tenzro_createPasskeySession",
+                json!({
+                    "kind": "enroll",
+                    "display_name": self.display_name,
+                    "ml_dsa_public_key_hex": hex::encode(ml_dsa.verifying_key_bytes()),
+                    "salt": self.salt,
+                }),
+            )
+            .await?;
+        let session_id = session
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .context("node returned no session_id")?
+            .to_string();
+        let verification_path = session
+            .get("verification_path")
+            .and_then(|v| v.as_str())
+            .context("node returned no verification_path")?;
+
+        // Persist the PQ seed before any ceremony can complete — losing
+        // it after enrollment would orphan the account's ML-DSA leg.
+        let prefix: String = session_id.chars().take(8).collect();
+        let pending = passkey_state_dir()?.join(format!("pending-{prefix}.mldsa.seed"));
+        write_seed_file(&pending, &hex::encode(ml_dsa.seed_bytes()))?;
+
+        launch_browser(&format!("{web_base}{verification_path}"));
+        let result = poll_session(rpc, &session_id).await?;
+
+        let account = result
+            .get("smart_account_address")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let cred = result
+            .get("credential_id_hex")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        println!("Passkey account created");
+        output::print_field("DID", result.get("did").and_then(|v| v.as_str()).unwrap_or("?"));
+        output::print_field("Smart Account", if account.is_empty() { "?" } else { account });
+        output::print_field("Credential ID", if cred.is_empty() { "?" } else { cred });
+        let seed_path = if !account.is_empty() && !cred.is_empty() {
+            finalize_seed_file(&pending, account, cred)?
+        } else {
+            pending
+        };
+        output::print_field("ML-DSA seed file", &seed_path.display().to_string());
+        println!("Keep the seed file safe — `tenzro passkey sign` needs it for the post-quantum leg.");
+        Ok(())
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct AddCmd {
+    /// Smart account to add the credential to
+    #[arg(long)]
+    pub account_address: String,
+    /// Optional display label for the new credential
+    #[arg(long)]
+    pub label: Option<String>,
+    /// Web API base serving /auth/passkey (derived from the RPC URL when omitted)
+    #[arg(long)]
+    pub web_url: Option<String>,
+}
+
+impl AddCmd {
+    async fn execute(&self, rpc: &RpcClient, rpc_url: &str) -> Result<()> {
+        let web_base = derive_web_url(self.web_url.as_deref(), rpc_url)?;
+        let session: Value = rpc
+            .call(
+                "tenzro_createPasskeySession",
+                json!({
+                    "kind": "add",
+                    "account_address": self.account_address,
+                    "label": self.label,
+                }),
+            )
+            .await?;
+        let session_id = session
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .context("node returned no session_id")?
+            .to_string();
+        let verification_path = session
+            .get("verification_path")
+            .and_then(|v| v.as_str())
+            .context("node returned no verification_path")?;
+
+        launch_browser(&format!("{web_base}{verification_path}"));
+        let result = poll_session(rpc, &session_id).await?;
+
+        let account = result
+            .get("account_address")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let cred = result
+            .get("credential_id_hex")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        println!("Passkey added");
+        output::print_field("Account", if account.is_empty() { "?" } else { account });
+        output::print_field("Credential ID", if cred.is_empty() { "?" } else { cred });
+        output::print_field(
+            "Credentials total",
+            &result
+                .get("credentials_total")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into()),
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct ListCmd {
+    #[arg(long)]
+    pub account_address: String,
+}
+
+impl ListCmd {
+    async fn execute(&self, rpc: &RpcClient) -> Result<()> {
+        let result: Value = rpc
+            .call(
+                "tenzro_listPasskeys",
+                json!({ "account_address": self.account_address }),
+            )
+            .await?;
+        let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+        println!(
+            "{} credential(s) on {}",
+            count,
+            result.get("account_address").and_then(|v| v.as_str()).unwrap_or("?"),
+        );
+        if let Some(ids) = result.get("credential_ids").and_then(|v| v.as_array()) {
+            for id in ids.iter().filter_map(|v| v.as_str()) {
+                println!("  {id}");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct RemoveCmd {
+    #[arg(long)]
+    pub account_address: String,
+    /// Credential id to revoke (hex)
+    #[arg(long)]
+    pub credential_id_hex: String,
+}
+
+impl RemoveCmd {
+    async fn execute(&self, rpc: &RpcClient) -> Result<()> {
+        let result: Value = rpc
+            .call(
+                "tenzro_removePasskey",
+                json!({
+                    "account_address": self.account_address,
+                    "credential_id_hex": self.credential_id_hex,
+                }),
+            )
+            .await?;
+        println!("Passkey removal");
+        output::print_field(
+            "Removed",
+            &result.get("removed").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+        );
+        output::print_field(
+            "Credentials remaining",
+            &result
+                .get("credentials_remaining")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into()),
+        );
+        Ok(())
+    }
+}
+
+fn print_policy(result: &Value) {
+    output::print_field(
+        "Second factor",
+        result
+            .get("second_factor")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
+    );
+    output::print_field(
+        "Required signatures",
+        &result
+            .get("required_signatures")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "?".into()),
+    );
+    output::print_field(
+        "Credentials enrolled",
+        &result
+            .get("credentials_enrolled")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "?".into()),
+    );
+}
+
+#[derive(Debug, Args)]
+pub struct SetPolicyCmd {
+    #[arg(long)]
+    pub account_address: String,
+    /// `single_credential` (one passkey approves) or `two_credentials`
+    /// (two distinct enrolled passkeys must both sign every operation)
+    #[arg(long)]
+    pub second_factor: String,
+}
+
+impl SetPolicyCmd {
+    async fn execute(&self, rpc: &RpcClient) -> Result<()> {
+        let result: Value = rpc
+            .call(
+                "tenzro_setPasskeyPolicy",
+                json!({
+                    "account_address": self.account_address,
+                    "second_factor": self.second_factor,
+                }),
+            )
+            .await?;
+        println!("Passkey second-factor policy updated");
+        print_policy(&result);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct GetPolicyCmd {
+    #[arg(long)]
+    pub account_address: String,
+}
+
+impl GetPolicyCmd {
+    async fn execute(&self, rpc: &RpcClient) -> Result<()> {
+        let result: Value = rpc
+            .call(
+                "tenzro_getPasskeyPolicy",
+                json!({ "account_address": self.account_address }),
+            )
+            .await?;
+        println!("Passkey second-factor policy");
+        print_policy(&result);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct SignCmd {
+    #[arg(long)]
+    pub account_address: String,
+    /// 32-byte operation hash to approve (hex)
+    #[arg(long)]
+    pub op_hash_hex: String,
+    /// ML-DSA seed file written by `login` / `add` — enables the hybrid
+    /// PQ leg (required for accounts enrolled with an ML-DSA key)
+    #[arg(long)]
+    pub ml_dsa_seed_file: Option<PathBuf>,
+    /// Web API base serving /auth/passkey (derived from the RPC URL when omitted)
+    #[arg(long)]
+    pub web_url: Option<String>,
+}
+
+impl SignCmd {
+    async fn execute(&self, rpc: &RpcClient, rpc_url: &str) -> Result<()> {
+        let web_base = derive_web_url(self.web_url.as_deref(), rpc_url)?;
+        let op_hash = hex::decode(self.op_hash_hex.trim_start_matches("0x"))
+            .context("op-hash-hex is not valid hex")?;
+        if op_hash.len() != 32 {
+            bail!("op-hash-hex must be exactly 32 bytes, got {}", op_hash.len());
+        }
+        let ml_dsa_signature_hex = match &self.ml_dsa_seed_file {
+            Some(path) => Some(hex::encode(load_ml_dsa_seed(path)?.sign(&op_hash))),
+            None => None,
+        };
+        let session: Value = rpc
+            .call(
+                "tenzro_createPasskeySession",
+                json!({
+                    "kind": "sign",
+                    "account_address": self.account_address,
+                    "op_hash_hex": self.op_hash_hex,
+                    "ml_dsa_signature_hex": ml_dsa_signature_hex,
+                }),
+            )
+            .await?;
+        let session_id = session
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .context("node returned no session_id")?
+            .to_string();
+        let verification_path = session
+            .get("verification_path")
+            .and_then(|v| v.as_str())
+            .context("node returned no verification_path")?;
+
+        launch_browser(&format!("{web_base}{verification_path}"));
+        let result = poll_session(rpc, &session_id).await?;
+
+        println!("Passkey approval");
+        output::print_field(
+            "Verified",
+            &result.get("verified").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+        );
+        output::print_field(
+            "Op Hash",
+            result.get("op_hash_hex").and_then(|v| v.as_str()).unwrap_or("?"),
+        );
+        output::print_field(
+            "Validator",
+            result.get("validator").and_then(|v| v.as_str()).unwrap_or("?"),
+        );
         Ok(())
     }
 }

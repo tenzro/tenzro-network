@@ -18,6 +18,8 @@ cargo install --git https://github.com/tenzro/tenzro-network --bin tenzro
 # Talk to the live testnet
 export TENZRO_RPC_URL=https://rpc.tenzro.xyz
 
+tenzro setup                             # guided setup — join, provide, validate, or bootstrap a network
+# or go straight in:
 tenzro join --name "Alice"               # provisions DID + MPC wallet
 tenzro faucet                            # request testnet TNZO
 tenzro wallet balance
@@ -235,6 +237,13 @@ capacity on the provider gossip topic automatically; inference demand routes
 to you and settles in TNZO. Use `--rpc <url>` to target a node you operate
 remotely.
 
+To serve a model without announcing it to the network, register it with
+`tenzro model serve <id> --private` — the model answers local callers only,
+sends no announcements or heartbeats, and never appears in provider
+discovery. Distributing private weights to other nodes as encrypted shards
+(`tenzro model seal` / `install-sealed`) is covered in
+`docs/operators/OPERATOR_GUIDE.md` §17.
+
 ### 4.4 Verify it's running
 
 ```bash
@@ -249,6 +258,46 @@ curl -X POST http://localhost:8545 \
 
 Ctrl+C or `kill -TERM <pid>`. The node drains pending RPC requests, flushes RocksDB with fsync, and persists agent/swarm state before exit.
 
+### 4.6 Bootstrap a local or sovereign network
+
+`tenzro setup` walks through every participation path interactively — join the
+public network (consume / provide / validate), create your own network, or join
+an existing private one. Every prompt has a matching flag for non-interactive
+use.
+
+Create a self-contained network on your own hardware:
+
+```bash
+tenzro setup --path local --network-name lab --yes
+```
+
+This generates the full validator keyset (Ed25519 + ML-DSA-65 + BLS12-381),
+assembles a schema-v3 `genesis.toml` with your node as the founding validator
+plus a funded account and faucet, persists the libp2p peer identity, and writes
+a service unit (launchd plist on macOS, systemd unit on Linux) into the data
+directory. It then prints three things:
+
+1. The founding start command:
+   `tenzro-node --roles validator,ai --data-dir <data> --genesis <genesis.toml>`
+2. A copy hint for distributing `genesis.toml` to other machines
+3. The exact join command for each peer, including your LAN address and peer id:
+   `tenzro-node --roles ai --genesis <genesis.toml> --data-dir <dir> --boot-nodes /ip4/<LAN_IP>/tcp/9000/p2p/<PEER_ID>`
+
+Join an existing private network instead:
+
+```bash
+tenzro setup --path private --genesis ./genesis.toml \
+  --bootstrap /ip4/10.0.0.5/tcp/9000/p2p/12D3Koo...
+```
+
+Choosing the validator role in the private path prints your `[[validators]]`
+genesis stanza so the network operator can add you before their next genesis
+cut.
+
+Useful flags: `--path {network,local,private}`, `--mode {consume,provide,validate}`,
+`--network-name`, `--chain-id`, `--data-dir`, `--stake`, `--bootstrap`,
+`--genesis`, `--name`, `--rpc`, `--yes` (accept all defaults, no prompts).
+
 ---
 
 ## 5. Using the CLI
@@ -259,6 +308,9 @@ cargo install --path crates/tenzro-cli
 
 # Or run directly
 ./target/release/tenzro --help
+
+# Guided setup — join, provide, validate, or bootstrap a network (see §4.6)
+tenzro setup
 
 # Join the network (provisions identity + MPC wallet + hardware profile)
 tenzro join --name "Alice"

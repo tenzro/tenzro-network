@@ -228,6 +228,16 @@ pub struct ChatCompletionParams {
     pub optimize: Option<f64>,
     #[schemars(description = "Reject models below this tier during intent selection: 'cheap' or 'strong'. Optional")]
     pub quality_floor: Option<String>,
+    #[schemars(description = "Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. 'DE,EU'), case-insensitive. The serving node must declare a matching attestation-bound locality claim or the request is refused. Optional")]
+    pub jurisdiction: Option<String>,
+    #[schemars(description = "Set to 'required' to fail the request unless the response carries a verifiable signed jurisdiction receipt. Optional")]
+    pub jurisdiction_receipt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetSealedModelParams {
+    #[schemars(description = "Model ID of the sealed-model manifest to fetch")]
+    pub model_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -864,7 +874,8 @@ pub struct GetAgentTemplateStatsParams {
 ///   - Wallet: create_wallet, get_balance
 ///   - Transactions: send_transaction, request_faucet
 ///   - Identity: register_identity, resolve_did, set_delegation_scope, join_as_participant
-///   - Models: list_models, chat_completion, list_model_endpoints
+///   - Models: list_models, chat_completion, list_model_endpoints,
+///     list_sealed_models, get_sealed_model, model_recipient_key
 ///   - Payments: create_payment_challenge, verify_payment, list_payment_protocols
 ///   - Bridge: bridge_tokens, get_bridge_routes, list_bridge_adapters
 ///   - Staking & Providers: stake_tokens, unstake_tokens, register_provider, get_provider_stats
@@ -4491,8 +4502,28 @@ pub struct PasskeySignParams {
     pub account_address: String,
     pub op_hash_hex: String,
     pub assertion: serde_json::Value,
+    pub credential_id_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ml_dsa_signature_hex: Option<String>,
+    #[schemars(description = "Second passkey assertion — required when the account policy is two_credentials")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_assertion: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_credential_id_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_ml_dsa_signature_hex: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeySetPolicyParams {
+    pub account_address: String,
+    #[schemars(description = "\"single_credential\" or \"two_credentials\"")]
+    pub second_factor: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PasskeyGetPolicyParams {
+    pub account_address: String,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -4579,6 +4610,117 @@ pub struct PasskeyGetSmartAccountParams {
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct PasskeyListPendingRecoveriesParams {
     pub account_address: String,
+}
+
+// ─── Browser-launch passkey auth sessions (gcloud-style device flow) ───
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CreatePasskeySessionParams {
+    #[schemars(description = "Ceremony kind: \"enroll\" (new account), \"add\" (device credential on an existing account), or \"sign\" (verify an assertion over an op hash).")]
+    pub kind: String,
+    #[schemars(description = "Enroll: optional display name for the new identity.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[schemars(description = "Enroll: ML-DSA-65 verifying key (hex) for the hybrid PQ leg. Add sessions omit this — the node mints the new credential's PQ leg itself.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ml_dsa_public_key_hex: Option<String>,
+    #[schemars(description = "Enroll: CREATE2 salt (defaults to 0).")]
+    #[serde(default)]
+    pub salt: u64,
+    #[schemars(description = "Add + Sign: target smart-account address (hex).")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_address: Option<String>,
+    #[schemars(description = "Add: display label for the new credential.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[schemars(description = "Sign: 32-byte op hash (hex) the assertion must attest to.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_hash_hex: Option<String>,
+    #[schemars(description = "Sign: ML-DSA-65 signature (hex) over the op-hash bytes, pre-signed client-side for accounts with a hybrid PQ leg.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ml_dsa_signature_hex: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct GetPasskeySessionParams {
+    #[schemars(description = "Session id returned by create_passkey_session. Poll until status is completed/failed/expired.")]
+    pub session_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct AddPasskeyParams {
+    #[schemars(description = "Hex-encoded 20-byte smart-account address to add the credential to.")]
+    pub account_address: String,
+    #[schemars(description = "Hex-encoded P-256 public key of the new credential (raw 64-byte X||Y, SEC1 65-byte, or COSE_Key CBOR).")]
+    pub new_passkey_public_key_hex: String,
+    #[schemars(description = "WebAuthn credential id (hex) of the new credential.")]
+    pub new_credential_id_hex: String,
+    #[schemars(description = "Optional display label (e.g. \"Phone 1\", \"YubiKey\").")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct ListPasskeysParams {
+    #[schemars(description = "Hex-encoded 20-byte smart-account address.")]
+    pub account_address: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct RemovePasskeyParams {
+    #[schemars(description = "Hex-encoded 20-byte smart-account address.")]
+    pub account_address: String,
+    #[schemars(description = "Credential id (hex) to revoke. Removing the last credential leaves the account recoverable-only.")]
+    pub credential_id_hex: String,
+}
+
+// ─── MPC distributed key generation (DKLS23 secp256k1) ───
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct McpKeygenParams {
+    #[schemars(description = "This participant's DID. Must also appear in participant_dids.")]
+    pub local_did: String,
+    #[schemars(description = "Every participant DID in the group (including local_did). The node sorts + dedups; every party must pass the identical set so the derived InstanceId matches byte-for-byte.")]
+    pub participant_dids: Vec<String>,
+    #[schemars(description = "Signing threshold t (2 <= t <= n <= 32).")]
+    pub threshold: u8,
+    #[schemars(description = "32-byte finalized HotStuff-2 block hash (hex) anchoring the InstanceId. All parties pass the same value.")]
+    pub finalized_block_hash: String,
+    #[schemars(description = "32-byte per-ceremony nonce (hex). All parties pass the same value.")]
+    pub session_nonce: String,
+    #[schemars(description = "DID -> libp2p PeerId bindings, one entry per remote participant. Fail-closed: a missing binding for any remote DID is rejected.")]
+    #[serde(default)]
+    pub peer_bindings: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct McpKeygenStatusParams {
+    #[schemars(description = "Instance id (hex) of a specific keygen session. Omit to list all sessions on this node.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+}
+
+// ─── Identity + credential lifecycle (admin-gated) ───
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct RevokeJwtParams {
+    #[schemars(description = "JWT id (jti) to revoke. Cascades to any tokens minted from it.")]
+    pub jti: String,
+    #[schemars(description = "Optional human-readable revocation reason.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct AddTrustedIssuerParams {
+    #[schemars(description = "Issuer DID to trust for credential/attestation verification.")]
+    pub issuer_did: String,
+    #[schemars(description = "Free-form label for the issuer.")]
+    #[serde(default)]
+    pub name: String,
+    #[schemars(description = "Gossip topic ids the issuer is trusted for. Empty means trusted for all topics.")]
+    #[serde(default)]
+    pub topics: Vec<u64>,
 }
 
 // ─── Institutional-primitive Params structs ───
@@ -4882,11 +5024,21 @@ impl TenzroMcpServer {
                     rate_limit.insert(addr_key, now);
                 }
 
-                // Persist rate limit to RocksDB (survives pod restarts)
+                // Persist rate limit to RocksDB (survives node restarts). A failure
+                // here silently reopens the cooldown after a restart, so surface it.
                 if let Some(storage) = self.node.storage() {
                     use tenzro_storage::KvStore;
                     let faucet_key = format!("faucet_request:{}", addr_hex.to_lowercase());
-                    let _ = storage.put("metadata", faucet_key.as_bytes(), &now.to_le_bytes());
+                    storage
+                        .put("metadata", faucet_key.as_bytes(), &now.to_le_bytes())
+                        .map_err(|e| ErrorData {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!(
+                                "Faucet transfer succeeded but persisting the rate-limit record failed: {}",
+                                e
+                            )),
+                            data: None,
+                        })?;
                 }
 
                 Ok(Json(RequestFaucetOutput {
@@ -5046,25 +5198,20 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "TDIP/GDPR Article 17 right-to-erasure. Hard-deletes a previously revoked identity from the registry and persistent storage. The DID must already be in `Revoked` status — call `revoke_did` (RPC) first, allow cascading revocation to propagate, then call this. Distinct from revoke (logical delete).")]
+    #[tool(description = "TDIP/GDPR Article 17 right-to-erasure. Hard-deletes a previously revoked identity from the registry and persistent storage. The DID must already be in `Revoked` status — call `revoke_did` (RPC) first, allow cascading revocation to propagate, then call this. Distinct from revoke (logical delete). Operator-only: requires X-Tenzro-Admin-Token.")]
     async fn forget_identity(
         &self,
         Parameters(params): Parameters<ResolveDidParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let registry = self
-            .node
-            .identity_registry()
-            .ok_or_else(|| err_internal("Identity registry not initialized"))?;
-
-        registry
-            .forget_identity(&params.did)
-            .map_err(|e| err_internal(format!("forget_identity failed: {}", e)))?;
-
-        json_result(serde_json::json!({
-            "did": params.did,
-            "status": "erased",
-            "note": "Hard-deleted from CF_IDENTITIES per TDIP/GDPR Article 17",
-        }))
+        // Dispatch through the JSON-RPC layer so the admin-token gate on
+        // `tenzro_forgetIdentity` applies identically to MCP callers.
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_forgetIdentity",
+            serde_json::json!({ "did": params.did }),
+        )
+        .await?;
+        json_result(result)
     }
 
     #[tool(description = "List all Tenzro agent public signing keys as an RFC 7517 JWK Set. Mirrors GET /.well-known/jwks.json. External RFC 9421 verifiers (Visa TAP, Mastercard, Stripe MPP, AP2, x402) use this to resolve `keyid` parameters.")]
@@ -6332,7 +6479,7 @@ impl TenzroMcpServer {
         // Include local node if it is serving models
         let served: Vec<String> = self.node.served_models
             .iter()
-            .filter(|e| *e.value())
+            .filter(|e| e.value().is_network())
             .map(|e| e.key().clone())
             .collect();
 
@@ -6713,6 +6860,17 @@ impl TenzroMcpServer {
 
         let svc = service.unwrap();
 
+        let jurisdiction_pin = params
+            .jurisdiction
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let jurisdiction_receipt_required = params
+            .jurisdiction_receipt
+            .as_deref()
+            .is_some_and(|v| v.eq_ignore_ascii_case("required"));
+
         // Build generation config
         use tenzro_model::GenerationConfig;
         let config = GenerationConfig {
@@ -6724,6 +6882,20 @@ impl TenzroMcpServer {
         };
 
         if matches!(svc.location, tenzro_types::model::ModelLocation::Local) {
+            // Fail closed: refuse before generation when the caller pinned a
+            // jurisdiction this node's locality claim does not satisfy.
+            if let Some(pin) = &jurisdiction_pin
+                && !crate::rpc::local_claim_satisfies_pin(&self.node, pin)
+            {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "This node does not satisfy jurisdiction pin '{}' — no matching locality claim declared",
+                        pin
+                    )),
+                    data: None,
+                });
+            }
             // Local model inference
             let model_runtime = self.node.model_runtime.as_ref().ok_or_else(|| ErrorData {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -6762,6 +6934,22 @@ impl TenzroMcpServer {
                         })
                     });
 
+                    let jurisdiction = crate::rpc::sign_local_jurisdiction(
+                        &self.node,
+                        &svc.model_id,
+                        message.as_bytes(),
+                        result.text.as_bytes(),
+                    );
+                    if jurisdiction_receipt_required && jurisdiction.is_none() {
+                        return Err(ErrorData {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(
+                                "jurisdiction_receipt=required but this node has no jurisdiction claim or signer",
+                            ),
+                            data: None,
+                        });
+                    }
+
                     json_result(serde_json::json!({
                         "model": svc.model_id,
                         "response": result.text,
@@ -6774,6 +6962,7 @@ impl TenzroMcpServer {
                         "generation_time_ms": result.generation_time_ms,
                         "tokens_per_second": result.tokens_per_second,
                         "load": load,
+                        "tenzro_jurisdiction": jurisdiction,
                     }))
                 }
                 Err(e) => text_result(format!("Inference failed: {}", e)),
@@ -6788,13 +6977,63 @@ impl TenzroMcpServer {
                 "messages": [{"role": "user", "content": message}],
                 "temperature": temperature.unwrap_or(0.7),
                 "max_tokens": max_tokens.unwrap_or(512),
+                "jurisdiction": jurisdiction_pin,
+                "jurisdiction_receipt": jurisdiction_receipt_required.then_some("required"),
             });
 
             match client.post(&remote_url).json(&forward_body).send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     match resp.json::<serde_json::Value>().await {
-                        Ok(body) => json_result(body),
+                        Ok(mut body) => {
+                            let content = body
+                                .get("choices")
+                                .and_then(|c| c.get(0))
+                                .and_then(|c| c.get("message"))
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let pinned = crate::rpc::pinned_announcement_pubkey(
+                                &self.node,
+                                &svc.model_id,
+                                &svc.provider_name,
+                            );
+                            let jurisdiction = crate::rpc::verify_forwarded_jurisdiction(
+                                body.get("tenzro_jurisdiction"),
+                                message.as_bytes(),
+                                content.as_bytes(),
+                                &svc.model_id,
+                                pinned.as_deref(),
+                                jurisdiction_pin.as_deref(),
+                                &svc.provider_name,
+                            );
+                            if jurisdiction_receipt_required && jurisdiction.is_none() {
+                                return Err(ErrorData {
+                                    code: ErrorCode::INVALID_PARAMS,
+                                    message: Cow::from(format!(
+                                        "Provider {} did not return a verifiable jurisdiction receipt (jurisdiction_receipt=required)",
+                                        svc.provider_name
+                                    )),
+                                    data: None,
+                                });
+                            }
+                            if let Some(obj) = body.as_object_mut() {
+                                match jurisdiction {
+                                    Some(receipt) => {
+                                        obj.insert(
+                                            "tenzro_jurisdiction".to_string(),
+                                            serde_json::to_value(receipt)
+                                                .unwrap_or(serde_json::Value::Null),
+                                        );
+                                    }
+                                    None => {
+                                        obj.remove("tenzro_jurisdiction");
+                                    }
+                                }
+                            }
+                            json_result(body)
+                        }
                         Err(e) => text_result(format!(
                             "Failed to parse provider response (status {}): {}",
                             status, e
@@ -6997,6 +7236,75 @@ impl TenzroMcpServer {
         json_result(serde_json::json!({
             "endpoints": endpoints,
             "total": endpoints.len(),
+        }))
+    }
+
+    // ─── Sealed Models (private encrypted distribution) ───
+    // Read/discovery surface only: sealing and installing are operator
+    // actions gated by the admin token on the RPC surface
+    // (tenzro_sealModel / tenzro_installSealedModel).
+
+    #[tool(description = "List sealed-model manifests stored on this node. Sealed models are distributed as encrypted shards with per-recipient wrapped content keys (x25519-envelope-aes-256-gcm); only named recipients can decrypt. Returns summaries — use get_sealed_model for a full manifest")]
+    async fn list_sealed_models(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let store = self
+            .node
+            .sealed_model_store()
+            .ok_or_else(|| err_internal("Sealed-model store not initialized"))?;
+        let manifests = store.list();
+        let summaries: Vec<serde_json::Value> = manifests
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "model_id": m.model_id,
+                    "artifact_name": m.artifact_name,
+                    "model_hash": hex::encode(m.model_hash.as_bytes()),
+                    "manifest_hash": hex::encode(m.manifest_hash.as_bytes()),
+                    "total_bytes": m.total_bytes,
+                    "shard_count": m.shards.len(),
+                    "recipients": m.recipients.iter().map(|r| r.did.clone()).collect::<Vec<_>>(),
+                    "wrap_alg": m.wrap_alg,
+                    "owner_did": m.owner_did,
+                    "created_at": m.created_at,
+                })
+            })
+            .collect();
+        json_result(serde_json::json!({
+            "count": summaries.len(),
+            "sealed_models": summaries,
+        }))
+    }
+
+    #[tool(description = "Fetch a full sealed-model manifest by model ID. The manifest carries only ciphertext hashes, blob URIs, and wrapped (encrypted) content keys — safe to share; recipients use it to install the model on their own node")]
+    async fn get_sealed_model(
+        &self,
+        Parameters(params): Parameters<GetSealedModelParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let store = self
+            .node
+            .sealed_model_store()
+            .ok_or_else(|| err_internal("Sealed-model store not initialized"))?;
+        match store.get(&params.model_id) {
+            Some(manifest) => {
+                let value = serde_json::to_value(&manifest)
+                    .map_err(|e| err_internal(format!("Failed to serialize manifest: {}", e)))?;
+                json_result(value)
+            }
+            None => text_result(format!(
+                "No sealed-model manifest stored for '{}'",
+                params.model_id
+            )),
+        }
+    }
+
+    #[tool(description = "Get this node's X25519 public key for sealed-model distribution. A publisher includes this key in a recipients entry when sealing a model addressed to this node")]
+    async fn model_recipient_key(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let keypair = self
+            .node
+            .model_recipient_key()
+            .ok_or_else(|| err_internal("Node X25519 recipient key unavailable"))?;
+        json_result(serde_json::json!({
+            "x25519_pubkey": hex::encode(keypair.public_key_bytes()),
+            "wrap_alg": tenzro_model::SEALED_WRAP_ALG,
         }))
     }
 
@@ -7967,17 +8275,25 @@ impl TenzroMcpServer {
                 data: None,
             })?,
         };
-        if stake_wei > 0
-            && let Some(staking) = self.node.staking() {
-                let staker_address = if let Some(registry) = self.node.identity_registry() {
-                    let identities = registry.list_all();
-                    identities.first().map(|(_, id)| id.wallet_address)
-                        .unwrap_or_else(Address::zero)
-                } else {
-                    Address::zero()
-                };
-                let _ = staking.stake(staker_address, stake_wei, provider_type);
-            }
+        if stake_wei > 0 {
+            let staking = self.node.staking().ok_or_else(|| ErrorData {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from("Staking subsystem is unavailable on this node; cannot register a provider with a stake"),
+                data: None,
+            })?;
+            let staker_address = if let Some(registry) = self.node.identity_registry() {
+                let identities = registry.list_all();
+                identities.first().map(|(_, id)| id.wallet_address)
+                    .unwrap_or_else(Address::zero)
+            } else {
+                Address::zero()
+            };
+            staking.stake(staker_address, stake_wei, provider_type).map_err(|e| ErrorData {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Provider stake failed: {}", e)),
+                data: None,
+            })?;
+        }
 
         json_result(serde_json::json!({
             "status": "registered",
@@ -8449,7 +8765,7 @@ impl TenzroMcpServer {
         }))
     }
 
-    #[tool(description = "Run (invoke) a spawned agent template end-to-end. For paid templates, the `payer_wallet` is charged: the network commission (5%) goes to the treasury and the remainder is paid to the template's `creator_wallet`. `tokens_estimate` is used for per-token pricing. Set `dry_run=true` to simulate without charging fees or dispatching real transactions. Successful non-dry-run invocations are metered (invocation_count + total_revenue) and persisted.")]
+    #[tool(description = "Run (invoke) a spawned agent template. For paid templates, the `payer_wallet` is charged: the network commission (5%) goes to the treasury and the remainder is paid to the template's `creator_wallet`. `tokens_estimate` is used for per-token pricing. Set `dry_run=true` to simulate without charging fees or dispatching real transactions. Successful non-dry-run invocations are metered (invocation_count + total_revenue) and persisted.")]
     async fn run_agent_template(
         &self,
         Parameters(params): Parameters<RunAgentTemplateParams>,
@@ -9421,7 +9737,7 @@ impl TenzroMcpServer {
         model_runtime.load_model_with_context(model_id, &gguf_path, Some(entry.context_length))
             .await
             .map_err(|e| err_internal(format!("Failed to load model: {}", e)))?;
-        self.node.served_models.insert(model_id.to_string(), true);
+        self.node.served_models.insert(model_id.to_string(), tenzro_types::model::ModelVisibility::Network);
         let max_concurrent = {
             let hw = self.node.hardware_profile.read();
             if let Some(ref profile) = *hw {
@@ -15171,7 +15487,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load an ASR ONNX model (Moonshine, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT-v3, Canary-1B-Flash). Either pass `catalog_id` to inherit `family` / `max_audio_seconds` / `whisper_variant` from the catalog, or set them explicitly. The transcriber lands in a follow-up wave — today, `transcribe` returns ProviderNotAvailable; loading is wired for end-to-end testing once the transcriber arrives.")]
+    #[tool(description = "Load an ASR ONNX model (Moonshine, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT-v3, Canary-1B-Flash). Either pass `catalog_id` to inherit `family` / `max_audio_seconds` / `whisper_variant` from the catalog, or set them explicitly. The ORT-backed transcribers ship behind an audio feature flag; default node builds return ProviderNotAvailable until built with that feature.")]
     async fn load_audio_model(
         &self,
         Parameters(params): Parameters<LoadAudioModelParams>,
@@ -15636,6 +15952,30 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
+    #[tool(description = "Set a smart account's second-factor policy. \"single_credential\" (default): one enrolled passkey approves each operation. \"two_credentials\": two distinct enrolled passkeys must both sign every operation (requires at least two enrolled credentials).")]
+    async fn set_passkey_policy(
+        &self,
+        Parameters(params): Parameters<PasskeySetPolicyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_setPasskeyPolicy", payload)
+            .await
+            .map_err(|e| err_internal(format!("setPasskeyPolicy failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Get a smart account's second-factor policy: the policy name, how many passkey signatures each operation requires, and how many credentials are enrolled.")]
+    async fn get_passkey_policy(
+        &self,
+        Parameters(params): Parameters<PasskeyGetPolicyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_getPasskeyPolicy", payload)
+            .await
+            .map_err(|e| err_internal(format!("getPasskeyPolicy failed: {}", e)))?;
+        json_result(result)
+    }
+
     #[tool(description = "Add a social-recovery guardian to a smart account. The guardian holds an Ed25519 + ML-DSA-65 composite key and will be asked to sign rotation proofs when the user loses access to their primary passkey.")]
     async fn add_passkey_guardian(
         &self,
@@ -15763,6 +16103,120 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_listPendingRecoveries", payload)
             .await
             .map_err(|e| err_internal(format!("listPendingRecoveries failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Browser-launch passkey auth sessions (gcloud-style device flow) ───
+
+    #[tool(description = "Create a pending browser-launch passkey ceremony session (enroll a new account, add a device credential, or sign over an op hash). Returns a session id and the node-served /auth/passkey URL to open in a browser; the browser runs navigator.credentials.create()/get() and the caller polls get_passkey_session until the session reaches a terminal status.")]
+    async fn create_passkey_session(
+        &self,
+        Parameters(params): Parameters<CreatePasskeySessionParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_createPasskeySession", payload)
+            .await
+            .map_err(|e| err_internal(format!("createPasskeySession failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Poll a browser-launch passkey ceremony session by id. Returns the session kind, status (pending/in_flight/completed/failed/expired), and — once terminal — the handler result or error.")]
+    async fn get_passkey_session(
+        &self,
+        Parameters(params): Parameters<GetPasskeySessionParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_getPasskeySession", payload)
+            .await
+            .map_err(|e| err_internal(format!("getPasskeySession failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Add an additional WebAuthn device credential to an existing passkey-bound smart account. The account must already have at least one enrolled credential.")]
+    async fn add_passkey(
+        &self,
+        Parameters(params): Parameters<AddPasskeyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_addPasskey", payload)
+            .await
+            .map_err(|e| err_internal(format!("addPasskey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List the WebAuthn credential ids enrolled on a passkey-bound smart account.")]
+    async fn list_passkeys(
+        &self,
+        Parameters(params): Parameters<ListPasskeysParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_listPasskeys", payload)
+            .await
+            .map_err(|e| err_internal(format!("listPasskeys failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Revoke a single WebAuthn credential from a passkey-bound smart account by credential id. The account stays usable while at least one other credential survives; removing the last one leaves it recoverable-only until a guardian finalizes a recovery.")]
+    async fn remove_passkey(
+        &self,
+        Parameters(params): Parameters<RemovePasskeyParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_removePasskey", payload)
+            .await
+            .map_err(|e| err_internal(format!("removePasskey failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── MPC distributed key generation (DKLS23 secp256k1) ───
+
+    #[tool(description = "Operator-only. Start a DKLS23 secp256k1 distributed-key-generation ceremony. Requires X-Tenzro-Admin-Token. Every participant's operator posts identical params (same participant_dids, finalized_block_hash, session_nonce, threshold) so the derived InstanceId matches byte-for-byte; peer_bindings must map every remote participant DID to its libp2p PeerId or the call is rejected. Idempotent — re-posting the same session returns the existing record.")]
+    async fn mpc_keygen(
+        &self,
+        Parameters(params): Parameters<McpKeygenParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_mpcKeygen", payload)
+            .await
+            .map_err(|e| err_internal(format!("mpcKeygen failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Query MPC keygen session state. Pass instance_id for a single session, or omit it to list every keygen session on this node. Each record carries status, threshold, total_parties, local_party_index, and — once completed — group_id, group_public_key, and the derived EIP-55 address.")]
+    async fn mpc_keygen_status(
+        &self,
+        Parameters(params): Parameters<McpKeygenStatusParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_mpcKeygenStatus", payload)
+            .await
+            .map_err(|e| err_internal(format!("mpcKeygenStatus failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ─── Identity + credential lifecycle (admin-gated) ───
+
+    #[tool(description = "Operator-only. Revoke a JWT by its jti. Requires X-Tenzro-Admin-Token. Cascades to any tokens minted from the revoked token.")]
+    async fn revoke_jwt(
+        &self,
+        Parameters(params): Parameters<RevokeJwtParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_revokeJwt", payload)
+            .await
+            .map_err(|e| err_internal(format!("revokeJwt failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Operator-only. Register a trusted credential issuer DID. Requires X-Tenzro-Admin-Token. Pass topics to scope trust to specific gossip topic ids, or leave it empty to trust the issuer for all topics. Persisted to the compliance store.")]
+    async fn add_trusted_issuer(
+        &self,
+        Parameters(params): Parameters<AddTrustedIssuerParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::to_value(params).map_err(|e| err_internal(format!("serialize: {}", e)))?;
+        let result = rpc_dispatch(&self.node, "tenzro_addTrustedIssuer", payload)
+            .await
+            .map_err(|e| err_internal(format!("addTrustedIssuer failed: {}", e)))?;
         json_result(result)
     }
 

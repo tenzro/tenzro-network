@@ -18,6 +18,8 @@ pub enum Ap2Command {
     VerifyMandate(Ap2VerifyMandateCmd),
     /// Cross-validate a PaymentMandate against its parent CheckoutMandate
     ValidatePair(Ap2ValidatePairCmd),
+    /// List persisted intent/cart mandate pairs for a controller DID
+    ListMandates(Ap2ListMandatesCmd),
     /// Print AP2 protocol metadata (version, signing alg, kinds)
     Info(Ap2InfoCmd),
 }
@@ -28,6 +30,7 @@ impl Ap2Command {
             Self::SignMandate(cmd) => cmd.execute().await,
             Self::VerifyMandate(cmd) => cmd.execute().await,
             Self::ValidatePair(cmd) => cmd.execute().await,
+            Self::ListMandates(cmd) => cmd.execute().await,
             Self::Info(cmd) => cmd.execute().await,
         }
     }
@@ -233,6 +236,39 @@ impl Ap2ValidatePairCmd {
 }
 
 /// Print AP2 protocol metadata
+/// List persisted intent/cart mandate pairs authorized by a controller DID.
+///
+/// Calls `tenzro_listMandates` and prints the stored records — each carrying
+/// the mandate id, payment-mandate id, the controller/agent/merchant DIDs,
+/// `max_amount` + `total_amount` (decimal strings), asset, chain, expiry, the
+/// `delegation_enforced` flag, and the stored checkout/payment VDCs.
+#[derive(Debug, Parser)]
+pub struct Ap2ListMandatesCmd {
+    /// Controller DID whose persisted mandates to list
+    #[arg(long)]
+    controller_did: String,
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl Ap2ListMandatesCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("AP2 Persisted Mandates");
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_listMandates",
+                serde_json::json!({ "controller_did": self.controller_did }),
+            )
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Parser)]
 pub struct Ap2InfoCmd {
     /// RPC endpoint

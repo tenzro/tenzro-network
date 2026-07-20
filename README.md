@@ -136,6 +136,10 @@ cargo build --release -p tenzro-node -p tenzro-cli
 ### Join the Network
 
 ```bash
+# Guided setup — join the public network (consume, provide, or validate),
+# create a local or sovereign network, or join an existing private network
+tenzro setup
+
 # Join — provisions identity + FROST-Ed25519 threshold wallet + hardware profile
 tenzro join --name "Your Name"
 
@@ -166,6 +170,17 @@ tenzro interactive
 
 # One node serving inference and holding storage under one stake
 ./target/release/tenzro-node --roles ai,storage --data-dir ./data
+```
+
+### Run Your Own Network
+
+```bash
+# Bootstrap a self-contained network: validator keyset, schema-v3 genesis,
+# service unit, and the exact join command for each peer
+tenzro setup --path local --network-name lab
+
+# Join an existing private network
+tenzro setup --path private --genesis ./genesis.toml --bootstrap <multiaddr>
 ```
 
 ### Become a Provider

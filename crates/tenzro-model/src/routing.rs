@@ -735,6 +735,37 @@ impl InferenceRouter {
             }
         }
 
+        // Jurisdiction pin — when the caller pins serving jurisdictions
+        // (via `parameters.custom["jurisdiction"]`, a comma-separated list
+        // of ISO 3166-1 alpha-2 country codes and/or bloc tokens like
+        // `EU`, matched case-insensitively), keep only providers whose
+        // declared `JurisdictionClaim` satisfies at least one token.
+        // Fail-closed, like the hardware floor and unlike the MTP filter:
+        // data sovereignty is a hard constraint, so a pin that no declared
+        // provider satisfies fails the request rather than silently
+        // routing outside the requested jurisdiction. Providers with no
+        // declared claim never satisfy a pin.
+        if let Some(pin) = request.parameters.custom.get("jurisdiction") {
+            let tokens: Vec<&str> =
+                pin.split(',').map(str::trim).filter(|t| !t.is_empty()).collect();
+            if !tokens.is_empty() {
+                providers.retain(|p| {
+                    p.provider
+                        .capacity
+                        .jurisdiction
+                        .as_ref()
+                        .is_some_and(|claim| claim.matches_any(tokens.iter().copied()))
+                });
+                if providers.is_empty() {
+                    return Err(ModelError::NoProvidersAvailable(format!(
+                        "{} (jurisdiction pin {})",
+                        request.model_id,
+                        tokens.join(",")
+                    )));
+                }
+            }
+        }
+
         // Memory-fit admission — when the registry knows the model's
         // resident artifact size, drop providers whose *detected* memory
         // envelope (RAM + VRAM, or the unified pool on Apple Silicon)
@@ -1553,6 +1584,93 @@ impl InferenceRouter {
                         _ => None,
                     };
 
+                    // Provider-attached jurisdiction receipt (optional
+                    // `tenzro_jurisdiction` extension on the OpenAI-compatible
+                    // response). The receipt is an attestation-bound locality
+                    // claim signed by the serving node — verified against the
+                    // exact prompt/output bytes, the routed model id, the
+                    // provider identity, and — when the provider registered a
+                    // signing key — that key. When the request pins a
+                    // jurisdiction, the receipt's claim must also satisfy the
+                    // pin. The router never countersigns: asserting another
+                    // node's locality would be dishonest.
+                    let jurisdiction_pin = request.parameters.custom.get("jurisdiction");
+                    let provider_jurisdiction_receipt = match resp_body.get("tenzro_jurisdiction") {
+                        Some(v) if !v.is_null() => {
+                            match serde_json::from_value::<tenzro_types::JurisdictionReceipt>(
+                                v.clone(),
+                            ) {
+                                Ok(receipt) => {
+                                    let verdict = if receipt.provider != provider_address {
+                                        Err(crate::jurisdiction::JurisdictionError::VerificationFailed)
+                                    } else {
+                                        crate::jurisdiction::verify_response_receipt(
+                                            &receipt,
+                                            input_text.as_bytes(),
+                                            output_text.as_bytes(),
+                                            &request.model_id,
+                                            provider.signing_pubkey.as_deref(),
+                                        )
+                                        .and_then(|()| match jurisdiction_pin {
+                                            Some(pin) => {
+                                                crate::jurisdiction::check_receipt_satisfies_pin(
+                                                    &receipt, pin,
+                                                )
+                                            }
+                                            None => Ok(()),
+                                        })
+                                    };
+                                    match verdict {
+                                        Ok(()) => Some(receipt),
+                                        Err(e) => {
+                                            warn!(
+                                                "Provider {} attached an invalid jurisdiction \
+                                                 receipt for request {}: {}",
+                                                provider_address, request.request_id, e
+                                            );
+                                            None
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Provider {} attached a malformed jurisdiction \
+                                         receipt for request {}: {}",
+                                        provider_address, request.request_id, e
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    // Opt-in strictness: `jurisdiction_receipt=required` turns
+                    // a missing or invalid receipt into a provider failure so
+                    // the retry loop moves on to the next candidate instead of
+                    // returning an unverifiable locality claim.
+                    let jurisdiction_receipt_required = request
+                        .parameters
+                        .custom
+                        .get("jurisdiction_receipt")
+                        .is_some_and(|v| v.eq_ignore_ascii_case("required"));
+                    if jurisdiction_receipt_required && provider_jurisdiction_receipt.is_none() {
+                        warn!(
+                            "Provider {} did not return a verifiable jurisdiction receipt \
+                             for request {} (jurisdiction receipt required)",
+                            provider_address, request.request_id
+                        );
+                        self.record_provider_failure(&provider_address);
+                        self.provider_manager.record_call_failure(&provider_address);
+                        return Err(DispatchFailure::Retryable {
+                            provider: provider_address,
+                            error: ModelError::InferenceError(format!(
+                                "Provider {} did not return a verifiable jurisdiction receipt",
+                                provider_address
+                            )),
+                        });
+                    }
+
                     if config.require_signed_response && provider_manifest.is_none() {
                         warn!(
                             "Provider {} did not return a verifiable signed response \
@@ -1714,6 +1832,10 @@ impl InferenceRouter {
                                 );
                             }
                         }
+                    }
+
+                    if let Some(receipt) = provider_jurisdiction_receipt {
+                        response.jurisdiction_receipt = Some(receipt);
                     }
 
                     Ok(response)

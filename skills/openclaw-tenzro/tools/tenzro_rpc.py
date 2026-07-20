@@ -82,8 +82,8 @@ Usage:
     python tenzro_rpc.py spawn_agent_template <template_id> "My Agent"
     python tenzro_rpc.py import_identity did:tenzro:human:... <private_key>
     python tenzro_rpc.py register_machine_identity <controller_did> nlp,code
-    python tenzro_rpc.py add_service <did> LinkedDomains https://example.com
-    python tenzro_rpc.py add_credential <did> KycAttestation <issuer_did>
+    python tenzro_rpc.py add_service <did> LinkedDomains https://example.com <envelope_hex>
+    python tenzro_rpc.py add_credential <did> KycAttestation <issuer_did> <envelope_hex>
     python tenzro_rpc.py list_identities
     python tenzro_rpc.py pay_mpp https://api.example.com/resource
     python tenzro_rpc.py pay_x402 https://api.example.com/resource
@@ -907,6 +907,23 @@ def total_supply() -> dict:
 def token_balance(address: str) -> dict:
     """Get TNZO token balance for an address."""
     return _rpc("tenzro_tokenBalance", {"address": address})
+
+
+def get_price(symbol: str = "", symbols: list = None) -> dict:
+    """Read one or more asset prices from the node's price oracle.
+
+    Pass a single ``symbol`` (e.g. "ETH") or a ``symbols`` list.
+    ``price_usd_8dp`` is the USD price as an integer scaled by 1e8, encoded
+    as a decimal string. Symbols with no live feed are returned under
+    ``unavailable`` rather than failing the whole call. Requires
+    ``bridge.prices.enabled`` on the node.
+    """
+    params = {}
+    if symbol:
+        params["symbol"] = symbol
+    if symbols:
+        params["symbols"] = symbols
+    return _rpc("tenzro_getPrice", params)
 
 
 # ── Token Registry & Contracts ───────────────────────────────────
@@ -2094,13 +2111,17 @@ def recover_tokens(token_id: str, from_addr: str, to: str,
 
 
 def add_identity_claim(address: str, topic: str, issuer: str,
-                       data: str = "", valid_from: str = None,
+                       envelope: str, data: str = "",
+                       valid_from: str = None,
                        valid_to: str = None) -> dict:
     """Add an identity claim to an address for compliance verification.
 
     address: the address to add the claim for
     topic: claim topic (e.g. "kyc", "accredited_investor", "jurisdiction")
-    issuer: DID of the claim issuer
+    issuer: DID of the claim issuer (must be an active trusted issuer
+        registered for this topic; the envelope must be signed by this DID)
+    envelope: hex DID-envelope header signed by the issuer over the
+        canonical claim params, with method "tenzro_addIdentityClaim"
     data: optional claim data payload
     valid_from: optional ISO-8601 start time
     valid_to: optional ISO-8601 expiry time
@@ -2110,6 +2131,7 @@ def add_identity_claim(address: str, topic: str, issuer: str,
         "topic": topic,
         "issuer": issuer,
         "data": data,
+        "envelope": envelope,
     }
     if valid_from:
         params["valid_from"] = valid_from
@@ -2122,15 +2144,23 @@ def add_trusted_issuer(issuer_did: str, name: str,
                        topics: list) -> dict:
     """Register a trusted claim issuer for compliance verification.
 
+    Operator-only: the node requires the admin token for this method.
+
     issuer_did: DID of the trusted issuer
     name: human-readable name of the issuer
     topics: list of claim topics this issuer is trusted for
+        (empty list = unrestricted)
     """
     return _rpc("tenzro_addTrustedIssuer", {
         "issuer_did": issuer_did,
         "name": name,
         "topics": topics,
     })
+
+
+def list_trusted_issuers() -> dict:
+    """List registered trusted claim issuers."""
+    return _rpc("tenzro_listTrustedIssuers", {})
 
 
 # ── Events & Webhooks ────────────────────────────────────────────
@@ -3158,40 +3188,52 @@ def register_machine_identity(controller_did: str,
 
 
 def add_service(did: str, service_type: str, endpoint: str,
-                description: str = None) -> dict:
+                envelope: str) -> dict:
     """Add a service endpoint to a DID document.
 
     did: the DID to add the service to
     service_type: service type (e.g. "LinkedDomains", "MessagingService")
     endpoint: service endpoint URL
-    description: optional description
+    envelope: hex DID-envelope header signed by the subject (or its
+        controller) over the canonical service params, with method
+        "tenzro_addService"
     """
     params = {
         "did": did,
-        "service_type": service_type,
+        "type": service_type,
         "endpoint": endpoint,
+        "envelope": envelope,
     }
-    if description:
-        params["description"] = description
     return _rpc("tenzro_addService", [params])
 
 
 def add_credential(did: str, credential_type: str, issuer: str,
-                   claims: dict = None) -> dict:
+                   envelope: str, claims: dict = None,
+                   proof_value: str = None, proof_type: str = None) -> dict:
     """Add a verifiable credential to an identity.
 
     did: the DID to add the credential to
     credential_type: credential type (e.g. "KycAttestation")
-    issuer: issuer DID
+    issuer: issuer DID (must be the subject, its controller, or an active
+        trusted issuer; the envelope must be signed by this DID)
+    envelope: hex DID-envelope header signed by the issuer over the
+        canonical credential params, with method "tenzro_addCredential"
     claims: optional claims dict
+    proof_value: optional hex Ed25519 issuer signature over the canonical
+        credential-subject bytes (durable proof, verified server-side)
+    proof_type: optional proof type (default "Ed25519Signature2020")
     """
     params = {
         "did": did,
-        "credential_type": credential_type,
+        "type": credential_type,
         "issuer": issuer,
+        "envelope": envelope,
     }
     if claims:
         params["claims"] = claims
+    if proof_value:
+        params["proof_value"] = proof_value
+        params["proof_type"] = proof_type or "Ed25519Signature2020"
     return _rpc("tenzro_addCredential", [params])
 
 
@@ -5460,6 +5502,176 @@ def revoke_did(did, reason="revoked"):
     return _rpc("tenzro_revokeDid", {"did": did, "reason": reason})
 
 
+# ── Passkey-first wallet custody (WebAuthn P-256 + ML-DSA-65 hybrid) ──
+
+
+def enroll_passkey(passkey_public_key_hex, credential_id_hex,
+                   ml_dsa_public_key_hex, display_name=None, salt=0):
+    """Enroll a passkey-bound smart account.
+
+    Consumes a WebAuthn registration credential (P-256 public key + opaque
+    credential id + ML-DSA-65 verifying key for the hybrid PQ leg), creates a
+    TDIP human identity, deploys a smart account via the shared AccountFactory,
+    and installs the WebAuthnValidator as the primary signer. The signing key
+    never leaves the user's hardware secure element.
+    """
+    params = {
+        "passkey_public_key_hex": passkey_public_key_hex,
+        "credential_id_hex": credential_id_hex,
+        "ml_dsa_public_key_hex": ml_dsa_public_key_hex,
+        "salt": salt,
+    }
+    if display_name:
+        params["display_name"] = display_name
+    return _rpc("tenzro_enrollPasskey", params)
+
+
+def add_passkey(account_address, new_passkey_public_key_hex,
+                new_credential_id_hex, label=None):
+    """Add an additional WebAuthn device credential to an existing account.
+
+    The account must already carry at least one enrolled credential. The new
+    credential only carries its P-256 WebAuthn key; the node mints the
+    credential's ML-DSA-65 post-quantum leg in its TEE.
+    """
+    params = {
+        "account_address": account_address,
+        "new_passkey_public_key_hex": new_passkey_public_key_hex,
+        "new_credential_id_hex": new_credential_id_hex,
+    }
+    if label:
+        params["label"] = label
+    return _rpc("tenzro_addPasskey", params)
+
+
+def list_passkeys(account_address):
+    """List the WebAuthn credential ids enrolled on a smart account."""
+    return _rpc("tenzro_listPasskeys", {"account_address": account_address})
+
+
+def remove_passkey(account_address, credential_id_hex):
+    """Revoke a single credential from a smart account by credential id.
+
+    The account stays usable while at least one other credential survives.
+    Removing the last one leaves it recoverable-only until a guardian
+    finalizes a recovery.
+    """
+    return _rpc("tenzro_removePasskey", {
+        "account_address": account_address,
+        "credential_id_hex": credential_id_hex,
+    })
+
+
+def sign_with_passkey(account_address, op_hash_hex, assertion,
+                      credential_id_hex, ml_dsa_signature_hex=None):
+    """Verify a WebAuthn assertion against a registered passkey.
+
+    Returns verified=true iff the P-256 leg validates and the embedded
+    challenge matches the supplied op hash.
+    """
+    params = {
+        "account_address": account_address,
+        "op_hash_hex": op_hash_hex,
+        "assertion": assertion,
+        "credential_id_hex": credential_id_hex,
+    }
+    if ml_dsa_signature_hex:
+        params["ml_dsa_signature_hex"] = ml_dsa_signature_hex
+    return _rpc("tenzro_signWithPasskey", params)
+
+
+def set_passkey_policy(account_address, second_factor):
+    """Set a smart account's second-factor policy.
+
+    `second_factor` is "single_credential" (one enrolled passkey approves
+    each operation) or "two_credentials" (two distinct enrolled passkeys
+    must both sign every operation).
+    """
+    return _rpc("tenzro_setPasskeyPolicy", {
+        "account_address": account_address,
+        "second_factor": second_factor,
+    })
+
+
+def get_passkey_policy(account_address):
+    """Get a smart account's second-factor policy and enrolled-credential count."""
+    return _rpc("tenzro_getPasskeyPolicy", {"account_address": account_address})
+
+
+# ── Browser-launch passkey auth sessions (gcloud-style device flow) ──
+
+
+def create_passkey_session(kind, display_name=None, ml_dsa_public_key_hex=None,
+                           salt=0, account_address=None, label=None,
+                           op_hash_hex=None, ml_dsa_signature_hex=None):
+    """Create a pending browser-launch passkey ceremony session.
+
+    `kind` is "enroll" (new account), "add" (device credential on an existing
+    account), or "sign" (verify an assertion over an op hash). Returns a
+    session id and the node-served /auth/passkey URL to open in a browser;
+    poll `get_passkey_session` until the session reaches a terminal status.
+    """
+    params = {"kind": kind, "salt": salt}
+    if display_name:
+        params["display_name"] = display_name
+    if ml_dsa_public_key_hex:
+        params["ml_dsa_public_key_hex"] = ml_dsa_public_key_hex
+    if account_address:
+        params["account_address"] = account_address
+    if label:
+        params["label"] = label
+    if op_hash_hex:
+        params["op_hash_hex"] = op_hash_hex
+    if ml_dsa_signature_hex:
+        params["ml_dsa_signature_hex"] = ml_dsa_signature_hex
+    return _rpc("tenzro_createPasskeySession", params)
+
+
+def get_passkey_session(session_id):
+    """Poll a browser-launch passkey ceremony session by id.
+
+    Returns the session kind, status (pending/in_flight/completed/failed/
+    expired), and — once terminal — the handler result or error.
+    """
+    return _rpc("tenzro_getPasskeySession", {"session_id": session_id})
+
+
+# ── MPC distributed key generation (DKLS23 secp256k1; admin-token-gated) ──
+
+
+def mpc_keygen(local_did, participant_dids, threshold,
+               finalized_block_hash, session_nonce, peer_bindings=None):
+    """Start a DKLS23 secp256k1 distributed-key-generation ceremony.
+
+    Operator-only — set TENZRO_ADMIN_TOKEN. Every participant's operator posts
+    identical params (same participant_dids, finalized_block_hash,
+    session_nonce, threshold) so the derived InstanceId matches byte-for-byte;
+    `peer_bindings` maps every remote participant DID to its libp2p PeerId (a
+    missing binding for any remote DID is rejected). Idempotent — re-posting
+    the same session returns the existing record.
+    """
+    return _rpc("tenzro_mpcKeygen", {
+        "local_did": local_did,
+        "participant_dids": participant_dids,
+        "threshold": threshold,
+        "finalized_block_hash": finalized_block_hash,
+        "session_nonce": session_nonce,
+        "peer_bindings": peer_bindings or {},
+    })
+
+
+def mpc_keygen_status(instance_id=None):
+    """Query MPC keygen session state.
+
+    Pass `instance_id` for a single session, or omit it to list every keygen
+    session on this node.
+    """
+    params = {}
+    if instance_id:
+        params["instance_id"] = instance_id
+    return _rpc("tenzro_mpcKeygenStatus", params)
+
+
 def forget_identity(did):
     """TDIP/GDPR Article 17 right-to-erasure. Hard-deletes a previously
     revoked identity from the registry and persistent storage. The DID
@@ -5647,6 +5859,16 @@ def ap2_get_session(session_id: str) -> dict:
 def ap2_list_agent_sessions(agent_did: str) -> dict:
     """List all AP2 sessions for an agent DID."""
     return _rpc("tenzro_ap2ListAgentSessions", {"agent_did": agent_did})
+
+
+def ap2_list_mandates(controller_did: str) -> dict:
+    """List the persisted AP2 mandates authorized by a controller DID.
+
+    Each record captures the validated intent/cart pair — amounts, asset,
+    chain, merchant, expiry, and the stored checkout/payment VDCs — so a
+    controller can audit what its agents were authorized to spend.
+    """
+    return _rpc("tenzro_listMandates", {"controller_did": controller_did})
 
 
 # ── ERC-8004 (Trustless Agents Registry — full v0.6+ surface) ────
@@ -8132,6 +8354,55 @@ COMMANDS = {
     "resolve_username": lambda args: resolve_username(args[0]),
     "revoke_did": lambda args: revoke_did(args[0], args[1] if len(args) > 1 else "revoked"),
     "forget_identity": lambda args: forget_identity(args[0]),
+    # Passkey smart accounts
+    "enroll_passkey": lambda args: enroll_passkey(
+        args[0],
+        args[1],
+        args[2],
+        args[3] if len(args) > 3 else None,
+        int(args[4]) if len(args) > 4 else 0,
+    ),
+    "add_passkey": lambda args: add_passkey(
+        args[0],
+        args[1],
+        args[2],
+        args[3] if len(args) > 3 else None,
+    ),
+    "list_passkeys": lambda args: list_passkeys(args[0]),
+    "remove_passkey": lambda args: remove_passkey(args[0], args[1]),
+    "sign_with_passkey": lambda args: sign_with_passkey(
+        args[0],
+        args[1],
+        json.loads(args[2]),
+        args[3],
+        args[4] if len(args) > 4 else None,
+    ),
+    "set_passkey_policy": lambda args: set_passkey_policy(args[0], args[1]),
+    "get_passkey_policy": lambda args: get_passkey_policy(args[0]),
+    # Browser-launch passkey auth sessions
+    "create_passkey_session": lambda args: create_passkey_session(
+        args[0],
+        args[1] if len(args) > 1 else None,
+        args[2] if len(args) > 2 else None,
+        int(args[3]) if len(args) > 3 else 0,
+        args[4] if len(args) > 4 else None,
+        args[5] if len(args) > 5 else None,
+        args[6] if len(args) > 6 else None,
+        args[7] if len(args) > 7 else None,
+    ),
+    "get_passkey_session": lambda args: get_passkey_session(args[0]),
+    # MPC distributed key generation (operator: admin-token-gated)
+    "mpc_keygen": lambda args: mpc_keygen(
+        args[0],
+        args[1].split(","),
+        int(args[2]),
+        args[3],
+        args[4],
+        json.loads(args[5]) if len(args) > 5 and args[5] else None,
+    ),
+    "mpc_keygen_status": lambda args: mpc_keygen_status(
+        args[0] if len(args) > 0 else None
+    ),
     # Verification
     "verify_zk_proof": lambda args: verify_zk_proof(
         args[0],
@@ -8156,6 +8427,10 @@ COMMANDS = {
     # Token
     "total_supply": lambda args: total_supply(),
     "token_balance": lambda args: token_balance(args[0]),
+    "get_price": lambda args: get_price(
+        args[0] if args else "",
+        json.loads(args[1]) if len(args) > 1 else None,
+    ),
     # Token Registry & Contracts
     "create_token": lambda args: create_token(
         args[0], args[1], args[2], args[3],
@@ -8403,20 +8678,21 @@ COMMANDS = {
         args[0], args[1], args[2], int(args[3]), args[4],
     ),
     "add_identity_claim": lambda args: add_identity_claim(
-        args[0], args[1], args[2],
-        args[3] if len(args) > 3 else "",
+        args[0], args[1], args[2], args[3],
+        args[4] if len(args) > 4 else "",
     ),
     "add_trusted_issuer": lambda args: add_trusted_issuer(
         args[0], args[1], args[2].split(","),
     ),
+    "list_trusted_issuers": lambda args: list_trusted_issuers(),
     # Identity (Extended)
     "import_identity": lambda args: import_identity(args[0], args[1]),
     "register_machine_identity": lambda args: register_machine_identity(
         args[0],
         args[1].split(",") if len(args) > 1 else None,
     ),
-    "add_service": lambda args: add_service(args[0], args[1], args[2]),
-    "add_credential": lambda args: add_credential(args[0], args[1], args[2]),
+    "add_service": lambda args: add_service(args[0], args[1], args[2], args[3]),
+    "add_credential": lambda args: add_credential(args[0], args[1], args[2], args[3]),
     "list_identities": lambda args: list_identities(args[0] if args else None),
     # Payments (Extended)
     "pay_mpp": lambda args: pay_mpp(args[0]),
@@ -9017,6 +9293,7 @@ COMMANDS = {
     "ap2_cancel_session": lambda args: ap2_cancel_session(args[0]),
     "ap2_get_session": lambda args: ap2_get_session(args[0]),
     "ap2_list_agent_sessions": lambda args: ap2_list_agent_sessions(args[0]),
+    "ap2_list_mandates": lambda args: ap2_list_mandates(args[0]),
     # ── ERC-8004 (Trustless Agents Registry — full v0.6+ surface) ──
     "erc8004_encode_register": lambda args: erc8004_encode_register(),
     "erc8004_encode_register_with_uri": lambda args: erc8004_encode_register_with_uri(args[0]),

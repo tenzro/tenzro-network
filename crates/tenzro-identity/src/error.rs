@@ -106,6 +106,17 @@ pub enum IdentityError {
     /// Serialization/deserialization error
     #[error("serialization error: {0}")]
     SerializationError(String),
+
+    /// Revocation broadcast could not be dispatched to the network layer.
+    /// Best-effort: `revoke()` logs this and keeps the local revocation.
+    #[error("revocation broadcast error: {0}")]
+    BroadcastError(String),
+
+    /// Remote DID resolution backend failed (transport or upstream error).
+    /// `IdentityRegistry::resolve()` logs this and falls through to
+    /// `NotFound` — a broken upstream must not mask a local lookup.
+    #[error("resolution backend error: {0}")]
+    ResolutionError(String),
 }
 
 impl From<tenzro_crypto::CryptoError> for IdentityError {

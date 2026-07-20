@@ -275,6 +275,19 @@ pub struct CredentialSubject {
     pub claims: HashMap<String, serde_json::Value>,
 }
 
+impl CredentialSubject {
+    /// Canonical byte form of the subject used as the proof message.
+    ///
+    /// Round-trips through `serde_json::Value` so map keys serialize in
+    /// sorted order — `HashMap` iteration order is process-random, and a
+    /// proof signed in one process must verify in another. Every signer
+    /// and verifier of a credential proof MUST use these bytes.
+    pub fn canonical_bytes(&self) -> crate::error::Result<Vec<u8>> {
+        let value = serde_json::to_value(self)?;
+        Ok(serde_json::to_vec(&value)?)
+    }
+}
+
 impl VerifiableCredential {
     /// Creates a new verifiable credential
     pub fn new(
@@ -358,9 +371,9 @@ impl VerifiableCredential {
             None => return Err(crate::error::IdentityError::CredentialError("No proof attached to credential".to_string())),
         };
 
-        // Create canonical message from credential (excluding proof)
-        // For now, we use the JSON serialization of the credential subject and claims
-        let message = serde_json::to_vec(&self.credential_subject)?;
+        // Canonical message from the credential (excluding proof): the
+        // sorted-key JSON of the credential subject and claims.
+        let message = self.credential_subject.canonical_bytes()?;
 
         proof.verify(&message, issuer_pubkey)
     }
@@ -371,7 +384,7 @@ impl VerifiableCredential {
     /// The credential must carry a proof whose `proof_type` is
     /// `"HybridEd25519MlDsa65Signature2026"` and whose `proof_value` is a
     /// bincode-serialized [`tenzro_crypto::composite::CompositeSignature`]
-    /// over `serde_json::to_vec(&self.credential_subject)`. Both legs of
+    /// over [`CredentialSubject::canonical_bytes`]. Both legs of
     /// the composite signature are required.
     pub fn verify_proof_hybrid(
         &self,
@@ -390,7 +403,7 @@ impl VerifiableCredential {
             }
         };
 
-        let message = serde_json::to_vec(&self.credential_subject)?;
+        let message = self.credential_subject.canonical_bytes()?;
         proof.verify_hybrid(&message, issuer_pubkey)
     }
 
@@ -403,7 +416,7 @@ impl VerifiableCredential {
         signer: &dyn tenzro_crypto::composite::HybridSigner,
         verification_method: impl Into<String>,
     ) -> crate::error::Result<Self> {
-        let message = serde_json::to_vec(&self.credential_subject)?;
+        let message = self.credential_subject.canonical_bytes()?;
         let proof = sign_credential_hybrid(signer, &message, verification_method)?;
         self.proof = Some(proof);
         Ok(self)
@@ -557,7 +570,7 @@ mod tests {
         );
 
         // Create the message to sign (credential subject)
-        let message = serde_json::to_vec(&cred.credential_subject).unwrap();
+        let message = cred.credential_subject.canonical_bytes().unwrap();
         let signature = signer.sign(&message).unwrap();
 
         // Attach the proof
@@ -667,7 +680,7 @@ mod tests {
         .with_expiration(Utc::now() - chrono::Duration::days(1));
 
         // Sign it
-        let message = serde_json::to_vec(&cred.credential_subject).unwrap();
+        let message = cred.credential_subject.canonical_bytes().unwrap();
         let signature = signer.sign(&message).unwrap();
         cred = cred.with_proof(CredentialProof::new(
             "Ed25519",

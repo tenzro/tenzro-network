@@ -37,6 +37,12 @@ tenzro-node 0.1.0
 
 ## Running Your First Node
 
+Prefer a guided flow? `tenzro setup` (in the `tenzro` CLI) walks through
+every path — join the public network, become a provider or validator,
+create a local or sovereign network, or join an existing private one — and
+prints the exact `tenzro-node` start command plus a service unit for your
+platform.
+
 ### 1. LightClient (Simplest)
 
 Perfect for interacting with the network:

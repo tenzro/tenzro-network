@@ -944,6 +944,7 @@ async fn bridge_to_guest(
     head: &RequestHead,
     body: &[u8],
 ) -> std::io::Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
     let mut req = Vec::with_capacity(256 + head.headers.len() * 32 + body.len());

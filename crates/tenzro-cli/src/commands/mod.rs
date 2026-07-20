@@ -103,6 +103,7 @@ pub mod presign;
 pub mod moe;
 pub mod discover;
 pub mod cluster;
+pub mod setup;
 
 // Re-export command types
 pub use node::NodeCommand;
@@ -115,6 +116,7 @@ pub use inference::InferenceCommand;
 pub use identity::IdentityCommand;
 pub use payment::PaymentCommand;
 pub use join::JoinCmd;
+pub use setup::SetupCmd;
 pub use schedule::ScheduleCommand;
 pub use username::SetUsernameCmd;
 pub use agent::AgentCommand;

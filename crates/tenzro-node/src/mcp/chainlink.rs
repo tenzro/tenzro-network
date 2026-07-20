@@ -1532,12 +1532,10 @@ impl ChainlinkMcpServer {
                         "ETH/USD": "0x000359843a543ee2fe414dc14c7e7920ef10f4372990b79d6361cdc0dd1ba782",
                         "BTC/USD": "0x00037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439",
                         "LINK/USD": "0x0003c915006ba88731510bb995c190925d12b87e5442f888932a3c7628d74b14",
-                        "SOL/USD": "0x000346999e7ef12bc3f55a2ebd8506d2bbd4dfa7a3e5d6f0e1a5c1b0a3c51a1a",
-                    },
-                    "forex": {
-                        "EUR/USD": "0x0003f07c8b2c9c5e5e5c0f0a5a5b5c5d5e5f5a5b5c5d5e5f5a5b5c5d5e5f5a5b",
                     },
                 },
+                "feed_id_catalog": "https://docs.chain.link/data-streams/crypto-streams",
+                "feed_id_note": "Only feed IDs published in Chainlink's Data Streams documentation are listed here. Resolve any other pair's feed ID from the catalog above or the authenticated /feeds API — do not construct feed IDs by hand.",
             }));
         }
 
@@ -1569,19 +1567,28 @@ impl ChainlinkMcpServer {
         // If API requires auth, return well-known feeds
         let feeds = match resp {
             Ok(r) if r.status().is_success() => {
-                let body: serde_json::Value = r.json().await.unwrap_or_default();
-                body
+                let body_text = r
+                    .text()
+                    .await
+                    .map_err(|e| err_internal(format!("Failed to read Data Streams feeds response: {}", e)))?;
+                serde_json::from_str::<serde_json::Value>(&body_text)
+                    .map_err(|e| err_internal(format!("Failed to parse Data Streams feeds response: {}", e)))?
             }
             _ => {
-                // Return well-known feed IDs as fallback
+                // The /feeds endpoint requires authentication. Without it, list
+                // only feed IDs published in Chainlink's Data Streams
+                // documentation, and name the remaining pairs without an ID so
+                // callers resolve the ID from the authoritative catalog rather
+                // than a hand-constructed value.
                 serde_json::json!({
-                    "note": "Data Streams API requires authentication. Listing well-known feed IDs.",
+                    "note": "Data Streams /feeds requires authentication. Listing only documented feed IDs; resolve other pairs from the catalog URL below.",
+                    "feed_id_catalog": "https://docs.chain.link/data-streams/crypto-streams",
                     "crypto": [
                         {"pair": "ETH/USD", "feed_id": "0x000359843a543ee2fe414dc14c7e7920ef10f4372990b79d6361cdc0dd1ba782", "decimals": 18},
                         {"pair": "BTC/USD", "feed_id": "0x00037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439", "decimals": 18},
                         {"pair": "LINK/USD", "feed_id": "0x0003c915006ba88731510bb995c190925d12b87e5442f888932a3c7628d74b14", "decimals": 18},
-                        {"pair": "SOL/USD", "feed_id": "0x000346999e7ef12bc3f55a2ebd8506d2bbd4dfa7a3e5d6f0e1a5c1b0a3c51a1a", "decimals": 18},
-                        {"pair": "AVAX/USD", "feed_id": "0x0003acf06b7b7d0e5ee0dab88fe1c8c12b0f73d9f5c3e5c3e3d3b3a3e5f5a5b5", "decimals": 18},
+                        {"pair": "SOL/USD", "decimals": 18},
+                        {"pair": "AVAX/USD", "decimals": 18},
                     ],
                     "forex": [
                         {"pair": "EUR/USD", "decimals": 18},
@@ -2137,14 +2144,14 @@ impl ServerHandler for ChainlinkMcpServer {
         impl_info.title = Some("Tenzro Chainlink MCP Server".into());
         impl_info.version = env!("CARGO_PKG_VERSION").into();
         impl_info.description = Some(
-            "The most complete Chainlink MCP server — 20 tools covering CCIP cross-chain messaging, Data Feeds, Data Streams, VRF v2.5, Proof of Reserve, Automation, and Functions"
+            "Chainlink MCP server — 20 tools covering CCIP cross-chain messaging, Data Feeds, Data Streams, VRF v2.5, Proof of Reserve, Automation, and Functions"
                 .into(),
         );
         impl_info.website_url = Some("https://chain.link".into());
         info.server_info = impl_info;
         info.instructions = Some(
-            "Tenzro Chainlink MCP Server — the most complete Chainlink MCP available. \
-             20 tools covering the full Chainlink product surface.\n\n\
+            "Tenzro Chainlink MCP Server. \
+             20 tools covering the Chainlink product surface.\n\n\
              TOOLS BY CATEGORY:\n\n\
              CCIP Cross-Chain (8 tools):\n\
              - ccip_get_fee — Estimate CCIP fee via Router.getFee()\n\

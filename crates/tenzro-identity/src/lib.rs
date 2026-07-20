@@ -70,6 +70,7 @@ pub mod erc8004;
 pub mod erc8004_daml;
 pub mod erc8004_svm;
 pub mod error;
+pub mod gossip;
 pub mod identity;
 pub mod iso20022;
 pub mod ivms101;
@@ -108,6 +109,9 @@ pub use erc8004_svm::{
     Erc8004SvmTransport, OnChainAgentSvmRegistry, SolPubkey, SvmAgentRecord,
 };
 pub use error::{IdentityError, Result};
+pub use gossip::{
+    decode_identity_for_topic, encode_revocation_broadcast, IdentityGossipMessage, IDENTITY_TOPIC,
+};
 pub use identity::{
     validate_username, IdentityData, IdentityStatus, KeyPurpose, PublicKeyInfo, RevocationEntry,
     ServiceEndpoint, TenzroIdentity,

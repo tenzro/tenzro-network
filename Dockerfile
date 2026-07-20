@@ -20,7 +20,6 @@ ENV CXX=clang++
 # Copy workspace files
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
-COPY sdk/ sdk/
 COPY tools/ tools/
 # vendor/* subtrees (erc8004-evm, erc8004-solana, erc8004-daml, erc8004-atom)
 # are source artifacts for regenerate.sh / DAML compilation, not build-time

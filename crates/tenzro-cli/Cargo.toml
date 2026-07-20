@@ -16,6 +16,7 @@ tenzro-crypto = { workspace = true }
 tenzro-wallet = { workspace = true }
 tenzro-identity = { workspace = true }
 tenzro-node = { workspace = true }
+tenzro-network = { workspace = true }
 tenzro-model = { workspace = true }
 tenzro-zk = { workspace = true }
 async-trait = { workspace = true }
@@ -29,6 +30,7 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 indicatif = { workspace = true }
 dialoguer = { workspace = true }
+console = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }

@@ -208,7 +208,7 @@ fn compose_pubkey_for_hash(pk: &Option<CompositePublicKey>) -> Vec<u8> {
 
 ### 5.1 `tenzro-wallet`
 
-`crates/tenzro-wallet/src/transaction_builder.rs` — when constructing a tx, sign with `HybridSigner`. The wallet's `Wallet` struct now carries both an Ed25519 key and an ML-DSA-65 key; both are derived deterministically from the same seed (different domain-separation tags) so a single mnemonic produces a hybrid key pair.
+`crates/tenzro-wallet/src/transaction_builder.rs` — when constructing a tx, sign with `HybridSigner`. The wallet's `Wallet` struct carries both an Ed25519 key and an ML-DSA-65 key. The wallet is auto-provisioned without a seed phrase: the two legs are generated independently (each key from its own CSPRNG source), so the hybrid key pair is produced at provisioning time rather than derived from any shared secret to recover.
 
 Persistent keystore (`tenzro-wallet/src/keystore.rs`): bump format version, store both private keys. Argon2id parameters unchanged.
 

@@ -34,12 +34,16 @@ pub enum AdminCommand {
     /// API key management (`X-Tenzro-Admin-Token` required).
     #[command(subcommand)]
     ApiKey(ApiKeySubcommand),
+    /// Threshold-key distributed key generation (DKLS23 secp256k1).
+    #[command(subcommand)]
+    MpcKeygen(MpcKeygenSubcommand),
 }
 
 impl AdminCommand {
     pub async fn execute(&self) -> Result<()> {
         match self {
             Self::ApiKey(cmd) => cmd.execute().await,
+            Self::MpcKeygen(cmd) => cmd.execute().await,
         }
     }
 }
@@ -331,5 +335,203 @@ impl ApiKeyRevokeCmd {
         output::print_field("Revoked", if revoked { "yes" } else { "no" });
 
         Ok(())
+    }
+}
+
+/// Distributed key generation (DKLS23 secp256k1) for a threshold group.
+///
+/// DKG is a coordinated multi-party ceremony: every participant's
+/// operator calls `start` with the *same* participant set, threshold,
+/// finalized block hash, and session nonce so the derived instance id
+/// is byte-identical across parties. Admin-token-gated on each node.
+#[derive(Debug, Subcommand)]
+pub enum MpcKeygenSubcommand {
+    /// Kick off (or idempotently re-join) a DKG session on this node.
+    Start(MpcKeygenStartCmd),
+    /// Query DKG session state (a single instance, or all sessions).
+    Status(MpcKeygenStatusCmd),
+}
+
+impl MpcKeygenSubcommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::Start(cmd) => cmd.execute().await,
+            Self::Status(cmd) => cmd.execute().await,
+        }
+    }
+}
+
+/// Start (or idempotently re-join) a DKG session.
+#[derive(Debug, Parser)]
+pub struct MpcKeygenStartCmd {
+    /// This node's participant DID (must appear in `--participant`).
+    #[arg(long)]
+    local_did: String,
+
+    /// A participant DID. Repeat once per party. The node sorts and
+    /// dedups the set, so ordering across operators does not matter.
+    #[arg(long = "participant")]
+    participants: Vec<String>,
+
+    /// Signing threshold `t` (need `2 <= t <= n <= 32`).
+    #[arg(long)]
+    threshold: u8,
+
+    /// A finalized-block hash (64-hex) that all parties agree on. Anchors
+    /// the derived instance id — every operator must pass the same value.
+    #[arg(long)]
+    finalized_block_hash: String,
+
+    /// A shared 32-byte session nonce (64-hex). Every operator must pass
+    /// the same value so the instance id agrees byte-for-byte.
+    #[arg(long)]
+    session_nonce: String,
+
+    /// A `DID=PeerId` binding for a remote participant. Repeat once per
+    /// remote party (the local party is bound from the live PeerId).
+    #[arg(long = "peer-binding", value_parser = parse_peer_binding)]
+    peer_bindings: Vec<(String, String)>,
+
+    /// RPC endpoint.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`).
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+}
+
+fn parse_peer_binding(s: &str) -> Result<(String, String), String> {
+    let (did, peer) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected DID=PeerId, got '{s}'"))?;
+    if did.is_empty() || peer.is_empty() {
+        return Err(format!("both sides of DID=PeerId must be non-empty, got '{s}'"));
+    }
+    Ok((did.to_string(), peer.to_string()))
+}
+
+impl MpcKeygenStartCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Start DKG Session");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        }
+
+        let mut peer_bindings = serde_json::Map::new();
+        for (did, peer) in &self.peer_bindings {
+            peer_bindings.insert(did.clone(), serde_json::Value::String(peer.clone()));
+        }
+
+        let spinner = output::create_spinner("Establishing DKG session...");
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_mpcKeygen",
+                serde_json::json!({
+                    "local_did": self.local_did,
+                    "participant_dids": self.participants,
+                    "threshold": self.threshold,
+                    "finalized_block_hash": self.finalized_block_hash,
+                    "session_nonce": self.session_nonce,
+                    "peer_bindings": serde_json::Value::Object(peer_bindings),
+                }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        print_keygen_session(&result);
+        Ok(())
+    }
+}
+
+/// Query DKG session state.
+#[derive(Debug, Parser)]
+pub struct MpcKeygenStatusCmd {
+    /// A specific instance id (64-hex). When omitted, lists every session.
+    #[arg(long)]
+    instance_id: Option<String>,
+
+    /// RPC endpoint.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`).
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+}
+
+impl MpcKeygenStatusCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("DKG Session Status");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        }
+
+        let params = match &self.instance_id {
+            Some(id) => serde_json::json!({ "instance_id": id }),
+            None => serde_json::json!({}),
+        };
+
+        let spinner = output::create_spinner("Querying...");
+        let result: serde_json::Value =
+            rpc.call("tenzro_mpcKeygenStatus", params).await?;
+        spinner.finish_and_clear();
+
+        if let Some(sessions) = result.get("sessions").and_then(|v| v.as_array()) {
+            if sessions.is_empty() {
+                output::print_info("No DKG sessions on this node.");
+                return Ok(());
+            }
+            for session in sessions {
+                println!();
+                print_keygen_session(session);
+            }
+            println!();
+            output::print_field("Total", &sessions.len().to_string());
+        } else {
+            print_keygen_session(&result);
+        }
+        Ok(())
+    }
+}
+
+/// Render a single `KeygenSessionRecord` in the human-readable field format.
+fn print_keygen_session(record: &serde_json::Value) {
+    if let Some(v) = record.get("instance_id").and_then(|v| v.as_str()) {
+        output::print_field("Instance", v);
+    }
+    if let Some(v) = record.get("status").and_then(|v| v.as_str()) {
+        output::print_field("Status", v);
+    }
+    if let Some(v) = record.get("local_did").and_then(|v| v.as_str()) {
+        output::print_field("Local DID", v);
+    }
+    if let Some(v) = record.get("threshold").and_then(|v| v.as_u64()) {
+        output::print_field("Threshold", &v.to_string());
+    }
+    if let Some(v) = record.get("total_parties").and_then(|v| v.as_u64()) {
+        output::print_field("Parties", &v.to_string());
+    }
+    if let Some(v) = record.get("local_party_index").and_then(|v| v.as_u64()) {
+        output::print_field("Party Index", &v.to_string());
+    }
+    if let Some(v) = record.get("group_id").and_then(|v| v.as_str()) {
+        output::print_field("Group ID", v);
+    }
+    if let Some(v) = record.get("group_public_key").and_then(|v| v.as_str()) {
+        output::print_field("Group Public Key", v);
+    }
+    if let Some(v) = record.get("address").and_then(|v| v.as_str()) {
+        output::print_field("Address", v);
+    }
+    if let Some(v) = record.get("epoch").and_then(|v| v.as_u64()) {
+        output::print_field("Epoch", &v.to_string());
+    }
+    if let Some(v) = record.get("error").and_then(|v| v.as_str()) {
+        output::print_field("Error", v);
     }
 }

@@ -557,7 +557,7 @@ In addition to the main Tenzro MCP server, the node runs specialized servers for
 | **Tenzro** | 3001 | `/mcp` | 500+ tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + distributed MoE serving + AgentBond/insurance + agent memory + app hosting |
 | **Solana** | 3003 | `/mcp` | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking |
 | **Ethereum** | 3004 | `/mcp` | 17 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
-| **Canton** | 3005 | `/mcp` | 15 tools — Canton 3.5+ JSON Ledger API (active-contracts queries with live offset + FQ party id, party / package / connected-synchronizer / version / health reads, CIP-56 Canton Coin balance, AmuletRules fee schedule, DAR upload via `/v2/packages`, submit-and-wait DAML commands, DvP settlement) |
+| **Canton** | 3005 | `/mcp` | 23 tools — Canton 3.5+ JSON Ledger API (active-contracts queries with live offset + FQ party id, party / package / connected-synchronizer / version / health reads, CIP-56 Canton Coin balance, AmuletRules fee schedule, DAR upload via `/v2/packages`, submit-and-wait DAML commands, DvP settlement) |
 | **LayerZero** | 3006 | `/mcp` | 21 tools — V2 messaging, OFT, Stargate V2, Value Transfer API |
 | **Chainlink** | 3007 | `/mcp` | 21 tools — CCIP, data feeds, Data Streams, VRF v2.5, PoR, automation, Functions |
 | **Li.Fi** | 3008 | `/mcp` | 9 tools — cross-chain aggregation, quotes, routes, status |

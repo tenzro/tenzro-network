@@ -131,8 +131,10 @@ pub mod moe_compute_wgpu;
 pub mod moe_exec;
 pub mod moe_extract;
 pub mod moe_quant;
+pub mod moe_receipt;
 pub mod moe_router;
 pub mod moe_shard;
+pub mod jurisdiction;
 pub mod onnx_session;
 pub mod pricing;
 pub mod provenance;
@@ -141,6 +143,7 @@ pub mod provisioning;
 pub mod registry;
 pub mod routing;
 pub mod runtime;
+pub mod sealed;
 pub mod segmentation_runtime;
 pub mod sla;
 pub mod text_embedding_runtime;
@@ -154,6 +157,11 @@ pub mod vision_runtime;
 // Re-export commonly used types
 pub use error::{ModelError, Result};
 pub use latency::LatencyTail;
+pub use sealed::{
+    compute_manifest_hash, compute_shard_ciphertext_hash, seal_model_file, unseal_model_to_file,
+    RecipientSpec, SealedModelManifest, SealedModelShard, SealedModelStore, SealedRecipient,
+    DEFAULT_SHARD_BYTES, SEALED_WRAP_ALG,
+};
 pub use registry::{ModelFilter, ModelRegistry, RegistryEvent};
 pub use provider::{ProviderManager, ProviderMetrics, ProviderWithMetrics};
 pub use routing::{
@@ -172,11 +180,16 @@ pub use moe_exec::{
     combine_expert_outputs, quantize_expert_blob, to_token_routing, ExpertExecuteRequest,
     ExpertExecuteResponse, ExpertFfn, ExpertQuantPlan, ExpertTier, GatingNetwork, MoeCombiner,
     MoeExecError, MoeExpertRuntime, MoeExpertRuntimeStatus, MoeLoadedExpert, MoeLoadedGate,
-    ResidencyConfig, RoutedSlot, RoutedToken,
+    PartialCombine, ResidencyConfig, RoutedSlot, RoutedToken,
 };
 pub use moe_compute::{BackendKind, ComputeBackend, CpuCompute, ExpertCompute, Weight};
 pub use moe_quant::{QuantError, QuantKind, QuantMatrix};
 pub use moe_extract::{MoeExtractor, MoeTensorNaming};
+pub use moe_receipt::{
+    build_expert_receipt, expert_receipt_signing_payload, verify_activation_commitment,
+    verify_expert_receipt, ActivationRow, ActivationVerification, ExpertActivationCommitment,
+    ExpertExecutionReceipt, DEFAULT_ACTIVATION_K,
+};
 pub use library::{
     CategoryType, CompatibilityRequirements, LibraryModelInfo, ModelCategory, ModelHighlight,
     ModelLibrary,
@@ -246,6 +259,10 @@ pub use provenance::{
     hash_content, verify_manifest, verify_response_manifest, Ed25519ProvenanceSigner,
     ProvenanceError, ProvenanceSigner, ProvenanceStore, SharedProvenanceSigner,
     ASSERTION_AI_GENERATED, ASSERTION_DEEPFAKE,
+};
+pub use jurisdiction::{
+    check_receipt_satisfies_pin, verify_receipt, verify_response_receipt,
+    Ed25519JurisdictionSigner, JurisdictionError, JurisdictionSigner, SharedJurisdictionSigner,
 };
 pub use sla::{
     response_signing_payload as sla_response_signing_payload, ProviderSlashingCallback, SlaManager,

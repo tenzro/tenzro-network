@@ -416,6 +416,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Cancel session <id>",
                     "Verify AP2 mandate (metadata.vdc)",
                     "Validate AP2 checkout/payment pair (metadata.checkout_vdc, payment_vdc)",
+                    "List AP2 mandates (metadata.controller_did)",
                     "x402 protocol info",
                     "x402 register resource (metadata: sellerDid, resource, payTo, "
                     "maxAmountRequired, scheme, network, asset, tags)",
@@ -1300,7 +1301,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Tenzro CAIP namespace identifiers per the "
                     "submitted `ChainAgnostic/namespaces#184`. CAIP-2 "
                     "chain id is `tenzro:<lowercase hex of first 16 "
-                    "bytes of the genesis block hash>` with an "
+                    "bytes of the genesis state root>` with an "
                     "EVM-compatible `evm_chain_id` sidecar. CAIP-10 "
                     "account ids accept hex or base58btc on input and "
                     "normalise to canonical 64-hex Tenzro addresses. "
@@ -1317,6 +1318,28 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Get the CAIP-19 asset id for kind=slip44 (native TNZO)",
                     "Get the CAIP-19 asset id for kind=token, token_id=0x…",
                     "Get the CAIP-19 asset id for kind=nft, collection_id=0x…, nft_token_id=42",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "oracle",
+                "name": "Price Oracle",
+                "description": (
+                    "Read asset prices from the node's price oracle "
+                    "(tenzro_getPrice). Pass a single `symbol` or a "
+                    "`symbols` list. `price_usd_8dp` is the USD price as "
+                    "an integer scaled by 1e8. Symbols with no live feed "
+                    "are returned under `unavailable` rather than failing "
+                    "the whole request. Requires bridge.prices.enabled on "
+                    "the node."
+                ),
+                "tags": [
+                    "oracle", "price", "usd", "feed", "asset-price",
+                ],
+                "examples": [
+                    "Get the price of TNZO (metadata.symbol)",
+                    "Get prices for TNZO, ETH, USDC (metadata.symbols)",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],

@@ -1939,8 +1939,11 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `import_identity` — Import an existing identity by DID and private key
 - `resolve_did` — Resolve DID to identity info, delegation scope
 - `list_identities` — List all registered identities on the node
-- `add_service` — Add a service endpoint to a DID document
-- `add_credential` — Add a verifiable credential to an identity
+- `add_service` — Add a service endpoint to a DID document (requires a subject- or controller-signed DID envelope)
+- `add_credential` — Add a verifiable credential to an identity (requires an issuer-signed DID envelope; optional durable issuer proof)
+- `add_identity_claim` — Add a compliance claim to an address (trusted issuer only; requires an issuer-signed DID envelope)
+- `add_trusted_issuer` — Register a trusted claim issuer (operator admin token required)
+- `list_trusted_issuers` — List registered trusted claim issuers
 - `set_delegation_scope` — Set spending limits, allowed operations/protocols/chains for machine identities
 
 **Payments:**

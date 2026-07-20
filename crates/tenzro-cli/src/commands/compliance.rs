@@ -24,6 +24,8 @@ pub enum ComplianceCommand {
     AddClaim(ComplianceAddClaimCmd),
     /// Register a trusted claim issuer
     AddIssuer(ComplianceAddIssuerCmd),
+    /// List registered trusted claim issuers
+    ListIssuers(ComplianceListIssuersCmd),
     /// Add address to whitelist for a token
     Whitelist(ComplianceWhitelistCmd),
     /// Set country restriction for a token
@@ -40,6 +42,7 @@ impl ComplianceCommand {
             Self::Recover(cmd) => cmd.execute().await,
             Self::AddClaim(cmd) => cmd.execute().await,
             Self::AddIssuer(cmd) => cmd.execute().await,
+            Self::ListIssuers(cmd) => cmd.execute().await,
             Self::Whitelist(cmd) => cmd.execute().await,
             Self::SetCountry(cmd) => cmd.execute().await,
         }
@@ -359,9 +362,37 @@ pub struct ComplianceAddClaimCmd {
     /// Valid to (ISO 8601 date, e.g. 2027-01-01T00:00:00Z)
     #[arg(long)]
     valid_to: String,
+    /// Issuer Ed25519 signing key (32-byte hex seed) — the issuer must be
+    /// a registered active trusted issuer for the claim topic
+    #[arg(long)]
+    signing_key: String,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
+}
+
+/// Canonical params for `tenzro_addIdentityClaim` — must match the node's
+/// `canonical_claim_params` byte-for-byte.
+fn canonical_claim_params(
+    address_hex_lower: &str,
+    topic: u64,
+    issuer: &str,
+    data: &str,
+    valid_from: &str,
+    valid_to: &str,
+) -> Vec<u8> {
+    let mut buf = b"tenzro/identity/claim".to_vec();
+    let push = |buf: &mut Vec<u8>, bytes: &[u8]| {
+        buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        buf.extend_from_slice(bytes);
+    };
+    push(&mut buf, address_hex_lower.as_bytes());
+    buf.extend_from_slice(&topic.to_be_bytes());
+    push(&mut buf, issuer.as_bytes());
+    push(&mut buf, data.as_bytes());
+    push(&mut buf, valid_from.as_bytes());
+    push(&mut buf, valid_to.as_bytes());
+    buf
 }
 
 impl ComplianceAddClaimCmd {
@@ -369,6 +400,26 @@ impl ComplianceAddClaimCmd {
         use crate::rpc::RpcClient;
 
         output::print_header("Add Identity Claim");
+
+        let addr_hex_lower = self
+            .address
+            .strip_prefix("0x")
+            .unwrap_or(&self.address)
+            .to_lowercase();
+        let envelope = super::app::sign_envelope(
+            &self.issuer,
+            "tenzro_addIdentityClaim",
+            tenzro_identity::envelope::params_hash(&canonical_claim_params(
+                &addr_hex_lower,
+                self.topic,
+                &self.issuer,
+                &self.data,
+                &self.valid_from,
+                &self.valid_to,
+            )),
+            &self.signing_key,
+        )?;
+
         let spinner = output::create_spinner("Adding identity claim...");
         let rpc = RpcClient::new(&self.rpc);
 
@@ -379,6 +430,7 @@ impl ComplianceAddClaimCmd {
             "data": self.data,
             "valid_from": self.valid_from,
             "valid_to": self.valid_to,
+            "envelope": envelope,
         })).await?;
 
         spinner.finish_and_clear();
@@ -456,6 +508,68 @@ impl ComplianceAddIssuerCmd {
 
         let topic_strs: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
         output::print_field("Topics", &topic_strs.join(", "));
+
+        Ok(())
+    }
+}
+
+/// List registered trusted claim issuers
+#[derive(Debug, Parser)]
+pub struct ComplianceListIssuersCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ComplianceListIssuersCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Trusted Claim Issuers");
+        let spinner = output::create_spinner("Fetching trusted issuers...");
+        let rpc = RpcClient::new(&self.rpc);
+
+        let result: serde_json::Value = rpc
+            .call("tenzro_listTrustedIssuers", serde_json::json!({}))
+            .await?;
+
+        spinner.finish_and_clear();
+
+        let issuers = result
+            .get("issuers")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if issuers.is_empty() {
+            println!("No trusted issuers registered.");
+            return Ok(());
+        }
+        for issuer in &issuers {
+            output::print_field(
+                "Issuer DID",
+                issuer.get("issuer_did").and_then(|v| v.as_str()).unwrap_or(""),
+            );
+            output::print_field(
+                "Name",
+                issuer.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+            );
+            let topics: Vec<String> = issuer
+                .get("topics")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|t| t.as_u64()).map(|t| t.to_string()).collect())
+                .unwrap_or_default();
+            let topics_str = topics.join(", ");
+            output::print_field(
+                "Topics",
+                if topics.is_empty() { "unrestricted" } else { &topics_str },
+            );
+            output::print_field(
+                "Active",
+                if issuer.get("active").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" },
+            );
+            println!();
+        }
+        println!("{} issuer(s)", issuers.len());
 
         Ok(())
     }

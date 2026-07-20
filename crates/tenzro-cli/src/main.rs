@@ -13,7 +13,7 @@ use tenzro_cli::{commands, output, rpc};
 use commands::{
     NodeCommand, WalletCommand, ModelCommand, StakeCommand,
     GovernanceCommand, ProviderCommand, InferenceCommand,
-    IdentityCommand, PaymentCommand, JoinCmd, ScheduleCommand,
+    IdentityCommand, PaymentCommand, JoinCmd, SetupCmd, ScheduleCommand,
     SetUsernameCmd, AgentCommand, CantonCommand,
     EscrowCommand, TaskCommand, MarketplaceCommand, SkillCommand,
     ToolCommand, McpCommand, ResourcesCommand, TokenCommand, ContractCommand, BridgeCommand,
@@ -64,6 +64,9 @@ struct Cli {
 enum Command {
     /// Join the Tenzro Network (one-click participate)
     Join(JoinCmd),
+
+    /// Guided setup — join the network, provide, validate, or bootstrap a private network
+    Setup(SetupCmd),
 
     /// Node management commands
     #[command(subcommand)]
@@ -566,6 +569,18 @@ struct ChatCmd {
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=6))]
     draft_n: Option<u8>,
 
+    /// Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes
+    /// and/or bloc tokens (e.g. "DE,EU"), case-insensitive. The serving
+    /// node must declare a matching attestation-bound locality claim or
+    /// the request is refused.
+    #[arg(long)]
+    jurisdiction: Option<String>,
+
+    /// Fail the request unless the response carries a verifiable signed
+    /// jurisdiction receipt.
+    #[arg(long)]
+    require_jurisdiction_receipt: bool,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -611,6 +626,7 @@ async fn main() -> Result<()> {
     // Execute command
     match cli.command {
         Command::Join(cmd) => cmd.execute().await?,
+        Command::Setup(cmd) => cmd.execute().await?,
         Command::Node(cmd) => cmd.execute().await?,
         Command::Wallet(cmd) => cmd.execute().await?,
         Command::Model(cmd) => cmd.execute().await?,
@@ -853,8 +869,14 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
         }
     };
 
-    // Determine inference source: local model or network
-    let use_local = if let Some(entry) = get_model_by_id(&model_id) {
+    // Determine inference source: local model or network.
+    // Jurisdiction pins are enforced by the serving node against its
+    // attestation-bound locality claim; the CLI's in-process llama.cpp
+    // path has no claim, so pinned requests always go through RPC.
+    let jurisdiction_pinned = cmd.jurisdiction.is_some() || cmd.require_jurisdiction_receipt;
+    let use_local = if jurisdiction_pinned {
+        false
+    } else if let Some(entry) = get_model_by_id(&model_id) {
         let gguf_path = downloader.model_path(&model_id);
         if gguf_path.exists() || gguf_path.is_symlink() {
             // Auto-load model if downloaded but not yet loaded
@@ -889,6 +911,9 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
     output::print_field("Source", source_label);
     output::print_field("Max Tokens", &cmd.max_tokens.to_string());
     output::print_field("Temperature", &format!("{:.1}", cmd.temperature));
+    if let Some(pin) = &cmd.jurisdiction {
+        output::print_field("Jurisdiction", pin);
+    }
     println!();
     output::print_info("Type '/exit' or '/quit' to end the conversation");
     output::print_info("Type '/history' to list recent sessions");
@@ -1106,6 +1131,8 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                 cost: String,
                 #[serde(default)]
                 load: Option<serde_json::Value>,
+                #[serde(default)]
+                tenzro_jurisdiction: Option<serde_json::Value>,
             }
 
             let mut request = serde_json::json!({
@@ -1117,6 +1144,12 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
             });
             if let Some(n) = cmd.draft_n {
                 request["draft_n"] = serde_json::json!(n);
+            }
+            if let Some(pin) = &cmd.jurisdiction {
+                request["jurisdiction"] = serde_json::json!(pin);
+            }
+            if cmd.require_jurisdiction_receipt {
+                request["jurisdiction_receipt"] = serde_json::json!("required");
             }
 
             let response: Result<ChatResponse> = rpc.call("tenzro_chat", request).await;
@@ -1150,6 +1183,39 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                     );
                     if let Some(ref load) = chat_response.load {
                         output::print_field("", &format!("  Load: {}", output::format_load_info(load)));
+                    }
+                    if let Some(ref receipt) = chat_response.tenzro_jurisdiction {
+                        let claim = receipt.get("jurisdiction");
+                        let country = claim
+                            .and_then(|c| c.get("country"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let blocs = claim
+                            .and_then(|c| c.get("blocs"))
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|b| b.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            })
+                            .unwrap_or_default();
+                        let attested = claim
+                            .and_then(|c| c.get("attestation_hash"))
+                            .is_some_and(|v| !v.is_null());
+                        let label = if blocs.is_empty() {
+                            country.to_string()
+                        } else {
+                            format!("{} ({})", country, blocs)
+                        };
+                        output::print_field(
+                            "",
+                            &format!(
+                                "  Jurisdiction: {} — {} claim, signed receipt",
+                                label,
+                                if attested { "attestation-bound" } else { "operator-asserted" }
+                            ),
+                        );
                     }
                     println!();
 

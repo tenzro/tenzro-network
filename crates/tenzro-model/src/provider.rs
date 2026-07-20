@@ -305,6 +305,7 @@ fn apply_advertised_capacity(
     capacity.moe_roles = advertised.moe_roles.clone();
     capacity.moe_gpu = advertised.moe_gpu;
     capacity.prefix_cache = advertised.prefix_cache.clone();
+    capacity.jurisdiction = advertised.jurisdiction.clone();
 }
 
 /// Manager for inference providers

@@ -65,7 +65,7 @@ fn parse_wallet_address(s: &str) -> Result<tenzro_types::primitives::Address> {
 }
 
 /// Build an Ed25519 signer from a 32-byte hex seed.
-fn ed25519_signer(signing_key_hex: &str) -> Result<tenzro_crypto::signatures::Ed25519SignerImpl> {
+pub(crate) fn ed25519_signer(signing_key_hex: &str) -> Result<tenzro_crypto::signatures::Ed25519SignerImpl> {
     let seed = decode_hex("signing key", signing_key_hex)?;
     let keypair = tenzro_crypto::keys::KeyPair::from_bytes(tenzro_crypto::keys::KeyType::Ed25519, &seed)
         .map_err(|e| anyhow!("invalid Ed25519 signing key: {e}"))?;
@@ -73,8 +73,10 @@ fn ed25519_signer(signing_key_hex: &str) -> Result<tenzro_crypto::signatures::Ed
         .map_err(|e| anyhow!("failed to build signer: {e}"))
 }
 
-/// Sign a DID envelope for an app-registry write and return its header value.
-fn sign_envelope(
+/// Sign a DID envelope for an authorized node write and return its header
+/// value. Shared with the identity and compliance commands, which bind the
+/// same envelope convention to their own canonical params.
+pub(crate) fn sign_envelope(
     did: &str,
     method: &str,
     params_hash: [u8; 32],

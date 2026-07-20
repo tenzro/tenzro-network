@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Tenzro AI is the protocol surface that makes intelligence a network resource — discovered, compensated, attested, and settled in TNZO. The same network providers serve dense single-replica inference, sharded Mixture-of-Experts serving for frontier-scale models, speculative decoding via Multi-Token Prediction, multi-modal inference across seven ONNX runtimes plus the llama.cpp language path, TEE-confidential inference, recurrent-depth reasoning (Cortex), and decoupled-outer-aggregation decentralized training.
+Tenzro AI is the protocol surface that makes intelligence a network resource — discovered, compensated, attested, and settled in TNZO. It is the open infrastructure for self-owned AI: any open model, any size, on hardware you and your peers own. The same network providers serve dense single-replica inference, sharded Mixture-of-Experts serving for frontier-scale models, speculative decoding via Multi-Token Prediction, multi-modal inference across seven ONNX runtimes plus the llama.cpp language path, TEE-confidential inference, recurrent-depth reasoning (Cortex), and decoupled-outer-aggregation decentralized training.
 
 None of these are silos. Compute providers serving an MoE expert shard are the same providers that serve a dense Qwen 3.5 27B chat completion. The TDIP identity that pays a per-token bill on inference is the same identity that sponsors a training run. The reputation a provider earns serving inference is the reputation that admits them to a training witness committee. The protocol layer underwrites all of it with one consensus, one settlement asset, and one identity model.
 
@@ -184,7 +184,9 @@ Members are discovered from the runtime ggml device API (`list_llama_ggml_backen
 
 The dispatch planner in §3.2 decides *where* each token batch goes; the expert-host execution runtime carries the tensors there and runs the math.
 
-Every node embeds a `MoeExpertRuntime` (`tenzro-model::moe_exec`). An expert holder loads expert FFN weights (`ExpertFfn`, gate/up/down projections with SwiGLU activation) and gating networks (`GatingNetwork`, softmax top-k router) from safetensors payloads, keyed by `(model_id, layer, expert)`.
+Every node embeds a `MoeExpertRuntime` (`tenzro-model::moe_exec`). An expert holder loads expert FFN weights (`ExpertFfn`, gate/up/down projections with SwiGLU activation) and gating networks (`GatingNetwork`) from safetensors payloads, keyed by `(model_id, layer, expert)`.
+
+The gating network supports both router families in the catalog. Qwen-layout checkpoints use softmax top-k routing. DeepSeek-layout checkpoints (DeepSeek V3/V4, Kimi K2/K3) use sigmoid scoring with a per-expert selection bias: experts are *selected* by `sigmoid(score) + bias` but *weighted* by the raw sigmoid scores, renormalized to sum 1 and scaled by the checkpoint's routed scaling factor. The gate blob is self-describing — the presence of a `router.bias` tensor switches the sigmoid path on, and `routed_scaling_factor` / `shared_experts` ride in the blob's `__metadata__` — so a holder loads either family with the same call. When the checkpoint declares a fused shared-expert FFN, the router appends it as one extra weight-1.0 slot per token at index `num_experts`; the distributed layer treats it as a normal expert for announcement, holding, dispatch, and settlement.
 
 The runtime holds experts in two tiers under a byte budget, so a holder can advertise more experts than fit in memory:
 
@@ -207,6 +209,18 @@ A distributed layer forward (`tenzro_moeForward`) runs in three steps on the coo
 
 The wire format is identical across all three tiers, so a holder can serve LAN peers, WAN peers, and its own local router with one code path.
 
+**Failover.** Holder failures are handled inside the forward, not surfaced to the caller. Each batch first walks its planned holder set — primary, then each standby in the planner's warm-first order — retiring any holder that fails at the transport level or returns an execution error. When a batch exhausts every known holder, the coordinating node replans: the affected (expert, token) pairs are re-dispatched against a rebuilt shard view that excludes every provider that already failed, while contributions already gathered stay in the combiner. Replanning is bounded at two rounds per forward. Each holder failure records a reputation penalty against that provider and the winning holder's latency feeds its serving metrics, so repeat offenders sink in future dispatch plans.
+
+By default the forward is fail-closed: tokens still unservable after the replan budget fail the request. Passing `allow_partial: true` instead drops the unservable (expert, token) contributions, renormalizes each affected token's surviving expert outputs by their gate weights, and reports the dropped slots in the response's `missing` field (`[{layer, expert, tokens}]`) alongside a `replans` count — the distributed analogue of serving with a reduced top-k under partial outages.
+
+**Throughput metering.** Every expert holder meters its aggregate expert-forward throughput (tokens served per second over a rolling minute) and stamps the measurement onto each advertised holding as `committed_tps`, so the dispatch planner ranks holders by observed serving capacity rather than self-declared numbers.
+
+**Execution receipts.** Every remote expert execution is signed. The holder computes an activation commitment over its output rows — for each token, the top-k features by absolute value (k = 8 by default), hashed under a dedicated domain tag — and signs `(model_id, layer, expert, token_indices, input_carrier_hash, commitment_hash)` with the same Ed25519 key that signs its provider announcements. The input carrier hash covers the exact bytes the router sent (including the Q8_0-compressed hidden-state carrier when that leg is in use), so both sides hash identical bytes and the binding survives the lossy transport encoding. The router verifies each receipt inline before accepting a batch: it recomputes the activation commitment from the returned outputs, checks the signature, the provider binding, and token-set equality. A response with a missing, mismatched, or unverifiable receipt is treated exactly like a transport failure — the holder is retired for the batch, takes the reputation penalty, and the standby/replan path takes over. Local self-execution attaches no receipt and is never settled. A holder without a signing key on disk serves receiptless and is rejected by remote routers, matching the fail-closed provider-announcement policy.
+
+**Settlement.** After a forward completes, the router settles the remote expert work per holder in the background — response latency never waits on settlement. Each holder is paid at its own advertised per-input-token price with its minimum-price floor; the network's inference commission is deducted, and the holder's reputation is credited with the net amount through the settled-success path — the only path that raises a provider's score, so reputation tracks paid, receipt-verified work rather than mere liveness. The settlement engine records an audit entry whose proof bytes are the concatenated activation-commitment hashes from that forward's signed receipts, and the usage tracker meters the per-model, per-holder token counts.
+
+**Sampled receipt store and disputes.** Roughly one in 64 verified batches is persisted in full — the exact request carrier, the complete activation-commitment rows, and the holder's signed receipt. Sampling is keyed off the commitment hash itself, so a holder cannot predict which of its batches will be retained. Any node holding its own copy of the disputed expert can re-execute the stored request and compare its output rows against the committed sketch: per-row index overlap and relative feature delta must clear fixed thresholds. An upheld dispute is a fraud proof against the signed receipt and hits the holder with the quarantine-grade reputation penalty.
+
 ### 3.7 RPCs
 
 Planning and topology:
@@ -224,12 +238,16 @@ Execution:
 - `tenzro_moeExpertStatus` — resident experts and gates on this node: per-expert tier (`memory` / `disk`) and footprint, plus `memory_bytes` / `memory_budget_bytes` / `memory_experts` / `disk_experts`
 - `tenzro_moeRoute` — run the local gating network over a batch of hidden states, returning per-token top-k expert assignments
 - `tenzro_moeExecute` — run a batch of tokens through one locally-resident expert FFN
-- `tenzro_moeForward` — the full distributed layer forward: gate → plan → dispatch to holders (local / iroh / HTTP) → combine
+- `tenzro_moeForward` — the full distributed layer forward: gate → plan → dispatch to holders (local / iroh / HTTP) → combine, with bounded in-flight failover around failed holders; `allow_partial: true` degrades unservable tokens to a gate-weight-renormalized partial combine reported under `missing`, and the response's `replans` counts failover rounds. Every remote batch is receipt-verified inline and settled per holder in the background
+- `tenzro_moeListReceipts` — summaries of the sampled execution receipts this router has persisted: model, expert, token count, holder, commitment hash, storage key; optional `model_id` filter and `limit`
+- `tenzro_moeDisputeReceipt` — re-execute a stored receipt's exact request carrier against this node's own copy of the expert and compare the output rows to the committed activation sketch; an upheld dispute applies the quarantine-grade reputation penalty to the receipt's signer
 
 Weight preparation:
 
 - `tenzro_moePrepareExperts` — extract per-expert (and optionally gate) safetensors blobs for a catalog MoE model directly from its original checkpoint using HTTP-Range tensor fetches (only the requested tensors cross the wire, never whole shards), publish each blob into the iroh blob store, and return a background job id. An optional `quant` param re-encodes each expert blob before publish: a preset string (`"q4_k_m"`, or a uniform `"q8_0"` / `"q4_k"` / `"q6_k"`) or a per-projection object (`{ "gate": "q4_k", "up": "q4_k", "down": "q6_k" }`, any projection omitted stays dense). Prepared quantized blobs are self-describing, so a holder loads them at their reduced footprint with no extra flags.
 - `tenzro_moePrepareStatus` — progress snapshot for a prepare job: completed experts, each blob's `quant` tag when quantized, and the resulting `tenzro://blob/` URIs, which feed `tenzro_moeExpertLoad` / `tenzro_moeGateLoad` on any node
+
+The extractor understands two checkpoint layouts, selected by the entry's architecture. The Qwen layout (`Qwen3MoeForCausalLM`) has routed experts and a softmax router on every MoE layer. The DeepSeek layout (`DeepseekV3ForCausalLM` — DeepSeek and Kimi families) shares the routed-expert tensor pattern and adds three things the extractor carries through: the router selection bias (`e_score_correction_bias`, packed into the gate blob as `router.bias`), the fused shared-expert FFN (prepared as one extra expert slot at index `num_experts`, requested like any other expert id), and dense-first-k layers — the extractor fetches the checkpoint's `config.json` at open, requires `first_k_dense_replace` / `routed_scaling_factor` / `n_shared_experts` to be present, refuses expert extraction on the dense layers with a clear error, and stamps the scaling factor and shared-expert count into the gate blob's `__metadata__` so the loading node needs no side-channel configuration.
 
 ### 3.8 Catalog coverage
 
@@ -245,11 +263,14 @@ Catalog entries that declare a `moe: Some(MoeShape { ... })` topology:
 | Gemma 4 | `gemma4-26b-a4b`, `gemma4-26b-a4b-qat`, `gemma4-26b-a4b-mtp-draft` | 128 | 4 | 1 |
 | DiffusionGemma | `diffusiongemma-26b-a4b` | 128 | 4 | 1 |
 | Kimi | `kimi-k2-instruct`, `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code` | 384 | 8 | 1 |
+| Kimi K3 | `kimi-k3` | 896 | 16 | 1 |
 | MiniMax | `minimax-m1-40b`, `minimax-m3` | 32 | 2 | 0 |
 | DeepSeek | `deepseek-v3-0324`, `deepseek-v4-flash`, `deepseek-v4-pro` | 256 / 256 / 512 | 8 | 1 |
 | GLM | `glm-5`, `glm-5.1`, `glm-5.2` | 160 | 8 | 1 |
 | Nemotron Nano | `nemotron-nano-30b-a3b` | 16 | 4 | 0 |
 | OpenAI | `gpt-oss-120b` | 128 | 4 | 0 |
+
+Per-expert extraction (`tenzro_moePrepareExperts`) additionally needs a safetensors checkpoint source mapped in `moe_safetensors_repo`. Currently mapped: `qwen3-30b-a3b`, `deepseek-v3-0324`, `deepseek-v4-flash`, `deepseek-v4-pro`, `kimi-k2-instruct`, `kimi-k2.6`, and `kimi-k3`. The `kimi-k3` entry is extraction-only for now — no whole-model GGUF serving artifact is published yet, so the entry carries the MoE topology and safetensors source but is not promotable for single-node llama.cpp serving.
 
 ---
 

@@ -335,7 +335,7 @@ impl SolanaMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Get current yield/APY information for Solana DeFi staking protocols including Marinade, Jito, BlazeStake, and native staking")]
+    #[tool(description = "Get a static reference table of typical APY ranges for Solana staking protocols (Marinade, Jito, BlazeStake, native staking). These are reference ranges, not a live rate query — verify current rates on each protocol before acting.")]
     async fn solana_get_yield(
         &self,
         Parameters(params): Parameters<GetYieldParams>,
@@ -406,8 +406,8 @@ impl SolanaMcpServer {
         };
 
         let result = serde_json::json!({
-            "source": "tenzro_yield_aggregator",
-            "note": "APY estimates are approximate and fluctuate with network conditions, validator performance, and MEV revenue. Always verify current rates on the protocol website.",
+            "source": "static_reference_table",
+            "note": "The APY ranges are a static reference, not a live query. Actual yield fluctuates with network conditions, validator performance, and MEV revenue — verify the current rate on each protocol's website before acting on it.",
             "protocols": filtered,
         });
         json_result(result)

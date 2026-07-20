@@ -27,7 +27,7 @@
 //!   family of RPCs require a DPoP proof bound to the JWT's `cnf.jkt`.
 //!
 //! Why this split: the MCP transport does not carry DPoP headers
-//! end-to-end through every transport adapter, but the *consequential*
+//! across every transport adapter, but the *consequential*
 //! actions (signing, transferring, escrowing) funnel through the JSON-RPC
 //! layer where the per-handler `AuthContext` enforces DPoP-bound proof.
 

@@ -72,6 +72,12 @@ def route_message(text: str) -> str:
     # ------------------------------------------------------------------
     if any(k in t for k in ["key exchange", "x25519", "diffie-hellman"]):
         return "crypto"
+    if any(k in t for k in [
+        "passkey", "webauthn", "smart account", "social recovery",
+        "guardian", "recovery ceremony", "hardware signer",
+        "passkey policy", "enroll passkey",
+    ]):
+        return "passkey-wallet"
     if any(k in t for k in ["mpc wallet", "keystore", "session key", "spending limit", "custody", "key share", "key rotation"]):
         return "custody"
     if any(k in t for k in ["zk proof", "zero knowledge", "zk circuit", "plonky3", "stark"]):
@@ -85,7 +91,7 @@ def route_message(text: str) -> str:
     if any(k in t for k in [
         "ap2 mandate", "verify mandate", "validate mandate", "intent vdc", "cart vdc",
         "payment vdc", "mandate pair", "ap2 session", "ap2 protocol", "ap2 intent",
-        "ap2 cart", "ap2 payment",
+        "ap2 cart", "ap2 payment", "list mandates", "list mandate", "ap2 mandates",
     ]):
         return "ap2"
     if any(k in t for k in [
@@ -163,6 +169,11 @@ def route_message(text: str) -> str:
         "slip-44", "slip44 coin", "asset namespace", "casa",
     ]):
         return "caip"
+    if any(k in t for k in [
+        "asset price", "price oracle", "spot price", "usd price",
+        "price feed", "get price", "oracle price",
+    ]):
+        return "oracle"
 
     # ------------------------------------------------------------------
     # Tier 2e: Operability inspection, storage market, compute rental,

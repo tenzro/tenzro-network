@@ -35,6 +35,16 @@ pub enum ModelCommand {
     UnregisterEndpoint(ModelUnregisterEndpointCmd),
     /// Reconcile the node's model registry (auto-reload served models, prune stale endpoints)
     Prune(ModelPruneCmd),
+    /// Seal a local model artifact into encrypted shards for named recipients
+    Seal(ModelSealCmd),
+    /// Install a sealed model (fetch, verify, decrypt into local model storage)
+    InstallSealed(ModelInstallSealedCmd),
+    /// List sealed-model manifests stored on the node
+    SealedList(ModelSealedListCmd),
+    /// Fetch a full sealed-model manifest (for out-of-band delivery to recipients)
+    SealedGet(ModelSealedGetCmd),
+    /// Show the node's X25519 recipient public key for sealed models
+    RecipientKey(ModelRecipientKeyCmd),
 }
 
 impl ModelCommand {
@@ -53,6 +63,11 @@ impl ModelCommand {
             Self::RegisterEndpoint(cmd) => cmd.execute().await,
             Self::UnregisterEndpoint(cmd) => cmd.execute().await,
             Self::Prune(cmd) => cmd.execute().await,
+            Self::Seal(cmd) => cmd.execute().await,
+            Self::InstallSealed(cmd) => cmd.execute().await,
+            Self::SealedList(cmd) => cmd.execute().await,
+            Self::SealedGet(cmd) => cmd.execute().await,
+            Self::RecipientKey(cmd) => cmd.execute().await,
         }
     }
 }
@@ -1189,6 +1204,345 @@ impl ModelPruneCmd {
             "Reconcile complete: {} auto-reloaded, {} served flag(s) cleared, {} endpoint(s) pruned",
             reloaded, cleared_models, cleared_services
         ));
+        Ok(())
+    }
+}
+
+/// Seal a local model artifact into encrypted shards for named recipients.
+///
+/// Splits the file into AES-256-GCM shards published to the blob layer,
+/// wraps the content key to each recipient's X25519 public key
+/// (`x25519-envelope-aes-256-gcm`), and stores the signed manifest on the
+/// node. Operator-only (requires the node admin token).
+#[derive(Debug, Parser)]
+pub struct ModelSealCmd {
+    /// Model ID to seal under
+    model_id: String,
+
+    /// Local artifact file to seal (e.g. a GGUF)
+    #[arg(long)]
+    path: String,
+
+    /// Publisher DID recorded on the manifest
+    #[arg(long)]
+    owner_did: String,
+
+    /// Recipient in `did:...=<64-hex x25519 pubkey>` form (repeatable)
+    #[arg(long = "recipient", required = true)]
+    recipients: Vec<String>,
+
+    /// Artifact name (defaults to the file name)
+    #[arg(long)]
+    artifact_name: Option<String>,
+
+    /// Shard size in bytes (defaults to 256 MiB)
+    #[arg(long)]
+    shard_bytes: Option<u64>,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`)
+    #[arg(long)]
+    admin_token: Option<String>,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl ModelSealCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header(&format!("Sealing Model: {}", self.model_id));
+
+        let mut recipients = Vec::with_capacity(self.recipients.len());
+        for r in &self.recipients {
+            let (did, pubkey) = r.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!(
+                    "recipient '{}' must be 'did:...=<64-hex x25519 pubkey>'",
+                    r
+                )
+            })?;
+            recipients.push(serde_json::json!({
+                "did": did,
+                "x25519_pubkey": pubkey,
+            }));
+        }
+
+        let mut params = serde_json::json!({
+            "model_id": self.model_id,
+            "path": self.path,
+            "owner_did": self.owner_did,
+            "recipients": recipients,
+        });
+        if let Some(ref name) = self.artifact_name {
+            params["artifact_name"] = serde_json::json!(name);
+        }
+        if let Some(bytes) = self.shard_bytes {
+            params["shard_bytes"] = serde_json::json!(bytes);
+        }
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        }
+
+        let spinner = output::create_spinner("Sealing artifact and publishing shards...");
+        let result: serde_json::Value = rpc.call("tenzro_sealModel", params).await?;
+        spinner.finish_and_clear();
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_success(&format!("Model '{}' sealed", self.model_id));
+        output::print_field(
+            "Manifest hash",
+            result.get("manifest_hash").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
+        output::print_field(
+            "Model hash",
+            result.get("model_hash").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
+        output::print_field(
+            "Shards",
+            &result.get("shard_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+        );
+        output::print_field(
+            "Recipients",
+            &result.get("recipient_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+        );
+        output::print_field(
+            "Wrap alg",
+            result.get("wrap_alg").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
+        Ok(())
+    }
+}
+
+/// Install a sealed model on this node: fetch shards from the blob layer,
+/// verify the manifest signature and hashes, decrypt with the node's
+/// X25519 recipient key, and write the artifact into local model storage.
+#[derive(Debug, Parser)]
+pub struct ModelInstallSealedCmd {
+    /// Recipient DID (must match a manifest recipient addressed to this node)
+    #[arg(long)]
+    recipient_did: String,
+
+    /// Model ID whose manifest is already stored on the node
+    #[arg(long, conflicts_with = "manifest_file")]
+    model_id: Option<String>,
+
+    /// Path to a manifest JSON file received out-of-band from the publisher
+    #[arg(long, conflicts_with = "model_id")]
+    manifest_file: Option<String>,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`)
+    #[arg(long)]
+    admin_token: Option<String>,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl ModelInstallSealedCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Installing Sealed Model");
+
+        let mut params = serde_json::json!({
+            "recipient_did": self.recipient_did,
+        });
+        match (&self.model_id, &self.manifest_file) {
+            (Some(id), None) => {
+                params["model_id"] = serde_json::json!(id);
+            }
+            (None, Some(file)) => {
+                let raw = std::fs::read_to_string(file)?;
+                let manifest: serde_json::Value = serde_json::from_str(&raw)?;
+                params["manifest"] = manifest;
+            }
+            _ => {
+                anyhow::bail!("provide exactly one of --model-id or --manifest-file");
+            }
+        }
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        }
+
+        let spinner = output::create_spinner("Fetching, verifying, and decrypting shards...");
+        let result: serde_json::Value = rpc.call("tenzro_installSealedModel", params).await?;
+        spinner.finish_and_clear();
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_success(&format!(
+            "Sealed model '{}' installed",
+            result.get("model_id").and_then(|v| v.as_str()).unwrap_or("-")
+        ));
+        output::print_field(
+            "Path",
+            result.get("installed_path").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
+        output::print_field(
+            "Bytes",
+            &result.get("total_bytes").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+        );
+        Ok(())
+    }
+}
+
+/// List sealed-model manifests stored on the node.
+#[derive(Debug, Parser)]
+pub struct ModelSealedListCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Output format (table, json)
+    #[arg(long, default_value = "table")]
+    format: String,
+}
+
+impl ModelSealedListCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Sealed Models");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value =
+            rpc.call("tenzro_listSealedModels", serde_json::Value::Null).await?;
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        let empty = Vec::new();
+        let models = result
+            .get("sealed_models")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        if models.is_empty() {
+            output::print_info("No sealed models stored on this node");
+            return Ok(());
+        }
+
+        let headers = vec!["Model ID", "Artifact", "Size", "Shards", "Recipients", "Owner DID"];
+        let rows: Vec<Vec<String>> = models
+            .iter()
+            .map(|m| {
+                vec![
+                    m.get("model_id").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                    m.get("artifact_name").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                    format_bytes(m.get("total_bytes").and_then(|v| v.as_u64()).unwrap_or(0)),
+                    m.get("shard_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+                    m.get("recipients")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0)
+                        .to_string(),
+                    m.get("owner_did").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                ]
+            })
+            .collect();
+        output::print_table(&headers, &rows);
+        Ok(())
+    }
+}
+
+/// Fetch a full sealed-model manifest — pass the JSON to recipients
+/// out-of-band so they can run `model install-sealed --manifest-file`.
+#[derive(Debug, Parser)]
+pub struct ModelSealedGetCmd {
+    /// Model ID
+    model_id: String,
+
+    /// Write the manifest JSON to this file instead of stdout
+    #[arg(long)]
+    out: Option<String>,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ModelSealedGetCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getSealedModel",
+                serde_json::json!({ "model_id": self.model_id }),
+            )
+            .await?;
+
+        match &self.out {
+            Some(path) => {
+                std::fs::write(path, serde_json::to_string_pretty(&result)?)?;
+                output::print_success(&format!("Manifest written to {}", path));
+            }
+            None => {
+                output::print_json(&result)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Show the node's X25519 recipient public key for sealed models. Give
+/// this key to a publisher so they can address a sealed model to this
+/// node.
+#[derive(Debug, Parser)]
+pub struct ModelRecipientKeyCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl ModelRecipientKeyCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value =
+            rpc.call("tenzro_modelRecipientKey", serde_json::Value::Null).await?;
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_field(
+            "X25519 pubkey",
+            result.get("x25519_pubkey").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
+        output::print_field(
+            "Wrap alg",
+            result.get("wrap_alg").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
         Ok(())
     }
 }

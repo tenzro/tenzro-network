@@ -1835,7 +1835,7 @@ impl rmcp::ServerHandler for LayerZeroMcpServer {
         impl_info.website_url = Some("https://tenzro.com".into());
         info.server_info = impl_info;
         info.instructions = Some(
-            "Tenzro LayerZero MCP Server — the most complete LayerZero V2 MCP available. \
+            "Tenzro LayerZero MCP Server. \
              20 tools for cross-chain messaging, native bridging, and token transfers.\n\n\
              TOOLS BY CATEGORY:\n\n\
              Messaging (4 tools):\n\
