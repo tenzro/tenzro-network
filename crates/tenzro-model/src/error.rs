@@ -137,6 +137,26 @@ pub enum ModelError {
     #[error("Sealed model error: {0}")]
     SealedModel(String),
 
+    /// A differing canonical hash is already recorded for this model. First
+    /// recorder wins; correcting the record requires a governance override.
+    #[error("Canonical hash already recorded for model '{0}'")]
+    HashAlreadyRecorded(String),
+
+    /// No canonical hash is on record for this model, so a peer-fetched
+    /// artifact cannot be verified against the transparency log.
+    #[error("No canonical hash recorded for model '{0}'")]
+    HashNotRecorded(String),
+
+    /// A fetched artifact's manifest hash does not match the recorded
+    /// canonical hash for its model — the weights may be tampered.
+    #[error("Model hash mismatch for '{0}': fetched artifact does not match recorded canonical hash")]
+    HashMismatch(String),
+
+    /// A model manifest carried no weight files, so no primary hash could be
+    /// derived.
+    #[error("Model manifest for '{0}' has no files")]
+    EmptyManifest(String),
+
     /// Runtime / catch-all error
     #[error("{0}")]
     Other(String),

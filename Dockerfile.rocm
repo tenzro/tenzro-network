@@ -1,0 +1,144 @@
+# AMD ROCm/HIP image variant. Builds tenzro-node with GPU acceleration:
+#   - llama.cpp HIP backend for LLM inference (feature `tenzro-node/rocm`)
+#   - ONNX Runtime falls back to CPU for the non-LLM modalities (there is no
+#     ROCm ONNX execution-provider feature wired in tenzro-model)
+#
+# Run with the AMD container runtime:
+#   docker run --device /dev/kfd --device /dev/dri --group-add video ...
+# The CPU image is built from ./Dockerfile and is unchanged by this file.
+
+# Stage 1: Build
+FROM rocm/dev-ubuntu-22.04:6.3-complete AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    clang \
+    cmake \
+    protobuf-compiler \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain (the workspace rust-toolchain.toml selects the channel;
+# rustup syncs it on the first cargo invocation)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH=/root/.cargo/bin:$PATH
+
+WORKDIR /build
+
+# ROCm's hipcc drives the ggml HIP kernels; the rest of the C/C++ tree uses
+# clang (llama-cpp-sys-2 relies on clang-specific flags).
+ENV CC=clang
+ENV CXX=clang++
+ENV ROCM_PATH=/opt/rocm
+
+# Target GPU architectures for the ggml HIP kernels (CMAKE_HIP_ARCHITECTURES).
+# gfx90a = MI210/MI250, gfx942 = MI300X/MI325X, gfx1100 = RX 7900 XTX / RDNA3,
+# gfx1201 = RDNA4. "native" is unusable: the build container has no GPU.
+ENV AMDGPU_TARGETS="gfx90a;gfx942;gfx1100;gfx1201"
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY tools/ tools/
+COPY vendor/ vendor/
+
+RUN mkdir -p apps/tenzro-desktop/src-tauri/src && \
+    echo "fn main() {}" > apps/tenzro-desktop/src-tauri/src/main.rs && \
+    echo "fn main() {}" > apps/tenzro-desktop/src-tauri/build.rs && \
+    printf '%s\n' \
+      '[package]' \
+      'name = "tenzro-desktop"' \
+      'version = "0.1.0"' \
+      'edition = "2021"' \
+      '' \
+      '[build-dependencies]' \
+      'tauri-build = { version = "2", features = [] }' \
+      '' \
+      '[dependencies]' \
+      'tauri = { version = "2", features = ["tray-icon"] }' \
+      'tauri-plugin-shell = "2"' \
+      'serde = { version = "1", features = ["derive"] }' \
+      'serde_json = "1"' \
+      'tokio = { version = "1", features = ["full"] }' \
+      'reqwest = { version = "0.12", features = ["json", "stream"] }' \
+      'futures-util = "0.3"' \
+      'thiserror = "2"' \
+      'tracing = "0.1"' \
+      'uuid = { version = "1", features = ["v4"] }' \
+      'hex = "0.4"' \
+      'dirs = "5"' \
+      'sysinfo = "0.31"' \
+      'sha2 = "0.10"' \
+      'aes-gcm = "0.10"' \
+      'rand = "0.8"' \
+      'hostname = "0.4"' \
+      'tenzro-model = { path = "../../../crates/tenzro-model" }' \
+      'tenzro-zk = { path = "../../../crates/tenzro-zk" }' \
+      '' \
+      '[features]' \
+      'default = ["custom-protocol"]' \
+      'custom-protocol = ["tauri/custom-protocol"]' \
+      > apps/tenzro-desktop/src-tauri/Cargo.toml
+
+# Build tenzro-node (llama.cpp HIP backend) and tenzro-cli.
+RUN cargo build --release -p tenzro-node -p tenzro-cli \
+    --features tenzro-node/rocm
+
+# Stage the ggml rpc-server binary at a fixed path for COPY into the runtime
+# stage. ROCm shared objects (libamdhip64 / librocblas) are expected dynamic
+# links resolved from the runtime image, so they are excluded from the
+# not-found guard; a ggml/llama shared link would still fail the build.
+RUN set -eux; \
+    src="$(find target/release/build -type f -name rpc-server -perm -u+x 2>/dev/null | head -n1)"; \
+    test -n "$src"; \
+    cp "$src" /build/rpc-server; \
+    ldd /build/rpc-server || true; \
+    ! ldd /build/rpc-server | grep -viE 'libamdhip64|librocblas|libhipblas|librocm|libhsa' | grep -qiE 'libggml|libllama|not found'
+
+# Stage 2: Runtime
+FROM rocm/dev-ubuntu-22.04:6.3-complete AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    curl \
+    libstdc++6 \
+    libgomp1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user, added to the render/video groups so it can reach
+# /dev/kfd and /dev/dri when the device nodes are passed in at `docker run`.
+RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro \
+    && usermod -aG video,render tenzro
+
+# Copy binaries from builder
+COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
+COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+COPY --from=builder /build/rpc-server /usr/local/bin/rpc-server
+ENV TENZRO_RPC_SERVER_BIN=/usr/local/bin/rpc-server
+
+# Create data directories
+RUN mkdir -p /data/tenzro /config /home/tenzro/.tenzro/models && chown -R tenzro:tenzro /data /config /home/tenzro/.tenzro
+
+USER tenzro
+WORKDIR /home/tenzro
+
+# Expose ports
+# P2P, JSON-RPC, Web API, Metrics, MCP, A2A
+EXPOSE 9000 8545 8080 9090 3001 3002
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/verify/health || exit 1
+
+# Default entrypoint
+ENTRYPOINT ["tenzro-node"]
+
+# Default args (override with docker run args)
+CMD ["--data-dir", "/data/tenzro", "--log-level", "info"]

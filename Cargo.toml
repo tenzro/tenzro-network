@@ -151,6 +151,7 @@ ff = "=0.14.0"
 group = "=0.14.0"
 sha2 = "0.10"
 sha3 = "0.10"
+blake3 = "1"
 aes-gcm = "0.10"
 x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
 rand = "0.8"

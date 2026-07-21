@@ -92,20 +92,71 @@ impl HardwareInfo {
                 compiled_backends.push("metal".to_string());
             }
         }
+        if cfg!(feature = "sycl") {
+            compiled_backends.push("sycl".to_string());
+        }
+        if cfg!(feature = "openvino") {
+            compiled_backends.push("openvino".to_string());
+        }
+        if cfg!(feature = "opencl") {
+            compiled_backends.push("opencl".to_string());
+        }
+        if cfg!(feature = "musa") {
+            compiled_backends.push("musa".to_string());
+        }
+        if cfg!(feature = "cann") {
+            compiled_backends.push("cann".to_string());
+        }
+        if cfg!(feature = "webgpu") {
+            compiled_backends.push("webgpu".to_string());
+        }
+        if cfg!(feature = "blas") {
+            compiled_backends.push("blas".to_string());
+        }
+        if cfg!(feature = "zdnn") {
+            compiled_backends.push("zdnn".to_string());
+        }
 
-        // Determine what's actually active
+        // Determine what's actually active. GPU/NPU backends are checked
+        // ahead of CPU-acceleration backends (blas / openvino-CPU / zdnn),
+        // which apply whether or not GPU offload was requested.
         let active_backend = if gpu_offload {
             if cfg!(feature = "cuda") || cfg!(feature = "cuda-no-vmm") {
                 "CUDA (NVIDIA GPU)".to_string()
             } else if cfg!(feature = "rocm") {
                 "ROCm (AMD GPU)".to_string()
+            } else if cfg!(feature = "sycl") {
+                "SYCL (Intel GPU)".to_string()
+            } else if cfg!(feature = "musa") {
+                "MUSA (Moore Threads GPU)".to_string()
+            } else if cfg!(feature = "cann") {
+                "CANN (Huawei Ascend NPU)".to_string()
+            } else if cfg!(feature = "openvino") {
+                // Device (CPU / GPU / NPU) is picked at runtime via GGML_OPENVINO_DEVICE.
+                format!(
+                    "OpenVINO (Intel {})",
+                    std::env::var("GGML_OPENVINO_DEVICE").unwrap_or_else(|_| "CPU".to_string())
+                )
+            } else if cfg!(feature = "opencl") {
+                "OpenCL (GPU)".to_string()
             } else if cfg!(feature = "vulkan") {
                 "Vulkan (GPU)".to_string()
+            } else if cfg!(feature = "webgpu") {
+                "WebGPU (GPU)".to_string()
             } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
                 "Metal (Apple GPU)".to_string()
             } else {
                 "GPU (unknown backend)".to_string()
             }
+        } else if cfg!(feature = "openvino") {
+            format!(
+                "OpenVINO (Intel {})",
+                std::env::var("GGML_OPENVINO_DEVICE").unwrap_or_else(|_| "CPU".to_string())
+            )
+        } else if cfg!(feature = "zdnn") {
+            "zDNN (IBM Z Telum accelerator)".to_string()
+        } else if cfg!(feature = "blas") {
+            "CPU + BLAS".to_string()
         } else {
             "CPU".to_string()
         };
@@ -311,11 +362,22 @@ unsafe impl Sync for LoadedDrafter {}
 
 /// Model runtime -- loads and runs GGUF models for inference via llama.cpp.
 ///
-/// Adapts to the provider's hardware automatically:
+/// Adapts to the provider's hardware automatically. The GPU/NPU backend is
+/// selected at compile time via a cargo feature; the CPU path is always
+/// available as fallback:
 /// - Metal GPU on macOS ARM64 (auto-detected)
-/// - CUDA on NVIDIA GPUs (compile with `--features cuda`)
-/// - ROCm on AMD GPUs (compile with `--features rocm`)
-/// - Vulkan on any GPU (compile with `--features vulkan`)
+/// - CUDA on NVIDIA GPUs (`--features cuda`, or `cuda-no-vmm` for older drivers)
+/// - ROCm/HIP on AMD GPUs (`--features rocm`)
+/// - SYCL on Intel GPUs (`--features sycl`, needs the oneAPI DPC++ toolchain)
+/// - OpenVINO on Intel CPU/GPU/NPU (`--features openvino`; device picked at
+///   runtime via the `GGML_OPENVINO_DEVICE` env var — `CPU` / `GPU` / `NPU`)
+/// - Vulkan on any cross-vendor GPU (`--features vulkan`)
+/// - OpenCL on Adreno / Mali (`--features opencl`)
+/// - MUSA on Moore Threads GPUs (`--features musa`)
+/// - CANN on Huawei Ascend NPUs (`--features cann`)
+/// - WebGPU via Dawn (`--features webgpu`)
+/// - zDNN on IBM Z Telum (`--features zdnn`)
+/// - BLAS CPU acceleration (`--features blas`)
 /// - CPU fallback (always available)
 pub struct ModelRuntime {
     loaded_models: Arc<DashMap<String, Arc<LoadedEntry>>>,

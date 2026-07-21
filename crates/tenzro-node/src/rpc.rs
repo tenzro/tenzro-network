@@ -790,6 +790,11 @@ fn requires_admin_token(method: &str) -> bool {
             | "tenzro_revokeDid"
             | "tenzro_revokeIdentity"
             | "tenzro_forgetIdentity"
+            // Canonical model-hash override: correcting or revoking the
+            // first-recorded canonical hash for a model_id is a network-wide
+            // trust-root mutation. Recording is permissionless (first-recorder
+            // -wins); overriding an existing record is governance-gated.
+            | "tenzro_overrideModelHash"
     )
 }
 
@@ -1047,36 +1052,6 @@ fn sanitize_model_error(e: &tenzro_model::ModelError) -> String {
         ModelError::InvalidModel(_) => "invalid model request".to_string(),
         _ => "inference failed".to_string(),
     }
-}
-
-/// Compute the SHA-256 (hex) of an on-disk file by streaming it in 1 MiB
-/// chunks so a multi-GB GGUF never lands fully in memory. Returns `None`
-/// (with a `warn!`) if the file can't be opened or read — the caller then
-/// broadcasts an empty `weights_sha256`, which is a soft integrity signal,
-/// not a hard failure.
-fn sha256_file_hex(path: &str) -> Option<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(path = %path, error = %e, "Failed to open weights for SHA-256");
-            return None;
-        }
-    };
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        match file.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => hasher.update(&buf[..n]),
-            Err(e) => {
-                tracing::warn!(path = %path, error = %e, "Failed to read weights for SHA-256");
-                return None;
-            }
-        }
-    }
-    Some(hex::encode(hasher.finalize()))
 }
 
 fn normalize_params(params: Option<Value>) -> Option<Value> {
@@ -1974,6 +1949,14 @@ async fn dispatch_request(
         "tenzro_getSealedModel" => handle_get_sealed_model(node, request.params).await,
         "tenzro_listSealedModels" => handle_list_sealed_models(node).await,
         "tenzro_modelRecipientKey" => handle_model_recipient_key(node).await,
+        // Canonical model-hash transparency log. Recording is permissionless
+        // (first-recorder-wins) so any node can anchor a model_id → hash
+        // assertion; overriding an existing record is governance-gated
+        // (admin-token in requires_admin_token). Reads are open.
+        "tenzro_getModelHash" => handle_get_model_hash(node, request.params).await,
+        "tenzro_listModelHashes" => handle_list_model_hashes(node).await,
+        "tenzro_recordModelHash" => handle_record_model_hash(node, request.params).await,
+        "tenzro_overrideModelHash" => handle_override_model_hash(node, request.params).await,
         "tenzro_chat" | "tenzro_chatCompletion" => handle_chat(node, request.params).await,
         // Intent routing (model selection tier). `routeIntent` is discovery
         // only — returns the chosen model and fallback chain without dispatch
@@ -23368,6 +23351,18 @@ async fn handle_serve_model(
             .unwrap_or_else(|| gguf_path.to_string_lossy().to_string())
     };
 
+    // Verify-before-load gate: before loading the GGUF (single-box or
+    // clustered), measure its BLAKE3 and compare to the governance-anchored
+    // canonical hash on record. Fail-closed on mismatch — a differing hash for
+    // a model with an anchor means the local bytes were tampered with, so the
+    // serve is refused. No record yet (first-recorder-wins un-anchored) → load
+    // proceeds; serving this GGUF is what anchors the hash downstream.
+    if let Some((measured, recorded)) =
+        verify_gguf_against_record(node, model_id, std::path::Path::new(&gguf_path))?
+    {
+        attest_verified_load(node, model_id, measured, recorded).await;
+    }
+
     // Decide whether to serve this model as a single-box load or split it
     // across a LAN pipeline cluster. Clustering is opt-out: the model shape is
     // read from the GGUF header (or a caller-supplied `model_shape`), members
@@ -23636,15 +23631,80 @@ async fn handle_serve_model(
         let api_endpoint_c = api_endpoint.clone();
         let model_id_c = model_id.to_string();
         let gguf_path_c = gguf_path.clone();
-        tokio::spawn(async move {
-            // Hash the served weights off the async executor — a GGUF can be
-            // multiple GB. Empty hash on failure is a soft signal (peers can
-            // still route; they just can't cross-check integrity).
-            let weights_sha256 = tokio::task::spawn_blocking(move || {
-                sha256_file_hex(&gguf_path_c).unwrap_or_default()
-            })
-            .await
+        // Transparency-log context: the governance-anchored hash registry, the
+        // filename served, this node's recorder DID (first-recorder-wins
+        // authorship), the current epoch, and the iroh resolver used to
+        // opportunistically publish the weights into the peer blob store so the
+        // gossiped `tenzro://blob/<blake3>` URI resolves. All snapshotted here
+        // — the identity-registry read holds a parking_lot guard and must not
+        // cross the spawn.
+        let model_hash_registry = node.model_hash_registry().cloned();
+        let gguf_filename = std::path::Path::new(&gguf_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("model.gguf")
+            .to_string();
+        let recorder_did = node
+            .identity_registry()
+            .and_then(|r| r.list_all().first().map(|(_, id)| id.did.to_string()))
             .unwrap_or_default();
+        let record_epoch = current_epoch_or_err(node).unwrap_or(0);
+        let iroh_resolver = node.iroh_resolver().cloned();
+        tokio::spawn(async move {
+            // Read the served weights once, off the async executor — a GGUF can
+            // be multiple GB — and derive both hashes from the same bytes: the
+            // SHA-256 integrity digest peers verify fetched bytes against, and
+            // the BLAKE3 root iroh-blobs content-addresses by. An empty result
+            // is a soft signal: the model stays out of the registry rather than
+            // entering with a fabricated or partial hash.
+            let file_record: Option<tenzro_model::ModelFileRecord> = {
+                let path = gguf_path_c.clone();
+                let filename = gguf_filename.clone();
+                tokio::task::spawn_blocking(move || {
+                    tenzro_model::ModelFileRecord::from_path(filename, std::path::Path::new(&path))
+                        .ok()
+                })
+                .await
+                .ok()
+                .flatten()
+            };
+            let weights_sha256 = file_record
+                .as_ref()
+                .map(|f| hex::encode(f.sha256))
+                .unwrap_or_default();
+
+            // Publish the weights into the iroh blob store so the
+            // `tenzro://blob/<blake3>` URI advertised in the announcement
+            // resolves for peers. Content-addressed and idempotent: republishing
+            // identical bytes returns the same hash. Best-effort — a publish
+            // failure only means this node isn't a peer source yet (HF fallback
+            // still serves the model).
+            let tenzro_uri: Option<String> = match (&iroh_resolver, &file_record) {
+                (Some(resolver), Some(f)) => {
+                    match tokio::fs::read(&gguf_path_c).await {
+                        Ok(bytes) => {
+                            use tenzro_iroh::IrohResolver;
+                            match resolver.publish_bytes(bytes.into()).await {
+                                Ok(uri) => Some(uri.to_string()),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        model_id = %model_id_c,
+                                        error = %e,
+                                        "Failed to publish weights to iroh blob store; \
+                                         peers fall back to HuggingFace"
+                                    );
+                                    // Fall back to the deterministic content
+                                    // address so peers can still address the
+                                    // blob by BLAKE3 once some node publishes it.
+                                    Some(format!("tenzro://blob/{}", hex::encode(f.blake3)))
+                                }
+                            }
+                        }
+                        Err(_) => Some(format!("tenzro://blob/{}", hex::encode(f.blake3))),
+                    }
+                }
+                _ => None,
+            };
 
             // ModelRegistry publication with the real artifact hash. Peer
             // downloads verify fetched bytes against this via
@@ -23654,13 +23714,16 @@ async fn handle_serve_model(
             if let Some(registry) = registry {
                 match (
                     provider_wallet,
+                    file_record.as_ref(),
                     hex::decode(&weights_sha256)
                         .ok()
                         .and_then(|b| tenzro_types::Hash::from_bytes(&b)),
                 ) {
-                    (Some(provider), Some(hash)) => {
+                    (Some(provider), Some(fr), Some(hash)) => {
                         let mut info = entry.to_model_info(provider);
                         info.model_hash = hash;
+                        info.blake3_hash = Some(fr.blake3);
+                        info.tenzro_uri = tenzro_uri.clone();
                         info.status = tenzro_types::model::ModelStatus::Active;
                         let result = match registry.register_model(info.clone()) {
                             Err(tenzro_model::ModelError::ModelAlreadyExists(_)) => {
@@ -23675,14 +23738,51 @@ async fn handle_serve_model(
                                 "Failed to publish served model in ModelRegistry"
                             );
                         }
+
+                        // Record the canonical hash in the governance-anchored
+                        // transparency log. First-recorder-wins: an identical
+                        // re-assertion is idempotent; a differing hash for an
+                        // already-recorded model returns HashAlreadyRecorded and
+                        // is surfaced (not overwritten) so tampering is visible.
+                        // Correction flows only through a governance override.
+                        if let Some(hash_registry) = &model_hash_registry {
+                            let manifest = tenzro_model::ModelManifest {
+                                model_id: model_id_c.clone(),
+                                files: vec![fr.clone()],
+                            };
+                            match hash_registry.record(&manifest, recorder_did.as_str(), record_epoch) {
+                                Ok(rec) => {
+                                    tracing::info!(
+                                        model_id = %model_id_c,
+                                        blake3 = %hex::encode(rec.blake3),
+                                        recorder = %rec.recorder_did,
+                                        "Recorded canonical model hash in transparency log"
+                                    );
+                                }
+                                Err(tenzro_model::ModelError::HashAlreadyRecorded(_)) => {
+                                    tracing::warn!(
+                                        model_id = %model_id_c,
+                                        "Served weights differ from the canonical hash on \
+                                         record; not overwriting (governance override required)"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        model_id = %model_id_c,
+                                        error = %e,
+                                        "Failed to record canonical model hash"
+                                    );
+                                }
+                            }
+                        }
                     }
-                    (None, _) => {
+                    (None, _, _) => {
                         tracing::warn!(
                             model_id = %model_id_c,
                             "Skipping ModelRegistry publication: no local identity for provider address"
                         );
                     }
-                    (_, None) => {
+                    _ => {
                         tracing::warn!(
                             model_id = %model_id_c,
                             "Skipping ModelRegistry publication: weights hashing failed"
@@ -24273,6 +24373,249 @@ async fn handle_model_recipient_key(
         "x25519_pubkey": hex::encode(keypair.public_key_bytes()),
         "wrap_alg": tenzro_model::SEALED_WRAP_ALG,
     }))
+}
+
+/// The canonical model-hash registry, or a `-32000` error when the node was
+/// started without one (in-memory-only nodes never reach this path because the
+/// registry is constructed unconditionally in `init_ai_infrastructure`).
+fn model_hash_registry_or_err(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<&Arc<tenzro_model::ModelHashRegistry>, JsonRpcError> {
+    node.model_hash_registry().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Model-hash registry not initialized".to_string(),
+        data: None,
+    })
+}
+
+/// This node's recorder DID for first-recorder-wins authorship. Uses the first
+/// local identity; empty when the node holds no identity yet (a recording node
+/// always has one, since serving requires a provider identity).
+fn node_recorder_did(node: &Arc<TenzroNode>) -> String {
+    node.identity_registry()
+        .and_then(|r| r.list_all().first().map(|(_, id)| id.did.to_string()))
+        .unwrap_or_default()
+}
+
+/// Serializes a [`tenzro_model::CanonicalModelHash`] to the RPC wire shape —
+/// hex-encoding the three 32-byte hashes so callers never receive raw byte
+/// arrays.
+fn canonical_hash_to_json(rec: &tenzro_model::CanonicalModelHash) -> Value {
+    serde_json::json!({
+        "model_id": rec.model_id,
+        "blake3": hex::encode(rec.blake3),
+        "sha256": hex::encode(rec.sha256),
+        "manifest_hash": hex::encode(rec.manifest_hash),
+        "recorder_did": rec.recorder_did,
+        "recorded_at_epoch": rec.recorded_at_epoch,
+        "governance_overridden": rec.governance_overridden,
+    })
+}
+
+/// Parses a `files` array of `{filename, sha256, blake3, size}` objects into a
+/// [`tenzro_model::ModelManifest`]. Both hashes are 64-hex 32-byte values. A
+/// single-file model passes one entry; a bundle passes one per weight file.
+fn parse_model_manifest(
+    model_id: &str,
+    files: &Value,
+) -> std::result::Result<tenzro_model::ModelManifest, JsonRpcError> {
+    let arr = files.as_array().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "'files' must be an array".to_string(),
+        data: None,
+    })?;
+    if arr.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "'files' must contain at least one file record".to_string(),
+            data: None,
+        });
+    }
+    let parse_hash = |v: &Value, field: &str| -> std::result::Result<[u8; 32], JsonRpcError> {
+        let s = v.get(field).and_then(|x| x.as_str()).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Missing '{}' (64-hex) in file record", field),
+            data: None,
+        })?;
+        let bytes = hex::decode(s).map_err(|_| JsonRpcError {
+            code: -32602,
+            message: format!("'{}' must be valid hex", field),
+            data: None,
+        })?;
+        if bytes.len() != 32 {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!("'{}' must be 32 bytes (64 hex chars)", field),
+                data: None,
+            });
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    };
+    let mut records = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let filename = entry
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Missing 'filename' in file record".to_string(),
+                data: None,
+            })?
+            .to_string();
+        let sha256 = parse_hash(entry, "sha256")?;
+        let blake3 = parse_hash(entry, "blake3")?;
+        let size = entry.get("size").and_then(|v| v.as_u64()).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'size' (u64) in file record".to_string(),
+            data: None,
+        })?;
+        records.push(tenzro_model::ModelFileRecord {
+            filename,
+            sha256,
+            blake3,
+            size,
+        });
+    }
+    Ok(tenzro_model::ModelManifest {
+        model_id: model_id.to_string(),
+        files: records,
+    })
+}
+
+/// `tenzro_getModelHash { "model_id": "..." }` — read the canonical hash record
+/// for a model from the governance-anchored transparency log. Open (no auth):
+/// the record is the trust root any fetcher verifies against.
+async fn handle_get_model_hash(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+    let registry = model_hash_registry_or_err(node)?;
+    match registry.get(model_id) {
+        Some(rec) => Ok(canonical_hash_to_json(&rec)),
+        None => Err(JsonRpcError {
+            code: -32004,
+            message: format!("No canonical hash recorded for '{}'", model_id),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_listModelHashes` — every recorded canonical hash. Open (no auth).
+async fn handle_list_model_hashes(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let registry = model_hash_registry_or_err(node)?;
+    let records: Vec<Value> = registry.list().iter().map(canonical_hash_to_json).collect();
+    Ok(serde_json::json!({
+        "count": records.len(),
+        "model_hashes": records,
+    }))
+}
+
+/// `tenzro_recordModelHash { "model_id", "files": [{filename, sha256, blake3,
+/// size}] }` — anchor a canonical hash in the transparency log. Permissionless:
+/// first recorder wins. An identical re-assertion is idempotent; a differing
+/// hash for an already-recorded model returns `HashAlreadyRecorded` (-32005) so
+/// tampering is visible. Correction flows only through `tenzro_overrideModelHash`.
+async fn handle_record_model_hash(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+    let files = params.get("files").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing 'files' parameter".to_string(),
+        data: None,
+    })?;
+    let manifest = parse_model_manifest(model_id, files)?;
+    let epoch = current_epoch_or_err(node)?;
+    let recorder_did = node_recorder_did(node);
+    let registry = model_hash_registry_or_err(node)?;
+    match registry.record(&manifest, recorder_did, epoch) {
+        Ok(rec) => Ok(canonical_hash_to_json(&rec)),
+        Err(tenzro_model::ModelError::HashAlreadyRecorded(id)) => Err(JsonRpcError {
+            code: -32005,
+            message: format!(
+                "Canonical hash for '{}' already recorded and differs; \
+                 governance override required to change it",
+                id
+            ),
+            data: None,
+        }),
+        Err(e) => Err(JsonRpcError {
+            code: -32603,
+            message: format!("Failed to record canonical hash: {}", e),
+            data: None,
+        }),
+    }
+}
+
+/// `tenzro_overrideModelHash { "model_id", "files": [...] }` — replace the
+/// canonical hash for a model under a governance decision. Admin-token-gated
+/// (`requires_admin_token`): the operator/governance authority is verified at
+/// the gate before this handler runs. Marks the resulting record
+/// `governance_overridden = true`.
+async fn handle_override_model_hash(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id' parameter".to_string(),
+            data: None,
+        })?;
+    let files = params.get("files").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing 'files' parameter".to_string(),
+        data: None,
+    })?;
+    let manifest = parse_model_manifest(model_id, files)?;
+    let epoch = current_epoch_or_err(node)?;
+    let recorder_did = node_recorder_did(node);
+    let registry = model_hash_registry_or_err(node)?;
+    match registry.override_hash(&manifest, recorder_did, epoch) {
+        Ok(rec) => Ok(canonical_hash_to_json(&rec)),
+        Err(e) => Err(JsonRpcError {
+            code: -32603,
+            message: format!("Failed to override canonical hash: {}", e),
+            data: None,
+        }),
+    }
 }
 
 /// Manual admin reconcile of the model registry. Auto-reloads served models
@@ -24868,6 +25211,206 @@ async fn handle_load_text_embedding_model(
     }))
 }
 
+/// Builds positional peer-fetch hints for a bundle's `files` from the
+/// governance-anchored transparency log. `peer_hints[i]` corresponds to
+/// `files[i]`. A [`CanonicalModelHash`] record only carries the primary
+/// (filename-ascending-first) file's blake3/sha256, so at most one file in
+/// the bundle gets a hint — the file matching that primary name — and every
+/// other slot stays `None`. When no record exists (or the primary file isn't
+/// in this bundle) the whole vector is `None`, leaving the download on the HF
+/// path.
+fn bundle_peer_hints(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    files: &[String],
+) -> Vec<Option<tenzro_model::PeerHint>> {
+    let record = match node.model_hash_registry().and_then(|r| r.get(model_id)) {
+        Some(r) => r,
+        None => return vec![None; files.len()],
+    };
+    // The primary file is the filename-ascending-first of the recorded set,
+    // which for a same-repo bundle is the min filename here.
+    let primary = files.iter().min().cloned();
+    files
+        .iter()
+        .map(|f| {
+            if Some(f) == primary.as_ref() {
+                Some(tenzro_model::PeerHint {
+                    tenzro_uri: tenzro_types::tenzro_uri::TenzroUri::Blob {
+                        hash: hex::encode(record.blake3),
+                        provider_hint: None,
+                    },
+                    sha256_hex: Some(hex::encode(record.sha256)),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Constructs an [`HfArtifactDownloader`] at `models_dir`, wiring the node's
+/// iroh resolver as a [`BlobFetcher`] when one is bound so any `PeerHint` on
+/// the spec is tried over `tenzro://` before the HF CDN. Without a bound
+/// resolver the downloader is HF-only.
+fn artifact_downloader(node: &Arc<TenzroNode>, models_dir: std::path::PathBuf) -> HfArtifactDownloader {
+    let downloader = HfArtifactDownloader::new(models_dir);
+    match node.iroh_resolver() {
+        Some(resolver) => downloader.with_blob_fetcher(
+            crate::model_blob_fetcher_bridge::IrohBlobFetcher::arc(resolver.clone()),
+        ),
+        None => downloader,
+    }
+}
+
+/// Verify-before-load gate for a freshly-materialized bundle. Reads the primary
+/// weight file (the first in filename-ascending order — the same one the
+/// canonical record's `blake3` binds), measures its BLAKE3, and compares it to
+/// the governance-anchored transparency-log record for `model_id`.
+///
+/// Fail-closed on mismatch: a record exists but the bytes on disk differ →
+/// `-32006`, and the caller must delete the artifact rather than load tampered
+/// weights. When no record exists yet (`HashNotRecorded`) the load proceeds —
+/// first-recorder-wins means most models have no anchor until first served, and
+/// blocking every un-anchored model would break bootstrap. When the registry is
+/// absent the gate is a no-op.
+///
+/// `files` is the bundle file list (repository-relative names); `bundle_dir` is
+/// where they landed. The primary file must be present on disk.
+fn verify_bundle_against_record(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    files: &[String],
+    bundle_dir: &std::path::Path,
+) -> std::result::Result<Option<([u8; 32], [u8; 32])>, JsonRpcError> {
+    let registry = match node.model_hash_registry() {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    let record = match registry.get(model_id) {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    let primary = match files.iter().min() {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let path = bundle_dir.join(primary);
+    let bytes = std::fs::read(&path).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("failed to read fetched weights for verification: {}", e),
+        data: None,
+    })?;
+    let measured = tenzro_model::blake3_of_bytes(&bytes);
+    if measured == record.blake3 {
+        Ok(Some((measured, record.blake3)))
+    } else {
+        Err(JsonRpcError {
+            code: -32006,
+            message: format!(
+                "Fetched weights for '{}' do not match the canonical hash on record \
+                 (measured blake3 {}, recorded {}); refusing to load tampered weights",
+                model_id,
+                hex::encode(measured),
+                hex::encode(record.blake3),
+            ),
+            data: None,
+        })
+    }
+}
+
+/// Verify-before-load gate for single-file GGUF weights. Measures the BLAKE3 of
+/// the resolved GGUF and compares it to the governance-anchored canonical hash
+/// on record for `model_id`. Fail-closed on mismatch (`-32006`). No registry, or
+/// no record yet (first-recorder-wins un-anchored model) → load proceeds.
+///
+/// Returns `Some((measured, recorded))` when an anchored record was matched — the
+/// caller can then bind this comparison into a TEE attestation on hardware nodes
+/// via [`attest_verified_load`]. Returns `None` when there was nothing to verify
+/// against (no registry / no record).
+fn verify_gguf_against_record(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    path: &std::path::Path,
+) -> std::result::Result<Option<([u8; 32], [u8; 32])>, JsonRpcError> {
+    let registry = match node.model_hash_registry() {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    let record = match registry.get(model_id) {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    let bytes = std::fs::read(path).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("failed to read fetched weights for verification: {}", e),
+        data: None,
+    })?;
+    let measured = tenzro_model::blake3_of_bytes(&bytes);
+    if measured == record.blake3 {
+        Ok(Some((measured, record.blake3)))
+    } else {
+        Err(JsonRpcError {
+            code: -32006,
+            message: format!(
+                "Fetched weights for '{}' do not match the canonical hash on record \
+                 (measured blake3 {}, recorded {}); refusing to load tampered weights",
+                model_id,
+                hex::encode(measured),
+                hex::encode(record.blake3),
+            ),
+            data: None,
+        })
+    }
+}
+
+/// Binds a passed verify-before-load comparison into a TEE attestation on nodes
+/// with real enclave hardware. The report's `user_data` commits to
+/// `SHA-256("tenzro/model/verify" || model_id || measured_blake3 ||
+/// recorded_blake3)`, packed for the vendor — a hardware-rooted proof that *this*
+/// enclave measured *these* weights and found them equal to the canonical hash on
+/// record. Best-effort: a node without TEE, or an attestation failure, does not
+/// block a load whose synchronous fail-closed gate already passed. Returns the
+/// attested `user_data` hex when a report was produced.
+async fn attest_verified_load(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    measured: [u8; 32],
+    recorded: [u8; 32],
+) -> Option<String> {
+    let provider = node.tee_provider()?;
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"tenzro/model/verify");
+    h.update(model_id.as_bytes());
+    h.update(measured);
+    h.update(recorded);
+    let binding = h.finalize();
+    let user_data =
+        tenzro_tee::pack_user_data_for_vendor(provider.vendor(), binding.as_slice());
+    match provider.generate_attestation(&user_data).await {
+        Ok(report) => {
+            let attested = hex::encode(&report.user_data);
+            info!(
+                "TEE-attested verify-before-load for {} (vendor {:?}, blake3 {}, user_data {})",
+                model_id,
+                report.vendor,
+                hex::encode(measured),
+                attested,
+            );
+            Some(attested)
+        }
+        Err(e) => {
+            warn!(
+                "TEE-attested compare for {} unavailable ({}); \
+                 synchronous BLAKE3 gate already passed, load proceeds",
+                model_id, e,
+            );
+            None
+        }
+    }
+}
+
 /// Fetch (or reuse cached) a catalog ONNX text encoder from HuggingFace Hub and
 /// register it. When the export ships an external-data sidecar
 /// (`model.onnx_data`) the graph, sidecar, and tokenizer are pulled as a
@@ -24902,13 +25445,15 @@ async fn download_and_load_text_embedding(
     files.push(entry.tokenizer_filename.clone());
 
     let dir_name = format!("{}-bundle", model_id);
+    let peer_hints = bundle_peer_hints(node, &model_id, &files);
+    let verify_files = files.clone();
     let spec = ArtifactSpec::Bundle {
         files,
         dir_name,
-        peer_hints: Vec::new(),
+        peer_hints,
     };
 
-    let downloader = HfArtifactDownloader::new(models_dir);
+    let downloader = artifact_downloader(node, models_dir);
     let initial_progress = DownloadProgress {
         model_id: model_id.clone(),
         status: DownloadState::Pending,
@@ -24921,6 +25466,12 @@ async fn download_and_load_text_embedding(
         .download(&model_id, &entry.hf_repo, &spec, entry.size_bytes, tx)
         .await
         .map_err(forecast_err)?;
+
+    if let Some((measured, recorded)) =
+        verify_bundle_against_record(node, &model_id, &verify_files, &bundle_dir)?
+    {
+        attest_verified_load(node, &model_id, measured, recorded).await;
+    }
 
     let onnx_path = bundle_dir.join(&entry.hf_filename).display().to_string();
     let tokenizer_path = bundle_dir.join(&entry.tokenizer_filename).display().to_string();
@@ -25214,13 +25765,14 @@ async fn handle_load_text_segmentation_model(
         entry.tokenizer_filename.clone(),
     ];
     let dir_name = format!("{}-bundle", model_id);
+    let peer_hints = bundle_peer_hints(node, &model_id, &files);
     let spec = ArtifactSpec::Bundle {
         files: files.clone(),
         dir_name: dir_name.clone(),
-        peer_hints: Vec::new(),
+        peer_hints,
     };
 
-    let downloader = HfArtifactDownloader::new(models_dir);
+    let downloader = artifact_downloader(node, models_dir);
     let initial_progress = DownloadProgress {
         model_id: model_id.clone(),
         status: DownloadState::Pending,
@@ -25233,6 +25785,12 @@ async fn handle_load_text_segmentation_model(
         .download(&model_id, &entry.hf_repo, &spec, entry.size_bytes, tx)
         .await
         .map_err(forecast_err)?;
+
+    if let Some((measured, recorded)) =
+        verify_bundle_against_record(node, &model_id, &files, &bundle_dir)?
+    {
+        attest_verified_load(node, &model_id, measured, recorded).await;
+    }
 
     node.text_segmentation_runtime
         .load_sam3(

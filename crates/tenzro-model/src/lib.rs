@@ -123,6 +123,7 @@ pub mod latency;
 pub mod library;
 pub mod load;
 pub mod meta_router;
+pub mod model_hash;
 pub mod moe_compute;
 #[cfg(all(feature = "moe-gpu", feature = "moe-cuda"))]
 pub mod moe_compute_cuda;
@@ -163,6 +164,10 @@ pub use sealed::{
     DEFAULT_SHARD_BYTES, SEALED_WRAP_ALG,
 };
 pub use registry::{ModelFilter, ModelRegistry, RegistryEvent};
+pub use model_hash::{
+    blake3_of_bytes, compute_model_manifest_hash, CanonicalModelHash, ModelFileRecord,
+    ModelHashRegistry, ModelManifest, MODEL_MANIFEST_DOMAIN,
+};
 pub use provider::{ProviderManager, ProviderMetrics, ProviderWithMetrics};
 pub use routing::{
     CircuitBreaker, CircuitBreakerState, InferenceRouter, RouterMetricsSnapshot, RoutingConfig,

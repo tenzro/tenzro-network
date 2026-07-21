@@ -75,12 +75,23 @@ training loop with decoupled outer aggregation, paired with the Rust protocol la
   model with FSDP2 (per-parameter DTensor sharding, bf16 compute / fp32
   gradient reduction) — every rank runs the loop, only rank 0 speaks JSON-RPC,
   each rank samples distinct batches. Attention uses FlashAttention-2 when
-  `flash_attn` + CUDA are present (SDPA otherwise; override via
+  `flash_attn` + an accelerator are present (SDPA otherwise; override via
   `architecture.metadata.attn_implementation`), and
   `architecture.metadata.fp8: true` opts eligible linear layers into torchao
-  FP8 training on compute-capability ≥ 8.9 GPUs (`pip install
+  FP8 training on compute-capability ≥ 8.9 CUDA GPUs (`pip install
   'tenzro-trainer[fp8]'`). QLoRA (`lora.quantize: "nf4"`) is single-process
   only — bitsandbytes 4-bit parameters are not DTensor-compatible.
+- **AMD ROCm** *(unverified on AMD hardware in this fleet)*: PyTorch's HIP build
+  reports `torch.cuda.is_available() == True`, so AMD GPUs (MI300X, RDNA3/3.5/4)
+  run bf16/fp16 + SDPA (or ROCm FlashAttention) with no config change; the
+  adapter discriminates the backend on `torch.version.hip`. torchao rowwise FP8
+  is CUDA-only and degrades to a logged no-op on ROCm. Two steps are manual on
+  the ROCm host: install the ROCm torch wheel
+  (`pip install torch --index-url https://download.pytorch.org/whl/rocm6.3`),
+  and for QLoRA install the patched bitsandbytes wheel with `pip` (not `uv`) —
+  stock ≤ 0.49.2 has a 4-bit NF4 dequant NaN bug on AMD:
+  `pip install --force-reinstall --no-cache-dir --no-deps "https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_main/bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_x86_64.whl"`.
+  The `tenzro-trainer[amd]` extra pulls the ROCm-safe language stack.
 
 ## Quickstart
 

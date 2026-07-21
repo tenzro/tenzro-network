@@ -1964,8 +1964,11 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `register_model_endpoint` — Register a model service endpoint
 - `get_model_endpoint` — Get details of a specific model endpoint
 - `unregister_model_endpoint` — Unregister a model service endpoint
-- `download_model` — Download a model from the registry
+- `download_model` — Download a model's weights: peer-first over iroh blobs (BLAKE3-verified end-to-end), falling back to HuggingFace, checked against the canonical hash record before load
 - `get_download_progress` — Get download progress for a model
+- `get_model_hash` — Get a model's content-addressed hash record (BLAKE3 root + SHA-256 + per-file manifest hash) by `model_id`
+- `list_model_hashes` — List every recorded model hash
+- `record_model_hash` — Record a model's content-addressed hash (first-recorder-wins)
 - `serve_model` — Start serving a model for inference (auto-clusters when it exceeds one host; `force_cluster` / `force_single` override placement, `visibility="private"` keeps it local/LAN-only)
 - `stop_model` — Stop serving a model
 - `delete_model` — Delete a downloaded model

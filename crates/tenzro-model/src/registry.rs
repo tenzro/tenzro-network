@@ -688,6 +688,9 @@ mod tests {
             license: String::new(),
             license_id: None,
             visibility: ModelVisibility::Network,
+            blake3_hash: None,
+            tenzro_uri: None,
+            peer_hints: Vec::new(),
         }
     }
 }

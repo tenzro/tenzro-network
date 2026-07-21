@@ -96,14 +96,27 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Tenzro network, with settlement in TNZO. Supports intent "
                     "routing: state a use case (chat/code/reasoning/summarize/"
                     "extract/embed) plus budget and quality floor in metadata "
-                    "to have the network select a model instead of naming one."
+                    "to have the network select a model instead of naming one. "
+                    "Model weights are content-addressed: download is peer-first "
+                    "over iroh blobs (BLAKE3-verified end-to-end on transfer), "
+                    "falling back to HuggingFace, and the weights are checked "
+                    "against the canonical hash record before load. Read that "
+                    "record (BLAKE3 + SHA-256 + per-file manifest hash, recorder "
+                    "DID, record epoch) with a model_id, or list every recorded "
+                    "hash."
                 ),
-                "tags": ["ai", "inference", "models", "intent-routing"],
+                "tags": [
+                    "ai", "inference", "models", "intent-routing",
+                    "content-addressed", "blake3",
+                ],
                 "examples": [
                     "List available AI models",
                     "Run inference on model X",
                     "Route by intent for a reasoning use case",
                     "Chat by intent with budget 1000000000000000000",
+                    "Get the content hash for model qwen3-4b",
+                    "List every recorded model hash",
+                    "Download model qwen3-4b (peer-first, BLAKE3-verified)",
                 ],
                 "inputModes": ["text/plain"],
                 "outputModes": ["text/plain", "application/json"],

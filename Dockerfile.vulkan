@@ -1,0 +1,137 @@
+# Vulkan image variant. Builds tenzro-node with cross-vendor GPU acceleration:
+#   - llama.cpp Vulkan backend for LLM inference (feature `tenzro-node/vulkan`)
+#   - ONNX Runtime falls back to CPU for the non-LLM modalities
+#
+# Vulkan is the widest-reach GPU backend: it runs on NVIDIA, AMD, Intel Arc /
+# Battlemage, and ARM Mali via each vendor's installable client driver (ICD).
+# Run with the GPU device nodes and the host ICD passed in, e.g.:
+#   docker run --device /dev/dri \
+#     -v /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro ...
+# The CPU image is built from ./Dockerfile and is unchanged by this file.
+
+# Stage 1: Build
+FROM rust:1.85-slim-bookworm AS builder
+
+# Install build dependencies + Vulkan headers/loader/glslc for the ggml
+# Vulkan backend (it compiles shaders at build time via glslc from
+# glslang-tools; the loader header comes from libvulkan-dev).
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    clang \
+    cmake \
+    protobuf-compiler \
+    libvulkan-dev \
+    glslang-tools \
+    glslc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+ENV CC=clang
+ENV CXX=clang++
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY tools/ tools/
+COPY vendor/ vendor/
+
+RUN mkdir -p apps/tenzro-desktop/src-tauri/src && \
+    echo "fn main() {}" > apps/tenzro-desktop/src-tauri/src/main.rs && \
+    echo "fn main() {}" > apps/tenzro-desktop/src-tauri/build.rs && \
+    printf '%s\n' \
+      '[package]' \
+      'name = "tenzro-desktop"' \
+      'version = "0.1.0"' \
+      'edition = "2021"' \
+      '' \
+      '[build-dependencies]' \
+      'tauri-build = { version = "2", features = [] }' \
+      '' \
+      '[dependencies]' \
+      'tauri = { version = "2", features = ["tray-icon"] }' \
+      'tauri-plugin-shell = "2"' \
+      'serde = { version = "1", features = ["derive"] }' \
+      'serde_json = "1"' \
+      'tokio = { version = "1", features = ["full"] }' \
+      'reqwest = { version = "0.12", features = ["json", "stream"] }' \
+      'futures-util = "0.3"' \
+      'thiserror = "2"' \
+      'tracing = "0.1"' \
+      'uuid = { version = "1", features = ["v4"] }' \
+      'hex = "0.4"' \
+      'dirs = "5"' \
+      'sysinfo = "0.31"' \
+      'sha2 = "0.10"' \
+      'aes-gcm = "0.10"' \
+      'rand = "0.8"' \
+      'hostname = "0.4"' \
+      'tenzro-model = { path = "../../../crates/tenzro-model" }' \
+      'tenzro-zk = { path = "../../../crates/tenzro-zk" }' \
+      '' \
+      '[features]' \
+      'default = ["custom-protocol"]' \
+      'custom-protocol = ["tauri/custom-protocol"]' \
+      > apps/tenzro-desktop/src-tauri/Cargo.toml
+
+# Build tenzro-node (llama.cpp Vulkan backend) and tenzro-cli.
+RUN cargo build --release -p tenzro-node -p tenzro-cli \
+    --features tenzro-node/vulkan
+
+# Stage the ggml rpc-server binary at a fixed path for COPY into the runtime
+# stage. libvulkan is an expected dynamic link resolved from the runtime
+# image's loader; a ggml/llama shared link would still fail the build.
+RUN set -eux; \
+    src="$(find target/release/build -type f -name rpc-server -perm -u+x 2>/dev/null | head -n1)"; \
+    test -n "$src"; \
+    cp "$src" /build/rpc-server; \
+    ldd /build/rpc-server || true; \
+    ! ldd /build/rpc-server | grep -vi 'libvulkan' | grep -qiE 'libggml|libllama|not found'
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim AS runtime
+
+# libvulkan1 is the loader; mesa-vulkan-drivers covers software/lavapipe and
+# AMD/Intel open drivers. Vendor ICDs (NVIDIA, proprietary) are mounted in at
+# `docker run` from the host so the image stays vendor-neutral.
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    curl \
+    libstdc++6 \
+    libgomp1 \
+    ffmpeg \
+    libvulkan1 \
+    mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r tenzro && useradd -r -g tenzro -m -d /home/tenzro tenzro
+
+# Copy binaries from builder
+COPY --from=builder /build/target/release/tenzro-node /usr/local/bin/tenzro-node
+COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
+COPY --from=builder /build/rpc-server /usr/local/bin/rpc-server
+ENV TENZRO_RPC_SERVER_BIN=/usr/local/bin/rpc-server
+
+# Create data directories
+RUN mkdir -p /data/tenzro /config /home/tenzro/.tenzro/models && chown -R tenzro:tenzro /data /config /home/tenzro/.tenzro
+
+USER tenzro
+WORKDIR /home/tenzro
+
+# Expose ports
+# P2P, JSON-RPC, Web API, Metrics, MCP, A2A
+EXPOSE 9000 8545 8080 9090 3001 3002
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/verify/health || exit 1
+
+# Default entrypoint
+ENTRYPOINT ["tenzro-node"]
+
+# Default args (override with docker run args)
+CMD ["--data-dir", "/data/tenzro", "--log-level", "info"]

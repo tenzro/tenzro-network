@@ -25,9 +25,11 @@ FSDP2 (``torch.distributed.fsdp.fully_shard``) — per-parameter DTensor
 sharding, bf16 compute with fp32 gradient reduction — before the optimizer
 is constructed; see ``docs/AI.md §7.7.1``. Single-process runs skip
 sharding entirely. Attention dispatches to FlashAttention-2 when the
-``flash_attn`` package and a CUDA device are present (SDPA otherwise), and
+``flash_attn`` package and an accelerator are present (CUDA, or the AMD
+ROCm build of the package; SDPA otherwise), and
 ``architecture.metadata.fp8`` opts eligible linear layers into torchao FP8
-training on Ada/Hopper-class GPUs.
+training on Ada/Hopper-class GPUs. AMD ROCm GPUs run bf16/fp16 + SDPA (or
+ROCm FlashAttention); QLoRA on ROCm needs the patched bitsandbytes wheel.
 """
 
 from __future__ import annotations
@@ -50,6 +52,39 @@ from tenzro_trainer.muon import build_inner_optimizer
 from tenzro_trainer.shards import resolve_shard
 
 log = logging.getLogger(__name__)
+
+
+# bitsandbytes builds at or below this version carry a 4-bit dequant NaN bug
+# on ROCm; the fixed line ships as a pre-release wheel. See the ROCm install
+# note in ``docs/AI.md``.
+_BNB_ROCM_MIN_SAFE = (0, 49, 3)
+
+
+def _warn_if_rocm_bnb_4bit_nan_risk() -> None:
+    """Warn once when QLoRA is requested on ROCm with a NaN-prone bitsandbytes.
+
+    On a ROCm/HIP torch build, 4-bit NF4 dequant in ``bitsandbytes`` produces
+    NaN gradients on builds <= 0.49.2. The check is advisory — training still
+    proceeds — because the operator may have installed a patched wheel whose
+    version string does not parse cleanly.
+    """
+    if torch is None or getattr(torch.version, "hip", None) is None:
+        return
+    try:
+        import bitsandbytes as bnb
+
+        raw = str(getattr(bnb, "__version__", "")).split("+")[0]
+        parts = tuple(int(p) for p in raw.split(".")[:3])
+    except Exception:
+        return
+    if parts and parts < _BNB_ROCM_MIN_SAFE:
+        log.warning(
+            "QLoRA (nf4) on ROCm with bitsandbytes %s: builds <= 0.49.2 have a "
+            "4-bit dequant NaN bug on AMD GPUs. Install the ROCm pre-release "
+            "wheel (bitsandbytes-1.33.7.preview) or >= 0.49.1; see the ROCm "
+            "install note in docs/AI.md.",
+            ".".join(str(p) for p in parts),
+        )
 
 
 # Default HF repo for the language adapter — Qwen 3 0.6B is the smallest
@@ -453,6 +488,7 @@ def build_adapter(
                 "QLoRA (lora.quantize='nf4') requires `bitsandbytes`. "
                 "Install with: `pip install tenzro-trainer[language]`"
             ) from e
+        _warn_if_rocm_bnb_4bit_nan_risk()
         load_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",

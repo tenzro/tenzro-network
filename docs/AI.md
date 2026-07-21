@@ -110,6 +110,57 @@ Shipped in the catalog with `mtp_kind: DraftMtp`: DeepSeek V3 (native MTP head),
 
 The catalog is the single source of truth for serving behaviour. Each `HfModelEntry` carries a `serving: ServingProfile` (temperature, top_p, top_k, min_p, `jinja_required`, `reasoning_default`) stamped from the model author's recommended values (Unsloth per-family guidance) by a single post-construction pass keyed on family + architecture — the per-family knowledge lives in one `ServingProfile::for_family` function rather than being duplicated across the struct literals. Clients consume the profile two ways: the `tenzro_modelMetadata` RPC returns it (alongside `drafter_id`, `mtp_kind`, MoE shape, and multimodal/`mmproj` flags) so any client can render or apply the recommended config, and the local serving sidecar stamps each on-disk GGUF's preset section with the profile's samplers, `--jinja`, speculative (`spec-type`), and MoE-offload (`n-cpu-moe`) flags. Request-level parameters override the profile; the profile is the default, not a ceiling.
 
+### 2.7 Hardware backends
+
+A provider can serve inference on whatever accelerator it has. llama.cpp's ggml runtime ships a backend for every major vendor; Tenzro exposes each one as a cargo feature on `tenzro-model` that forwards to the corresponding `GGML_<X>` cmake define at build time. A node compiled with a backend feature detects the device at runtime and reports it through `HardwareInfo` (`compiled_backends` + `active_backend`), logged when the llama backend initialises. The default build (`cluster-serving`) is CPU-only plus the ggml RPC backend for LAN layer-pipeline serving.
+
+| Hardware | Backend | Cargo feature | Build-time requirement |
+|---|---|---|---|
+| NVIDIA (datacenter + consumer) | CUDA | `cuda` | CUDA Toolkit |
+| NVIDIA (older drivers / no VMM) | CUDA | `cuda-no-vmm` | CUDA Toolkit |
+| AMD (Instinct + Radeon) | HIP / ROCm | `rocm` | ROCm + hipcc |
+| Apple Silicon | Metal | auto-linked (macOS ARM64); `metal` to force | Xcode toolchain |
+| Intel Arc / Battlemage / Data Center GPU Max / Xe | SYCL | `sycl` | oneAPI DPC++ (`icx`/`icpx`) |
+| Intel CPU / GPU / NPU | OpenVINO | `openvino` | OpenVINO runtime; device via `GGML_OPENVINO_DEVICE` (`CPU`/`GPU`/`NPU`) |
+| NVIDIA / AMD / Intel Arc / ARM Mali / Adreno | Vulkan | `vulkan` | Vulkan headers + loader + `glslc` |
+| Qualcomm Adreno / ARM Mali | OpenCL | `opencl` | OpenCL 3.0 headers + ICD |
+| Moore Threads MTT S-series | MUSA | `musa` | MUSA toolkit |
+| Huawei Ascend 910 / 310 NPU | CANN | `cann` | Ascend CANN toolkit |
+| Cross-vendor GPU (Dawn) | WebGPU | `webgpu` | Dawn |
+| IBM Z Telum | zDNN | `zdnn` | zDNN library |
+| CPU (BLAS-accelerated) | BLAS | `blas` | OpenBLAS / Intel MKL / Apple Accelerate |
+| CPU (fallback) | — | none | — |
+
+**Build recipes.** Pass the backend feature to `tenzro-node` at build time:
+
+```bash
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/cuda
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/rocm
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/vulkan
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/sycl
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/openvino
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/opencl
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/musa
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/cann
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/webgpu
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/zdnn
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/blas
+```
+
+SYCL additionally needs the oneAPI DPC++ compiler selected as the C/C++ compiler (`CC=icx CXX=icpx`). OpenVINO picks its device at runtime from `GGML_OPENVINO_DEVICE` (defaults to `CPU`); the node reports the selected device in `active_backend`.
+
+**Container images.** Three prebuilt Dockerfile variants cover the widest-reach backends. The base `Dockerfile` is the CPU image.
+
+| Backend | Dockerfile | Run flags |
+|---|---|---|
+| CUDA | `Dockerfile.cuda` | `--gpus all` |
+| ROCm / HIP | `Dockerfile.rocm` | `--device /dev/kfd --device /dev/dri --group-add video` |
+| Vulkan (cross-vendor) | `Dockerfile.vulkan` | `--device /dev/dri -v /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro` |
+
+Backends without a prebuilt image (SYCL, OpenVINO, OpenCL, MUSA, CANN, WebGPU, zDNN, BLAS) build from the base `Dockerfile` template with the vendor toolchain layered into the builder stage and the matching `--features tenzro-node/<x>` flag.
+
+The non-LLM modalities (forecast / vision / text-embed / segmentation / detection / ASR / video) run on ONNX Runtime and fall back to CPU under every GPU image; the `onnx-cuda`, `onnx-tensorrt`, and `onnx-coreml` features link the corresponding ONNX Runtime execution provider where available.
+
 ---
 
 ## 3. Mixture-of-Experts serving
@@ -610,10 +661,22 @@ Under torchrun, every rank runs the full training loop (the FSDP2 collectives re
 
 Two further acceleration knobs, both automatic with metadata overrides:
 
-- **Attention kernel.** The language adapter requests **FlashAttention-2** when the `flash_attn` package is importable and a CUDA device is present, PyTorch SDPA otherwise. Override with `architecture.metadata.attn_implementation`. `flash-attn` is deliberately not a pip extra — it needs a CUDA toolchain at install time, so GPU operators install it directly (`pip install flash-attn --no-build-isolation`) and the adapter picks it up.
-- **FP8 training.** Setting `architecture.metadata.fp8: true` converts eligible linear layers to FP8 via torchao `convert_to_float8_training` on Ada/Hopper-class GPUs (compute capability ≥ 8.9). Embedding and head modules are skipped, as are linear layers whose dimensions are not multiples of 16 (an FP8 kernel requirement). Absent a capable GPU or torchao (`pip install 'tenzro-trainer[fp8]'`), the request degrades to a logged no-op.
+- **Attention kernel.** The language adapter requests **FlashAttention-2** when the `flash_attn` package is importable and an accelerator is present, PyTorch SDPA otherwise. Override with `architecture.metadata.attn_implementation`. `flash-attn` is deliberately not a pip extra — it needs a CUDA (or ROCm) toolchain at install time, so GPU operators install it directly (`pip install flash-attn --no-build-isolation`) and the adapter picks it up. On AMD, the `flash_attn` package is the ROCm Composable-Kernel/Triton build; when it imports, transformers dispatches the ROCm kernel behind the same `flash_attention_2` request.
+- **FP8 training.** Setting `architecture.metadata.fp8: true` converts eligible linear layers to FP8 via torchao `convert_to_float8_training` on Ada/Hopper-class GPUs (compute capability ≥ 8.9). Embedding and head modules are skipped, as are linear layers whose dimensions are not multiples of 16 (an FP8 kernel requirement). Absent a capable GPU or torchao (`pip install 'tenzro-trainer[fp8]'`), the request degrades to a logged no-op. torchao rowwise FP8 is treated as CUDA-only here — on a ROCm build the compute-capability tuple has HIP semantics and does not map to the ≥ 8.9 gate, so FP8 degrades to a logged no-op on AMD (MI300-class FP8 needs a different code path).
 
 One constraint: QLoRA (`lora.quantize: "nf4"`) cannot be combined with FSDP2 sharding — bitsandbytes 4-bit parameters are not DTensor-compatible. Run QLoRA single-process, or drop `quantize` for multi-process LoRA.
+
+**AMD ROCm.** *(Unverified on AMD hardware in this fleet — the reference path is coded and documented but has not been exercised on a physical AMD GPU here.)* PyTorch's HIP build reuses the `torch.cuda` namespace, so `torch.cuda.is_available()` returns True on AMD data-center (MI300X, 192 GB) and RDNA3/3.5/4 GPUs; the adapter discriminates the backend on `torch.version.hip`. Two install steps cannot be expressed as pip constraints and must be run manually on the ROCm host:
+
+1. **ROCm torch wheel** — `pip install torch --index-url https://download.pytorch.org/whl/rocm6.3` (match the host's ROCm version).
+2. **Patched bitsandbytes** — stock bitsandbytes ≤ 0.49.2 has a 4-bit NF4 dequant NaN bug on ROCm. Install the ROCm pre-release wheel with `pip` (not `uv`):
+   ```
+   pip install --force-reinstall --no-cache-dir --no-deps \
+     "https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_main/bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_x86_64.whl"
+   ```
+   (swap `x86_64` → `aarch64` on ARM hosts, or use `bitsandbytes>=0.49.1`). The language adapter logs a warning when QLoRA is requested on ROCm with a NaN-prone bitsandbytes version.
+
+The `tenzro-trainer[amd]` extra pulls the ROCm-safe language stack (transformers/peft/tokenizers); torchao FP8 is deliberately excluded from it (CUDA-only rowwise path). AMD GPUs otherwise run bf16/fp16 + SDPA (or ROCm FlashAttention when installed).
 
 #### Measured inner-loop throughput
 

@@ -241,6 +241,12 @@ pub struct GetSealedModelParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetModelHashParams {
+    #[schemars(description = "Model ID whose canonical content-hash record to fetch")]
+    pub model_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RouteByIntentParams {
     #[schemars(description = "Use case: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Maps to a modality and biases quality tiering")]
     pub use_case: String,
@@ -875,7 +881,8 @@ pub struct GetAgentTemplateStatsParams {
 ///   - Transactions: send_transaction, request_faucet
 ///   - Identity: register_identity, resolve_did, set_delegation_scope, join_as_participant
 ///   - Models: list_models, chat_completion, list_model_endpoints,
-///     list_sealed_models, get_sealed_model, model_recipient_key
+///     list_sealed_models, get_sealed_model, model_recipient_key,
+///     get_model_hash, list_model_hashes, download_model
 ///   - Payments: create_payment_challenge, verify_payment, list_payment_protocols
 ///   - Bridge: bridge_tokens, get_bridge_routes, list_bridge_adapters
 ///   - Staking & Providers: stake_tokens, unstake_tokens, register_provider, get_provider_stats
@@ -7308,6 +7315,27 @@ impl TenzroMcpServer {
         }))
     }
 
+    #[tool(description = "Read the canonical content-hash record for a model from the transparency log: the BLAKE3 + SHA-256 over the canonical weight bytes plus the per-file manifest hash, the recorder DID, and the record epoch. This is the trust root a fetcher verifies downloaded weights against before load. Open — no auth")]
+    async fn get_model_hash(
+        &self,
+        Parameters(params): Parameters<GetModelHashParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_getModelHash",
+            serde_json::json!([{ "model_id": params.model_id }]),
+        )
+        .await?;
+        json_result(result)
+    }
+
+    #[tool(description = "List every recorded canonical model hash on this node. Each entry carries the model ID, BLAKE3, SHA-256, manifest hash, recorder DID, and record epoch. Open — no auth")]
+    async fn list_model_hashes(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(&self.node, "tenzro_listModelHashes", serde_json::json!([]))
+            .await?;
+        json_result(result)
+    }
+
     // ─── Bridge (Cross-Chain) ───
 
     #[tool(description = "Bridge tokens between blockchains. Supports routes between Tenzro, Ethereum, Solana, and Base via LayerZero, Chainlink CCIP, and deBridge adapters")]
@@ -9606,7 +9634,7 @@ impl TenzroMcpServer {
 
     // ─── Model Lifecycle Tools ───
 
-    #[tool(description = "Download a model from the Tenzro model registry or HuggingFace Hub to this node's local storage. Performs SHA-256 integrity verification. Returns download status and progress.")]
+    #[tool(description = "Download a model to this node's local storage. Fetch is peer-first: content-addressed weights are pulled from Tenzro peers over iroh blobs (BLAKE3-verified end-to-end on transfer), falling back to HuggingFace Hub when no peer holds them. Computes the weights' BLAKE3 and checks it against the canonical hash record (see get_model_hash) before load. Returns download status and progress.")]
     async fn download_model(
         &self,
         Parameters(params): Parameters<DownloadModelParams>,
@@ -16560,7 +16588,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Return this node's hardware self-profile: linked runtime build commit, CPU architecture, operating system, detected compute devices, and derived serving values (capacity in GB, backend, capability key).")]
+    #[tool(description = "Return this node's hardware self-profile: linked runtime build commit, CPU architecture, operating system, detected compute devices, and derived serving values (capacity in GB, serving backend, capability key). Each device reports the ggml backend it executes on — CUDA, Metal, Vulkan, ROCm, SYCL, or CPU — and serving_backend is the backend of the strongest GPU-class device, else CPU.")]
     async fn node_profile(&self) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let result = rpc_dispatch(&self.node, "tenzro_nodeProfile", serde_json::json!({}))
             .await

@@ -102,6 +102,24 @@ impl ModelVisibility {
     }
 }
 
+/// A serializable peer-fetch hint carried on [`ModelInfo`]. Names a
+/// `tenzro://` blob a neighbour can fetch the artifact from, plus the
+/// canonical SHA-256 for a transport-independent integrity check.
+///
+/// Distinct from `tenzro_model::PeerHint`, which is the download-time
+/// runtime shape (holds a parsed `TenzroUri`). This record is the wire /
+/// storage form persisted on the model catalog entry; the node projects it
+/// into the runtime `PeerHint` when building an `ArtifactSpec`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerHintRecord {
+    /// `tenzro://blob/<blake3>` or `tenzro://model/<id>@<blake3>` URI.
+    pub tenzro_uri: String,
+    /// Canonical SHA-256 of the artifact bytes (hex), verified end-to-end
+    /// against the fetched payload regardless of transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256_hex: Option<String>,
+}
+
 /// Information about an AI model on Tenzro Network
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -179,6 +197,24 @@ pub struct ModelInfo {
     /// served-model lists.
     #[serde(default)]
     pub visibility: ModelVisibility,
+    /// BLAKE3 content address of the artifact bytes, if known. This is the
+    /// hash iroh-blobs indexes by, so it is the key a neighbour uses to
+    /// fetch the weights over the peer network. `None` for models with no
+    /// local downloadable artifact (external engines, Cortex workers).
+    /// The same bytes are also SHA-256'd into `model_hash` (integrity
+    /// digest); both are hashes of the same payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blake3_hash: Option<[u8; 32]>,
+    /// `tenzro://model/<id>@<blake3>` URI for this artifact, if it has a
+    /// content address. Lets clients request the model by content hash
+    /// over the peer network instead of by HuggingFace repo path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenzro_uri: Option<String>,
+    /// Peers that can serve this artifact over `tenzro://`, freshest last.
+    /// Populated opportunistically as neighbours announce providership on
+    /// `tenzro/blobs`; the downloader tries these before the HF CDN.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer_hints: Vec<PeerHintRecord>,
 }
 
 impl ModelInfo {
@@ -213,6 +249,9 @@ impl ModelInfo {
             license: String::new(),
             license_id: None,
             visibility: ModelVisibility::Network,
+            blake3_hash: None,
+            tenzro_uri: None,
+            peer_hints: Vec::new(),
         }
     }
 

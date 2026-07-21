@@ -29,6 +29,12 @@ pub enum ModelCommand {
     Discover(ModelDiscoverCmd),
     /// Get download progress for a model
     Progress(ModelProgressCmd),
+    /// Show a model's content-addressed hash record (BLAKE3 + SHA-256 + per-file manifest)
+    GetHash(ModelGetHashCmd),
+    /// List every recorded model hash on the node
+    ListHashes(ModelListHashesCmd),
+    /// Record a model's content-addressed hash (first-recorder-wins)
+    RecordHash(ModelRecordHashCmd),
     /// Register a new model endpoint
     RegisterEndpoint(ModelRegisterEndpointCmd),
     /// Unregister a model endpoint
@@ -60,6 +66,9 @@ impl ModelCommand {
             Self::Endpoint(cmd) => cmd.execute().await,
             Self::Discover(cmd) => cmd.execute().await,
             Self::Progress(cmd) => cmd.execute().await,
+            Self::GetHash(cmd) => cmd.execute().await,
+            Self::ListHashes(cmd) => cmd.execute().await,
+            Self::RecordHash(cmd) => cmd.execute().await,
             Self::RegisterEndpoint(cmd) => cmd.execute().await,
             Self::UnregisterEndpoint(cmd) => cmd.execute().await,
             Self::Prune(cmd) => cmd.execute().await,
@@ -357,7 +366,10 @@ pub struct ModelDownloadCmd {
     /// Model ID to download
     model_id: String,
 
-    /// RPC endpoint to download on a remote node (omit to download locally)
+    /// RPC endpoint to fetch on a remote node (omit to download locally).
+    /// The node fetch is peer-first over iroh blobs (BLAKE3-verified),
+    /// falling back to HuggingFace, and verified against the hash record
+    /// before load.
     #[arg(long)]
     rpc: Option<String>,
 }
@@ -1543,6 +1555,160 @@ impl ModelRecipientKeyCmd {
             "Wrap alg",
             result.get("wrap_alg").and_then(|v| v.as_str()).unwrap_or("-"),
         );
+        Ok(())
+    }
+}
+
+/// Show a model's content-addressed hash record. This is the record a
+/// fetcher verifies weights against before load: the BLAKE3 root, the
+/// SHA-256, and the per-file manifest hash.
+#[derive(Debug, Parser)]
+pub struct ModelGetHashCmd {
+    /// Model ID
+    model_id: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+impl ModelGetHashCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_getModelHash",
+                serde_json::json!({ "model_id": self.model_id }),
+            )
+            .await?;
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        output::print_header(&format!("Model Hash: {}", self.model_id));
+        println!();
+        output::print_field(
+            "BLAKE3",
+            result.get("blake3").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
+        output::print_field(
+            "SHA-256",
+            result.get("sha256").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
+        output::print_field(
+            "Manifest hash",
+            result.get("manifest_hash").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
+        output::print_field(
+            "Recorder DID",
+            result.get("recorder_did").and_then(|v| v.as_str()).unwrap_or("-"),
+        );
+        if result.get("governance_overridden").and_then(|v| v.as_bool()).unwrap_or(false) {
+            output::print_field("Governance overridden", "true");
+        }
+        Ok(())
+    }
+}
+
+/// List every recorded model hash on the node.
+#[derive(Debug, Parser)]
+pub struct ModelListHashesCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Output format (table, json)
+    #[arg(long, default_value = "table")]
+    format: String,
+}
+
+impl ModelListHashesCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Model Hashes");
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value =
+            rpc.call("tenzro_listModelHashes", serde_json::Value::Null).await?;
+
+        if self.format == "json" {
+            output::print_json(&result)?;
+            return Ok(());
+        }
+
+        let empty = Vec::new();
+        let hashes = result
+            .get("model_hashes")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        if hashes.is_empty() {
+            output::print_info("No model hashes recorded on this node");
+            return Ok(());
+        }
+
+        let headers = vec!["Model ID", "BLAKE3", "SHA-256"];
+        let rows: Vec<Vec<String>> = hashes
+            .iter()
+            .map(|h| {
+                vec![
+                    h.get("model_id").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                    h.get("blake3").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                    h.get("sha256").and_then(|v| v.as_str()).unwrap_or("-").to_string(),
+                ]
+            })
+            .collect();
+        output::print_table(&headers, &rows);
+        Ok(())
+    }
+}
+
+/// Record a model's content-addressed hash (first-recorder-wins). Reads the
+/// per-file manifest from a JSON file: an array of
+/// `{"filename","sha256","blake3","size"}` entries (both hashes 64-hex).
+/// An identical re-assertion is idempotent; a differing hash for an already
+/// recorded model is rejected — correction is governance-gated.
+#[derive(Debug, Parser)]
+pub struct ModelRecordHashCmd {
+    /// Model ID
+    model_id: String,
+
+    /// Path to a JSON file holding the per-file manifest: an array of
+    /// {"filename","sha256","blake3","size"} entries
+    #[arg(long)]
+    files: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl ModelRecordHashCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let raw = std::fs::read_to_string(&self.files)?;
+        let files: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("Invalid manifest JSON in {}: {}", self.files, e))?;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_recordModelHash",
+                serde_json::json!({ "model_id": self.model_id, "files": files }),
+            )
+            .await?;
+
+        output::print_success(&format!("Recorded hash for '{}'", self.model_id));
+        output::print_json(&result)?;
         Ok(())
     }
 }

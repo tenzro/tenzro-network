@@ -124,6 +124,17 @@ pub const CF_CHALLENGES: &str = "challenges";
 ///   `partition/<database_id>/<partition_index>` → JSON `PartitionPlacement`
 ///       (the HRW-selected holder endpoint ids for this partition).
 pub const CF_DATABASES: &str = "databases";
+/// Governance-anchored transparency log binding a model id to its canonical
+/// content hash, so a peer-fetched weight artifact can be verified against a
+/// value the validator committee has witnessed and HotStuff-2 has finalized.
+/// Recording is permissionless (first recorder for a given model id wins); a
+/// second differing assertion is rejected unless it carries a governance
+/// override. Serving and fetching stay fully permissionless — only the
+/// canonical-hash assertion is anchored.
+/// Keys:
+///   `<model_id>` → JSON `CanonicalModelHash` { model_id, blake3, sha256,
+///       recorder_did, recorded_at_epoch, manifest_hash, governance_overridden }.
+pub const CF_MODEL_HASHES: &str = "model_hashes";
 
 /// Key-value store trait
 pub trait KvStore: Send + Sync {
@@ -242,6 +253,7 @@ const ALL_CFS: &[&str] = &[
     CF_DA_COMMITTEE,
     CF_CHALLENGES,
     CF_DATABASES,
+    CF_MODEL_HASHES,
 ];
 
 /// Force a file through compaction at least this often even when write
@@ -612,6 +624,7 @@ impl MemoryStore {
         data.insert(CF_DA_COMMITTEE.to_string(), HashMap::new());
         data.insert(CF_CHALLENGES.to_string(), HashMap::new());
         data.insert(CF_DATABASES.to_string(), HashMap::new());
+        data.insert(CF_MODEL_HASHES.to_string(), HashMap::new());
 
         Self {
             data: Arc::new(RwLock::new(data)),

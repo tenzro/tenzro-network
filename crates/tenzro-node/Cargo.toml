@@ -114,11 +114,23 @@ default = ["cluster-serving", "visa-tap", "mastercard-agent-pay"]
 # member's layer range into a head node's pipeline. Enabled by default — it
 # is core to multi-node serving.
 cluster-serving = ["tenzro-model/cluster-serving", "llama-cpp-2/rpc"]
+# llama.cpp/ggml LLM backends. Each forwards to tenzro-model, which sets the
+# matching GGML_<X> cmake define on the vendored llama-cpp-sys-2 build. A node
+# is CPU-only unless one of these is enabled; the runtime reports the compiled
+# set via HardwareInfo (compiled_backends / active_backend).
 cuda = ["tenzro-model/cuda"]
 cuda-no-vmm = ["tenzro-model/cuda-no-vmm"]
 rocm = ["tenzro-model/rocm"]
 vulkan = ["tenzro-model/vulkan"]
 metal = ["tenzro-model/metal"]
+sycl = ["tenzro-model/sycl"]
+openvino = ["tenzro-model/openvino"]
+opencl = ["tenzro-model/opencl"]
+musa = ["tenzro-model/musa"]
+cann = ["tenzro-model/cann"]
+webgpu = ["tenzro-model/webgpu"]
+zdnn = ["tenzro-model/zdnn"]
+blas = ["tenzro-model/blas"]
 # ONNX Runtime GPU execution providers (forecast / vision / text-embedding /
 # segmentation / detection / audio runtimes). Forward to tenzro-model.
 onnx-cuda = ["tenzro-model/onnx-cuda"]

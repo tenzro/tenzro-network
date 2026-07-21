@@ -54,7 +54,7 @@ Continue below if you want to run a node locally.
 | OS | Linux (glibc 2.31+), macOS 12+ | Ubuntu 22.04 / macOS 14+ |
 | Network | Open outbound 443 (Hugging Face, Cloud Build) | — |
 
-**GPU (optional, for local inference):** NVIDIA (CUDA 12+), AMD (ROCm 6+), Intel/Apple (Vulkan/Metal auto-detected).
+**GPU / accelerator (optional, for local inference):** enabled per cargo feature on `tenzro-node`, one backend per build — `cuda` (NVIDIA), `rocm` (AMD), `metal` (Apple), `vulkan` (any NVIDIA/AMD/Intel/ARM GPU), `sycl` (Intel GPU, needs oneAPI DPC++), `opencl`, `webgpu`, `musa` (Moore Threads), `cann` (Huawei Ascend NPU), `openvino` (Intel CPU/GPU/NPU), `zdnn` (IBM Z Telum), `blas` (accelerated CPU). A node with no backend feature runs CPU-only. See §3.2 and `docs/AI.md` §2.7 for the full matrix.
 
 ---
 
@@ -164,22 +164,43 @@ cargo test --workspace # full test suite
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-### 3.2 GPU-accelerated inference (optional)
+### 3.2 GPU / accelerator inference (optional)
 
-Enable one of the feature flags on `tenzro-model`:
+llama.cpp ships every backend; a build enables one via a `tenzro-node` feature flag. Pick the one that matches your hardware — a build with no backend feature is CPU-only.
+
+| Feature | Hardware | Build requirement |
+|---------|----------|-------------------|
+| `cuda` | NVIDIA GPU | CUDA Toolkit 12+ |
+| `cuda-no-vmm` | NVIDIA GPU (no virtual-memory management) | CUDA Toolkit 12+ |
+| `rocm` | AMD GPU | ROCm 6+ (gfx90a/gfx942/gfx1100/gfx1201) |
+| `metal` | Apple Silicon GPU | macOS + Xcode (auto-links on macOS ARM64) |
+| `vulkan` | any NVIDIA/AMD/Intel/ARM GPU | Vulkan SDK + `glslc` |
+| `sycl` | Intel GPU | oneAPI DPC++ (`CC=icx CXX=icpx`) |
+| `opencl` | OpenCL GPU | OpenCL ICD loader |
+| `webgpu` | WebGPU device | Dawn/wgpu |
+| `musa` | Moore Threads GPU | MUSA Toolkit |
+| `cann` | Huawei Ascend NPU | CANN Toolkit |
+| `openvino` | Intel CPU/GPU/NPU | OpenVINO runtime (device via `GGML_OPENVINO_DEVICE`) |
+| `zdnn` | IBM Z Telum accelerator | zDNN library |
+| `blas` | accelerated CPU | OpenBLAS/MKL |
 
 ```bash
-# NVIDIA CUDA (data-center + consumer)
-cargo build --release -p tenzro-node --features tenzro-model/cuda
+# NVIDIA CUDA
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/cuda
 
 # AMD ROCm
-cargo build --release -p tenzro-node --features tenzro-model/rocm
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/rocm
 
-# Cross-platform Vulkan (NVIDIA/AMD/Intel/ARM)
-cargo build --release -p tenzro-node --features tenzro-model/vulkan
+# Intel GPU via SYCL (oneAPI compiler required)
+CC=icx CXX=icpx cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/sycl
+
+# Cross-platform Vulkan
+cargo build --release -p tenzro-node -p tenzro-cli --features tenzro-node/vulkan
 
 # Apple Metal auto-links on macOS ARM64 — no flag needed
 ```
+
+The runtime reports the compiled set and the active backend at startup via `HardwareInfo` (`compiled_backends` / `active_backend`). Prebuilt container images cover CUDA, ROCm, and Vulkan — see `docs/AI.md` §2.7 and `deploy/validator-deployment.md`.
 
 > The `.cargo/config.toml` sets `CMAKE_ARGS="-DGGML_NATIVE=OFF"` to prevent Apple Clang breakage. On Linux, override with `CMAKE_ARGS="-DGGML_NATIVE=ON"` for max CPU SIMD detection.
 
@@ -559,12 +580,14 @@ xattr -d com.apple.quarantine ./target/release/tenzro
 
 ### 9.12 Model download fails with 401 / 403 from Hugging Face
 
-Gated models require an HF token:
+Model weights are content-addressed: each artifact is identified by its BLAKE3 hash and a `tenzro://blob/<hash>` URI. A download is peer-first — the node fetches from other nodes over the iroh blob transport when a peer holds the artifact, and falls back to Hugging Face Hub otherwise. When a peer serves the weights, no HF token is needed. The fallback path still hits Hugging Face, and gated models there require a token:
 
 ```bash
 export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx
 tenzro model download gemma3-270m
 ```
+
+Every downloaded artifact is verified against its recorded BLAKE3 hash before it loads (`tenzro_getModelHash` / `tenzro_listModelHashes` expose the registry). A hash mismatch fails the load — the node never serves weights it can't verify. The first node to record a model's hash pins it network-wide (first-recorder-wins); subsequent downloads verify against that pin.
 
 ### 9.13 Slow first build, no visible progress
 

@@ -75,7 +75,7 @@ pub use asset::{AssetId, AssetType, StablecoinType, AssetInfo};
 pub use network::{NetworkRole, NodeInfo, PeerInfo, RoleSet};
 pub use tee::{TeeVendor, AttestationReport, AttestationResult, TeeCapacity, TeeProviderInfo};
 pub use agent::{AgentIdentity, AgentConfig, AgentMessage, AgentMessageType, Capability};
-pub use model::{AcceptancePolicy, LicenseTier, ModelInfo, ModelLoadInfo, ModelModality, ModelVisibility, MoeMetadata, MoeRoutingStrategy, MoeExpertHolding, MoeExpertResidency, MoeProviderRole, PrefixCacheSummary, PrefixCacheNode, prefix_run_hashes, PREFIX_RUN_BYTES, InferenceRequest, InferenceResponse, InferenceParameters, InferenceProvider, JurisdictionClaim, JurisdictionReceipt, ProvenanceManifest, ProviderCapacity, AdvertisedCapacity, PricingConfig};
+pub use model::{AcceptancePolicy, LicenseTier, ModelInfo, ModelLoadInfo, PeerHintRecord, ModelModality, ModelVisibility, MoeMetadata, MoeRoutingStrategy, MoeExpertHolding, MoeExpertResidency, MoeProviderRole, PrefixCacheSummary, PrefixCacheNode, prefix_run_hashes, PREFIX_RUN_BYTES, InferenceRequest, InferenceResponse, InferenceParameters, InferenceProvider, JurisdictionClaim, JurisdictionReceipt, ProvenanceManifest, ProviderCapacity, AdvertisedCapacity, PricingConfig};
 pub use settlement::{SettlementRequest, SettlementReceipt, SettlementStatus, ReleaseConditions, ServiceType, PaymentIntent, ServiceProof, ProofType, SettlementAuthorization, SETTLEMENT_AUTHORIZATION_DOMAIN};
 pub use token::{TokenConfig, Treasury, StakingPool, ProviderStake, ProviderType, GovernanceProposal, ProposalStatus, ProposalType};
 pub use governance::{GovernanceVote, VoteType};

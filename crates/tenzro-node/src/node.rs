@@ -1889,6 +1889,15 @@ pub struct TenzroNode {
 
     // AI infrastructure
     model_registry: Option<Arc<ModelRegistry>>,
+    /// Governance-anchored transparency log mapping `model_id` to its
+    /// canonical weight hash (BLAKE3 peer content-address + SHA-256 integrity
+    /// digest + manifest hash). Recording is permissionless first-recorder-
+    /// wins; correction flows only through a governance override. Write-through
+    /// to CF_MODEL_HASHES, hydrated on boot. Read by the verify-before-load
+    /// gate and the `tenzro_getModelHash` / `tenzro_listModelHashes` RPCs;
+    /// written at model registration and by `tenzro_recordModelHash` /
+    /// `tenzro_overrideModelHash`.
+    model_hash_registry: Option<Arc<tenzro_model::ModelHashRegistry>>,
     provider_manager: Option<Arc<ProviderManager>>,
     inference_router: Option<Arc<InferenceRouter>>,
     /// Intent → model discovery-and-dispatch layer. Sits above the inference
@@ -2573,6 +2582,7 @@ impl TenzroNode {
             tenant_idp_provisioner: None,
             admin_token: None,
             model_registry: None,
+            model_hash_registry: None,
             provider_manager: None,
             inference_router: None,
             meta_router: None,
@@ -5358,6 +5368,24 @@ impl TenzroNode {
             Arc::new(ModelRegistry::new().with_acceptance_policy(acceptance))
         };
         self.model_registry = Some(registry);
+
+        // Governance-anchored model-weight transparency log. Hydrates the
+        // `model_id → canonical_hash` map from CF_MODEL_HASHES so records
+        // asserted before the restart survive. Recording is permissionless
+        // first-recorder-wins; correction flows only through a governance
+        // override verified at the RPC layer before `override_hash` is called.
+        let model_hash_registry = if let Some(ref storage) = self.storage {
+            Arc::new(tenzro_model::ModelHashRegistry::with_storage(
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+            ))
+        } else {
+            Arc::new(tenzro_model::ModelHashRegistry::new())
+        };
+        info!(
+            "Model-hash transparency log ready ({} canonical records)",
+            model_hash_registry.list().len()
+        );
+        self.model_hash_registry = Some(model_hash_registry);
 
         // Initialize provider manager (with storage persistence if available)
         let provider_manager = if let Some(ref storage) = self.storage {
@@ -11626,6 +11654,14 @@ impl TenzroNode {
     /// Returns the model registry if initialized
     pub fn model_registry(&self) -> Option<&Arc<ModelRegistry>> {
         self.model_registry.as_ref()
+    }
+
+    /// Returns the governance-anchored model-hash transparency log if
+    /// initialized. Read by the verify-before-load gate and the model-hash
+    /// RPC handlers (`tenzro_getModelHash`, `tenzro_listModelHashes`,
+    /// `tenzro_recordModelHash`, `tenzro_overrideModelHash`).
+    pub fn model_hash_registry(&self) -> Option<&Arc<tenzro_model::ModelHashRegistry>> {
+        self.model_hash_registry.as_ref()
     }
 
     /// Returns the provider manager if initialized. Consumed by RPC handlers

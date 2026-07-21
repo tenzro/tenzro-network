@@ -461,6 +461,35 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
         result = await rpc_call("tenzro_chat", params)
         return json.dumps(result, indent=2)
 
+    # Content-addressed weights: the canonical BLAKE3 / SHA-256 record a
+    # fetcher verifies weights against before load. "hash" + "model" reads a
+    # record (metadata.model_id) or lists every recorded hash.
+    if "hash" in t and "model" in t:
+        model_id = (metadata or {}).get("model_id")
+        if model_id or "get" in t or "record" in t:
+            if model_id:
+                result = await rpc_call(
+                    "tenzro_getModelHash", [{"model_id": model_id}]
+                )
+                return json.dumps(result, indent=2)
+        result = await rpc_call("tenzro_listModelHashes", [])
+        return json.dumps(result, indent=2)
+
+    # Peer-first model download: weights are pulled from Tenzro peers over
+    # iroh blobs (BLAKE3-verified end-to-end), falling back to HuggingFace,
+    # then checked against the canonical hash record before load.
+    if "download" in t and "model" in t:
+        model_id = (metadata or {}).get("model_id")
+        if not model_id:
+            return (
+                "Specify the model to download via metadata.model_id. "
+                "Fetch is peer-first over iroh blobs (BLAKE3-verified), "
+                "falling back to HuggingFace, and the weights are checked "
+                "against the canonical hash record before load."
+            )
+        result = await rpc_call("tenzro_downloadModel", [{"model_id": model_id}])
+        return json.dumps(result, indent=2)
+
     if "endpoint" in t:
         result = await rpc_call("tenzro_listModelEndpoints", [])
         return json.dumps(result, indent=2)

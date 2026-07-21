@@ -75,6 +75,31 @@ The image is multi-stage (Rust 1.85 builder → debian-slim runtime), produces
 a single `tenzro-node` binary, and runs as non-root. Build time on a fast
 build host is ~15–25 min.
 
+### GPU / accelerator variants
+
+The base `Dockerfile` is CPU-only. To serve inference on an accelerator,
+build the matching backend variant instead. Each variant compiles
+`tenzro-node` with the corresponding llama.cpp/ggml backend feature.
+
+| Backend | Dockerfile | `docker run` flags |
+|---|---|---|
+| NVIDIA CUDA | `Dockerfile.cuda` | `--gpus all` |
+| AMD ROCm / HIP | `Dockerfile.rocm` | `--device /dev/kfd --device /dev/dri --group-add video` |
+| Vulkan (NVIDIA / AMD / Intel Arc / Mali) | `Dockerfile.vulkan` | `--device /dev/dri -v /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro` |
+
+```bash
+TAG=$(date +%Y%m%d-%H%M%S)
+docker build -f Dockerfile.rocm -t <your-registry>/tenzro-node:$TAG-rocm .
+docker push <your-registry>/tenzro-node:$TAG-rocm
+```
+
+Backends without a prebuilt image (Intel SYCL / OpenVINO, OpenCL, Moore
+Threads MUSA, Huawei CANN, WebGPU, IBM zDNN, BLAS) build from the base
+`Dockerfile` template with the vendor toolchain layered into the builder
+stage and `--features tenzro-node/<backend>` added to the `cargo build`
+line. See `docs/AI.md` §2.7 for the full backend/feature matrix and the
+per-backend build recipes.
+
 **Pin by digest in production.** Tags can be moved; digests can't:
 ```bash
 docker inspect <your-registry>/tenzro-node:$TAG --format '{{.RepoDigests}}'

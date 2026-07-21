@@ -67,13 +67,18 @@ The `tenzro-model` crate provides the core infrastructure for managing AI models
 
 ### Download Manager
 
-- Download AI models from HuggingFace Hub via `hf-hub` crate
+- Content-addressed, peer-first model distribution: weights are identified by their BLAKE3 hash and a `tenzro://blob/<hash>` URI
+- `HfArtifactDownloader` fetches peer-first through a pluggable `BlobFetcher` (the node wires `IrohBlobFetcher` over the iroh blob transport), falling back to HuggingFace Hub when no peer holds the artifact; downloaded weights are opportunistically re-published into the local blob store so the next node can fetch from this one
 - Progress tracking with speed estimation
 - Pause, resume, and cancel downloads
-- SHA-256 checksum verification
+- Verify-before-load: every artifact is checked against its recorded BLAKE3 hash before it loads — a mismatch fails the load
 - Concurrent download management
 - Storage path management
 - `HfArtifactDownloader` supports both `ArtifactSpec::SingleFile { filename, extension }` (single-file ONNX) and `ArtifactSpec::Bundle { files, dir_name }` (multi-file ONNX encoder/decoder/joiner). Tmp-dir-rename atomic finalization. `HfDownloader` is the GGUF-oriented downloader with size-tolerant `verify_download`, used by LLM callers (CLI, RPC).
+
+### Content-Addressed Model Registry
+
+`ModelHashRegistry` binds every model artifact to its BLAKE3 hash. `ModelInfo` carries `blake3_hash: Option<[u8; 32]>`, `tenzro_uri: Option<String>` (the `tenzro://blob/<hash>` locator), and `peer_hints: Vec<PeerHintRecord>` (nodes known to hold the artifact). The registry is **first-recorder-wins**: the first node to record a model's hash pins it network-wide, and every subsequent download verifies against that pin. Records write through to `CF_MODEL_HASHES` and hydrate on startup (`ModelHashRegistry::with_storage`). `compute_model_manifest_hash()` folds a multi-file bundle into one manifest hash; `blake3_of_bytes()` / `ModelFileRecord::from_bytes()` are the single-file primitives. Surfaced through `tenzro_getModelHash` / `tenzro_listModelHashes` / `tenzro_recordModelHash` / `tenzro_overrideModelHash`.
 
 ### Multi-Modal Inference Runtimes
 
@@ -175,11 +180,7 @@ single end-of-stream settlement charge.
 ### Model Runtime
 
 - Local model inference via `llama.cpp` bindings (`llama-cpp-2` crate)
-- GPU acceleration:
-  - Metal (macOS ARM64, auto-linked)
-  - NVIDIA CUDA (datacenter: A100/H100/B200; consumer: RTX 3090/4090)
-  - AMD ROCm (MI300X, RX 7900 XTX)
-  - Vulkan (cross-platform: NVIDIA, AMD, Intel Arc, ARM Mali/Adreno)
+- GPU / accelerator backends (one per build, via cargo feature — see "GPU Acceleration" below): CUDA, ROCm, Metal, Vulkan, SYCL, OpenCL, WebGPU, MUSA, CANN, OpenVINO, zDNN, BLAS
 - Chat interface with session history
 - Streaming and batch inference
 - Hardware detection and capability reporting
@@ -345,7 +346,8 @@ The crate is organized into several key modules:
 - `pricing`: Cost calculation and market analysis
 - `library`: Model discovery and browsing
 - `download`: Model download management
-- `hf_download`: HuggingFace Hub integration with SHA-256 verification
+- `hf_download`: peer-first artifact downloader (`BlobFetcher` → iroh blobs, HuggingFace Hub fallback)
+- `model_hash`: `ModelHashRegistry` — BLAKE3 content addressing, first-recorder-wins, verify-before-load, `CF_MODEL_HASHES` persistence
 - `runtime`: Local inference via llama.cpp with GPU acceleration and MTP speculative decoding
 - `moe_shard`: Expert → holder shard maps and replication policy
 - `moe_router`: Token-to-expert dispatch planning
@@ -386,13 +388,23 @@ On startup, hydration restores the full catalog so models survive node restarts 
 
 ## GPU Acceleration
 
-The crate supports multiple GPU backends via feature flags:
+llama.cpp ships every ggml backend; each is exposed as a cargo feature that sets the matching `GGML_<X>` cmake define on the vendored `llama-cpp-sys-2` build. A build enables one backend; a build with no backend feature is CPU-only. These features are forwarded through `tenzro-node` (`--features tenzro-node/<name>`).
 
 - **cuda** — NVIDIA CUDA (datacenter: A100/H100/B200; consumer: RTX 3090/4090)
 - **cuda-no-vmm** — NVIDIA CUDA without virtual memory (older drivers/embedded)
 - **rocm** — AMD ROCm (datacenter: MI300X; consumer: RX 7900 XTX)
-- **vulkan** — Cross-platform GPU (NVIDIA, AMD, Intel Arc, ARM Mali/Adreno)
 - **metal** — Apple Metal (auto-linked on macOS ARM64 regardless)
+- **vulkan** — Cross-platform GPU (NVIDIA, AMD, Intel Arc, ARM Mali/Adreno)
+- **sycl** — Intel GPU via oneAPI DPC++ (build with `CC=icx CXX=icpx`)
+- **opencl** — OpenCL GPU
+- **webgpu** — WebGPU device
+- **musa** — Moore Threads GPU (MUSA Toolkit)
+- **cann** — Huawei Ascend NPU (CANN Toolkit)
+- **openvino** — Intel CPU/GPU/NPU (device selected at runtime via `GGML_OPENVINO_DEVICE`)
+- **zdnn** — IBM Z Telum accelerator
+- **blas** — accelerated CPU (OpenBLAS/MKL)
+
+`HardwareInfo::detect()` reports the compiled set (`compiled_backends`) and the resolved `active_backend` string at startup.
 
 ## Integration with Tenzro Network
 

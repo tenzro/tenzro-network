@@ -137,7 +137,7 @@ The Tenzro A2A agent exposes skills covering blockchain, AI, identity, payments,
 
 | Skill | ID | Description |
 |-------|-----|-------------|
-| **AI Inference** | `inference` | Route inference to model providers, settle in TNZO |
+| **AI Inference** | `inference` | Route inference to model providers, settle in TNZO. Content-addressed weights: download is peer-first over iroh blobs (BLAKE3-verified end-to-end), falling back to HuggingFace, and the weights are checked against the canonical hash record before load; read that record (BLAKE3 + SHA-256 + per-file manifest hash) by `model_id` or list every recorded hash |
 | **Cortex Reasoning Workers** | `cortex` | Tenzro Cortex reasoning-tier inference via signed receipts (Fast/Standard/Deep budgets, MoE rdt-moe family, max_cost_wei cap) |
 | **Forecast** | `forecast` | Timeseries forecasting via TimesFM 2.5 |
 | **Vision** | `vision` | Image embedding/similarity via CLIP, SigLIP2, DINOv3 |

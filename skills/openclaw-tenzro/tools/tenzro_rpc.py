@@ -3733,9 +3733,14 @@ def unregister_model_endpoint(instance_id: str) -> dict:
 
 
 def download_model(model_id: str) -> dict:
-    """Download a model from the registry.
+    """Download a model's weights.
 
     model_id: model to download
+
+    Fetch is peer-first: weights are pulled from Tenzro peers over iroh blobs
+    (BLAKE3-verified end-to-end on transfer), falling back to HuggingFace when
+    no peer holds them. Downloaded weights are checked against the canonical
+    hash record before load.
     """
     return _rpc("tenzro_downloadModel", {"model_id": model_id})
 
@@ -3746,6 +3751,38 @@ def get_download_progress(model_id: str) -> dict:
     model_id: model being downloaded
     """
     return _rpc("tenzro_getDownloadProgress", {"model_id": model_id})
+
+
+def get_model_hash(model_id: str) -> dict:
+    """Get the content-addressed hash record for a model.
+
+    model_id: model to look up
+
+    Returns the canonical record a fetcher verifies weights against before
+    load: the BLAKE3 root, the SHA-256, and the per-file manifest hash.
+    """
+    return _rpc("tenzro_getModelHash", {"model_id": model_id})
+
+
+def list_model_hashes() -> dict:
+    """List every recorded model hash.
+
+    Returns the full set of content-addressed weight records known to this
+    node (count + one entry per model_id).
+    """
+    return _rpc("tenzro_listModelHashes", {})
+
+
+def record_model_hash(model_id: str, files: list) -> dict:
+    """Record the content-addressed hash for a model (first-recorder-wins).
+
+    model_id: model the record is for
+    files: per-file manifest entries (name + hash) the record binds
+
+    The first record for a model_id wins; a conflicting later record is
+    rejected. Use the admin override RPC to replace an existing record.
+    """
+    return _rpc("tenzro_recordModelHash", {"model_id": model_id, "files": files})
 
 
 def serve_model(model_id: str, force_cluster: bool = False,

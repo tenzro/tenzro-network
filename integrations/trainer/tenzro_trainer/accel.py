@@ -29,8 +29,25 @@ logger = logging.getLogger(__name__)
 _FP8_SKIP_NAME_TAGS = ("embed", "lm_head", "wte", "wpe", "head")
 
 
+def _is_rocm() -> bool:
+    """True when torch is a ROCm/HIP build.
+
+    PyTorch's HIP shim reuses the ``torch.cuda`` namespace, so
+    ``torch.cuda.is_available()`` returns True on AMD data-center and RDNA
+    GPUs and ``torch.version.hip`` is the only reliable backend discriminator.
+    """
+    return torch is not None and getattr(torch.version, "hip", None) is not None
+
+
 def resolve_attn_implementation(metadata: Dict[str, Any]) -> str:
-    """Pick the attention kernel to request from ``from_pretrained``."""
+    """Pick the attention kernel to request from ``from_pretrained``.
+
+    FlashAttention-2 resolves when ``flash_attn`` is importable and an
+    accelerator is present. On ROCm the ``flash_attn`` package is the AMD
+    Composable-Kernel/Triton build; when it imports we request the same
+    ``flash_attention_2`` implementation and transformers dispatches the ROCm
+    kernel. SDPA is the fallback on either backend.
+    """
     override = metadata.get("attn_implementation")
     if isinstance(override, str) and override:
         return override
@@ -45,6 +62,12 @@ def resolve_attn_implementation(metadata: Dict[str, Any]) -> str:
 
 def _fp8_capable() -> bool:
     if torch is None or not torch.cuda.is_available():
+        return False
+    # Compute-capability gating is a CUDA (Ada/Hopper >= 8.9) concept. On ROCm
+    # the tuple has HIP semantics and does not map to it, so torchao FP8
+    # rowwise training is treated as CUDA-only here — MI300-class FP8 needs a
+    # different code path (unverified on AMD hardware in this fleet).
+    if _is_rocm():
         return False
     major, minor = torch.cuda.get_device_capability()
     return (major, minor) >= (8, 9)
@@ -69,10 +92,12 @@ def maybe_convert_fp8(model: "nn.Module", metadata: Dict[str, Any]) -> "nn.Modul
     if not requested or str(requested).lower() in ("0", "false", "no"):
         return model
     if not _fp8_capable():
-        logger.info(
-            "fp8 requested but no CUDA device with compute capability >= 8.9; "
-            "continuing without fp8"
+        reason = (
+            "running on ROCm/HIP (torchao rowwise FP8 gating is CUDA-only here)"
+            if _is_rocm()
+            else "no CUDA device with compute capability >= 8.9"
         )
+        logger.info("fp8 requested but %s; continuing without fp8", reason)
         return model
     try:
         from torchao.float8 import convert_to_float8_training

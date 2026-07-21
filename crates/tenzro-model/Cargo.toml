@@ -26,6 +26,7 @@ futures = { workspace = true }
 parking_lot = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 reqwest = { workspace = true }
 bincode = { workspace = true }
@@ -91,12 +92,30 @@ cluster-serving = ["llama-cpp-2/rpc"]
 cuda = ["llama-cpp-2/cuda"]
 # NVIDIA CUDA without virtual memory management (older drivers / embedded)
 cuda-no-vmm = ["llama-cpp-2/cuda-no-vmm"]
-# AMD ROCm — datacenter (MI300X) and consumer (RX 7900 XTX)
+# AMD ROCm/HIP — datacenter (MI300X/MI325X) and consumer (RX 7900 XTX, Radeon)
 rocm = ["llama-cpp-2/rocm"]
-# Vulkan — cross-platform GPU (NVIDIA, AMD, Intel Arc, ARM Mali/Adreno)
+# Vulkan — cross-vendor GPU (NVIDIA, AMD, Intel Arc/Battlemage, ARM Mali, Adreno)
 vulkan = ["llama-cpp-2/vulkan"]
 # Apple Metal — explicit opt-in (auto-linked on macOS ARM64 regardless)
 metal = ["llama-cpp-2/metal"]
+# Intel oneAPI SYCL — Arc / Battlemage / Data Center GPU Max / integrated Xe.
+# Needs the oneAPI DPC++ toolchain (icpx) at build time.
+sycl = ["llama-cpp-2/sycl"]
+# OpenVINO — runs GGUF on Intel CPU / GPU / NPU. Runtime device via the
+# GGML_OPENVINO_DEVICE env var (CPU / GPU / NPU), forwarded by the runtime.
+openvino = ["llama-cpp-2/openvino"]
+# OpenCL — Qualcomm Adreno, ARM Mali, and other OpenCL 3.0 GPUs.
+opencl = ["llama-cpp-2/opencl"]
+# Moore Threads MUSA — MTT S-series GPUs.
+musa = ["llama-cpp-2/musa"]
+# Huawei Ascend CANN — Ascend 910 / 310 NPUs.
+cann = ["llama-cpp-2/cann"]
+# WebGPU (Dawn) — cross-vendor GPU via the WebGPU API.
+webgpu = ["llama-cpp-2/webgpu"]
+# BLAS CPU acceleration (OpenBLAS / Intel MKL / Apple Accelerate).
+blas = ["llama-cpp-2/blas"]
+# IBM Z zDNN — Telum on-chip AI accelerator.
+zdnn = ["llama-cpp-2/zdnn"]
 # ONNX Runtime GPU execution providers for the non-LLM modalities. The ONNX
 # runtimes are always compiled (ort is an unconditional dependency); these
 # features additionally link the corresponding execution provider into the
