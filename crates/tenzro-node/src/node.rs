@@ -13123,7 +13123,15 @@ impl TenzroNode {
                     }
                 }
             });
-            match hf.download_model(&drafter_entry, None, progress_tx).await {
+            match hf
+                .download_model(
+                    &drafter_entry,
+                    None,
+                    tenzro_model::SourcePolicy::Auto,
+                    progress_tx,
+                )
+                .await
+            {
                 Ok(path) => {
                     if let Some(mut row) = downloads.get_mut(&drafter_id) {
                         row.status = "completed".to_string();
@@ -13352,6 +13360,70 @@ impl TenzroNode {
         }
     }
 
+    /// Register a served model with the load tracker, sizing max-concurrency
+    /// against detected hardware. Shared by the serve path and the lazy loader
+    /// so the concurrency budget is computed identically everywhere.
+    fn register_load_tracker(&self, model_id: &str, entry: &tenzro_model::HfModelEntry) {
+        let max_concurrent = {
+            let hw = self.hardware_profile.read();
+            if let Some(ref profile) = *hw {
+                let gpu_vram = profile
+                    .gpus
+                    .first()
+                    .map(|g| g.vram_gb as f64)
+                    .unwrap_or(0.0);
+                let has_gpu = !profile.gpus.is_empty() && gpu_vram > 0.0;
+                tenzro_model::estimate_max_concurrent(
+                    entry.min_ram_gb,
+                    profile.total_ram_gb,
+                    gpu_vram,
+                    has_gpu,
+                )
+            } else {
+                tenzro_model::estimate_max_concurrent(entry.min_ram_gb, 4.0, 0.0, false)
+            }
+        };
+        self.load_tracker.register_model(model_id, max_concurrent);
+    }
+
+    /// Load a served model into the runtime on demand.
+    ///
+    /// Serving weights are loaded lazily on the first inference rather than at
+    /// boot, so a node's boot-time RAM is independent of how many models it
+    /// holds. A holder that never receives an inference request keeps its
+    /// models purely on disk. Idempotent: a no-op when already loaded.
+    ///
+    /// Returns `Ok(true)` when the model is loaded and ready, `Ok(false)` when
+    /// it is not a locally-servable model on this node (caller falls back to
+    /// remote routing or a not-serving error), and `Err` when a load was
+    /// attempted and failed (e.g. memory admission).
+    pub async fn ensure_local_model_loaded(&self, model_id: &str) -> Result<bool, String> {
+        let Some(runtime) = self.model_runtime.as_ref() else {
+            return Ok(false);
+        };
+        if runtime.is_loaded(model_id) {
+            return Ok(true);
+        }
+        // Only load models this node has flagged as served.
+        if !self.served_models.contains_key(model_id) {
+            return Ok(false);
+        }
+        let Some(entry) = tenzro_model::get_model_by_id(model_id) else {
+            return Ok(false);
+        };
+        let Some(path) = self.resolve_gguf_path(model_id) else {
+            return Ok(false);
+        };
+        runtime
+            .load_model_with_context(model_id, &path, Some(entry.context_length))
+            .await
+            .map_err(|e| e.to_string())?;
+        self.register_load_tracker(model_id, &entry);
+        let _ = self.autoload_drafter(model_id, &entry).await;
+        info!(model_id = %model_id, "Lazily loaded served model on first use");
+        Ok(true)
+    }
+
     /// Run a full reconciliation of the model registry against on-disk state
     /// and the in-memory runtime. Used both at startup and on-demand via
     /// `tenzro_pruneModelRegistry`.
@@ -13361,13 +13433,16 @@ impl TenzroNode {
     ///    - If the model is NOT in the catalog → clear the flag + remove any
     ///      matching ModelServiceInstance rows.
     ///    - If the model file is missing on disk → clear the flag + rows.
-    ///    - If the model file exists but is not loaded in the runtime →
-    ///      attempt `load_model_with_context()`. On failure → clear.
+    ///    - If the model file exists on disk → keep the serve flag and register
+    ///      the load tracker, but do NOT load weights into the runtime. The
+    ///      llama.cpp load is deferred to the first inference request via
+    ///      `ensure_local_model_loaded`, so boot RAM is independent of the
+    ///      number of held models.
     /// 2. For every Local `ModelServiceInstance`:
-    ///    - If the runtime is not serving the model_id → remove the row.
-    ///      (Orphaned endpoints from previous process lifetimes.)
+    ///    - If the model_id is neither loaded nor flagged as served → remove
+    ///      the row. (Orphaned endpoints from previous process lifetimes.)
     ///
-    /// Returns a tuple `(reloaded, cleared_models, cleared_services)`.
+    /// Returns a tuple `(reconciled, cleared_models, cleared_services)`.
     pub async fn reconcile_model_registry(&self) -> (usize, usize, usize) {
         use tenzro_model::get_model_by_id;
 
@@ -13433,72 +13508,21 @@ impl TenzroNode {
 
             let ok = match (catalog, gguf_path) {
                 (Some(entry), Some(path)) => {
-                    // Catalog entry + file present. Try to load into runtime if
-                    // not already loaded.
-                    if let Some(ref runtime) = self.model_runtime {
-                        if runtime.is_loaded(model_id) {
-                            // Idempotent: no-op when the drafter is already loaded.
-                            let _ = self.autoload_drafter(model_id, &entry).await;
-                            true
-                        } else {
-                            match runtime
-                                .load_model_with_context(
-                                    model_id,
-                                    &path,
-                                    Some(entry.context_length),
-                                )
-                                .await
-                            {
-                                Ok(()) => {
-                                    reloaded += 1;
-                                    info!(
-                                        model_id = %model_id,
-                                        path = %path.display(),
-                                        "Auto-reloaded model into runtime after restart",
-                                    );
-                                    // Re-register load tracker (same logic as serve_model)
-                                    let max_concurrent = {
-                                        let hw = self.hardware_profile.read();
-                                        if let Some(ref profile) = *hw {
-                                            let gpu_vram = profile
-                                                .gpus
-                                                .first()
-                                                .map(|g| g.vram_gb as f64)
-                                                .unwrap_or(0.0);
-                                            let has_gpu = !profile.gpus.is_empty()
-                                                && gpu_vram > 0.0;
-                                            tenzro_model::estimate_max_concurrent(
-                                                entry.min_ram_gb,
-                                                profile.total_ram_gb,
-                                                gpu_vram,
-                                                has_gpu,
-                                            )
-                                        } else {
-                                            tenzro_model::estimate_max_concurrent(
-                                                entry.min_ram_gb,
-                                                4.0,
-                                                0.0,
-                                                false,
-                                            )
-                                        }
-                                    };
-                                    self.load_tracker
-                                        .register_model(model_id, max_concurrent);
-                                    // Restore speculative decoding across restarts.
-                                    let _ = self.autoload_drafter(model_id, &entry).await;
-                                    true
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        model_id = %model_id,
-                                        path = %path.display(),
-                                        "Auto-reload failed: {} — clearing serve flag",
-                                        e,
-                                    );
-                                    false
-                                }
-                            }
-                        }
+                    // Catalog entry + file present on disk. Keep the serve flag
+                    // and register the load tracker, but do NOT warm the weights
+                    // into the runtime here — the llama.cpp load is deferred to
+                    // the first inference via `ensure_local_model_loaded`, so a
+                    // node's boot RAM does not scale with the number of held
+                    // models. A holder that never serves keeps them on disk.
+                    if self.model_runtime.is_some() {
+                        self.register_load_tracker(model_id, &entry);
+                        reloaded += 1;
+                        info!(
+                            model_id = %model_id,
+                            path = %path.display(),
+                            "Reconciled served model (weights load lazily on first use)",
+                        );
+                        true
                     } else {
                         // No runtime available at all — can't serve. Keep file,
                         // but don't keep the flag advertising we serve it.

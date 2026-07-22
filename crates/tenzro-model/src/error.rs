@@ -157,6 +157,14 @@ pub enum ModelError {
     #[error("Model manifest for '{0}' has no files")]
     EmptyManifest(String),
 
+    /// A `Network` source policy was requested but no verified network
+    /// provider currently holds the blob (or no peer hint / fetcher was
+    /// wired), so there is no non-HuggingFace source to fetch from. The
+    /// `Network` policy never falls back to the HuggingFace CDN, so this is
+    /// terminal rather than a fallback trigger.
+    #[error("No verified network provider holds '{0}' and the source policy forbids HuggingFace")]
+    NoNetworkSource(String),
+
     /// Runtime / catch-all error
     #[error("{0}")]
     Other(String),

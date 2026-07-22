@@ -485,9 +485,15 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
                 "Specify the model to download via metadata.model_id. "
                 "Fetch is peer-first over iroh blobs (BLAKE3-verified), "
                 "falling back to HuggingFace, and the weights are checked "
-                "against the canonical hash record before load."
+                "against the canonical hash record before load. Optionally set "
+                "metadata.source to 'network' (verified network providers only) "
+                "or 'huggingface' (HuggingFace only)."
             )
-        result = await rpc_call("tenzro_downloadModel", [{"model_id": model_id}])
+        req = {"model_id": model_id}
+        source = (metadata or {}).get("source")
+        if source:
+            req["source"] = source
+        result = await rpc_call("tenzro_downloadModel", [req])
         return json.dumps(result, indent=2)
 
     if "endpoint" in t:

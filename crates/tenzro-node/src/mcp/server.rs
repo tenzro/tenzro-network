@@ -1122,6 +1122,11 @@ pub struct ClosePaymentChannelParams {
 pub struct DownloadModelParams {
     #[schemars(description = "Model ID to download (e.g. 'gemma3-270m', 'qwen3.5-0.8b')")]
     pub model_id: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Source: 'network' (verified network providers only), 'huggingface' (HuggingFace only), or omit for network-first with HuggingFace fallback"
+    )]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -9663,6 +9668,11 @@ impl TenzroMcpServer {
             error: None,
         };
         self.node.model_downloads.insert(model_id.clone(), status);
+        let policy = match params.source.as_deref() {
+            Some("network") => tenzro_model::SourcePolicy::Network,
+            Some("huggingface") | Some("hf") => tenzro_model::SourcePolicy::HuggingFace,
+            _ => tenzro_model::SourcePolicy::Auto,
+        };
         let downloads = self.node.model_downloads.clone();
         let hf_dl = hf_downloader.clone();
         let entry_clone = entry.clone();
@@ -9690,7 +9700,7 @@ impl TenzroMcpServer {
                     }
                 }
             });
-            match hf_dl.download_model(&entry_clone, None, progress_tx).await {
+            match hf_dl.download_model(&entry_clone, None, policy, progress_tx).await {
                 Ok(_path) => {
                     if let Some(mut e) = downloads.get_mut(&model_id_spawn) {
                         e.status = "completed".to_string();
@@ -17065,7 +17075,7 @@ impl ServerHandler for TenzroMcpServer {
              • reveal_challenge_vote — Committee member reveals (verdict, salt)\n\
              • finalize_challenge — Tally revealed votes; upheld penalizes the provider\n\n\
              Model Lifecycle:\n\
-             • download_model — Download a model from HuggingFace Hub\n\
+             • download_model — Download a model from verified network providers or HuggingFace Hub\n\
              • serve_model_mcp — Start serving a downloaded model\n\
              • stop_model — Stop serving a model\n\
              • delete_model_mcp — Delete a downloaded model from disk\n\

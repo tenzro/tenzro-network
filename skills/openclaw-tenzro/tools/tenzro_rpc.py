@@ -3732,17 +3732,22 @@ def unregister_model_endpoint(instance_id: str) -> dict:
     return _rpc("tenzro_unregisterModelEndpoint", {"instance_id": instance_id})
 
 
-def download_model(model_id: str) -> dict:
+def download_model(model_id: str, source: str = None) -> dict:
     """Download a model's weights.
 
     model_id: model to download
+    source: 'network' (verified network providers only), 'huggingface'
+        (HuggingFace only), or omit for network-first with HuggingFace fallback
 
     Fetch is peer-first: weights are pulled from Tenzro peers over iroh blobs
     (BLAKE3-verified end-to-end on transfer), falling back to HuggingFace when
     no peer holds them. Downloaded weights are checked against the canonical
     hash record before load.
     """
-    return _rpc("tenzro_downloadModel", {"model_id": model_id})
+    params = {"model_id": model_id}
+    if source:
+        params["source"] = source
+    return _rpc("tenzro_downloadModel", params)
 
 
 def get_download_progress(model_id: str) -> dict:
@@ -8804,7 +8809,7 @@ COMMANDS = {
     "register_model_endpoint": lambda args: register_model_endpoint(args[0], args[1]),
     "get_model_endpoint": lambda args: get_model_endpoint(args[0]),
     "unregister_model_endpoint": lambda args: unregister_model_endpoint(args[0]),
-    "download_model": lambda args: download_model(args[0]),
+    "download_model": lambda args: download_model(args[0], args[1] if len(args) > 1 else None),
     "get_download_progress": lambda args: get_download_progress(args[0]),
     "serve_model": lambda args: serve_model(
         args[0],

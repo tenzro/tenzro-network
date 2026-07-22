@@ -20757,6 +20757,15 @@ async fn handle_download_model(
         })?
         .to_string();
 
+    // Source selection: "network" fetches only from verified network providers
+    // (never HuggingFace), "huggingface"/"hf" fetches only from the HuggingFace
+    // CDN, and the default fetches network-first with a HuggingFace fallback.
+    let policy = match params.get("source").and_then(|v| v.as_str()) {
+        Some("network") => tenzro_model::SourcePolicy::Network,
+        Some("huggingface") | Some("hf") => tenzro_model::SourcePolicy::HuggingFace,
+        _ => tenzro_model::SourcePolicy::Auto,
+    };
+
     // Look up model in catalog
     let entry = get_model_by_id(&model_id).ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -20838,6 +20847,17 @@ async fn handle_download_model(
     let downloads = node.model_downloads.clone();
     let hf_dl = hf_downloader.clone();
     let entry_clone = entry.clone();
+    // Transparency-log context snapshotted before the spawn so a completed
+    // download records the canonical content hash and makes this node a
+    // verified holder — without loading the weights into llama.cpp. Storage
+    // provision costs disk (the recorded hash), not RAM (a served model).
+    let hash_registry = node.model_hash_registry().cloned();
+    let recorder_did = node
+        .identity_registry()
+        .and_then(|r| r.list_all().first().map(|(_, id)| id.did.to_string()))
+        .unwrap_or_default();
+    let record_epoch = current_epoch_or_err(node).unwrap_or(0);
+    let node_for_hash = node.clone();
     tokio::spawn(async move {
         let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(
             tenzro_model::DownloadProgress {
@@ -20865,13 +20885,60 @@ async fn handle_download_model(
         });
 
         // Perform the actual download
-        match hf_dl.download_model(&entry_clone, None, progress_tx).await {
-            Ok(_path) => {
+        match hf_dl.download_model(&entry_clone, None, policy, progress_tx).await {
+            Ok(path) => {
                 if let Some(mut entry) = downloads.get_mut(&model_id) {
                     entry.status = "completed".to_string();
                     entry.progress_percent = 100.0;
                 }
                 info!("Model {} download completed", model_id);
+
+                // Record the canonical content hash so this node is a verified
+                // holder of the model. Reads the on-disk GGUF once (off the
+                // async executor — a GGUF can be multiple GB) and derives the
+                // SHA-256 + BLAKE3 record. First-recorder-wins: an identical
+                // re-assertion is idempotent. No llama.cpp load — becoming a
+                // holder never warms the weights into RAM.
+                if let Some(hash_registry) = &hash_registry {
+                    let gguf_path = node_for_hash
+                        .resolve_gguf_path(&model_id)
+                        .unwrap_or_else(|| path.clone());
+                    let filename = gguf_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("model.gguf")
+                        .to_string();
+                    let record_path = gguf_path.clone();
+                    let file_record = tokio::task::spawn_blocking(move || {
+                        tenzro_model::ModelFileRecord::from_path(filename, &record_path).ok()
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(fr) = file_record {
+                        let manifest = tenzro_model::ModelManifest {
+                            model_id: model_id.clone(),
+                            files: vec![fr],
+                        };
+                        match hash_registry.record(&manifest, recorder_did.as_str(), record_epoch) {
+                            Ok(rec) => info!(
+                                model_id = %model_id,
+                                blake3 = %hex::encode(rec.blake3),
+                                "Recorded canonical model hash on download (verified holder)"
+                            ),
+                            Err(tenzro_model::ModelError::HashAlreadyRecorded(_)) => warn!(
+                                model_id = %model_id,
+                                "Downloaded weights differ from the canonical hash on record; \
+                                 not overwriting (governance override required)"
+                            ),
+                            Err(e) => warn!(
+                                model_id = %model_id,
+                                error = %e,
+                                "Failed to record canonical model hash on download"
+                            ),
+                        }
+                    }
+                }
             }
             Err(e) => {
                 let err_msg = format!("{}", e);
@@ -25463,7 +25530,14 @@ async fn download_and_load_text_embedding(
     };
     let (tx, _rx) = tokio::sync::watch::channel(initial_progress);
     let bundle_dir = downloader
-        .download(&model_id, &entry.hf_repo, &spec, entry.size_bytes, tx)
+        .download(
+            &model_id,
+            &entry.hf_repo,
+            &spec,
+            entry.size_bytes,
+            tenzro_model::SourcePolicy::Auto,
+            tx,
+        )
         .await
         .map_err(forecast_err)?;
 
@@ -25782,7 +25856,14 @@ async fn handle_load_text_segmentation_model(
     };
     let (tx, _rx) = tokio::sync::watch::channel(initial_progress);
     let bundle_dir = downloader
-        .download(&model_id, &entry.hf_repo, &spec, entry.size_bytes, tx)
+        .download(
+            &model_id,
+            &entry.hf_repo,
+            &spec,
+            entry.size_bytes,
+            tenzro_model::SourcePolicy::Auto,
+            tx,
+        )
         .await
         .map_err(forecast_err)?;
 
@@ -27842,6 +27923,9 @@ async fn handle_chat_simple(
             data: None,
         })?;
 
+        // Serving weights load lazily on first use — a holder keeps models on
+        // disk until an inference actually arrives.
+        let _ = node.ensure_local_model_loaded(&model_id).await;
         if !model_runtime.is_loaded(&model_id) {
             return Err(JsonRpcError {
                 code: -32000,
@@ -28350,6 +28434,8 @@ async fn handle_chat_rich(
             data: None,
         })?;
 
+        // Serving weights load lazily on first use.
+        let _ = node.ensure_local_model_loaded(&model_id).await;
         if !model_runtime.is_loaded(&model_id) {
             return Err(JsonRpcError {
                 code: -32000,
@@ -29738,6 +29824,8 @@ async fn handle_openai_chat_completions(
             }
         };
 
+        // Serving weights load lazily on first use.
+        let _ = node.ensure_local_model_loaded(&model_id).await;
         if !model_runtime.is_loaded(&model_id) {
             return json_error_response(
                 StatusCode::BAD_REQUEST,
@@ -30903,6 +30991,8 @@ pub async fn handle_chat_stream_rich(
         }
     };
 
+    // Serving weights load lazily on first use.
+    let _ = node.ensure_local_model_loaded(&model_id).await;
     if !model_runtime.is_loaded(&model_id) {
         return json_error_response(
             StatusCode::BAD_REQUEST,
@@ -44219,6 +44309,8 @@ async fn handle_agent_payment_pipeline(
             data: None,
         })?;
 
+        // Serving weights load lazily on first use.
+        let _ = node.ensure_local_model_loaded(&model_id).await;
         if !model_runtime.is_loaded(&model_id) {
             return Err(JsonRpcError {
                 code: -32000,

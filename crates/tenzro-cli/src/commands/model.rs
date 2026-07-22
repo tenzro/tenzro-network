@@ -372,9 +372,23 @@ pub struct ModelDownloadCmd {
     /// before load.
     #[arg(long)]
     rpc: Option<String>,
+
+    /// Fetch source: 'network' (verified network providers only),
+    /// 'huggingface' (HuggingFace only), or omit for network-first with a
+    /// HuggingFace fallback.
+    #[arg(long)]
+    source: Option<String>,
 }
 
 impl ModelDownloadCmd {
+    fn policy(&self) -> tenzro_model::SourcePolicy {
+        match self.source.as_deref() {
+            Some("network") => tenzro_model::SourcePolicy::Network,
+            Some("huggingface") | Some("hf") => tenzro_model::SourcePolicy::HuggingFace,
+            _ => tenzro_model::SourcePolicy::Auto,
+        }
+    }
+
     pub async fn execute(&self) -> Result<()> {
         // If --rpc is provided, delegate download to the remote node
         if let Some(ref rpc_url) = self.rpc {
@@ -395,9 +409,14 @@ impl ModelDownloadCmd {
         let rpc = RpcClient::new(rpc_url);
         let spinner = output::create_spinner("Requesting model download on node...");
 
-        let result: serde_json::Value = rpc.call("tenzro_downloadModel", serde_json::json!({
-            "model_id": self.model_id
-        })).await.map_err(|e| anyhow::anyhow!("Download request failed: {}", e))?;
+        let mut req = serde_json::json!({ "model_id": self.model_id });
+        if let Some(ref src) = self.source {
+            req["source"] = serde_json::json!(src);
+        }
+        let result: serde_json::Value = rpc
+            .call("tenzro_downloadModel", req)
+            .await
+            .map_err(|e| anyhow::anyhow!("Download request failed: {}", e))?;
 
         spinner.finish_and_clear();
 
@@ -444,7 +463,12 @@ impl ModelDownloadCmd {
         output::print_field("Size", &format_bytes(entry.size_bytes));
         println!();
 
-        let pb = output::create_progress_bar(entry.size_bytes, "Downloading from HuggingFace...");
+        let pb_label = match self.policy() {
+            tenzro_model::SourcePolicy::Network => "Downloading from verified network providers...",
+            tenzro_model::SourcePolicy::HuggingFace => "Downloading from HuggingFace...",
+            tenzro_model::SourcePolicy::Auto => "Downloading (network-first, HuggingFace fallback)...",
+        };
+        let pb = output::create_progress_bar(entry.size_bytes, pb_label);
 
         let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(
             tenzro_model::DownloadProgress {
@@ -466,7 +490,7 @@ impl ModelDownloadCmd {
         });
 
         // Perform download
-        match downloader.download_model(&entry, None, progress_tx).await {
+        match downloader.download_model(&entry, None, self.policy(), progress_tx).await {
             Ok(path) => {
                 pb.finish_with_message("Download complete!");
                 output::print_success(&format!("Model downloaded to: {}", path.display()));

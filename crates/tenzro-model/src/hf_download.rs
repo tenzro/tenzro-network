@@ -112,6 +112,46 @@ pub struct PeerHint {
     pub sha256_hex: Option<String>,
 }
 
+/// Where a download is allowed to source its bytes from.
+///
+/// The network offers two source classes: the centralized HuggingFace Hub,
+/// and the set of verified network providers that hold the blob at its
+/// content hash (BLAKE3, checked end-to-end on transfer, plus the canonical
+/// SHA-256 as defense-in-depth). A caller picks the policy that fits their
+/// trust and reachability constraints — a node in a jurisdiction where the
+/// HF CDN is blocked selects [`Network`], which never contacts HF.
+///
+/// [`Network`]: SourcePolicy::Network
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePolicy {
+    /// Network-first, HuggingFace fallback. Tries verified providers over
+    /// `tenzro://` first; on any peer-side failure (or absent hint / fetcher)
+    /// streams from the HF CDN. The default — maximizes availability.
+    #[default]
+    Auto,
+    /// Verified network providers only. Fetches the content-addressed blob
+    /// from a verified holder and never contacts the HF CDN. Fails if no
+    /// verified provider currently holds the blob. Use this to stay
+    /// independent of HuggingFace (blocked, rate-limited, or by preference).
+    Network,
+    /// Centralized HuggingFace Hub only. Skips the peer path and streams
+    /// directly from the HF CDN.
+    HuggingFace,
+}
+
+impl SourcePolicy {
+    /// Whether this policy permits fetching from verified network providers.
+    pub fn allows_network(self) -> bool {
+        matches!(self, Self::Auto | Self::Network)
+    }
+
+    /// Whether this policy permits falling back to the HuggingFace CDN.
+    pub fn allows_huggingface(self) -> bool {
+        matches!(self, Self::Auto | Self::HuggingFace)
+    }
+}
+
 /// Specification of an artifact to download from HuggingFace Hub.
 ///
 /// `SingleFile` is a single file (GGUF, single-file ONNX) saved as
@@ -317,6 +357,7 @@ impl HfDownloader {
         &self,
         entry: &HfModelEntry,
         peer_hint: Option<&PeerHint>,
+        policy: SourcePolicy,
         progress_tx: watch::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
         // Sharded (gguf-split) GGUFs: the catalog `hf_filename` points at
@@ -327,18 +368,21 @@ impl HfDownloader {
         // into `<storage>/<id>/` and return the first-shard path.
         if let Some((prefix, total, ext_suffix)) = parse_shard_spec(&entry.hf_filename) {
             return self
-                .download_sharded(entry, &prefix, total, &ext_suffix, progress_tx)
+                .download_sharded(entry, &prefix, total, &ext_suffix, policy, progress_tx)
                 .await;
         }
 
         let dest_path = self.model_path(&entry.id);
         let tmp_path = dest_path.with_extension("gguf.tmp");
 
-        // Peer-fetch path — only when a fetcher AND a hint are both present.
-        if let (Some(fetcher), Some(hint)) = (self.blob_fetcher.as_ref(), peer_hint) {
+        // Verified-network path — only when the policy permits it AND a
+        // fetcher AND a hint are all present.
+        if policy.allows_network()
+            && let (Some(fetcher), Some(hint)) = (self.blob_fetcher.as_ref(), peer_hint)
+        {
             debug!(
                 target: "tenzro_model::peer_fetch",
-                "{}: trying peer fetch via {}",
+                "{}: trying verified-provider fetch via {}",
                 entry.id, hint.tenzro_uri
             );
             match fetcher.fetch(&hint.tenzro_uri).await {
@@ -351,7 +395,7 @@ impl HfDownloader {
                             Err(actual) => {
                                 warn!(
                                     target: "tenzro_model::peer_fetch",
-                                    "{}: peer fetch SHA-256 mismatch (got {}), falling back to HF CDN",
+                                    "{}: verified-provider fetch SHA-256 mismatch (got {})",
                                     entry.id, actual
                                 );
                                 false
@@ -370,22 +414,31 @@ impl HfDownloader {
                         )
                         .await?;
                         info!(
-                            "{}: served from peer ({} bytes via {})",
+                            "{}: served from verified provider ({} bytes via {})",
                             entry.id,
                             bytes.len(),
                             hint.tenzro_uri
                         );
+                        // Vision projector still comes from the model repo;
+                        // honor the same policy for it.
+                        self.download_mmproj(entry, policy, &progress_tx).await?;
                         return Ok(dest_path);
                     }
                 }
                 Err(e) => {
                     warn!(
                         target: "tenzro_model::peer_fetch",
-                        "{}: peer fetch failed ({}), falling back to HF CDN",
+                        "{}: verified-provider fetch failed ({})",
                         entry.id, e
                     );
                 }
             }
+        }
+
+        // The `Network` policy never contacts the HF CDN. If we reach here
+        // under it, no verified provider served the blob — terminal.
+        if !policy.allows_huggingface() {
+            return Err(ModelError::NoNetworkSource(entry.id.clone()));
         }
 
         download_one_file(
@@ -432,7 +485,7 @@ impl HfDownloader {
             }
         }
 
-        self.download_mmproj(entry, &progress_tx).await?;
+        self.download_mmproj(entry, policy, &progress_tx).await?;
 
         Ok(dest_path)
     }
@@ -445,11 +498,22 @@ impl HfDownloader {
     async fn download_mmproj(
         &self,
         entry: &HfModelEntry,
+        policy: SourcePolicy,
         progress_tx: &watch::Sender<DownloadProgress>,
     ) -> Result<()> {
         let Some(mmproj) = entry.mmproj.as_ref() else {
             return Ok(());
         };
+        // The projector is fetched from the model repo on the HF CDN. Under a
+        // policy that forbids HF, skip it — the model still serves text-only,
+        // exactly as it would on an HF projector failure.
+        if !policy.allows_huggingface() {
+            debug!(
+                "{}: skipping mmproj projector (source policy forbids HuggingFace); model serves text-only",
+                entry.id
+            );
+            return Ok(());
+        }
         let dest_path = self.mmproj_path(&entry.id);
         if dest_path.exists() {
             return Ok(());
@@ -488,8 +552,17 @@ impl HfDownloader {
         prefix: &str,
         total: u32,
         ext_suffix: &str,
+        policy: SourcePolicy,
         progress_tx: watch::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
+        // Shard sets are fetched per-shard from the HF CDN — the catalog
+        // carries a single canonical hash for the model, not per-shard peer
+        // hints, so there is no verified-provider path for split GGUFs yet.
+        // A policy that forbids HF therefore has no source: fail terminally.
+        if !policy.allows_huggingface() {
+            return Err(ModelError::NoNetworkSource(entry.id.clone()));
+        }
+
         // Remote dir prefix (everything before the bare shard filename),
         // kept so we can rebuild each shard's remote path.
         let remote_dir = entry
@@ -577,7 +650,7 @@ impl HfDownloader {
             dest_dir.display()
         );
 
-        self.download_mmproj(entry, &progress_tx).await?;
+        self.download_mmproj(entry, policy, &progress_tx).await?;
 
         Ok(first_shard)
     }
@@ -776,12 +849,19 @@ impl HfArtifactDownloader {
     ///
     /// `total_size_hint` is used only for progress UI when the HF CDN
     /// doesn't return Content-Length; it does not gate the download.
+    ///
+    /// `policy` selects which source classes are allowed. [`SourcePolicy::Auto`]
+    /// (the default) tries verified network providers first and falls back to
+    /// the HF CDN; [`SourcePolicy::Network`] refuses HF entirely and fails if no
+    /// verified provider holds the blob; [`SourcePolicy::HuggingFace`] goes
+    /// straight to the HF CDN.
     pub async fn download(
         &self,
         model_id: &str,
         repo: &str,
         spec: &ArtifactSpec,
         total_size_hint: u64,
+        policy: SourcePolicy,
         progress_tx: watch::Sender<DownloadProgress>,
     ) -> Result<PathBuf> {
         // Ensure storage root exists
@@ -807,6 +887,7 @@ impl HfArtifactDownloader {
                     total_size_hint,
                     &dest_path,
                     &tmp_path,
+                    policy,
                     &progress_tx,
                 )
                 .await?;
@@ -870,6 +951,7 @@ impl HfArtifactDownloader {
                         per_file_hint,
                         &file_dest,
                         &file_tmp,
+                        policy,
                         &progress_tx,
                     )
                     .await
@@ -930,13 +1012,17 @@ impl HfArtifactDownloader {
         total_bytes_hint: u64,
         dest_path: &Path,
         tmp_path: &Path,
+        policy: SourcePolicy,
         progress_tx: &watch::Sender<DownloadProgress>,
     ) -> Result<()> {
-        // Peer-fetch path — only when a fetcher AND a hint are both present.
-        if let (Some(fetcher), Some(hint)) = (self.blob_fetcher.as_ref(), peer_hint) {
+        // Verified-network path — only when the policy permits it AND a
+        // fetcher AND a hint are all present.
+        if policy.allows_network()
+            && let (Some(fetcher), Some(hint)) = (self.blob_fetcher.as_ref(), peer_hint)
+        {
             debug!(
                 target: "tenzro_model::peer_fetch",
-                "{}: trying peer fetch via {}",
+                "{}: trying verified-provider fetch via {}",
                 progress_label, hint.tenzro_uri
             );
             match fetcher.fetch(&hint.tenzro_uri).await {
@@ -948,7 +1034,7 @@ impl HfArtifactDownloader {
                     {
                         warn!(
                             target: "tenzro_model::peer_fetch",
-                            "{}: peer fetch SHA-256 mismatch ({}), falling back to HF CDN",
+                            "{}: verified-provider fetch SHA-256 mismatch ({})",
                             progress_label, e
                         );
                     } else {
@@ -962,7 +1048,7 @@ impl HfArtifactDownloader {
                         )
                         .await?;
                         info!(
-                            "{}: served from peer ({} bytes via {})",
+                            "{}: served from verified provider ({} bytes via {})",
                             progress_label,
                             bytes.len(),
                             hint.tenzro_uri
@@ -973,14 +1059,20 @@ impl HfArtifactDownloader {
                 Err(e) => {
                     warn!(
                         target: "tenzro_model::peer_fetch",
-                        "{}: peer fetch failed ({}), falling back to HF CDN",
+                        "{}: verified-provider fetch failed ({})",
                         progress_label, e
                     );
                 }
             }
         }
 
-        // HF CDN fallback (or primary, when no peer hint).
+        // The `Network` policy never contacts the HF CDN. If we reach here
+        // under it, no verified provider served the blob — terminal.
+        if !policy.allows_huggingface() {
+            return Err(ModelError::NoNetworkSource(progress_label.to_string()));
+        }
+
+        // HF CDN path (fallback under `Auto`, primary under `HuggingFace`).
         download_one_file(
             progress_label,
             hf_repo,

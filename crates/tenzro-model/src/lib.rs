@@ -212,7 +212,7 @@ pub use catalog::{
 };
 pub use hf_download::{
     ArtifactSpec, BlobFetcher, DownloadProgress, DownloadState, HfArtifactDownloader,
-    HfDownloader, PeerHint,
+    HfDownloader, PeerHint, SourcePolicy,
 };
 pub use runtime::{
     ChatMessage, ChatWithToolsResult, GenerationConfig, HardwareInfo, InferenceResult,

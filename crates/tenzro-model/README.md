@@ -269,32 +269,35 @@ if let Some(task) = manager.get_download_status("gemma4-9b") {
 manager.verify_checksum("gemma4-9b").await?;
 ```
 
-### Downloading from HuggingFace
+### Downloading a model
+
+A model can be fetched from either source class: the centralized HuggingFace
+Hub, or the set of verified network providers that hold the blob at its content
+hash (BLAKE3, checked end-to-end on transfer, plus the canonical SHA-256).
+`SourcePolicy` selects between them — `Auto` tries verified providers first and
+falls back to HuggingFace, `Network` fetches only from verified providers and
+never contacts HuggingFace, and `HuggingFace` streams only from the Hub.
 
 ```rust
-use tenzro_model::hf_download::{HfDownloader, DownloadProgress};
+use tenzro_model::{get_model_by_id, HfDownloader, DownloadProgress, DownloadState, SourcePolicy};
 use std::path::PathBuf;
 
 let downloader = HfDownloader::new(PathBuf::from("/models"));
+let entry = get_model_by_id("qwen3.5-0.8b").expect("model in catalog");
 
-// Download a model from the Tenzro catalog
-let handle = downloader.download_model(
-    "unsloth/Qwen3.5-0.8B-GGUF",
-    Some("Qwen3.5-0.8B-Q4_K_M.gguf".to_string()),
-).await?;
+let (progress_tx, mut progress_rx) = tokio::sync::watch::channel(DownloadProgress {
+    model_id: entry.id.clone(),
+    status: DownloadState::Pending,
+    progress_percent: 0.0,
+    downloaded_bytes: 0,
+    total_bytes: entry.size_bytes,
+});
 
-// Monitor progress
-loop {
-    let progress = downloader.get_progress(&handle).await?;
-    match progress.state {
-        DownloadState::Downloading { bytes_downloaded, total_bytes } => {
-            println!("Downloaded {} / {} bytes", bytes_downloaded, total_bytes.unwrap_or(0));
-        },
-        DownloadState::Completed => break,
-        DownloadState::Failed(e) => return Err(e.into()),
-        _ => {}
-    }
-}
+// Network-first with a HuggingFace fallback; pass SourcePolicy::Network to
+// require a verified provider and never contact HuggingFace.
+let path = downloader
+    .download_model(&entry, None, SourcePolicy::Auto, progress_tx)
+    .await?;
 ```
 
 ### Browsing the Model Library

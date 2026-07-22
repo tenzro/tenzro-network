@@ -1334,9 +1334,16 @@ async def discover_models(
 
 
 @mcp.tool
-async def download_model(model_id: str) -> dict:
-    """Download a model from the registry to the local node."""
-    result = await rpc_call("tenzro_downloadModel", {"model_id": model_id})
+async def download_model(model_id: str, source: str | None = None) -> dict:
+    """Download a model from verified network providers or HuggingFace Hub.
+
+    source: 'network' (verified network providers only), 'huggingface'
+    (HuggingFace only), or omit for network-first with HuggingFace fallback.
+    """
+    params: dict = {"model_id": model_id}
+    if source:
+        params["source"] = source
+    result = await rpc_call("tenzro_downloadModel", params)
     return result
 
 
