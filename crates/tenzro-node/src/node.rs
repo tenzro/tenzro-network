@@ -13397,7 +13397,10 @@ impl TenzroNode {
     /// it is not a locally-servable model on this node (caller falls back to
     /// remote routing or a not-serving error), and `Err` when a load was
     /// attempted and failed (e.g. memory admission).
-    pub async fn ensure_local_model_loaded(&self, model_id: &str) -> Result<bool, String> {
+    pub async fn ensure_local_model_loaded(
+        &self,
+        model_id: &str,
+    ) -> std::result::Result<bool, String> {
         let Some(runtime) = self.model_runtime.as_ref() else {
             return Ok(false);
         };
