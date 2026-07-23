@@ -303,6 +303,19 @@ tenzro wallet send <to-address> <amount> --self-custody
 
 ### Model Management
 
+The `tenzro` CLI is the full node surface: it downloads weights and serves
+models so your node becomes a provider. If you only want to *use* a model —
+send a prompt to a provider that already serves it, with no node and no weights
+— reach for the simpler Tenzro Labs client instead:
+
+```bash
+npm install -g @tenzro/labs-cli
+tzlabs login tnz_...
+tzlabs chat qwen3-4b "explain content addressing in one line"
+```
+
+The rest of this section is for running the model yourself.
+
 ```bash
 # List all available models
 tenzro model list
@@ -340,6 +353,31 @@ tenzro model endpoint <model_id>
 # Delete model
 tenzro model delete gemma4-9b
 ```
+
+#### Download and run a model end to end
+
+```bash
+# 1. Find a model.
+tenzro model list --modality text
+
+# 2. Download the weights. Peer-first over the network (BLAKE3-verified),
+#    falling back to HuggingFace. --source pins one path.
+tenzro model download qwen3-4b
+tenzro model download qwen3-4b --source network
+tenzro model download qwen3-4b --source huggingface
+
+# 3. Serve it. If the model does not fit one machine, the node auto-forms a
+#    LAN pipeline cluster from cluster-willing providers it discovers over
+#    local gossip.
+tenzro model serve qwen3-4b --rpc http://127.0.0.1:8545
+
+# 4. Chat against your local copy.
+tenzro chat qwen3-4b
+```
+
+Serving a model also makes you a provider: register with
+`tenzro provider register --type inference` so the network routes hosted
+inference to you.
 
 ### Chat Interface
 

@@ -6,7 +6,21 @@ Build and run a full Tenzro node, the CLI, and the desktop app from source. Cove
 
 ## 0. Quickstart (Live Testnet)
 
-If you only want to try the network without building anything, point any Tenzro CLI build at the public testnet:
+If you only want to *use* a model — send a prompt to a provider that already
+serves it, with no node and no weights — the simplest path is the Tenzro Labs
+client, not the full node CLI:
+
+```bash
+npm install -g @tenzro/labs-cli
+tzlabs model list --serving
+tzlabs login tnz_...
+tzlabs chat qwen3-4b "explain content addressing in one line"
+```
+
+The rest of this guide covers the full `tenzro` node CLI — running a node,
+downloading weights, and serving models yourself. If you only want to try the
+network without building anything, point any Tenzro CLI build at the public
+testnet:
 
 ```bash
 # Install the CLI (requires Rust toolchain — see §2)
@@ -264,6 +278,23 @@ sends no announcements or heartbeats, and never appears in provider
 discovery. Distributing private weights to other nodes as encrypted shards
 (`tenzro model seal` / `install-sealed`) is covered in
 `docs/operators/OPERATOR_GUIDE.md` §17.
+
+To download and run a specific model yourself, without the one-command
+`--provider` flow:
+
+```bash
+# Download the weights: peer-first over the network (BLAKE3-verified),
+# falling back to HuggingFace. --source pins one path.
+tenzro model download qwen3-4b
+tenzro model download qwen3-4b --source network
+
+# Serve it. If it does not fit one machine, the node auto-forms a LAN
+# pipeline cluster from cluster-willing providers on your local segment.
+tenzro model serve qwen3-4b --rpc http://127.0.0.1:8545
+
+# Chat against your local copy.
+tenzro chat qwen3-4b
+```
 
 ### 4.4 Verify it's running
 
