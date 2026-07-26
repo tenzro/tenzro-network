@@ -1980,6 +1980,20 @@ pub struct TenzroNode {
     /// is available.
     pub training_runtime: Arc<tenzro_training::TrainingRuntime>,
 
+    /// Tenzro Media Gen runtime — protocol layer for generative-media
+    /// inference (see `tenzro_media_gen::MediaGenRuntime`). Wired with
+    /// write-through persistence to CF_MEDIA_GEN_RUNS /
+    /// CF_MEDIA_GEN_RECEIPTS / CF_MEDIA_GEN_WORKERS once storage is
+    /// available, and with an iroh-blobs output store once the resolver is
+    /// bound.
+    pub media_gen_runtime: Arc<tenzro_media_gen::MediaGenRuntime>,
+
+    /// Concrete handle on the media-gen output store, kept alongside the
+    /// `Arc<dyn MediaGenOutputStore>` inside the runtime because the gossip
+    /// consumer needs `record_blake3` to learn the iroh-blobs locator for an
+    /// output rendered on another node. `None` until the iroh resolver binds.
+    pub media_gen_output_store: Option<Arc<tenzro_iroh::IrohMediaGenOutputStore>>,
+
     /// MoE expert-host runtime — per-expert FFN weights + gating networks
     /// for distributed mixture-of-experts serving. Serves both the local
     /// `tenzro_moe*` RPC surface and the `tenzro/moe` iroh ALPN.
@@ -2607,6 +2621,8 @@ impl TenzroNode {
             audio_runtime: Arc::new(AudioRuntime::new()),
             video_runtime: Arc::new(VideoRuntime::new()),
             training_runtime: Arc::new(tenzro_training::TrainingRuntime::new()),
+            media_gen_runtime: Arc::new(tenzro_media_gen::MediaGenRuntime::new()),
+            media_gen_output_store: None,
             moe_runtime: Arc::new(tenzro_model::MoeExpertRuntime::with_config(
                 tenzro_model::ResidencyConfig::auto().with_disk_dir(moe_disk_dir),
             )),
@@ -7265,6 +7281,40 @@ impl TenzroNode {
                     info!("Trainer auto-provisioning daemon spawned");
                 }
             }
+
+            // Generative-media runtime — write-through to CF_MEDIA_GEN_RUNS /
+            // CF_MEDIA_GEN_WORKERS / CF_MEDIA_GEN_RECEIPTS, rehydrating the
+            // in-flight queue and the enrolled worker set on boot. Terminal
+            // jobs stay on disk for audit but are not re-queued.
+            //
+            // When the iroh resolver is bound, rendered output rides iroh-blobs
+            // via `IrohMediaGenOutputStore`; the gossiped receipt carries only
+            // the SHA-256 hash, and the adapter re-verifies that hash at the
+            // protocol boundary because iroh-blobs indexes by BLAKE3.
+            let mut media_gen_runtime = tenzro_media_gen::MediaGenRuntime::with_storage(
+                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+            );
+            if let Some(ref resolver) = self.iroh_resolver {
+                let store = Arc::new(tenzro_iroh::IrohMediaGenOutputStore::new(resolver.clone()));
+                media_gen_runtime = media_gen_runtime.with_output_store(
+                    store.clone() as Arc<dyn tenzro_media_gen::MediaGenOutputStore>,
+                );
+                self.media_gen_output_store = Some(store);
+                info!("MediaGenRuntime wired with iroh-blobs MediaGenOutputStore");
+            }
+            let media_gen_runtime = Arc::new(media_gen_runtime);
+            match media_gen_runtime.hydrate() {
+                Ok((jobs, workers)) => {
+                    info!(jobs, workers, "Media-gen runtime initialized");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "MediaGenRuntime hydration failed ({}); continuing with an empty queue",
+                        e
+                    );
+                }
+            }
+            self.media_gen_runtime = media_gen_runtime;
         }
 
         self.health_monitor.mark_healthy("ai");
@@ -10100,6 +10150,20 @@ impl TenzroNode {
         // a self-published gradient is a no-op.
         let event_loop = event_loop.with_training_runtime(self.training_runtime.clone());
 
+        // Wire the shared MediaGenRuntime so the event loop can mirror job
+        // state announced over the tenzro/media-gen gossipsub topic, and the
+        // iroh-backed output store so locators carried alongside a handoff or
+        // receipt are recorded against the content hash they name. Without the
+        // store a split job's intermediate latent stays reachable only from the
+        // machine that produced it, which is the one machine that does not need
+        // to fetch it.
+        let event_loop = event_loop.with_media_gen_runtime(self.media_gen_runtime.clone());
+        let event_loop = if let Some(store) = self.media_gen_output_store.clone() {
+            event_loop.with_media_gen_output_store(store)
+        } else {
+            event_loop
+        };
+
         // Wire the shared SeedAgentEarmarkManager (Spec 10) so the event
         // loop can apply idempotent state updates received over the
         // tenzro/seed-agents gossipsub topic. `MonthlyRefillCompleted`
@@ -11240,6 +11304,58 @@ impl TenzroNode {
                 });
             }
             info!("Tenzro Train discovery wired to gossipsub (tenzro/training + tenzro/training/syncer)");
+
+            // Wire the generative-media gossipsub bridge: subscribe to
+            // `tenzro/media-gen` and forward opaque payloads to the event loop
+            // for decode + mirroring. This is how a worker learns which jobs
+            // are already taken before it claims one, and how the low-noise
+            // half of a split job learns that the high-noise half has finished
+            // and where its intermediate latent can be fetched from.
+            {
+                let event_tx_media_gen = event_loop.event_sender();
+                let net_media_gen = network.clone();
+                let topic_owned = tenzro_media_gen::MEDIA_GEN_TOPIC.to_string();
+                tokio::spawn(async move {
+                    match net_media_gen.subscribe(&topic_owned).await {
+                        Ok(mut rx) => {
+                            tracing::info!(
+                                topic = %topic_owned,
+                                "Tenzro Media Gen: subscribed to gossipsub topic"
+                            );
+                            while let Some(msg) = rx.recv().await {
+                                if let tenzro_network::MessagePayload::Custom { topic, data } =
+                                    msg.payload
+                                {
+                                    if topic != topic_owned {
+                                        continue;
+                                    }
+                                    if let Err(e) = event_tx_media_gen
+                                        .send(NodeEvent::MediaGenGossipReceived {
+                                            topic: topic.clone(),
+                                            bytes: data,
+                                        })
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            "Failed to forward media-gen gossip to event loop: {}",
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                topic = %topic_owned,
+                                error = %e,
+                                "Failed to subscribe to media-gen gossipsub topic"
+                            );
+                        }
+                    }
+                });
+            }
+            info!("Tenzro Media Gen discovery wired to gossipsub (tenzro/media-gen)");
 
             // Wire SeedAgent (Spec 10) gossipsub bridge: subscribe to
             // `tenzro/seed-agents` and forward opaque payloads to the event

@@ -10,6 +10,8 @@ Serving a model is one way a node turns hardware into income. Renting out spare 
 
 Compute rental is not a separate role with its own stake. A node that serves AI already declares the capability; renting out compute rides the same `serves_ai()` role and the same stake that backs serving a model. One node can serve inference and rent capacity at once, and a single stake covers both obligations.
 
+Renting capacity is not the only way an accelerator earns. Generative image and video rendering is a third surface, and a distinct one: a render job is priced per pixel-step and paid once against a signed receipt rather than booked per epoch against an availability proof, and a media worker carries no stake and no coverage obligation. See [`AI.md`](AI.md) §8 for that surface.
+
 This document describes the rental lifecycle, the availability-proof gate, the streaming-escrow settlement model, how compute shares a coverage budget with storage, and the RPC / CLI / SDK surfaces.
 
 ---

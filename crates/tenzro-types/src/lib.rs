@@ -59,6 +59,7 @@ pub mod runtime;
 pub mod validation;
 pub mod cortex;
 pub mod training;
+pub mod media_gen;
 pub mod principal_chain;
 pub mod kill_switch;
 pub mod intent_7683;
@@ -137,6 +138,12 @@ pub use training::{
     TrainingAttestation, TrainingModality, TrainingObjective, TrainingReceipt, TrainingRun,
     TrainingRunStatus, TrainingTaskSpec, TrainingTier, ACTIVATION_COMMITMENT_DOMAIN_TAG,
     DEFAULT_PROBE_K, MAX_PROBE_K,
+};
+pub use media_gen::{
+    MediaGenAssignment, MediaGenExpertHolding, MediaGenExpertRole, MediaGenHandoff, MediaGenJob,
+    MediaGenKind, MediaGenParams, MediaGenReceipt, MediaGenStatus, MediaGenTaskSpec,
+    MediaGenWorkerCapability, MAX_MEDIA_GEN_DIMENSION, MAX_MEDIA_GEN_FRAMES,
+    MAX_MEDIA_GEN_PROMPT_BYTES, MAX_MEDIA_GEN_STEPS,
 };
 pub use principal_chain::{
     ControllerActivitySummary, PrincipalChain, PrincipalChainSummary, PrincipalLink,

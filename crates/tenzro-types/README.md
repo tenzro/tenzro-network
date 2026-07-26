@@ -8,7 +8,7 @@ Foundation crate providing shared types for the Tenzro Network.
 
 ## Modules
 
-**Public modules:** primitives, transaction, block, account, asset, network, tee, agent, model, settlement, token, governance, bridge, wallet, canton, identity, fees, task, agent_template, skill, tool, error, config, constants, runtime, validation, cortex, training, principal_chain, kill_switch, intent_7683
+**Public modules:** primitives, transaction, block, account, asset, network, tee, agent, model, settlement, token, governance, bridge, wallet, canton, identity, fees, task, saga, capital_intent, reserve, marketplace, agent_template, skill, tool, knowledge, workflow_template, resource, error, config, constants, runtime, validation, cortex, training, media_gen, principal_chain, kill_switch, intent_7683, hardware, tenzro_uri, access_policy
 
 ### Primitives
 - `Hash` - 32-byte hash type
@@ -29,6 +29,15 @@ Foundation crate providing shared types for the Tenzro Network.
 - `VisionParameters`, `AudioParameters`, `VideoParameters`, `TimeseriesParameters` - Optional sidecar parameters on `ModelInfo`
 - `InferenceRequest`, `InferenceResponse`, `InferenceParameters`, `InferencePayload` - Inference operations. `InferencePayload` is a typed enum (`Chat | Forecast | VisionEmbed | VisionSimilarity | TextEmbed | Segment | Detect | Transcribe | VideoEmbed`) consumed by the modality-aware `InferenceRouter`.
 - `InferenceProvider`, `ProviderCapacity`, `PricingConfig` - Provider management
+
+### Generative Media Types (`media_gen` module)
+- `MediaGenKind` - Text2Image, Image2Image, Text2Video, Image2Video
+- `MediaGenParams`, `MediaGenTaskSpec` - Requester-signed render request. `MediaGenParams::pixel_steps()` is the work unit price is quoted against (`width × height × steps × frames`)
+- `MediaGenStatus`, `MediaGenJob`, `MediaGenAssignment` - Queue and assignment state
+- `MediaGenWorkerCapability`, `MediaGenExpertHolding`, `MediaGenExpertRole` - What a GPU-bearing worker advertises. A worker holding one half of a split model declares that half rather than the whole
+- `MediaGenHandoff` - The signed commitment to the intermediate latent that passes a partly-denoised job from the high-noise expert to the low-noise one
+- `MediaGenReceipt` - Signed result binding the output hash to the parameters that produced it
+- `MAX_MEDIA_GEN_DIMENSION`, `MAX_MEDIA_GEN_STEPS`, `MAX_MEDIA_GEN_FRAMES`, `MAX_MEDIA_GEN_PROMPT_BYTES` - Request bounds
 
 ### Financial Types
 - `SettlementRequest`, `SettlementReceipt`, `SettlementStatus` - Payment settlement

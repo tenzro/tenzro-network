@@ -14,7 +14,7 @@
 
 **Tenzro Ledger** is the purpose-built network for humans and agents, providing verifiable, on-chain primitives for the AI age: **identity** (TDIP: Tenzro Decentralized Identity Protocol for humans and machines), **security** (TEE-weighted consensus with hardware attestations), **verification** (dual ZK + TEE proof systems), and **settlement** (micropayment channels, escrow, batch processing). All fees and settlements are denominated in **TNZO**, the governance token of the Tenzro Network protocol.
 
-Built from the ground up around Trusted Execution Environments (TEEs) and zero-knowledge proofs, the Ledger provides hardware-rooted trust at every layer — TEE-attested validators receive a 1.5× multiplier on their reputation-weighted leader-selection draw, smart contracts execute within hardware enclaves, and all on-chain claims can be independently verified through cryptographic proofs or hardware attestations. The Ledger supports a multi-VM execution environment (EVM, SVM, Daml/Canton), an autonomous agent framework with self-sovereign identity and MPC wallet ownership, a multi-modal AI model marketplace covering text, vision, audio, and timeseries inference with per-token settlement, decentralized verifiable training (Tenzro Train, decoupled outer-aggregation with on-chain run-root commitments), recurrent-depth reasoning workers (Tenzro Cortex) priced by loop depth and bound to signed receipts, swarm orchestration for parallel agent execution, and cross-chain interoperability through Wormhole NTT, LayerZero V2, Chainlink CCIP, deBridge DLN, Li.Fi, and Canton. Multi-protocol payment support (MPP, x402, Tempo, Stripe SPT, AP2) enables HTTP 402-based machine payments with identity-bound delegation enforcement. Consensus is a two-phase HotStuff-2 BFT engine with 400ms block times, reputation-weighted proposer election, no-endorsement certificates for tail-fork resistance, and Ed25519 + ML-DSA-65 hybrid post-quantum signatures on every safety-critical message.
+Built from the ground up around Trusted Execution Environments (TEEs) and zero-knowledge proofs, the Ledger provides hardware-rooted trust at every layer — TEE-attested validators receive a 1.5× multiplier on their reputation-weighted leader-selection draw, smart contracts execute within hardware enclaves, and all on-chain claims can be independently verified through cryptographic proofs or hardware attestations. The Ledger supports a multi-VM execution environment (EVM, SVM, Daml/Canton), an autonomous agent framework with self-sovereign identity and MPC wallet ownership, a multi-modal AI model marketplace covering text, vision, audio, and timeseries inference with per-token settlement, decentralized verifiable training (Tenzro Train, decoupled outer-aggregation with on-chain run-root commitments), diffusion image and video generation (Tenzro Media Gen, including split-expert rendering across two accelerators), recurrent-depth reasoning workers (Tenzro Cortex) priced by loop depth and bound to signed receipts, swarm orchestration for parallel agent execution, and cross-chain interoperability through Wormhole NTT, LayerZero V2, Chainlink CCIP, deBridge DLN, Li.Fi, and Canton. Multi-protocol payment support (MPP, x402, Tempo, Stripe SPT, AP2) enables HTTP 402-based machine payments with identity-bound delegation enforcement. Consensus is a two-phase HotStuff-2 BFT engine with 400ms block times, reputation-weighted proposer election, no-endorsement certificates for tail-fork resistance, and Ed25519 + ML-DSA-65 hybrid post-quantum signatures on every safety-critical message.
 
 Tenzro is the open, distributed execution layer for AI. The execution surface — inference, agents, workflows — runs on a substrate where verifiable computation, confidential execution, rentable compute, decentralized storage, and agent-to-agent economic coordination are protocol-level primitives. Multi-role nodes, one stake covering every role, and per-epoch streaming settlement are what make that execution layer open and trustless. See [`COMPUTE.md`](COMPUTE.md) and [`STORAGE.md`](STORAGE.md) for the rentable-compute and storage surfaces.
 
@@ -42,6 +42,7 @@ Tenzro is the open, distributed execution layer for AI. The execution surface �
 18. [Governance](#18-governance)
 19. [Security Model](#19-security-model)
 20. [Tenzro Train: Decentralized Verifiable Foundation-Model Training](#20-tenzro-train-decentralized-verifiable-foundation-model-training)
+20a. [Tenzro Media Gen](#20a-tenzro-media-gen)
 21. [Roadmap](#21-roadmap)
 
 ---
@@ -167,7 +168,7 @@ Providers/validators/nodes can earn from multiple sources:
 
 ### 2.3 Crate Architecture
 
-The system is implemented as a Rust workspace of 26 crates plus SDKs, organized in a strict dependency hierarchy:
+The system is implemented as a Rust workspace of 32 crates plus SDKs, organized in a strict dependency hierarchy:
 
 | Layer | Crate | Purpose |
 |-------|-------|---------|
@@ -178,10 +179,15 @@ The system is implemented as a Rust workspace of 26 crates plus SDKs, organized 
 | Networking | `tenzro-network` | libp2p gossipsub, Kademlia DHT, peer management, Identify + AutoNAT v2 + Circuit-Relay v2 + DCUtR |
 | iroh data plane | `tenzro-iroh` | QUIC-native content-addressed transport, DA backend, gradient store, sealed-shard store, A2A-over-iroh on `tenzro/a2a` ALPN |
 | Storage | `tenzro-storage` | RocksDB, Merkle Patricia Trie, snapshots, fsync durability |
+| Storage provider | `tenzro-storage-provider` | Paid decentralized storage: provider daemon, proof of retrievability, Reed-Solomon redundancy, per-byte-epoch metering |
+| Databases | `tenzro-database` | Distributed database protocol: engine catalog (Postgres, Qdrant, Milvus, Dgraph, Valkey, embedded Lance and Tantivy), descriptors, partition placement, access control (engine-agnostic, links no driver) |
+| Cluster substrate | `tenzro-cluster` | Engine-agnostic local-network cluster tier: reachability tiers, probed link-cost graph, nearest-neighbour ordering, rendezvous placement — shared by model layers, storage shards, and database partitions |
 | Consensus | `tenzro-consensus` | HotStuff-2 BFT (three-phase PREPARE → COMMIT → DECIDE), epoch management, finality tracking, 1.5× TEE-weighted leader selection |
 | Execution | `tenzro-vm` | Multi-VM runtime: EVM, SVM, Daml executors |
 | Economics | `tenzro-token` | TNZO token, staking, rewards, treasury, governance |
 | Wallets | `tenzro-wallet` | FROST-Ed25519 (RFC 9591) 2-of-3 threshold wallets + ML-DSA-65 hybrid, Argon2id keystore |
+| Device keys | `tenzro-device-key` | Non-extractable P-256 keypairs in the platform secure element (macOS/iOS Secure Enclave, biometric-gated): prehash signing and ECIES secret wrapping |
+| Keystore unlock | `tenzro-keystore-unlock` | Platform-agnostic source of the keystore password so wallets persist across restarts: device key, environment, file, or KMS |
 | Authentication | `tenzro-auth` | Authentication engine: AAP (Agent Authentication Protocol), DPoP, RAR (Rich Authorization Requests) |
 | Identity | `tenzro-identity` | TDIP: unified human/machine identity, W3C DID, verifiable credentials, delegation |
 | Payments | `tenzro-payments` | Payment protocols: AP2, MPP (Stripe/Tempo), x402 (Coinbase), Tempo integration, Stripe SPT, ERC-8004 Trustless Agents Registry, Visa TAP, Mastercard Agent Pay |
@@ -190,13 +196,14 @@ The system is implemented as a Rust workspace of 26 crates plus SDKs, organized 
 | AI Models | `tenzro-model` | Multi-modal model registry, llama.cpp LLM runtime, ONNX vision/text-embedding/segmentation/detection/audio/video runtimes, ONNX timeseries forecasting runtime, inference routing, pricing engine, durable catalog |
 | Reasoning | `tenzro-cortex` | Recurrent-depth reasoning workers (RDT/MoE), HTTP sidecar architecture, signed receipts, attestation suite, gossip-based worker discovery |
 | Training | `tenzro-training` | Decentralized training protocol: outer-gradient aggregation, fragment exchange, sync rounds, training receipts (Rust protocol layer; Python reference trainer for inner loop) |
+| Media Gen | `tenzro-media-gen` | Generative-media protocol: diffusion job queue, worker registry, pixel-step pricing, split-expert payment division, signed handoffs and receipts (Rust protocol layer; Python reference worker for the denoising loop) |
 | Settlement | `tenzro-settlement` | Escrow, micropayments, batch settlement, fee collection |
 | Events | `tenzro-events` | Event sourcing and subscription system with replay, webhooks, websockets |
 | Workflow | `tenzro-workflow` | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
 | Sandboxed skills | `tenzro-wasm` | WASI 0.2 component host for language-agnostic agent skills and MCP tools. Capability-based sandbox, deterministic fuel metering, content-addressed component identity, execution receipts |
 | Bridge | `tenzro-bridge` | LayerZero V2, Chainlink CCIP + CCT, deBridge DLN, Li.Fi, Wormhole NTT (with Guardian quorum verifier), Canton, **Hyperlane V3** (sovereign Tenzro-ISM), **Axelar GMP** (Cosmos / Move / Stellar reach), **Babylon Bitcoin staking** (finality-providers protocol) |
-| Node | `tenzro-node` | Full node binary, RPC server (700+ methods across 30+ namespaces), MCP (500+ tools), A2A (68 skills), web API |
-| CLI | `tenzro-cli` | Command-line interface (63 command modules) |
+| Node | `tenzro-node` | Full node binary, RPC server (700+ methods across 31+ namespaces), MCP (500+ tools), A2A (40 skills), web API |
+| CLI | `tenzro-cli` | Command-line interface (103 command modules) |
 | SDK | `tenzro-sdk` | Rust SDK with builder-pattern configuration |
 | TypeScript SDK | `tenzro-ts-sdk` | TypeScript SDK for browser and Node.js integration |
 
@@ -215,6 +222,8 @@ Participants in the Tenzro Network operate nodes in one of several roles. Nodes 
 - **Storage Provider.** Stores and serves blockchain state, model weights, and historical data. **Open entry, no stake required.** Earns storage fees.
 
 - **Training Provider.** Participates in Tenzro Train distributed training runs as a trainer. **Open entry, no stake required.** Optional bond required for participation in the witness committee (Tier 2 staked validators only).
+
+- **Media Worker.** Renders Tenzro Media Gen diffusion jobs — image and video generation. **Open entry, no stake required.** Earns per-job fees (paid in TNZO) against the price ceiling the requester posted; the Network takes a 0.5% commission on worker earnings, which flows to the treasury. A worker enrolls the whole models it can hold and, separately, the individual experts of a split model — one half of a timestep-boundary expert pair fits accelerators that cannot hold the full model (§20a.4).
 
 - **Light Client.** Verifies block headers and proofs without storing full state. Suitable for end-user devices.
 
@@ -278,7 +287,9 @@ Agent-to-Agent protocol server implementing the Google A2A specification with JS
 | `POST /a2a` | JSON-RPC 2.0 dispatcher for task management |
 | `POST /a2a/stream` | SSE streaming for real-time task updates |
 
-JSON-RPC methods: `message/send`, `tasks/send`, `tasks/get`, `tasks/list`, `tasks/cancel`. The Agent Card advertises 68 skills: `wallet`, `identity`, `inference`, `cortex`, `settlement`, `verification`, `staking`, `task_marketplace`, `agent_marketplace`, `agent_spawning`, `swarm_orchestration`, `lifecycle`, `bond-insurance`, `token`, `contract`, `ap2-payments`, `erc8004`, `wormhole`, `cct`, `auth`, `approval`, `join`, `nft`, `bridge`, `compliance`, `crosschain`, `events`, `forecast`, `vision-embed`, `text-embed`, `segmentation`, `text-segmentation`, `detection`, `audio-transcribe`, `video-embed`, `workflow`, `agent-memory`, `adaptive-burn`, `seed-agent`, `erc7683`, `hosting`, `operability`. Supports streaming responses via Server-Sent Events and multi-turn conversation history.
+JSON-RPC methods: `message/send`, `tasks/send`, `tasks/get`, `tasks/list`, `tasks/cancel`. The Agent Card advertises 40 skills: `wallet`, `identity`, `inference`, `settlement`, `workflow-coordination`, `verification`, `staking`, `task_marketplace`, `agent_marketplace`, `agent_spawning`, `swarm_orchestration`, `token`, `contract`, `ap2-payments`, `join`, `nft`, `bridge`, `compliance`, `crosschain`, `events`, `erc8004`, `wormhole`, `cct`, `cortex`, `capability_registry`, `adaptive-burn`, `seed-agent`, `erc7683`, `iroh-transport`, `urwa`, `ivms101`, `attested-clock`, `signed-agent-card`, `wormhole-ntt`, `bridge-fee-in-tnzo`, `storage`, `compute`, `moe`, `media-gen`, `discovery`. Supports streaming responses via Server-Sent Events and multi-turn conversation history.
+
+The Python distributable at `integrations/a2a/` publishes its own card with a wider skill set (70), including the per-modality inference skills (`forecast`, `vision-embed`, `text-embed`, `segmentation`, `text-segmentation`, `detection`, `audio-transcribe`, `video-embed`), `lifecycle`, `bond-insurance`, `auth`, `approval`, `agent-memory`, and `operability`. The two cards front the same JSON-RPC surface; the Python card groups it more finely.
 
 ---
 
@@ -1373,7 +1384,7 @@ The A2A protocol enables structured inter-agent communication following the Goog
 | `/a2a` | POST | JSON-RPC 2.0 dispatcher |
 | `/a2a/stream` | POST | SSE streaming for task updates |
 
-**Agent Card.** Each node publishes an Agent Card at `/.well-known/agent.json` per the A2A specification. The card advertises the node's capabilities, skills, supported input/output modes, authentication requirements, and protocol version (0.2.0). 68 skills are advertised covering core blockchain (wallet, token, contract, NFT, staking), identity & payments (identity, settlement, ap2-payments, lifecycle, bond-insurance), AI & agents (inference, cortex, agent_spawning, swarm_orchestration, task_marketplace, agent_marketplace, agent-memory, erc8004), multi-modal AI (forecast, vision-embed, text-embed, segmentation, text-segmentation, detection, audio-transcribe, video-embed), cross-chain & compliance (bridge, crosschain, wormhole, cct, erc7683, compliance), and verification & operations (verification, events, join, auth, approval, workflow, adaptive-burn, seed-agent, operability).
+**Agent Card.** Each node publishes an Agent Card at `/.well-known/agent.json` per the A2A specification. The card advertises the node's capabilities, skills, supported input/output modes, authentication requirements, and protocol version (0.2.0). 40 skills are advertised covering core blockchain (wallet, token, contract, nft, staking), identity & payments (identity, settlement, ap2-payments, urwa, ivms101), AI & agents (inference, cortex, agent_spawning, swarm_orchestration, task_marketplace, agent_marketplace, capability_registry, erc8004, moe, media-gen), network resources (storage, compute, discovery, iroh-transport), cross-chain & compliance (bridge, crosschain, wormhole, wormhole-ntt, bridge-fee-in-tnzo, cct, erc7683, compliance), and verification & operations (verification, events, join, workflow-coordination, attested-clock, signed-agent-card, adaptive-burn, seed-agent).
 
 **JSON-RPC Methods:**
 - `message/send` / `tasks/send` — Send a message to create or continue a task
@@ -2769,6 +2780,118 @@ The Python `OuterGradient.to_json()` produces the *exact* JSON shape the Rust sy
 
 ---
 
+## 20a. Tenzro Media Gen
+
+### 20a.1 Overview
+
+Tenzro Media Gen is the protocol's generative-media service: diffusion image and video rendering as a network resource. A requester posts a job with a price ceiling; a worker claims it, renders it, publishes the output to the content-addressed store, and signs a receipt over what it produced. It is the generative counterpart to the AI Model Marketplace (§10) — the same TDIP identity, staking bond, reputation record, and TNZO settlement asset underwrite it, and a media worker is a provider registration carrying a different capability record.
+
+Four job kinds, spelled on the wire as `text2image`, `image2image`, `text2video`, `image2video`. The image-conditioned kinds bind the conditioning image's SHA-256 into the job id, so a job commits to the exact bytes it was conditioned on. Video kinds carry a frame count and fps; image kinds reject both. Admission bounds are `MAX_MEDIA_GEN_DIMENSION = 8192`, `MAX_MEDIA_GEN_STEPS = 500`, `MAX_MEDIA_GEN_FRAMES = 3600`, `MAX_MEDIA_GEN_PROMPT_BYTES = 8192` (`crates/tenzro-types/src/media_gen.rs`).
+
+### 20a.2 Architecture Split: Rust Protocol + Python Worker
+
+The same split as Tenzro Train (§20.3), for the same reason.
+
+**Rust protocol layer** (`crates/tenzro-media-gen`, no tensor library dependency): the job queue, the worker registry, the pricing function, the payment split, the three signing preimages, the output-store trait, RocksDB persistence, and the gossip envelope.
+
+**Python reference worker** (`integrations/media_gen/`): the denoising loop and nothing else — pipeline construction, scheduler manipulation, VAE decode, video muxing, over HuggingFace `diffusers`. The worker never decides what a job is worth, who else is working on it, or whether its own receipt is acceptable.
+
+`diffusers` carries a maintained implementation of every pipeline class in the catalog, including the timestep-boundary dispatch that split-expert rendering depends on. Reimplementing that in Rust would mean tracking upstream model releases in a second language for no protocol benefit.
+
+### 20a.3 Model Catalog
+
+Workers read the catalog at enrollment via `tenzro_mediaGen_listCatalog`. Each row names the HuggingFace repo, the `diffusers` pipeline class, the kinds it serves, default and maximum resolutions, default step count and guidance scale, frames and fps for video, a VRAM floor, and — for split models — the expert pair.
+
+| ID | Repo | Kinds | Default w×h | Steps | VRAM | Expert pair |
+|---|---|---|---|---|---|---|
+| `qwen-image` | `Qwen/Qwen-Image` | text2image | 1328 × 1328 | 50 | 48 GB | — |
+| `qwen-image-flash` | `nvidia/Qwen-Image-Flash` | text2image | 1024 × 1024 | 4 | 48 GB | — |
+| `qwen-image-edit` | `Qwen/Qwen-Image-Edit-2511` | image2image | 1328 × 1328 | 40 | 48 GB | — |
+| `z-image-turbo` | `Tongyi-MAI/Z-Image-Turbo` | text2image | 1024 × 1024 | 9 | 16 GB | — |
+| `flux2-klein-4b` | `black-forest-labs/FLUX.2-klein-4B` | text2image, image2image | 1024 × 1024 | 4 | 12 GB | — |
+| `wan2.2-t2v-a14b` | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | text2video | 1280 × 720 | 40 | 80 GB | 48 GB each |
+| `wan2.2-i2v-a14b` | `Wan-AI/Wan2.2-I2V-A14B-Diffusers` | image2video | 1280 × 720 | 40 | 80 GB | 48 GB each |
+| `wan2.2-ti2v-5b` | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` | text2video, image2video | 1280 × 704 | 50 | 24 GB | — |
+
+A row serving an image-conditioned kind resolves to a sibling pipeline class where the family provides one (`WanPipeline` → `WanImageToVideoPipeline`); a class that already covers image input keeps it.
+
+`qwen-image-flash` is `qwen-image` distilled onto a four-step trajectory with guidance disabled: identical transformer, identical VRAM floor, one twelfth of the pixel-steps and so one twelfth of the quote. It is also the one row outside the permissive tier — the NVIDIA Open Model License classifies it `CommercialCustom`, so a worker declaring it must enroll on a node started with `--accept-license nvidia-open-model`. `tenzro_mediaGen_enrollWorker` rejects a capability naming a model the operator has not accepted, or one absent from the catalog. Enrollment is the enforcement point because the node never loads media-gen weights; the Python worker does.
+
+### 20a.4 Split-Expert Rendering
+
+Two model shapes are both called mixture-of-experts in the generative-media literature, and only one of them is a distribution primitive.
+
+**Token-routed MoE** has a learned router selecting experts per token inside every forward pass. Splitting it across machines costs a round trip per layer per token. That is the shape the language-model dispatch planner addresses (`AI.md` §3); the media catalog does not carry it.
+
+**Timestep-boundary expert pairs** are two transformers trained for different noise regimes — one for the high-noise prefix of the denoising schedule, one for the low-noise remainder. There is no learned router: a fixed noise threshold decides which expert owns a step. Exactly one intermediate latent crosses between the two halves, once per job. One expert needs 48 GB where the whole model needs 80, so two commodity accelerators render what one alone could not, and the coordination cost is a single blob transfer.
+
+**The boundary is a noise level, not a step index.** A step belongs to the high-noise expert while:
+
+```
+t >= boundary_ratio × scheduler.config.num_train_timesteps
+```
+
+Timesteps descend through the schedule, so that set is always a prefix and one integer index splits it. `boundary_ratio` is a fraction of the scheduler's *training* timestep count — `0.875` of 1000 for Wan 2.2 A14B. A 40-step job and a 100-step job split at the same noise level and at different indices, which is why the protocol records `steps_completed` from the signed handoff rather than assuming a fixed fraction.
+
+Both transformer slots are optional in the `diffusers` Wan pipeline, and every internal read falls back to the other slot when one is unset. A high-noise holder loads its expert into `transformer` and leaves `transformer_2` unset; a low-noise holder does the reverse and resumes with `scheduler.set_begin_index(boundary_index)`.
+
+`MediaGenWorkerCapability` carries `supported_models` (models the worker serves whole) and `expert_holdings` (individual halves, for models it cannot). A worker with the VRAM for both halves lists the model in `supported_models` and still claims each half separately — the protocol makes no exception for co-location, which keeps the signed step counts and the payment split identical whether the halves run on one machine or two.
+
+### 20a.5 Pricing and Payment Split
+
+The work unit is the **pixel-step**: `width × height × steps × frames`, frames defaulting to 1 for image kinds (`crates/tenzro-media-gen/src/pricing.rs`). A quote is `base_fee + per_pixel_step × pixel_steps`, with `DEFAULT_BASE_FEE = 1 × 10¹⁵` attoTNZO and `DEFAULT_PER_PIXEL_STEP = 1 × 10⁹` attoTNZO. A job whose ceiling falls below the quote is rejected at admission rather than claimed and abandoned.
+
+A non-split job pays the single worker the full `10_000` basis points. A split job pays proportionally to the schedule each half rendered:
+
+```
+high_bps = steps_completed × 10_000 / total_steps
+low_bps  = 10_000 − high_bps
+```
+
+`steps_completed` comes from the signed handoff, not from either worker's later claim. Overstating a half would take a forged Ed25519 signature over the handoff preimage.
+
+### 20a.6 Commitments
+
+Three SHA-256 preimages under three distinct domain tags (`crates/tenzro-media-gen/src/commitments.rs`). Distinct tags keep a handoff signature from being replayed as a receipt signature.
+
+| Domain tag | Binds |
+|---|---|
+| `tenzro/media-gen/job-id` | requester DID and address, model ID, kind, every parameter, price ceiling, creation timestamp |
+| `tenzro/media-gen/handoff` | job ID, handing-off worker DID and address, latent hash, latent byte length, `steps_completed`, handoff timestamp |
+| `tenzro/media-gen/receipt` | job ID, the executed task spec, worker DID and address, output hash, output MIME, output byte length, seed used, generation time, price paid, completion timestamp |
+
+Encoding rules: integers big-endian at their declared width, `Timestamp` as two's-complement i64 milliseconds, `f32` as the IEEE-754 big-endian bit pattern, variable-length fields prefixed with a big-endian u32 byte count, `Option` as a presence byte then the value. Raw 32-byte hashes embed bare; addresses are length-prefixed. The opaque `metadata` map is excluded from every preimage — a map has no canonical ordering across the Rust and Python JSON encoders, so binding it would make the digest encoder-dependent.
+
+The job id is the digest of its own contents, so a spec carrying someone else's id still hashes to what it actually says. The Python worker recomputes the same three preimages; `integrations/media_gen/tests/` pins the field order against the same fixture values the Rust suite uses, so a preimage change on either side shows up as a digest change on one side only.
+
+### 20a.7 Payload Store
+
+Three payload kinds share one content-addressed store: the rendered output (receipt-committed), the intermediate latent on a split job (handoff-committed), and the requester's conditioning image (spec-committed). All three are addressed by `tenzro://blob/`, fetched over the node's iroh endpoint (§17), and verified on read.
+
+`Hash` is SHA-256 — the canonical Tenzro hash, and what the commitments bind. iroh-blobs indexes by BLAKE3. `tenzro_mediaGen_publishOutput` therefore returns both: `output_hash` for the commitment and `locator` for the fetch. A worker publishing a latent records the SHA-256 in the handoff it signs; its partner fetches by locator and verifies the SHA-256 before resuming, so the transport's BLAKE3 verification and the protocol's hash check remain independent.
+
+### 20a.8 Lifecycle and RPC Surface
+
+```
+postJob → claimJob → markRunning → render
+                                    ├─ recordHandoff   (high-noise half of a split job)
+                                    └─ submitReceipt   (whole job, or low-noise half)
+```
+
+`failJob` is terminal: a failed job does not requeue. A worker waiting on a split partner waits a bounded interval and then fails the job explicitly rather than abandoning it. `cancelJob` is the requester's path, valid until a worker has claimed. Job status is `pending` | `claimed` | `running` | `completed` | `failed` | `cancelled`; expert role is `high_noise` | `low_noise`.
+
+Eighteen JSON-RPC methods under the `tenzro_mediaGen_` namespace:
+
+| Group | Methods |
+|---|---|
+| Discovery | `listCatalog`, `quote`, `listWorkers` |
+| Requester | `postJob`, `listJobs`, `getJob`, `cancelJob`, `getReceipt`, `fetchOutput`, `fetchInput` |
+| Worker | `enrollWorker`, `claimJob`, `markRunning`, `failJob`, `publishOutput`, `recordHandoff`, `submitReceipt`, `fetchLatent` |
+
+The same surface is reachable through the CLI (`tenzro media-gen …`), the MCP server, the A2A `media-gen` skill, and both SDKs. Job, worker, and receipt events broadcast on the `tenzro/media-gen` gossip topic. The Python worker's `tenzro-media-gen serve` drives the worker methods for an operator; the Rust CLI subcommands are the inspection and manual-recovery path.
+
+---
+
 ## 21. Roadmap
 
 ### Phase 1: Core Infrastructure — **DONE**
@@ -2793,7 +2916,7 @@ The Python `OuterGradient.to_json()` produces the *exact* JSON shape the Rust sy
 
 ### Phase 3: Agent & Protocol Integration
 - ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 500+ tools
-- ~~Implement A2A protocol server~~ — **DONE**: JSON-RPC 2.0 on port 3002, Agent Card discovery, SSE streaming, 68 skills
+- ~~Implement A2A protocol server~~ — **DONE**: JSON-RPC 2.0 on port 3002, Agent Card discovery, SSE streaming, 40 skills
 - ~~Implement ecosystem MCP servers~~ — **DONE**: Solana (3003), Ethereum (3004), Canton (3005), LayerZero (3006), Chainlink (3007), Li.Fi (3008)
 - ~~Implement challenge store for payment protocols~~ — **DONE**: persistent challenge lookup for MPP and x402
 - ~~Implement OpenClaw skill integration~~ — **DONE**: `skills/openclaw-tenzro/SKILL.md`

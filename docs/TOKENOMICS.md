@@ -38,7 +38,7 @@ This document specifies the economic model, the rationale behind each parameter 
 TNZO is the primary utility token of Tenzro Network. It is the single asset every participant — humans, agents, machines — uses to pay transaction fees, access network resources, and vote in governance. The point of the design is simple: a participant on Tenzro does not have to juggle a dozen tokens to get things done. One token covers every protocol-layer action.
 
 - **Gas.** Every transaction pays gas in TNZO. No separate fee token.
-- **Resource access.** Resources on Tenzro are everything participants can offer or consume — agents, skills, data, workflows, models, compute, apps, tools, TEE attestation, storage, distributed training participation, micropayment channels, cross-chain messages, marketplace templates. Every paid resource settles its protocol-layer commission in TNZO. Counterparties can still settle the underlying payment in any asset they agree on (stablecoins, native chain assets, off-chain rails); TNZO is the protocol's denominator.
+- **Resource access.** Resources on Tenzro are everything participants can offer or consume — agents, skills, data, workflows, models, compute, apps, tools, TEE attestation, storage, distributed training participation, generative image and video rendering, micropayment channels, cross-chain messages, marketplace templates. Every paid resource settles its protocol-layer commission in TNZO. Counterparties can still settle the underlying payment in any asset they agree on (stablecoins, native chain assets, off-chain rails); TNZO is the protocol's denominator.
 - **Governance.** Voting weight is TNZO-stake-weighted. A single asset is the basis for proposal bonds, voting, delegation, and constitutional decisions.
 - **Bonds and security.** Validators, providers (model, TEE, storage, compute, data, training), bridge nodes, marketplace agents, and template creators bond TNZO. The bond aligns the participant with honest behavior; misbehavior is slashed.
 
@@ -486,6 +486,17 @@ A storage provider:
 - Stakes TNZO.
 - Serves snapshot / DA / blob requests.
 - Earns through DA pricing and snapshot-bootstrap fees.
+
+### Media workers
+
+A media worker renders Tenzro Media Gen diffusion jobs — image and video:
+
+- Enrolls a capability naming the models it can hold. Entry is open: there is no stake gate, because a job's payment is bounded by the ceiling the requester posted and no output is accepted without a signed receipt over its content hash.
+- Earns per job against that ceiling. The quote is `base_fee + per_pixel_step × pixel_steps`, where the pixel-step is `width × height × steps × frames` — so a 1024×1024 four-step image and a 1024×1024 fifty-step image are priced by the work each actually takes, not by a flat per-image rate.
+- Splits payment with a partner when the model's denoising schedule divides at a timestep boundary. Each worker holds one expert; the division is `steps_completed × 10_000 / total_steps` in basis points to the worker holding the high-noise half, remainder to the low-noise half, read from the signed handoff rather than assumed. This is what lets two accelerators that each fit 48 GB serve a model needing 80.
+- Pays the same 0.5% network commission on earnings as any other provider.
+
+Because the node never loads media-gen weights — the Python reference worker does — enrollment is where license terms are enforced: a capability naming a model whose terms the operator did not accept at startup is refused.
 
 ### Marketplace template creators
 

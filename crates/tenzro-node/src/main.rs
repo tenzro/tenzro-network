@@ -665,22 +665,40 @@ async fn main() -> Result<()> {
             std::sync::Arc::new(binder)
         });
 
-    if config.payments.enabled
+    // Serving models is what the network pays providers for, so a node in the
+    // `ai` role gates its inference routes by default, settling to its own
+    // validator address unless the operator named a different recipient or
+    // opted out. The amount defaults to whatever the config carries (0 on a
+    // freshly launched node), so the gate can be wired and proven before a
+    // real price is set.
+    let default_recipient = node_arc
+        .local_validator_address()
+        .map(|a| a.to_string());
+    let payments = config
+        .payments
+        .effective(&config.roles, default_recipient.as_deref());
+
+    if payments.gate_on
         && let Some(gateway) = node_arc.payment_gateway() {
             let mut rpc_gate = tenzro_payments::middleware::PaymentGateMiddleware::new(
                 gateway.clone(),
                 tenzro_payments::middleware::PaymentGateConfig {
-                    default_amount: config.payments.default_amount,
-                    default_asset: config.payments.default_asset.clone(),
-                    recipient: config.payments.recipient.clone(),
-                    default_protocol: config.payments.default_protocol.clone(),
+                    default_amount: payments.amount,
+                    default_asset: payments.asset.clone(),
+                    recipient: payments.recipient.clone(),
+                    default_protocol: payments.protocol.clone(),
                 },
                 gateway.challenge_store(),
             );
             if let Some(ref binder) = identity_binder {
                 rpc_gate = rpc_gate.with_identity_binder(binder.clone());
             }
-            info!("HTTP 402 payment gate enabled for RPC /v1/chat/completions");
+            info!(
+                recipient = %payments.recipient,
+                amount = %payments.amount,
+                asset = %payments.asset,
+                "HTTP 402 payment gate enabled for RPC /v1/chat/completions",
+            );
             rpc_server = rpc_server.with_payment_gate(rpc_gate);
         }
 
@@ -760,15 +778,15 @@ async fn main() -> Result<()> {
     let mut web_server = web::WebServer::new(config.web_addr.clone())
         .with_state_arc(web_state.clone());
 
-    if config.payments.enabled {
+    if payments.gate_on {
         if let Some(gateway) = node_arc.payment_gateway() {
             let mut middleware = tenzro_payments::middleware::PaymentGateMiddleware::new(
                 gateway.clone(),
                 tenzro_payments::middleware::PaymentGateConfig {
-                    default_amount: config.payments.default_amount,
-                    default_asset: config.payments.default_asset.clone(),
-                    recipient: config.payments.recipient.clone(),
-                    default_protocol: config.payments.default_protocol.clone(),
+                    default_amount: payments.amount,
+                    default_asset: payments.asset.clone(),
+                    recipient: payments.recipient.clone(),
+                    default_protocol: payments.protocol.clone(),
                 },
                 gateway.challenge_store(),
             );
@@ -777,19 +795,20 @@ async fn main() -> Result<()> {
             }
             let setup = web::server::PaymentGateSetup::new(
                 middleware,
-                config.payments.paid_routes.clone(),
+                payments.paid_routes.clone(),
             );
             info!(
-                routes = ?config.payments.paid_routes,
-                protocol = %config.payments.default_protocol,
-                amount = %config.payments.default_amount,
-                asset = %config.payments.default_asset,
+                routes = ?payments.paid_routes,
+                protocol = %payments.protocol,
+                amount = %payments.amount,
+                asset = %payments.asset,
+                recipient = %payments.recipient,
                 "HTTP 402 payment gate enabled for Web API",
             );
             web_server = web_server.with_payment_gate(setup);
         } else {
             tracing::warn!(
-                "payments.enabled = true but TenzroPaymentGateway not initialised; \
+                "payment gate active but TenzroPaymentGateway not initialised; \
                  HTTP 402 middleware will not be wired"
             );
         }

@@ -173,7 +173,7 @@ cargo build --release -p tenzro-node -p tenzro-cli
 ### 3.1 Build the full workspace (optional)
 
 ```bash
-cargo build            # debug, all 25 crates
+cargo build            # debug, all 32 crates
 cargo test --workspace # full test suite
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -296,7 +296,68 @@ tenzro model serve qwen3-4b --rpc http://127.0.0.1:8545
 tenzro chat qwen3-4b
 ```
 
-### 4.4 Verify it's running
+### 4.4 Media worker
+
+Generative image and video jobs are rendered by a separate worker process. The
+node holds the queue, prices the work, and verifies the receipt; the renderer is
+Python because that is where `diffusers` lives, and it never loads into the node.
+
+```bash
+pip install -e integrations/media_gen
+
+# One-time: mint the worker's signing key (or set TENZRO_MEDIA_GEN_SEED)
+tenzro-media-gen --url http://127.0.0.1:8545 keygen
+
+# Enroll and render until interrupted
+tenzro-media-gen --url http://127.0.0.1:8545 serve \
+  --worker-did did:tenzro:machine:<uuid> \
+  --worker-address <32-byte hex> \
+  --model z-image-turbo \
+  --gpu-vram-gb 24
+```
+
+`--model` names a model held whole and repeats. `--expert
+<model_id>:<high_noise|low_noise>` names one half of a model whose denoising
+schedule divides at a timestep boundary, which is how a machine that cannot hold
+the whole model still earns on it — the two halves exchange a single intermediate
+latent through the content-addressed store, and payment divides by the step counts
+each side signed.
+
+Declared VRAM is what requesters route against, so `--gpu-vram-gb` should be
+honest: a claim the machine cannot finish costs the worker the job. Most catalog
+models are permissively licensed; `qwen-image-flash` carries the NVIDIA Open Model
+License and the node refuses to enroll a worker for it unless it was started with
+`--accept-license nvidia-open-model`.
+
+To post work rather than render it:
+
+```bash
+tenzro-media-gen catalog
+
+tenzro-media-gen quote --kind text2image \
+  --prompt "a plaster studio room at dawn" \
+  --width 1024 --height 1024 --steps 8
+
+tenzro-media-gen post --kind text2image --model z-image-turbo \
+  --prompt "a plaster studio room at dawn" \
+  --width 1024 --height 1024 --steps 8 \
+  --requester-did did:tenzro:human:<uuid> \
+  --requester-address <32-byte hex> \
+  --max-price <attoTNZO>
+
+tenzro-media-gen get <job_id>
+tenzro-media-gen receipt <job_id>
+tenzro-media-gen fetch <job_id> -o ./render.png
+```
+
+`quote` prices the job before it is queued and takes no model, because the unit is
+the pixel-step (`width × height × steps × frames`) — cost is known in full at post
+time regardless of which model renders it. `--max-price` is a ceiling the node
+checks at admission, not after a worker claims. `receipt` returns the worker's
+signature over the output's content hash, so the bytes `fetch` returns can be
+checked against what was paid for.
+
+### 4.5 Verify it's running
 
 ```bash
 curl http://localhost:8080/health
@@ -306,11 +367,11 @@ curl -X POST http://localhost:8545 \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
 
-### 4.5 Graceful shutdown
+### 4.6 Graceful shutdown
 
 Ctrl+C or `kill -TERM <pid>`. The node drains pending RPC requests, flushes RocksDB with fsync, and persists agent/swarm state before exit.
 
-### 4.6 Bootstrap a local or sovereign network
+### 4.7 Bootstrap a local or sovereign network
 
 `tenzro setup` walks through every participation path interactively — join the
 public network (consume / provide / validate), create your own network, or join
@@ -361,7 +422,7 @@ cargo install --path crates/tenzro-cli
 # Or run directly
 ./target/release/tenzro --help
 
-# Guided setup — join, provide, validate, or bootstrap a network (see §4.6)
+# Guided setup — join, provide, validate, or bootstrap a network (see §4.7)
 tenzro setup
 
 # Join the network (provisions identity + MPC wallet + hardware profile)

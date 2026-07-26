@@ -11,6 +11,7 @@ The official command-line interface for operating Tenzro Network nodes, managing
 - **Multi-Modal Inference**: Forecast, vision/text/video embedding, segmentation, detection, audio transcription via dedicated CLI commands
 - **Distributed MoE**: Expert-shard maps, dispatch planning, expert/gate weight loading, and distributed layer forwards via `tenzro moe`
 - **Tenzro Train**: Post training tasks, enroll trainers, submit outer gradients, finalize rounds, and manage sealed manifests via `tenzro train`
+- **Tenzro Media Gen**: Post diffusion image/video jobs, enroll render workers, claim either half of a split-expert model, and fetch outputs via `tenzro media-gen`
 - **Staking**: Stake TNZO tokens as validator or provider
 - **Governance**: Participate in on-chain governance and voting
 - **Provider Tools**: Register and manage inference/TEE providers
@@ -54,7 +55,7 @@ tenzro model list
 tenzro chat
 ```
 
-## Commands (102 command modules)
+## Commands (103 command modules)
 
 All commands use real JSON-RPC calls via reqwest. No artificial delays.
 
@@ -746,6 +747,67 @@ tenzro moe unload-gate --model-id <id> --layer <l>
 tenzro moe status                               # resident experts + gates, per-expert tier + memory budget
 tenzro moe forward --model-id <id> --layer <l> --d-model <dim> --hidden ./hidden.f32
 ```
+
+### Tenzro Media Gen
+
+`tenzro media-gen` is the CLI surface for diffusion image and video generation
+(`tenzro_mediaGen_*` RPCs). Like Tenzro Train, the Rust crate is protocol-only —
+the denoising loop runs in the Python reference worker at
+`integrations/media_gen/`. Four job kinds: `text2image`, `image2image`,
+`text2video`, `image2video`.
+
+Catalog rows carrying an `expert_pair` split the denoising schedule across two
+machines at a fixed noise level: one worker renders the high-noise prefix, hands
+a single intermediate latent to its partner, and the partner renders the
+low-noise remainder and decodes. `catalog` marks those rows `[split]`. One
+expert of Wan 2.2 A14B needs 48 GB where the whole model needs 80, so two
+commodity accelerators render what one could not. The payment split follows the
+step count in the signed handoff.
+
+```bash
+# Discovery and pricing
+tenzro media-gen catalog                            # all rows; [split] marks expert pairs
+tenzro media-gen catalog --kind text2video
+tenzro media-gen quote --kind text2image --params ./params.json
+
+# Requester
+tenzro media-gen post-job --spec ./spec.json
+tenzro media-gen list-jobs --status pending
+tenzro media-gen get-job --job-id <id>              # assignments, roles, unclaimed halves
+tenzro media-gen cancel-job --job-id <id> --requester-did <did>
+tenzro media-gen get-receipt --job-id <id>
+tenzro media-gen fetch-output --job-id <id> --out ./render.png
+tenzro media-gen fetch-input --job-id <id> --out ./conditioning.png
+
+# Worker
+tenzro media-gen enroll-worker --capability ./capability.json
+tenzro media-gen list-workers
+tenzro media-gen claim-job --job-id <id> --worker-did <did>
+tenzro media-gen claim-job --job-id <id> --worker-did <did> --role high_noise
+tenzro media-gen mark-running --job-id <id> --worker-did <did>
+tenzro media-gen publish-output --file ./render.png  # returns output_hash + locator
+tenzro media-gen record-handoff --handoff ./handoff.json
+tenzro media-gen submit-receipt --receipt ./receipt.json
+tenzro media-gen fail-job --job-id <id> --worker-did <did> --error "<reason>"
+tenzro media-gen fetch-latent --job-id <id> --out ./latent.safetensors
+```
+
+`--role` is only meaningful on a split job; omit it and the node assigns the
+whole job. `publish-output` returns both hashes the two stores use: the SHA-256
+`output_hash` the receipt commits to, and the BLAKE3 `locator` the content
+store fetches by. `quote` prices from the same figures the runtime charges
+against, so `max_price` in the posted spec need not be a guess.
+
+`enroll-worker` checks every model the capability names — whole models and
+expert halves alike — against the node's catalog and against the licenses the
+operator has accepted. A capability naming a model outside the catalog, or one
+whose terms the node was not started with (`--accept-license <id>`,
+`--accept-non-commercial`), is refused. The node never loads media-gen weights,
+so enrollment is where those terms are held.
+
+Operators running the Python worker do not need these subcommands — `serve` in
+`integrations/media_gen/` drives the same RPCs. They are the inspection and
+manual-recovery path, and the reference for anyone writing another worker.
 
 ### Approval Flow
 

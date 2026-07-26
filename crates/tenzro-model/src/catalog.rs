@@ -1937,6 +1937,394 @@ pub fn get_video_model_by_id(id: &str) -> Option<OnnxVideoEntry> {
     get_video_catalog().into_iter().find(|m| m.id == id)
 }
 
+/// Two denoising experts split across the noise schedule.
+///
+/// Wan 2.2 A14B ships two full transformers of identical shape rather than a
+/// single one: the high-noise expert denoises the early, coarse part of the
+/// schedule and the low-noise expert finishes it. The pipeline switches once,
+/// at [`boundary_ratio`](Self::boundary_ratio) of the schedule.
+///
+/// This is a different shape from the token-routed FFN experts that
+/// [`MoeShape`] describes, and the difference is what makes it worth
+/// distributing. A routed model hands off per token; this hands off once per
+/// job, as a single latent tensor of a few megabytes. Two workers can hold one
+/// expert each and split a job across a wide-area link without the per-token
+/// round trips that make routed MoE impractical off a datacenter fabric.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaGenExpertPair {
+    /// Repository subfolder holding the high-noise expert.
+    pub high_noise_component: String,
+    /// Repository subfolder holding the low-noise expert.
+    pub low_noise_component: String,
+    /// Fraction of the noise schedule above which the high-noise expert runs.
+    /// The low-noise expert takes the remainder.
+    pub boundary_ratio: f32,
+    /// GPU VRAM in GB to hold one expert plus the shared text-encoder and VAE
+    /// stack — what a worker needs to serve half a job, against
+    /// [`min_vram_gb`](MediaGenModelEntry::min_vram_gb) for the whole of one.
+    pub min_vram_gb_per_expert: u32,
+}
+
+/// A generative-media pipeline in the curated media-gen catalog.
+///
+/// Unlike the ONNX entries above, a media-gen pipeline is a multi-folder
+/// HuggingFace repository (transformer + text encoder + VAE + scheduler)
+/// loaded whole by `diffusers`, so there is no single `hf_filename`. The
+/// worker in `integrations/media_gen/` resolves the repo through the
+/// [`pipeline_class`](MediaGenModelEntry::pipeline_class) declared in its
+/// `model_index.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaGenModelEntry {
+    /// Internal model ID, used as `model_id` on a `MediaGenTaskSpec`.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Model family.
+    pub family: String,
+    /// HuggingFace repository ID. Loaded as a whole pipeline directory.
+    pub hf_repo: String,
+    /// Diffusers pipeline class named by the repo's `model_index.json`.
+    ///
+    /// A repo that serves more than one [`MediaGenKind`] may need a sibling
+    /// class for the secondary kind — Wan TI2V-5B declares `WanPipeline` but
+    /// takes `WanImageToVideoPipeline` over the same weights for
+    /// image-to-video. The worker resolves that from the job's kind.
+    pub pipeline_class: String,
+    /// Job kinds this pipeline serves.
+    pub kinds: Vec<tenzro_types::MediaGenKind>,
+    /// Output width the vendor's reference invocation uses.
+    pub default_width: u32,
+    /// Output height the vendor's reference invocation uses.
+    pub default_height: u32,
+    /// Largest side length the pipeline is trained for.
+    pub max_resolution: u32,
+    /// Denoising steps the vendor's reference invocation uses.
+    pub default_steps: u32,
+    /// Classifier-free guidance scale the vendor's reference invocation uses.
+    pub default_guidance_scale: f32,
+    /// Frame count for video kinds; `None` for image-only pipelines.
+    pub default_num_frames: Option<u32>,
+    /// Frames per second for video kinds; `None` for image-only pipelines.
+    pub default_fps: Option<u32>,
+    /// Parameter count across the repo's safetensors.
+    pub parameters: String,
+    /// Total download footprint of the repository in bytes.
+    pub size_bytes: u64,
+    /// Minimum GPU VRAM in GB. Vendor-stated where the model card gives a
+    /// figure, otherwise the bf16 weight footprint rounded up to the next
+    /// common card size. Actual use varies with resolution and offload.
+    pub min_vram_gb: u32,
+    /// License.
+    pub license: String,
+    /// License tier. Gated at worker enrollment rather than at load: these
+    /// weights are loaded by the Python worker, so the node's only chance to
+    /// hold the operator to the terms is when a capability naming the model is
+    /// admitted.
+    #[serde(default)]
+    pub license_tier: LicenseTier,
+    /// Set when the pipeline splits denoising across two experts, so a job can
+    /// be served by two workers holding one expert each. `None` for a single
+    /// dense transformer.
+    #[serde(default)]
+    pub expert_pair: Option<MediaGenExpertPair>,
+    /// Short description.
+    pub description: String,
+}
+
+/// Get the curated generative-media catalog.
+///
+/// Membership rules, applied against the HuggingFace API at the time each
+/// entry was added:
+///
+/// - **Ungated.** `gated == false`, matching the catalog-wide invariant that
+///   no entry needs an HF login to download.
+/// - **Loadable by `diffusers`.** The repo ships a `model_index.json` whose
+///   `_class_name` is a real diffusers pipeline, so `from_pretrained` resolves
+///   the whole repo. This excludes repos that tag `library_name: diffusers`
+///   but ship their own loader (Microsoft Mage-Flow needs the `mage_flow`
+///   package) and repos that ship bare root-level checkpoints with no pipeline
+///   manifest. Lightricks LTX-2.3 is the latter case and fails a second way:
+///   the repo carries no text encoder, VAE, or scheduler, so even a
+///   single-file loader could not assemble a pipeline from it alone. The
+///   diffusers-format generation of that family ships `audio_vae/` and
+///   `vocoder/` and emits joint audio and video — a shape [`MediaGenKind`]
+///   does not carry.
+/// - **Serves a [`MediaGenKind`].** Image and video output only; a diffusion
+///   model that emits text is served by the chat path.
+///
+/// Entries are [`LicenseTier::Permissive`] except `qwen-image-flash`, which
+/// carries the NVIDIA Open Model License and so is [`LicenseTier::CommercialCustom`]
+/// — a worker must enroll with `--accept-license nvidia-open-model` to hold it.
+/// The frontier also holds several gated custom-license and non-commercial
+/// pipelines (Krea 2, FLUX.2 dev and klein-9B); they are absent because they
+/// are gated, not because of their tier.
+pub fn get_media_gen_catalog() -> Vec<MediaGenModelEntry> {
+    use tenzro_types::MediaGenKind::{Image2Image, Image2Video, Text2Image, Text2Video};
+
+    vec![
+        // ── Qwen-Image (Apache-2.0, Alibaba Qwen) ──
+        // 20B MMDiT. The reference invocation samples 50 steps at
+        // true-CFG 4.0; 1328² is the 1:1 entry in the card's aspect-ratio
+        // table and 1664 the longest side it lists (16:9).
+        //
+        // `default_guidance_scale` is true-CFG for this family, not the
+        // embedded-guidance scale of the same name: these checkpoints report
+        // no guidance embedding, so the worker sends the figure as
+        // `true_cfg_scale`, which is the knob that reaches the sampler.
+        MediaGenModelEntry {
+            id: "qwen-image".to_string(),
+            name: "Qwen-Image".to_string(),
+            family: "qwen-image".to_string(),
+            hf_repo: "Qwen/Qwen-Image".to_string(),
+            pipeline_class: "QwenImagePipeline".to_string(),
+            kinds: vec![Text2Image],
+            default_width: 1328,
+            default_height: 1328,
+            max_resolution: 1664,
+            default_steps: 50,
+            default_guidance_scale: 4.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "20.4B".to_string(),
+            size_bytes: 57_704_594_653,
+            min_vram_gb: 48,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            description: "Qwen-Image text-to-image MMDiT with strong text rendering".to_string(),
+        },
+        // ── Qwen-Image-Flash (NVIDIA Open Model License, NVIDIA) ──
+        // A distillation of Qwen/Qwen-Image down to a four-step trajectory,
+        // keeping the 20.4B transformer architecture and replacing its weights
+        // with the student's. The packaged scheduler is configured for that
+        // four-step trajectory, so the reference call is 4 steps at
+        // true-CFG 1.0 — guidance off — against 50 steps at 4.0 for the base
+        // model. Same footprint, same VRAM floor, one twelfth of the
+        // pixel-steps.
+        //
+        // The card states one tested output setting, 1024², and gives no
+        // larger figure, so `max_resolution` does not inherit the base model's
+        // 1664 even though the architecture is unchanged. Editing is named as
+        // out of scope, so this entry serves `text2image` only.
+        MediaGenModelEntry {
+            id: "qwen-image-flash".to_string(),
+            name: "Qwen-Image-Flash".to_string(),
+            family: "qwen-image".to_string(),
+            hf_repo: "nvidia/Qwen-Image-Flash".to_string(),
+            pipeline_class: "QwenImagePipeline".to_string(),
+            kinds: vec![Text2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 1024,
+            default_steps: 4,
+            default_guidance_scale: 1.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "20.4B".to_string(),
+            size_bytes: 57_708_362_811,
+            min_vram_gb: 48,
+            license: "NVIDIA Open Model License".to_string(),
+            license_tier: LicenseTier::CommercialCustom,
+            expert_pair: None,
+            description: "Qwen-Image distilled to four steps, guidance disabled".to_string(),
+        },
+        // ── Qwen-Image-Edit (Apache-2.0, Alibaba Qwen) ──
+        // Same 20B backbone specialised for instruction editing. 40 steps
+        // at true-CFG 4.0 per the card's parameter block.
+        MediaGenModelEntry {
+            id: "qwen-image-edit".to_string(),
+            name: "Qwen-Image-Edit 2511".to_string(),
+            family: "qwen-image".to_string(),
+            hf_repo: "Qwen/Qwen-Image-Edit-2511".to_string(),
+            pipeline_class: "QwenImageEditPlusPipeline".to_string(),
+            kinds: vec![Image2Image],
+            default_width: 1328,
+            default_height: 1328,
+            max_resolution: 1664,
+            default_steps: 40,
+            default_guidance_scale: 4.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "20.4B".to_string(),
+            size_bytes: 57_720_463_453,
+            min_vram_gb: 48,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            description: "Qwen-Image-Edit instruction-driven image editing, multi-reference"
+                .to_string(),
+        },
+        // ── Z-Image Turbo (Apache-2.0, Tongyi MAI) ──
+        // 6B few-step distillation: 9 steps, guidance disabled.
+        MediaGenModelEntry {
+            id: "z-image-turbo".to_string(),
+            name: "Z-Image Turbo".to_string(),
+            family: "z-image".to_string(),
+            hf_repo: "Tongyi-MAI/Z-Image-Turbo".to_string(),
+            pipeline_class: "ZImagePipeline".to_string(),
+            kinds: vec![Text2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 2048,
+            default_steps: 9,
+            default_guidance_scale: 0.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "6.2B".to_string(),
+            size_bytes: 32_899_667_397,
+            min_vram_gb: 16,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            description: "Z-Image Turbo few-step text-to-image, 9 steps without guidance"
+                .to_string(),
+        },
+        // ── FLUX.2 klein 4B (Apache-2.0, Black Forest Labs) ──
+        // The one FLUX.2 checkpoint released under Apache-2.0 and ungated.
+        // One class covers generation, editing, and multi-reference. 4 steps
+        // at guidance 1.0; the card targets consumer cards from 12 GB up.
+        MediaGenModelEntry {
+            id: "flux2-klein-4b".to_string(),
+            name: "FLUX.2 klein 4B".to_string(),
+            family: "flux2".to_string(),
+            hf_repo: "black-forest-labs/FLUX.2-klein-4B".to_string(),
+            pipeline_class: "Flux2KleinPipeline".to_string(),
+            kinds: vec![Text2Image, Image2Image],
+            default_width: 1024,
+            default_height: 1024,
+            max_resolution: 2048,
+            default_steps: 4,
+            default_guidance_scale: 1.0,
+            default_num_frames: None,
+            default_fps: None,
+            parameters: "3.9B".to_string(),
+            size_bytes: 23_740_007_447,
+            min_vram_gb: 12,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            description: "FLUX.2 klein 4B text-to-image and editing, runs on consumer GPUs"
+                .to_string(),
+        },
+        // ── Wan 2.2 T2V A14B (Apache-2.0, Alibaba Wan) ──
+        // Two-expert MoE over the denoising schedule: 27B total, ~14B active
+        // per step. The card's reference call is 1280×720, 81 frames at
+        // 16 fps, 40 steps, and asks for 80 GB single-GPU without offload.
+        MediaGenModelEntry {
+            id: "wan2.2-t2v-a14b".to_string(),
+            name: "Wan 2.2 T2V A14B".to_string(),
+            family: "wan2.2".to_string(),
+            hf_repo: "Wan-AI/Wan2.2-T2V-A14B-Diffusers".to_string(),
+            pipeline_class: "WanPipeline".to_string(),
+            kinds: vec![Text2Video],
+            default_width: 1280,
+            default_height: 720,
+            max_resolution: 1280,
+            default_steps: 40,
+            default_guidance_scale: 4.0,
+            default_num_frames: Some(81),
+            default_fps: Some(16),
+            parameters: "14.3B".to_string(),
+            size_bytes: 126_200_628_126,
+            min_vram_gb: 80,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: Some(MediaGenExpertPair {
+                high_noise_component: "transformer".to_string(),
+                low_noise_component: "transformer_2".to_string(),
+                boundary_ratio: 0.875,
+                min_vram_gb_per_expert: 48,
+            }),
+            description: "Wan 2.2 text-to-video mixture-of-experts, 480P and 720P".to_string(),
+        },
+        // ── Wan 2.2 I2V A14B (Apache-2.0, Alibaba Wan) ──
+        // Same MoE shape, conditioned on a reference frame. Guidance 3.5.
+        MediaGenModelEntry {
+            id: "wan2.2-i2v-a14b".to_string(),
+            name: "Wan 2.2 I2V A14B".to_string(),
+            family: "wan2.2".to_string(),
+            hf_repo: "Wan-AI/Wan2.2-I2V-A14B-Diffusers".to_string(),
+            pipeline_class: "WanImageToVideoPipeline".to_string(),
+            kinds: vec![Image2Video],
+            default_width: 1280,
+            default_height: 720,
+            max_resolution: 1280,
+            default_steps: 40,
+            default_guidance_scale: 3.5,
+            default_num_frames: Some(81),
+            default_fps: Some(16),
+            parameters: "14.3B".to_string(),
+            size_bytes: 126_204_155_463,
+            min_vram_gb: 80,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: Some(MediaGenExpertPair {
+                high_noise_component: "transformer".to_string(),
+                low_noise_component: "transformer_2".to_string(),
+                boundary_ratio: 0.875,
+                min_vram_gb_per_expert: 48,
+            }),
+            description: "Wan 2.2 image-to-video mixture-of-experts, 480P and 720P".to_string(),
+        },
+        // ── Wan 2.2 TI2V 5B (Apache-2.0, Alibaba Wan) ──
+        // The affordable video option: a 16×16×4 VAE lets 5B cover both video
+        // kinds at 720P/24fps on a 24 GB card. 1280×704 because the TI2V
+        // 720P shape is 1280*704, not 1280*720.
+        MediaGenModelEntry {
+            id: "wan2.2-ti2v-5b".to_string(),
+            name: "Wan 2.2 TI2V 5B".to_string(),
+            family: "wan2.2".to_string(),
+            hf_repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers".to_string(),
+            pipeline_class: "WanPipeline".to_string(),
+            kinds: vec![Text2Video, Image2Video],
+            default_width: 1280,
+            default_height: 704,
+            max_resolution: 1280,
+            default_steps: 50,
+            default_guidance_scale: 5.0,
+            default_num_frames: Some(121),
+            default_fps: Some(24),
+            parameters: "5.0B".to_string(),
+            size_bytes: 34_203_021_834,
+            min_vram_gb: 24,
+            license: "Apache-2.0".to_string(),
+            license_tier: LicenseTier::Permissive,
+            expert_pair: None,
+            description: "Wan 2.2 hybrid text/image-to-video at 720P 24fps on a single 24 GB GPU"
+                .to_string(),
+        },
+    ]
+}
+
+/// Look up a generative-media pipeline by its internal ID.
+pub fn get_media_gen_model_by_id(id: &str) -> Option<MediaGenModelEntry> {
+    get_media_gen_catalog().into_iter().find(|m| m.id == id)
+}
+
+/// Whether jobs for this model split their denoising schedule across two
+/// experts, and so must be posted as a split job.
+///
+/// Splitting is a property of the model, not of the request: a spec carries no
+/// role list, so the node admitting a job and every node mirroring it off the
+/// gossip topic have to reach the same answer from the model id alone or they
+/// end up holding different jobs under the same id. An unknown model is treated
+/// as whole — nothing can be split into halves that are not described anywhere.
+pub fn media_gen_model_splits(model_id: &str) -> bool {
+    get_media_gen_model_by_id(model_id)
+        .map(|m| m.expert_pair.is_some())
+        .unwrap_or(false)
+}
+
+/// Generative-media pipelines serving a given job kind.
+pub fn get_media_gen_models_for_kind(
+    kind: tenzro_types::MediaGenKind,
+) -> Vec<MediaGenModelEntry> {
+    get_media_gen_catalog()
+        .into_iter()
+        .filter(|m| m.kinds.contains(&kind))
+        .collect()
+}
+
 /// Get the full curated model catalog.
 pub fn get_model_catalog() -> Vec<HfModelEntry> {
     let mut catalog = vec![
@@ -4357,6 +4745,8 @@ pub fn custom_license_id(license: &str) -> Option<String> {
         Some("dinov3".to_string())
     } else if l.contains("gemma") {
         Some("gemma".to_string())
+    } else if l.contains("nvidia open model") {
+        Some("nvidia-open-model".to_string())
     } else if l.contains("sam") {
         Some("meta-sam".to_string())
     } else {
@@ -4980,6 +5370,119 @@ mod tests {
         assert_eq!((h.frame_size, h.embedding_dim), (256, 1280));
         let g = by("vjepa2-vitg-384");
         assert_eq!((g.frame_size, g.embedding_dim), (384, 1408));
+    }
+
+    // ── Generative-media catalog ─────────────────────────────────────
+
+    #[test]
+    fn test_media_gen_catalog_membership() {
+        let catalog = get_media_gen_catalog();
+        let mut ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "flux2-klein-4b",
+                "qwen-image",
+                "qwen-image-edit",
+                "qwen-image-flash",
+                "wan2.2-i2v-a14b",
+                "wan2.2-t2v-a14b",
+                "wan2.2-ti2v-5b",
+                "z-image-turbo",
+            ],
+            "media-gen membership changed — every entry must be ungated on \
+             HuggingFace and loadable by diffusers"
+        );
+        for e in &catalog {
+            // Nothing gated survives membership, so no entry is
+            // NonCommercial. A custom commercial license is admissible —
+            // enrollment refuses the model unless the operator accepted it by
+            // id — so every such entry must yield an id to accept.
+            match e.license_tier {
+                LicenseTier::Permissive | LicenseTier::Attribution => {}
+                LicenseTier::CommercialCustom => assert!(
+                    custom_license_id(&e.license).is_some(),
+                    "{} is CommercialCustom but its license '{}' maps to no \
+                     acceptance id, so --accept-license could never admit it",
+                    e.id,
+                    e.license
+                ),
+                LicenseTier::NonCommercial => panic!(
+                    "{} is NonCommercial (license={}); such a model is gated \
+                     on HuggingFace and fails membership",
+                    e.id, e.license
+                ),
+            }
+            assert!(!e.kinds.is_empty(), "{} serves no MediaGenKind", e.id);
+            assert!(e.pipeline_class.ends_with("Pipeline"), "{}", e.id);
+            assert!(e.max_resolution >= e.default_width.max(e.default_height));
+            let looked_up = get_media_gen_model_by_id(&e.id)
+                .unwrap_or_else(|| panic!("{} missing from catalog lookup", e.id));
+            assert_eq!(looked_up.hf_repo, e.hf_repo);
+        }
+        assert!(get_media_gen_model_by_id("not-a-real-id").is_none());
+    }
+
+    #[test]
+    fn test_media_gen_expert_pairs_are_the_two_a14b_entries() {
+        let catalog = get_media_gen_catalog();
+        let mut split: Vec<&str> = catalog
+            .iter()
+            .filter(|e| e.expert_pair.is_some())
+            .map(|e| e.id.as_str())
+            .collect();
+        split.sort();
+        assert_eq!(
+            split,
+            vec!["wan2.2-i2v-a14b", "wan2.2-t2v-a14b"],
+            "only the Wan 2.2 A14B checkpoints ship two denoising experts"
+        );
+        for e in &catalog {
+            let Some(ref pair) = e.expert_pair else {
+                continue;
+            };
+            assert_ne!(pair.high_noise_component, pair.low_noise_component);
+            assert!(
+                pair.boundary_ratio > 0.0 && pair.boundary_ratio < 1.0,
+                "{}: boundary must split the schedule",
+                e.id
+            );
+            assert!(
+                pair.min_vram_gb_per_expert < e.min_vram_gb,
+                "{}: holding one expert must cost less than holding both",
+                e.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_media_gen_video_entries_carry_frame_defaults() {
+        for e in get_media_gen_catalog() {
+            let serves_video = e.kinds.iter().any(|k| k.is_video());
+            assert_eq!(
+                serves_video,
+                e.default_num_frames.is_some() && e.default_fps.is_some(),
+                "{}: frame/fps defaults must be present iff it serves a \
+                 video kind",
+                e.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_media_gen_kind_filter() {
+        use tenzro_types::MediaGenKind;
+        let t2v = get_media_gen_models_for_kind(MediaGenKind::Text2Video);
+        assert!(t2v.iter().all(|e| e.kinds.contains(&MediaGenKind::Text2Video)));
+        assert!(t2v.iter().any(|e| e.id == "wan2.2-t2v-a14b"));
+        // TI2V-5B is the one entry serving both video kinds.
+        assert!(t2v.iter().any(|e| e.id == "wan2.2-ti2v-5b"));
+        let i2v = get_media_gen_models_for_kind(MediaGenKind::Image2Video);
+        assert!(i2v.iter().any(|e| e.id == "wan2.2-ti2v-5b"));
+        let t2i = get_media_gen_models_for_kind(MediaGenKind::Text2Image);
+        assert!(t2i.iter().any(|e| e.id == "qwen-image"));
+        assert!(t2i.iter().all(|e| !e.kinds.iter().any(|k| k.is_video())));
     }
 
     // ── GGUF promotability / HF-resolvability verification ───────────

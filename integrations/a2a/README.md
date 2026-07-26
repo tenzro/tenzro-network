@@ -112,7 +112,7 @@ local tip against peer-reported network tips (gossiped on
 
 ## Agent Skills
 
-The Tenzro A2A agent exposes skills covering blockchain, AI, identity, payments, lifecycle, bonds, capital markets, multi-party workflows, EVM primitives, cross-chain reach, BTC-secured staking, chain-agnostic discovery, Canton 3.5+ JSON Ledger API, decentralized storage, compute rental, distributed MoE serving, local discovery + LAN clustering, and agent orchestration. The Agent Card at `tenzro_a2a_server/agent_card.py` is the authoritative source for skill IDs and descriptions.
+The Tenzro A2A agent exposes skills covering blockchain, AI, identity, payments, lifecycle, bonds, capital markets, multi-party workflows, EVM primitives, cross-chain reach, BTC-secured staking, chain-agnostic discovery, Canton 3.5+ JSON Ledger API, decentralized storage, compute rental, distributed MoE serving, generative image and video, local discovery + LAN clustering, and agent orchestration. The Agent Card at `tenzro_a2a_server/agent_card.py` is the authoritative source for skill IDs and descriptions.
 
 ### Core Blockchain
 
@@ -175,6 +175,7 @@ The Tenzro A2A agent exposes skills covering blockchain, AI, identity, payments,
 | **Decentralized Storage** | `storage` | Content-addressed storage on the iroh data plane, billed per byte-epoch and held to a proof of retrievability — open/charge/look-up deals, set pricing, read provider status; one coverage budget shared with compute |
 | **Compute Rental** | `compute` | Rent compute against stake, settled per epoch on an availability proof — book/settle/look-up rentals, set pricing, read provider status; shares the storage coverage budget |
 | **Distributed MoE Serving** | `moe` | Decentralized expert-shard serving — shard map, top-k dispatch planning, replication policy, catalog topology, expert preparation (slice a checkpoint into per-expert blobs, optionally block-quantizing each projection with a `q4_k_m` / `q8_0` / `q4_k` / `q6_k` preset or a per-projection gate/up/down mix), expert/gate weight loading into the local expert runtime (byte-bounded memory-tier LRU over a disk tier that decodes spilled experts on demand, so a holder serves more experts than fit in memory), runtime status with per-expert residency tier + byte footprint + memory budget + GPU-active flag, and distributed layer forwards that fan hidden states out to expert holders and gather gate-weighted outputs. Expert compute runs on CPU by default (dense f32 plus a runtime-detected AVX-512-VNNI Q8_0 path) and on an optional CUDA or cross-vendor GPU backend where built; holders advertise GPU compute so routing biases toward them. Cross-holder forwards overlap via compressed activations, warm-first backup redispatch, and a pipelined gate-weighted combine. |
+| **Generative Image & Video** | `media-gen` | Decentralized generative image and video — read the curated diffusers catalog, price a job by pixel-step (`width × height × steps × frames`), post it to the queue, follow its status, list the enrolled workers, and read the signed receipt that commits to the rendered bytes. Pipelines whose denoising schedule splits at a timestep boundary are served by two workers, one holding the high-noise expert and one the low-noise expert, handing the intermediate latent over the content-addressed store. |
 | **Operability Inspection** | `operability` | Read-only surface for SREs and monitoring agents — Tenzro Train inspection (list runs, run state, sealed receipts, Confidential-tier sealed-shard manifests, trainer auto-provisioning daemon status), SLA fault-detector parameters and probes (list outstanding, issue liveness probe), and state-sync snapshot inspection (list, manifest by height, chunk fetch); validator-registry reads route through the validator-lifecycle skill |
 | **Local Discovery & LAN Clustering** | `discovery` | mDNS local-segment peers, connectivity tier (`direct` / `relay_only` / `unreachable`), hardware self-profile, and deterministic layer-wise LAN cluster planning. The connectivity tier is also the signal the node acts on automatically — promoting its Kademlia role from client to server once sustained-direct, and booking a Circuit-Relay v2 reservation through a relay-advertising peer while still behind NAT. Serving auto-triggers the cluster when a model exceeds one host: the node reads the GGUF header for shape, discovers members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline — opt out with `force_single`. |
 | **Managed Databases** | `database` | Register and query owned databases the node serves across local / lan_cluster / network placement over an operator-run engine (PostgreSQL / Qdrant / Valkey) or an embedded index (Lance / Tantivy). List engines, create a database, issue a connection credential scoped to one database, run an engine-dialect query, rescale in place, and drop. Access is gated by `AccessPolicy` + an optional confidential seal |
@@ -205,6 +206,8 @@ The agent routes messages based on natural language content:
 | `detect`, `bounding box`, `rf-detr`, `d-fine` | Detection |
 | `transcribe`, `whisper`, `moonshine`, `parakeet`, `canary`, `asr` | Audio |
 | `video embed` | Video |
+| `media gen`, `text2image`, `image2image`, `text2video`, `image2video`, `generate image`, `generate video`, `pixel-step`, `render job`, `latent handoff`, `high-noise`, `low-noise` | Generative Image & Video |
+| `expert`, `moe`, `shard map`, `dispatch plan`, `replication policy` | Distributed MoE Serving |
 | `payment`, `challenge`, `mpp`, `x402`, `ap2` | Payments |
 | `stake`, `validator`, `provider` | Staking |
 | `token`, `erc20`, `create token`, `wrap` | Token Management |
@@ -223,6 +226,11 @@ The agent routes messages based on natural language content:
 | `canton` | Cross-chain bridge |
 | `status`, `health`, `node`, `peer`, `network` | Node status |
 | `faucet`, `tokens` | Testnet faucet |
+
+Matching is ordered, so a more specific route wins over a broader one that shares a
+word. Generative-media phrases are tested before MoE phrases, because a split
+denoising schedule is described in terms of its high-noise and low-noise *expert*
+halves and would otherwise match the MoE route.
 
 ## Examples
 

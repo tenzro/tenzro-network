@@ -1,0 +1,23 @@
+[package]
+name = "tenzro-media-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tenzro Media Gen — protocol-only Rust crate for decentralized generative media inference (image, video). Job queue, worker registry, pricing, and receipts live here; the denoising loops are dispatched to the Python reference worker (HuggingFace diffusers)."
+
+[dependencies]
+tenzro-types = { workspace = true }
+tenzro-storage = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+dashmap = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

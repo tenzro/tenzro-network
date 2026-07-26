@@ -6,11 +6,11 @@
 
 ## Abstract
 
-Tenzro AI is the protocol surface that makes intelligence a network resource — discovered, compensated, attested, and settled in TNZO. It is the open infrastructure for self-owned AI: any open model, any size, on hardware you and your peers own. The same network providers serve dense single-replica inference, sharded Mixture-of-Experts serving for frontier-scale models, speculative decoding via Multi-Token Prediction, multi-modal inference across seven ONNX runtimes plus the llama.cpp language path, TEE-confidential inference, recurrent-depth reasoning (Cortex), and decoupled-outer-aggregation decentralized training.
+Tenzro AI is the protocol surface that makes intelligence a network resource — discovered, compensated, attested, and settled in TNZO. It is the open infrastructure for self-owned AI: any open model, any size, on hardware you and your peers own. The same network providers serve dense single-replica inference, sharded Mixture-of-Experts serving for frontier-scale models, speculative decoding via Multi-Token Prediction, multi-modal inference across seven ONNX runtimes plus the llama.cpp language path, TEE-confidential inference, recurrent-depth reasoning (Cortex), diffusion image and video generation including split-expert rendering across two accelerators, and decoupled-outer-aggregation decentralized training.
 
 None of these are silos. Compute providers serving an MoE expert shard are the same providers that serve a dense Qwen 3.5 27B chat completion. The TDIP identity that pays a per-token bill on inference is the same identity that sponsors a training run. The reputation a provider earns serving inference is the reputation that admits them to a training witness committee. The protocol layer underwrites all of it with one consensus, one settlement asset, and one identity model.
 
-This document describes the inference surface, the MoE serving primitives, MTP wiring, multi-modal coverage, the confidential-execution path, Cortex, and Tenzro Train.
+This document describes the inference surface, the MoE serving primitives, MTP wiring, multi-modal coverage, the confidential-execution path, Cortex, Tenzro Train, and Tenzro Media Gen.
 
 ### Verified on the live network
 
@@ -37,6 +37,8 @@ The crates that implement this:
 - `tenzro-cortex` — recurrent-depth reasoning sidecar
 - `tenzro-training` — decoupled outer-aggregation protocol layer (syncer, aggregators, receipts, on-chain commitments)
 - `integrations/trainer/` — Python reference trainer (PyTorch FSDP2, Hivemind, safetensors)
+- `tenzro-media-gen` — generative media protocol layer (job queue, worker registry, pricing, payment split, commitments, output store)
+- `integrations/media_gen/` — Python reference media worker (HuggingFace `diffusers`)
 
 ---
 
@@ -394,7 +396,7 @@ Cortex is the path for reasoning workloads where the caller is willing to pay fo
 
 ## 7. Tenzro Train
 
-The rest of this document describes the protocol layer for decentralized training. The split between Rust protocol (`tenzro-training`) and Python reference trainer (`integrations/trainer/`) keeps the protocol layer free of tensor library churn while letting the per-modality adapters track frontier model architectures without protocol changes.
+This section describes the protocol layer for decentralized training. The split between Rust protocol (`tenzro-training`) and Python reference trainer (`integrations/trainer/`) keeps the protocol layer free of tensor library churn while letting the per-modality adapters track frontier model architectures without protocol changes.
 
 The training surface below preserves the original Tenzro Train design verbatim, renumbered to fit this document.
 
@@ -986,4 +988,125 @@ For Phase 3 language scaling:
 - Yin et al., *Byzantine-Robust Distributed Learning: Towards Optimal Statistical Rates*, ICML 2018.
 - Costan & Devadas, *Intel SGX Explained*, IACR ePrint 2016/086.
 - AMD, *SEV-SNP: Strengthening VM Isolation with Integrity Protection and More*, 2020.
+
+---
+
+## 8. Tenzro Media Gen
+
+Diffusion image and video generation as a network resource. A requester posts a job with a price ceiling; a worker claims it, renders it, publishes the output, and signs a receipt over what it produced. The same TDIP identity, staking bond, reputation, and settlement asset that underwrite inference and training underwrite this too — a media worker is a provider registration with a different capability record.
+
+### 8.1 Rust protocol, Python worker
+
+The split mirrors Tenzro Train:
+
+- **`tenzro-media-gen` (Rust)** — the job queue, the worker registry, the pricing function, the payment split, the three signing preimages, the output-store trait, persistence, and the gossip envelope. No tensor library enters the Rust workspace.
+- **`integrations/media_gen/` (Python)** — the denoising loop and nothing else. Pipeline construction, scheduler manipulation, VAE decode, and video muxing over HuggingFace `diffusers`.
+
+The worker never decides what a job is worth, who else is working on it, or whether its own receipt is acceptable. `diffusers` carries a maintained implementation of every pipeline class in the catalog, including the timestep-boundary dispatch that split-expert rendering depends on; reimplementing that in Rust would mean tracking upstream model releases in a second language for no protocol benefit.
+
+### 8.2 Job kinds
+
+`MediaGenKind` has four values, spelled on the wire as `text2image`, `image2image`, `text2video`, `image2video`. The image-conditioned kinds bind the conditioning image's hash into the job id, so the job commits to the exact bytes it was conditioned on. Video kinds carry a frame count and fps; image kinds reject both.
+
+`MediaGenParams` carries the prompt, an optional negative prompt, width, height, step count, guidance scale, optional seed, optional frame count and fps, an optional conditioning-image hash, and an opaque `metadata` map. Admission bounds: `MAX_MEDIA_GEN_DIMENSION = 8192`, `MAX_MEDIA_GEN_STEPS = 500`, `MAX_MEDIA_GEN_FRAMES = 3600`, `MAX_MEDIA_GEN_PROMPT_BYTES = 8192`.
+
+### 8.3 Catalog
+
+Read by workers at enrollment through `tenzro_mediaGen_listCatalog`. Each row names the HuggingFace repo, the `diffusers` pipeline class, the kinds it serves, default and maximum resolutions, default step count and guidance scale, frame count and fps for video, a VRAM floor, and — for split models — the expert pair.
+
+| ID | Repo | Pipeline class | Kinds | Default w×h | Steps | Guidance | Frames / fps | VRAM | Expert pair |
+|---|---|---|---|---|---|---|---|---|---|
+| `qwen-image` | `Qwen/Qwen-Image` | `QwenImagePipeline` | text2image | 1328 × 1328 | 50 | 4.0 | — | 48 GB | — |
+| `qwen-image-flash` | `nvidia/Qwen-Image-Flash` | `QwenImagePipeline` | text2image | 1024 × 1024 | 4 | 1.0 | — | 48 GB | — |
+| `qwen-image-edit` | `Qwen/Qwen-Image-Edit-2511` | `QwenImageEditPlusPipeline` | image2image | 1328 × 1328 | 40 | 4.0 | — | 48 GB | — |
+| `z-image-turbo` | `Tongyi-MAI/Z-Image-Turbo` | `ZImagePipeline` | text2image | 1024 × 1024 | 9 | 0.0 | — | 16 GB | — |
+| `flux2-klein-4b` | `black-forest-labs/FLUX.2-klein-4B` | `Flux2KleinPipeline` | text2image, image2image | 1024 × 1024 | 4 | 1.0 | — | 12 GB | — |
+| `wan2.2-t2v-a14b` | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | `WanPipeline` | text2video | 1280 × 720 | 40 | 4.0 | 81 / 16 | 80 GB | 48 GB each |
+| `wan2.2-i2v-a14b` | `Wan-AI/Wan2.2-I2V-A14B-Diffusers` | `WanImageToVideoPipeline` | image2video | 1280 × 720 | 40 | 3.5 | 81 / 16 | 80 GB | 48 GB each |
+| `wan2.2-ti2v-5b` | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` | `WanPipeline` | text2video, image2video | 1280 × 704 | 50 | 5.0 | 121 / 24 | 24 GB | — |
+
+Rows with an image-conditioned kind resolve to a sibling pipeline class where the family provides one — `WanPipeline` becomes `WanImageToVideoPipeline` for an `image2video` job against `wan2.2-ti2v-5b`, while a class that already covers image input keeps it.
+
+`qwen-image-flash` is `qwen-image` distilled onto a four-step trajectory with guidance disabled — the same 20.4B transformer and the same VRAM floor, one twelfth of the pixel-steps, so it quotes at one twelfth of the price. It is the one row not under a permissive license: the NVIDIA Open Model License puts it in the `CommercialCustom` tier, and a worker naming it must enroll on a node started with `--accept-license nvidia-open-model`. Every other row is admitted by default. The check runs at `tenzro_mediaGen_enrollWorker` rather than at load, because the node never loads media-gen weights — the Python worker does — so enrollment is the only point at which the protocol sees what an operator is about to serve.
+
+### 8.4 Split-expert rendering
+
+Two distinct model shapes are called mixture-of-experts in the generative-media literature. Only one of them is a distribution primitive.
+
+**Token-routed MoE** — a learned router selects experts per token inside every forward pass. Splitting it across machines means a round trip per layer per token. This is the shape §3 addresses for language models, where the dispatch planner amortizes it; it is not what the media catalog carries.
+
+**Timestep-boundary expert pairs** — two transformers trained for different noise regimes, one for the high-noise prefix of the schedule and one for the low-noise remainder. There is no learned router: a fixed noise threshold decides which expert owns a step. Wan 2.2 A14B is this shape. Exactly one intermediate latent crosses between the two halves, once per job.
+
+That single handoff is what makes it a distribution primitive. One expert needs 48 GB where the whole model needs 80, so two commodity accelerators render what one could not, and the coordination cost is one blob transfer rather than one per layer.
+
+**The boundary is a noise level, not a step index.** A step belongs to the high-noise expert while
+
+```
+t >= boundary_ratio × scheduler.config.num_train_timesteps
+```
+
+Timesteps descend through the schedule, so that set is always a prefix and one integer index splits it. `boundary_ratio` is a fraction of the scheduler's *training* timestep count — for Wan 2.2 A14B, `0.875` of 1000. A 40-step job and a 100-step job therefore split at the same noise level and at different indices, which is why the protocol records `steps_completed` from the worker rather than assuming a fixed fraction.
+
+**Loading one half.** Both transformer slots are optional in the `diffusers` Wan pipeline, and every internal read falls back to the other slot when one is unset. A worker holding the high-noise expert loads it into `transformer` and leaves `transformer_2` unset; a low-noise holder does the reverse. The low-noise worker resumes the schedule with `scheduler.set_begin_index(boundary_index)`.
+
+**Assignment.** `MediaGenWorkerCapability` carries `supported_models` (models the worker serves whole) and `expert_holdings` (individual halves, for models it cannot). A worker with the VRAM for both halves lists the model in `supported_models`, and claims each half separately anyway — the protocol makes no exception for co-location, which keeps the signed step counts and the payment split identical whether the two halves run on one machine or two.
+
+### 8.5 Pricing and the payment split
+
+The work unit is the pixel-step: `width × height × steps × frames`, with frames defaulting to 1 for image kinds. A quote is `base_fee + per_pixel_step × pixel_steps`, with `DEFAULT_BASE_FEE = 1 × 10¹⁵` attoTNZO and `DEFAULT_PER_PIXEL_STEP = 1 × 10⁹` attoTNZO. A job whose ceiling falls below the quote is rejected at admission rather than claimed and abandoned.
+
+A non-split job pays the single worker `10_000` basis points. A split job pays proportionally to the schedule each half actually rendered:
+
+```
+high_bps = steps_completed × 10_000 / total_steps
+low_bps  = 10_000 − high_bps
+```
+
+`steps_completed` comes from the signed handoff, not from either worker's later claim. Overstating a half would take a forged Ed25519 signature over the handoff preimage.
+
+### 8.6 Commitments
+
+Three SHA-256 preimages under three distinct domain tags:
+
+| Tag | Binds |
+|---|---|
+| `tenzro/media-gen/job-id` | requester DID and address, model ID, kind, every parameter, price ceiling, creation timestamp |
+| `tenzro/media-gen/handoff` | job ID, handing-off worker DID and address, latent hash, latent byte length, `steps_completed`, handoff timestamp |
+| `tenzro/media-gen/receipt` | job ID, the executed task spec, worker DID and address, output hash, output MIME, output byte length, seed used, generation time, price paid, completion timestamp |
+
+Distinct tags keep a handoff signature from being replayed as a receipt signature. Encoding rules: integers big-endian at their declared width, `Timestamp` as two's-complement i64 milliseconds, `f32` as the IEEE-754 big-endian bit pattern, variable-length fields prefixed with a big-endian u32 byte count, `Option` as a presence byte then the value. Raw 32-byte hashes embed bare; addresses are length-prefixed. `metadata` is excluded from every preimage — a map has no canonical ordering across encoders, so binding it would make the digest encoder-dependent.
+
+The job id is the digest of its own contents, so a spec carrying someone else's id still hashes to what it actually says. `tenzro_mediaGen_getReceipt` returns the signature alongside the receipt; the Python and Rust implementations recompute the same preimages, and `integrations/media_gen/tests/` pins the field order against the same fixture values the Rust suite uses.
+
+### 8.7 Payload store
+
+Three payload kinds share one content-addressed store: the rendered output, the intermediate latent on a split job, and the requester's conditioning image. All three are addressed by `tenzro://blob/`, fetched over the node's iroh endpoint, and verified on read.
+
+`Hash` is SHA-256 — the canonical Tenzro hash, and what the commitments bind. iroh-blobs indexes by BLAKE3. `tenzro_mediaGen_publishOutput` therefore returns both: `output_hash` for the commitment and `locator` for the fetch. A worker that publishes a latent records the SHA-256 in the handoff it signs; its partner fetches by locator and verifies the SHA-256 before resuming, so iroh-blobs' own BLAKE3 verification and the protocol's hash check are independent.
+
+### 8.8 Lifecycle
+
+```
+postJob → claimJob → markRunning → render
+                                     ├─ recordHandoff   (high-noise half of a split job)
+                                     └─ submitReceipt   (whole job, or low-noise half)
+```
+
+`failJob` is terminal: a failed job does not requeue. A worker waiting on a split partner waits a bounded interval and then fails the job explicitly rather than abandoning it. `cancelJob` is the requester's path, valid until a worker has claimed.
+
+Job status is `pending` | `claimed` | `running` | `completed` | `failed` | `cancelled`. Expert role is `high_noise` | `low_noise`.
+
+### 8.9 Surfaces
+
+Eighteen JSON-RPC methods under `tenzro_mediaGen_`:
+
+| Group | Methods |
+|---|---|
+| Discovery | `listCatalog`, `quote`, `listWorkers` |
+| Requester | `postJob`, `listJobs`, `getJob`, `cancelJob`, `getReceipt`, `fetchOutput`, `fetchInput` |
+| Worker | `enrollWorker`, `claimJob`, `markRunning`, `failJob`, `publishOutput`, `recordHandoff`, `submitReceipt`, `fetchLatent` |
+
+The same surface is reachable through the CLI (`tenzro media-gen …`), the MCP server, and the A2A `media-gen` skill. Job, worker, and receipt events broadcast on the `tenzro/media-gen` gossip topic.
+
+The Python worker's own CLI (`tenzro-media-gen`) covers both sides: `catalog`, `quote`, `post`, `jobs`, `get`, `cancel`, `receipt`, `fetch` for requesters, and `keygen`, `enroll`, `serve`, `workers` for operators. The requester surface installs without torch. See [`integrations/media_gen/README.md`](../integrations/media_gen/README.md).
 

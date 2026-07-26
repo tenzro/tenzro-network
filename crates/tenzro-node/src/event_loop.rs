@@ -198,6 +198,21 @@ pub enum NodeEvent {
     /// `accept_outer_gradient` path dedups by `trainer_did`, so
     /// re-receiving a self-published gradient is a no-op.
     TrainingGossipReceived { topic: String, bytes: Vec<u8> },
+    /// Generative-media gossip message received on `tenzro/media-gen`.
+    ///
+    /// Carries one of the five variants in
+    /// [`tenzro_media_gen::MediaGenGossipMessage`]: `WorkerEnrolled`,
+    /// `JobPosted`, `JobClaimed`, `HandoffPublished`, `ReceiptSubmitted`.
+    ///
+    /// Dispatch goes through the runtime's observer methods, which keep the
+    /// invariants that belong to the job itself and drop the ones that only
+    /// hold on the node doing the work. Each is idempotent, so a publisher
+    /// receiving its own announcement back is a no-op.
+    ///
+    /// The two bulk-carrying variants also carry a transport locator. When
+    /// present it is recorded against the content hash so a node that did not
+    /// render the bytes can still fetch them.
+    MediaGenGossipReceived { topic: String, bytes: Vec<u8> },
     /// SeedAgent (Spec 10) gossip message received on `tenzro/seed-agents`.
     ///
     /// Carries one of the five variants in
@@ -490,6 +505,19 @@ pub struct EventLoop {
     /// dedups by `trainer_did`, so re-receiving a self-published gradient
     /// (the publisher is also subscribed to its own topic) is a no-op.
     training_runtime: Option<Arc<tenzro_training::TrainingRuntime>>,
+    /// Shared reference to the node's `MediaGenRuntime`, used to mirror job
+    /// state announced on the `tenzro/media-gen` topic so local workers know
+    /// what is already taken. Absent on nodes that don't initialize the
+    /// subsystem, in which case inbound messages are decoded and logged only.
+    media_gen_runtime: Option<Arc<tenzro_media_gen::MediaGenRuntime>>,
+    /// Concrete handle on the iroh-backed generative-media output store.
+    ///
+    /// The runtime holds the same store behind `dyn MediaGenOutputStore`,
+    /// which is the fetch-and-verify surface. Recording a locator learned
+    /// from gossip is specific to the iroh adapter — it is the translation
+    /// from the SHA-256 a receipt commits to into the BLAKE3 iroh-blobs
+    /// indexes by — so it needs the concrete type.
+    media_gen_output_store: Option<Arc<tenzro_iroh::IrohMediaGenOutputStore>>,
     /// Shared reference to the node's `SeedAgentEarmarkManager` (Spec 10)
     /// used to apply idempotent state updates received over the
     /// `tenzro/seed-agents` gossipsub topic. Absent on light clients or
@@ -715,6 +743,8 @@ impl EventLoop {
             remote_cortex_workers: None,
             iroh_resolver: None,
             training_runtime: None,
+            media_gen_runtime: None,
+            media_gen_output_store: None,
             seed_agent_manager: None,
             database_registry: None,
             kill_switch_store: None,
@@ -1070,6 +1100,29 @@ impl EventLoop {
         runtime: Arc<tenzro_training::TrainingRuntime>,
     ) -> Self {
         self.training_runtime = Some(runtime);
+        self
+    }
+
+    /// Wires the shared `MediaGenRuntime` so the event loop can mirror job
+    /// state announced on `tenzro/media-gen`. Without this wired, media-gen
+    /// payloads decoded off the wire are dropped with a debug-level log.
+    pub fn with_media_gen_runtime(
+        mut self,
+        runtime: Arc<tenzro_media_gen::MediaGenRuntime>,
+    ) -> Self {
+        self.media_gen_runtime = Some(runtime);
+        self
+    }
+
+    /// Wires the iroh-backed generative-media output store so locators
+    /// carried by inbound receipts and handoffs can be recorded against the
+    /// content hash they name. Without this wired, a job's bytes remain
+    /// reachable only from the node that rendered them.
+    pub fn with_media_gen_output_store(
+        mut self,
+        store: Arc<tenzro_iroh::IrohMediaGenOutputStore>,
+    ) -> Self {
+        self.media_gen_output_store = Some(store);
         self
     }
 
@@ -3044,6 +3097,170 @@ impl EventLoop {
                                     %topic,
                                     error = %e,
                                     "Failed to decode TrainingGossip payload"
+                                ),
+                            }
+                        }
+                        NodeEvent::MediaGenGossipReceived { topic, bytes } => {
+                            match tenzro_media_gen::decode_for_topic(&topic, &bytes) {
+                                Ok(tenzro_media_gen::MediaGenGossipMessage::WorkerEnrolled(
+                                    capability,
+                                )) => {
+                                    // Announcement only. The runtime's worker
+                                    // registry is what `claim_job` authorizes
+                                    // against, so a remote capability must not
+                                    // enter it — otherwise a local RPC caller
+                                    // could claim work on a remote worker's
+                                    // behalf. Nothing on this node reads a
+                                    // remote worker's capability, so nothing
+                                    // stores it.
+                                    debug!(
+                                        worker_did = %capability.worker_did,
+                                        models = capability.supported_models.len(),
+                                        experts = capability.expert_holdings.len(),
+                                        "Observed media-gen worker enrollment on a remote node"
+                                    );
+                                }
+                                Ok(tenzro_media_gen::MediaGenGossipMessage::JobPosted(spec)) => {
+                                    // Whether a job splits is a property of the
+                                    // model, not of the spec: the protocol crate
+                                    // is catalog-free, so the posting side reads
+                                    // the catalog and the receiving side has to
+                                    // read it too to reconstruct the same job.
+                                    let job_id = spec.job_id.clone();
+                                    let splits =
+                                        tenzro_model::media_gen_model_splits(&spec.model_id);
+                                    if let Some(ref runtime) = self.media_gen_runtime {
+                                        let posted = if splits {
+                                            runtime.post_split_job(spec)
+                                        } else {
+                                            runtime.post_job(spec)
+                                        };
+                                        match posted {
+                                            Ok(job) => info!(
+                                                %job_id,
+                                                model_id = %job.task_spec.model_id,
+                                                split = splits,
+                                                "Mirrored media-gen job posted on a remote node"
+                                            ),
+                                            Err(
+                                                tenzro_media_gen::MediaGenError::JobAlreadyExists {
+                                                    ..
+                                                },
+                                            ) => debug!(
+                                                %job_id,
+                                                "Media-gen job already held; re-delivery ignored"
+                                            ),
+                                            Err(e) => warn!(
+                                                %job_id,
+                                                error = %e,
+                                                "Rejected gossiped media-gen job"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %job_id,
+                                            "Observed media-gen job (runtime not wired)"
+                                        );
+                                    }
+                                }
+                                Ok(tenzro_media_gen::MediaGenGossipMessage::JobClaimed(claim)) => {
+                                    let job_id = claim.job_id.clone();
+                                    if let Some(ref runtime) = self.media_gen_runtime {
+                                        match runtime.observe_claim(&claim) {
+                                            Ok(job) => info!(
+                                                %job_id,
+                                                worker_did = %claim.worker_did,
+                                                role = ?claim.role,
+                                                status = %job.status,
+                                                "Mirrored media-gen claim"
+                                            ),
+                                            Err(e) => debug!(
+                                                %job_id,
+                                                error = %e,
+                                                "Media-gen claim not applied"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %job_id,
+                                            "Observed media-gen claim (runtime not wired)"
+                                        );
+                                    }
+                                }
+                                Ok(tenzro_media_gen::MediaGenGossipMessage::HandoffPublished {
+                                    handoff,
+                                    latent_locator,
+                                }) => {
+                                    // Record the locator before the commitment.
+                                    // The low-noise worker on this node reads
+                                    // the handoff to decide it can start, and
+                                    // the fetch it makes next needs the
+                                    // translation from the SHA-256 the handoff
+                                    // names into the BLAKE3 iroh-blobs indexes.
+                                    let job_id = handoff.job_id.clone();
+                                    if let (Some(store), Some(locator)) =
+                                        (&self.media_gen_output_store, latent_locator)
+                                    {
+                                        store.record_blake3(handoff.latent_hash, locator);
+                                    }
+                                    if let Some(ref runtime) = self.media_gen_runtime {
+                                        match runtime.observe_handoff(handoff) {
+                                            Ok(job) => info!(
+                                                %job_id,
+                                                steps_completed = job
+                                                    .handoff
+                                                    .as_ref()
+                                                    .map(|h| h.steps_completed)
+                                                    .unwrap_or(0),
+                                                "Mirrored media-gen handoff"
+                                            ),
+                                            Err(e) => debug!(
+                                                %job_id,
+                                                error = %e,
+                                                "Media-gen handoff not applied"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %job_id,
+                                            "Observed media-gen handoff (runtime not wired)"
+                                        );
+                                    }
+                                }
+                                Ok(tenzro_media_gen::MediaGenGossipMessage::ReceiptSubmitted {
+                                    receipt,
+                                    output_locator,
+                                }) => {
+                                    let job_id = receipt.job_id.clone();
+                                    if let (Some(store), Some(locator)) =
+                                        (&self.media_gen_output_store, output_locator)
+                                    {
+                                        store.record_blake3(receipt.output_hash, locator);
+                                    }
+                                    if let Some(ref runtime) = self.media_gen_runtime {
+                                        match runtime.observe_receipt(receipt) {
+                                            Ok(job) => info!(
+                                                %job_id,
+                                                status = %job.status,
+                                                "Mirrored media-gen receipt"
+                                            ),
+                                            Err(e) => debug!(
+                                                %job_id,
+                                                error = %e,
+                                                "Media-gen receipt not applied"
+                                            ),
+                                        }
+                                    } else {
+                                        debug!(
+                                            %job_id,
+                                            "Observed media-gen receipt (runtime not wired)"
+                                        );
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    %topic,
+                                    error = %e,
+                                    "Failed to decode MediaGenGossip payload"
                                 ),
                             }
                         }

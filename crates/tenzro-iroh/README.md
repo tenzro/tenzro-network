@@ -17,6 +17,7 @@ DCUtR); iroh handles bulk content-addressed transport.
 | `IrohBlobsDaBackend`   | `tenzro_storage::da::DaBackend` adapter. Locator = raw 32-byte BLAKE3. `commitment_kzg` / `attestation_root` both `None` (iroh-blobs verifies BLAKE3 end-to-end on transfer). Registered under `DaBackendId::IrohBlobs`. |
 | `IrohGradientStore`    | `tenzro_training::GradientPayloadStore` adapter. Keeps a `DashMap<SHA-256, BLAKE3-hex>` because the protocol hash (SHA-256) differs from the transport hash (BLAKE3). |
 | `IrohSealedShardStore` | Sponsor-DID-signed `SealedDatasetManifest` distribution over `tenzro/training` gossipsub + per-shard ciphertext fetch via iroh-blobs. Deliberately not iroh-docs (manifest is immutable). |
+| `IrohMediaGenOutputStore` | `tenzro_media_gen::MediaGenOutputStore` adapter carrying rendered images and video plus the one intermediate latent a split job hands between its two experts. Same `DashMap<SHA-256, BLAKE3-hex>` indirection as the gradient store; `record_blake3` lets a node that did not render the bytes fetch them from a gossiped receipt. |
 | `TenzroIrohConfig`     | Endpoint config used by `tenzro-node` to construct the resolver — `pkarr_relay_url`, `secret_key_seed`, `enable`.                  |
 
 ## Wiring
@@ -25,7 +26,8 @@ A node constructs **one** `IrohBackedResolver` at startup. The same endpoint
 services every consumer above. Wiring lives in `tenzro-node`:
 `init_ai_infrastructure` binds the endpoint before initializing `MemoryManager`
 (so the memory archive can pick up `IrohBlobsDaBackend`) and attaches it to
-`TrainingRuntime` as the payload store.
+`TrainingRuntime` as the payload store and to the media-gen queue as the output
+store.
 
 ## Phases shipped
 

@@ -22,6 +22,7 @@ use commands::{
     ZkCommand, VrfCommand, CustodyCommand, AppCommand,
     CortexCommand, Ap2Command, Erc8004Command, WormholeCommand, CcipCommand, CctCommand,
     TrainCommand,
+    MediaGenCommand,
     DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TextSegmentCommand,
     TranscribeCommand,
     AuthCommand,
@@ -251,6 +252,10 @@ enum Command {
     /// Tenzro Train — decentralized verifiable foundation-model training
     #[command(subcommand)]
     Train(TrainCommand),
+
+    /// Tenzro Media Gen — decentralized generative image and video
+    #[command(subcommand, name = "media-gen")]
+    MediaGen(MediaGenCommand),
 
     /// Text embeddings (Qwen3-Embedding, EmbeddingGemma, BGE-M3)
     #[command(subcommand, name = "embed-text")]
@@ -673,6 +678,7 @@ async fn main() -> Result<()> {
         Command::Ccip(cmd) => cmd.execute().await?,
         Command::Cct(cmd) => cmd.execute().await?,
         Command::Train(cmd) => cmd.execute().await?,
+        Command::MediaGen(cmd) => cmd.execute().await?,
         Command::EmbedText(cmd) => cmd.execute().await?,
         Command::Segment(cmd) => cmd.execute().await?,
         Command::TextSegment(cmd) => cmd.execute().await?,

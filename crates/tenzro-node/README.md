@@ -12,9 +12,9 @@ The `tenzro-node` crate provides the complete node binary that integrates all Te
 - **Modular Architecture**: Clean separation of concerns across subsystems
 - **Health Monitoring**: Real-time health tracking for all subsystems
 - **Metrics Collection**: Performance metrics and statistics
-- **JSON-RPC API**: Standard API for querying and interacting with the node (700+ methods across 30+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, settlement, escrow, agents, identity, network, governance, payments, x402 bazaar, ap2, staking, canton, task marketplace, agent marketplace, token registry, databases, app hosting (sites, functions, machines, leases), bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
-- **MCP Server**: Model Context Protocol server with 500+ tools (base + 29 multi-modal AI + 8 distributed MoE serving + 29 app hosting + 3 AgentBond/insurance + 3 agent-memory) on `rmcp` Streamable HTTP transport at `/mcp`, port 3001
-- **A2A Server**: Agent-to-Agent protocol server with 68 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
+- **JSON-RPC API**: Standard API for querying and interacting with the node (700+ methods across 31+ namespaces: blockchain, EVM-compat, accounts, token, models, inference, forecast, vision, text-embedding, segmentation, detection, audio, video, generative media, settlement, escrow, agents, identity, network, governance, payments, x402 bazaar, ap2, staking, canton, task marketplace, agent marketplace, token registry, databases, app hosting (sites, functions, machines, leases), bridge/crosschain, deBridge, wormhole, cct, erc8004, NFT, compliance, events, TEE, ZK, VRF, skill/tool registry, onboarding)
+- **MCP Server**: Model Context Protocol server with 500+ tools (base + 29 multi-modal AI + 6 generative media + 8 distributed MoE serving + 29 app hosting + 3 AgentBond/insurance + 3 agent-memory) on `rmcp` Streamable HTTP transport at `/mcp`, port 3001
+- **A2A Server**: Agent-to-Agent protocol server with 40 skills (JSON-RPC 2.0, SSE streaming, Agent Card at port 3002)
 - **Web Verification API**: REST endpoints for ZK proof, TEE attestation, and transaction verification (port 8080)
 - **Graceful Shutdown**: Clean shutdown sequence for all subsystems
 - **TEE Integration**: Optional Trusted Execution Environment support (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
@@ -148,7 +148,7 @@ Shutdown occurs in reverse order to ensure clean resource cleanup.
 
 The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0:8545`).
 
-### RPC Namespaces (700+ methods, 30+ namespaces)
+### RPC Namespaces (700+ methods, 31+ namespaces)
 
 - **Blockchain**: blockNumber, getBlock, getBlockRange (batch fetch for catch-up sync), getTransaction (returns `status: "pending" | "finalized"` so callers can distinguish in-mempool from block-included transactions), submitBlock
 - **Accounts**: createAccount, createWallet (chain-agnostic — see "Wallet model" below), getBalance, getNonce, listAccounts
@@ -162,6 +162,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0
 - **Detection**: listDetectionCatalog, listDetectionModels, loadDetectionModel, unloadDetectionModel, detect
 - **Audio (ASR)**: listAudioCatalog, listAudioModels, loadAudioModel, unloadAudioModel, transcribe
 - **Video**: listVideoCatalog, listVideoModels, loadVideoModel, unloadVideoModel, videoEmbed
+- **Generative Media**: tenzro_mediaGen_listCatalog, quote, postJob, getJob, listJobs, cancelJob, enrollWorker, listWorkers, claimJob, markRunning, failJob, recordHandoff, submitReceipt, getReceipt, fetchInput, publishOutput, fetchOutput, fetchLatent — image and video generation priced by the pixel-step (`width × height × steps × frames`). The node owns the job queue, the worker registry, the pricing, and the signed receipts; the denoising loop runs in the Python worker at `integrations/media_gen/`, so no tensor library enters the Rust workspace. A model whose catalog entry carries an `expert_pair` splits at a timestep boundary: the high-noise worker renders the prefix, commits to one intermediate latent via `recordHandoff`, and its partner finishes and decodes — two 48 GB accelerators serve a model needing 80 GB, with payment split by the steps each half completed. Enrollment is where media-gen license terms are held, because the node never loads the weights
 - **Settlement**: settle, getSettlement
 - **Agents**: registerAgent (provisioner mode → server-held FROST-Ed25519 + ML-DSA-65 hybrid wallet, returns `classical_public_key` + `pq_verifying_key_len`; BYOK mode → caller supplies `public_key` (32B Ed25519) + `pq_public_key` (1952B ML-DSA-65), `byok: true`), sendAgentMessage (optional hybrid `signature` (64B Ed25519) + `pq_signature` (3309B ML-DSA-65) — both or neither; mixed-mode rejected)
 - **Identity**: registerIdentity, importIdentity, resolveDidDocument, resolveIdentity, participate, forgetIdentity (GDPR Article 17 right-to-erasure — DID must already be `Revoked`)
@@ -342,16 +343,16 @@ POST /faucet                   -- Request testnet TNZO tokens
 
 ## Ecosystem MCP Servers
 
-Five additional MCP servers provide direct blockchain interaction:
+Six additional MCP servers provide direct blockchain interaction:
 
 | Server | Port | Description |
 |--------|------|-------------|
 | Solana MCP | 3003 | 14 tools: Jupiter, SPL, Metaplex, Bonfida SNS |
 | Ethereum MCP | 3004 | 17 tools: Chainlink, ENS, ERC-20, ERC-8004, EAS |
-| Canton MCP | 3005 | 15 tools: DAML, CIP-56, DvP, tokenization |
+| Canton MCP | 3005 | 23 tools: DAML, CIP-56, DvP, tokenization |
 | LayerZero MCP | 3006 | 21 tools: V2 messaging, OFT, Value Transfer API, Stargate V2 |
 | Chainlink MCP | 3007 | 21 tools: CCIP, data feeds, VRF v2.5, PoR, automation |
-| LI.FI MCP | 3008 | Cross-chain bridge aggregation |
+| LI.FI MCP | 3008 | 9 tools: cross-chain bridge aggregation, quotes, routes |
 
 ## Health & Metrics
 

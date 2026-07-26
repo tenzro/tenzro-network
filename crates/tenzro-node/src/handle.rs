@@ -252,24 +252,36 @@ async fn spawn_in_background_inner(
         std::sync::Arc::new(binder)
     });
 
-    if node.config().payments.enabled
+    // Mirror main.rs: serving models is what the network pays providers for,
+    // so a node in the `ai` role gates its inference routes by default,
+    // settling to its own validator address unless the operator opted out.
+    let default_recipient = node.local_validator_address().map(|a| a.to_string());
+    let payments = node
+        .config()
+        .payments
+        .effective(&node.config().roles, default_recipient.as_deref());
+
+    if payments.gate_on
         && let Some(gateway) = node.payment_gateway()
     {
-        let payments = &node.config().payments;
         let mut rpc_gate = tenzro_payments::middleware::PaymentGateMiddleware::new(
             gateway.clone(),
             tenzro_payments::middleware::PaymentGateConfig {
-                default_amount: payments.default_amount,
-                default_asset: payments.default_asset.clone(),
+                default_amount: payments.amount,
+                default_asset: payments.asset.clone(),
                 recipient: payments.recipient.clone(),
-                default_protocol: payments.default_protocol.clone(),
+                default_protocol: payments.protocol.clone(),
             },
             gateway.challenge_store(),
         );
         if let Some(ref binder) = identity_binder {
             rpc_gate = rpc_gate.with_identity_binder(binder.clone());
         }
-        info!("HTTP 402 payment gate enabled for embedded RPC /v1/chat/completions");
+        info!(
+            recipient = %payments.recipient,
+            amount = %payments.amount,
+            "HTTP 402 payment gate enabled for embedded RPC /v1/chat/completions",
+        );
         rpc_server = rpc_server.with_payment_gate(rpc_gate);
     }
 

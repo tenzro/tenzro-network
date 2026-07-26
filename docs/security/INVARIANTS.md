@@ -83,6 +83,21 @@ invariant exercises it mechanically (see `fuzz/README.md`).
 | E2 | Confidential-tier trainer enrollment requires attestation ↔ `enclave_pubkey` ↔ measurement parity | `tenzro-training::confidential validate_confidential_enrollment` |
 | E3 | Off-hardware key sealing fails closed (no simulation on live nodes) | `TeeKeyshareSealer::derive_auto` |
 
+## Generative media
+
+| # | Invariant | Enforced at |
+|---|---|---|
+| G1 | A job id is a domain-tagged SHA-256 over the whole posted spec, including any conditioning-image hash, so the terms a receipt is checked against cannot be swapped after posting | `crates/tenzro-media-gen/src/commitments.rs compute_job_id` / `expected_job_id`, checked in `post_job` |
+| G2 | The three signed stages use distinct domain tags (`tenzro/media-gen/job-id`, `/handoff`, `/receipt`), so a signature from one stage is not replayable as another | `commitments.rs` tag constants + preimage builders |
+| G3 | A charge above the requester's posted ceiling is rejected; the ceiling is checked at admission, not after a claim | `crates/tenzro-media-gen/src/pricing.rs enforce_ceiling` |
+| G4 | Image kinds are priced as one frame regardless of any stray `num_frames` — a still is never billed as a clip | `pricing.rs pixel_steps` |
+| G5 | Fetched bytes are accepted only at the exact size and content hash the receipt (or handoff, for the intermediate latent) committed to | `crates/tenzro-media-gen/src/output_store.rs verify_output` / `verify_latent` / `verify_input` |
+| G6 | A split job's payment division reads `steps_completed` from the signed handoff, never from a worker's claim; the two shares always sum to 10000 bps with rounding to the low-noise half | `crates/tenzro-media-gen/src/runtime.rs apply_shares` |
+| G7 | A handoff whose `steps_completed` exceeds the job's total steps is rejected, and a second handoff for the same job cannot replace the first | `runtime.rs` `HandoffStepsOutOfRange` / `HandoffAlreadyRecorded` |
+| G8 | A completed job cannot be re-completed with a different output hash, and a receipt whose spec differs from the posted spec is rejected | `runtime.rs` `ReceiptSpecMismatch` |
+| G9 | Only an enrolled worker can claim, each expert role is claimable once, and a split job cannot be claimed whole (nor a whole job claimed by role) | `runtime.rs` `WorkerNotEnrolled` / `RoleAlreadyClaimed` / `RoleRequired` / `RoleNotRequired` |
+| G10 | Worker enrollment refuses any model outside the curated catalog, or one whose license terms the operator did not accept at startup | `handle_media_gen_enroll_worker` in `crates/tenzro-node/src/rpc.rs` → `check_model_license` |
+
 ## RPC authorization
 
 | # | Invariant | Enforced at |

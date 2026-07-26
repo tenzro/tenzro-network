@@ -2029,6 +2029,25 @@ async fn dispatch_request(
         "tenzro_training_challengeCommitment" => handle_training_challenge_commitment(node, request.params).await,
         "tenzro_training_installSealedManifest" => handle_training_install_sealed_manifest(node, request.params).await,
         "tenzro_training_getSealedManifest" => handle_training_get_sealed_manifest(node, request.params).await,
+        // Tenzro Media Gen (decentralized generative image and video)
+        "tenzro_mediaGen_listCatalog" => handle_media_gen_list_catalog().await,
+        "tenzro_mediaGen_quote" => handle_media_gen_quote(node, request.params).await,
+        "tenzro_mediaGen_postJob" => handle_media_gen_post_job(node, request.params).await,
+        "tenzro_mediaGen_listJobs" => handle_media_gen_list_jobs(node, request.params).await,
+        "tenzro_mediaGen_getJob" => handle_media_gen_get_job(node, request.params).await,
+        "tenzro_mediaGen_cancelJob" => handle_media_gen_cancel_job(node, request.params).await,
+        "tenzro_mediaGen_enrollWorker" => handle_media_gen_enroll_worker(node, request.params).await,
+        "tenzro_mediaGen_listWorkers" => handle_media_gen_list_workers(node).await,
+        "tenzro_mediaGen_claimJob" => handle_media_gen_claim_job(node, request.params).await,
+        "tenzro_mediaGen_markRunning" => handle_media_gen_mark_running(node, request.params).await,
+        "tenzro_mediaGen_failJob" => handle_media_gen_fail_job(node, request.params).await,
+        "tenzro_mediaGen_publishOutput" => handle_media_gen_publish_output(node, request.params).await,
+        "tenzro_mediaGen_recordHandoff" => handle_media_gen_record_handoff(node, request.params).await,
+        "tenzro_mediaGen_submitReceipt" => handle_media_gen_submit_receipt(node, request.params).await,
+        "tenzro_mediaGen_getReceipt" => handle_media_gen_get_receipt(node, request.params).await,
+        "tenzro_mediaGen_fetchOutput" => handle_media_gen_fetch_output(node, request.params).await,
+        "tenzro_mediaGen_fetchLatent" => handle_media_gen_fetch_latent(node, request.params).await,
+        "tenzro_mediaGen_fetchInput" => handle_media_gen_fetch_input(node, request.params).await,
         "tenzro_deleteModel" | "tenzro_deleteModelMcp" => handle_delete_model(node, request.params).await,
         "tenzro_pruneModelRegistry" => handle_prune_model_registry(node).await,
         "tenzro_cleanupIdleLocalModelServices" => handle_cleanup_idle_local_model_services(node).await,
@@ -53137,6 +53156,744 @@ async fn handle_training_get_sealed_manifest(
         }),
         None => Ok(Value::Null),
     }
+}
+
+// ============================================================================
+// Tenzro Media Gen RPC handlers
+// ============================================================================
+//
+// The Rust protocol layer owns the job queue, worker registry, pricing, and
+// receipts; the denoising loop runs in the Python reference worker at
+// `integrations/media_gen/`. See AI.md for the split rationale — it is the
+// same one Tenzro Train uses.
+//
+// A handler that mutates state broadcasts on `tenzro/media-gen` only after the
+// local mutation succeeds, so a neighbour's mirror never records a transition
+// the authority rejected. `markRunning` and `failJob` have no gossip envelope
+// and stay local: inventing one would put a message on the wire that no
+// consumer reads.
+
+/// Map a `MediaGenError` to a JSON-RPC error.
+fn media_gen_err(e: tenzro_media_gen::MediaGenError) -> JsonRpcError {
+    use tenzro_media_gen::MediaGenError as ME;
+    let code = match &e {
+        ME::JobNotFound(_)
+        | ME::JobAlreadyExists { .. }
+        | ME::WorkerNotEnrolled(_)
+        | ME::WorkerAlreadyEnrolled { .. }
+        | ME::WorkerCannotServe { .. }
+        | ME::IllegalTransition { .. }
+        | ME::NotJobHolder { .. }
+        | ME::InvalidTaskSpec(_)
+        | ME::RoleNotRequired { .. }
+        | ME::RoleRequired { .. }
+        | ME::RoleAlreadyClaimed { .. }
+        | ME::HandoffMissing { .. }
+        | ME::HandoffAlreadyRecorded { .. }
+        | ME::HandoffStepsOutOfRange { .. }
+        | ME::PriceCeilingExceeded { .. }
+        | ME::ReceiptSpecMismatch { .. }
+        | ME::OutputSizeMismatch { .. }
+        | ME::OutputHashMismatch
+        | ME::OutputNotFound(_) => -32602,
+        ME::NoOutputStore | ME::Storage(_) | ME::Serialization(_) => -32603,
+    };
+    JsonRpcError {
+        code,
+        message: e.to_string(),
+        data: None,
+    }
+}
+
+/// The node's media-gen output store. Absent when no iroh endpoint is bound,
+/// in which case there is nowhere to put rendered bytes.
+fn media_gen_store(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<&Arc<tenzro_iroh::IrohMediaGenOutputStore>, JsonRpcError> {
+    node.media_gen_output_store
+        .as_ref()
+        .ok_or_else(|| JsonRpcError {
+            code: -32603,
+            message: "no media-gen output store on this node (iroh resolver unbound)".to_string(),
+            data: None,
+        })
+}
+
+/// Publish an encoded `tenzro/media-gen` envelope. A failure here is logged
+/// rather than returned: the local mutation is already committed, and a
+/// neighbour that misses one envelope re-learns the job from the next.
+async fn broadcast_media_gen(node: &Arc<TenzroNode>, job_id: &str, bytes: Vec<u8>) {
+    let Some(network) = node.network() else {
+        return;
+    };
+    let msg = tenzro_network::NetworkMessage::new(tenzro_network::MessagePayload::Custom {
+        topic: tenzro_media_gen::MEDIA_GEN_TOPIC.to_string(),
+        data: bytes,
+    });
+    if let Err(e) = network
+        .broadcast(tenzro_media_gen::MEDIA_GEN_TOPIC, msg)
+        .await
+    {
+        tracing::warn!(%job_id, error = %e, "Failed to broadcast on tenzro/media-gen");
+    }
+}
+
+/// `tenzro_mediaGen_listCatalog`: the curated generative-media catalog. Every
+/// entry is ungated on HuggingFace, loadable whole by a `diffusers` pipeline,
+/// and serves at least one media-gen kind.
+async fn handle_media_gen_list_catalog() -> std::result::Result<Value, JsonRpcError> {
+    let catalog = tenzro_model::get_media_gen_catalog();
+    let count = catalog.len();
+    let models = serde_json::to_value(&catalog).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize media-gen catalog: {}", e),
+        data: None,
+    })?;
+    Ok(serde_json::json!({ "models": models, "count": count }))
+}
+
+/// `tenzro_mediaGen_quote`: price a job before posting it, so the requester
+/// can set `max_price` from the same figure the runtime will charge against.
+///
+/// Params: `{ kind, params: MediaGenParams }`
+async fn handle_media_gen_quote(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let kind_str = p
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("kind"))?;
+    let kind = tenzro_types::MediaGenKind::from_str_lossy(kind_str).ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: format!("unknown media-gen kind '{}'", kind_str),
+        data: None,
+    })?;
+    let params_value = p.get("params").ok_or_else(|| missing_param("params.params"))?;
+    let gen_params: tenzro_types::MediaGenParams = serde_json::from_value(params_value.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid params: {}", e),
+            data: None,
+        })?;
+    gen_params.validate_for(kind).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: e.to_string(),
+        data: None,
+    })?;
+
+    let pricing = node.media_gen_runtime.pricing();
+    Ok(serde_json::json!({
+        "kind": kind.to_string(),
+        "pixel_steps": tenzro_media_gen::pixel_steps(kind, &gen_params).to_string(),
+        "per_pixel_step": pricing.per_pixel_step.to_string(),
+        "base_fee": pricing.base_fee.to_string(),
+        "quote": pricing.quote(kind, &gen_params).to_string(),
+    }))
+}
+
+/// `tenzro_mediaGen_postJob`: admit a job onto the local queue and announce it.
+///
+/// Whether the job splits its denoising schedule across two experts is read
+/// from the catalog, never from the caller: the spec carries no role list, so
+/// the posting node and every node mirroring the announcement have to derive
+/// the same answer from the model id or they hold different jobs under one id.
+///
+/// Params: `{ task_spec: MediaGenTaskSpec }`
+async fn handle_media_gen_post_job(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let spec_value = p
+        .get("task_spec")
+        .ok_or_else(|| missing_param("task_spec"))?;
+    let spec: tenzro_types::MediaGenTaskSpec = serde_json::from_value(spec_value.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid task_spec: {}", e),
+            data: None,
+        })?;
+
+    let splits = tenzro_model::media_gen_model_splits(&spec.model_id);
+    let announce = spec.clone();
+    let job = if splits {
+        node.media_gen_runtime.post_split_job(spec)
+    } else {
+        node.media_gen_runtime.post_job(spec)
+    }
+    .map_err(media_gen_err)?;
+
+    match tenzro_media_gen::encode_job_posted(&announce) {
+        Ok(bytes) => broadcast_media_gen(node, &job.job_id, bytes).await,
+        Err(e) => tracing::warn!(
+            job_id = %job.job_id,
+            error = %e,
+            "Failed to encode MediaGenTaskSpec for gossip"
+        ),
+    }
+
+    serde_json::to_value(&job).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize job: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_mediaGen_listJobs`: every job this node holds, optionally filtered
+/// by status. Includes jobs mirrored from the gossip topic, not just jobs the
+/// node's own workers act on.
+///
+/// Params: `{ status? }`
+async fn handle_media_gen_list_jobs(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let status = match params.as_ref().and_then(|p| p.get("status")).and_then(|v| v.as_str()) {
+        Some(s) => Some(
+            tenzro_types::MediaGenStatus::from_str_lossy(s).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("unknown media-gen status '{}'", s),
+                data: None,
+            })?,
+        ),
+        None => None,
+    };
+    let jobs = match status {
+        Some(s) => node.media_gen_runtime.list_jobs_by_status(s),
+        None => node.media_gen_runtime.list_jobs(),
+    };
+    let count = jobs.len();
+    let jobs = serde_json::to_value(&jobs).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize jobs: {}", e),
+        data: None,
+    })?;
+    Ok(serde_json::json!({ "jobs": jobs, "count": count }))
+}
+
+/// `tenzro_mediaGen_getJob`: one job by id. `null` when the node has never
+/// seen it.
+///
+/// Params: `{ job_id }`
+async fn handle_media_gen_get_job(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let job_id = p
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("job_id"))?;
+    match node.media_gen_runtime.get_job(job_id) {
+        Some(job) => serde_json::to_value(&job).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("serialize job: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_mediaGen_cancelJob`: withdraw a job the requester posted, before a
+/// worker claims it.
+///
+/// Params: `{ job_id, requester_did }`
+async fn handle_media_gen_cancel_job(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let job_id = p
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("job_id"))?;
+    let requester_did = p
+        .get("requester_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("requester_did"))?;
+    let job = node
+        .media_gen_runtime
+        .cancel_job(job_id, requester_did)
+        .map_err(media_gen_err)?;
+    serde_json::to_value(&job).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize job: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_mediaGen_enrollWorker`: register a local worker's capability and
+/// announce it, so requesters elsewhere can see what this node serves.
+///
+/// Rejects a capability naming a model outside the catalog, or one whose
+/// license tier the operator has not accepted.
+///
+/// Params: `{ capability: MediaGenWorkerCapability }`
+async fn handle_media_gen_enroll_worker(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let cap_value = p
+        .get("capability")
+        .ok_or_else(|| missing_param("capability"))?;
+    let capability: tenzro_types::MediaGenWorkerCapability =
+        serde_json::from_value(cap_value.clone()).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid capability: {}", e),
+            data: None,
+        })?;
+    // The node never loads media-gen weights — the Python worker does — so
+    // enrollment is the only point at which this node can hold the operator to
+    // the license terms of what it is about to serve. Every model the worker
+    // declares, whole or by expert half, is checked against the acceptance
+    // policy before the capability is admitted.
+    for model_id in capability
+        .supported_models
+        .iter()
+        .chain(capability.expert_holdings.iter().map(|h| &h.model_id))
+    {
+        let entry =
+            tenzro_model::get_media_gen_model_by_id(model_id).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("unknown media-gen model '{}'", model_id),
+                data: None,
+            })?;
+        node.check_model_license(
+            model_id,
+            entry.license_tier,
+            tenzro_model::custom_license_id(&entry.license).as_deref(),
+        )
+        .map_err(|m| JsonRpcError {
+            code: -32010,
+            message: m,
+            data: None,
+        })?;
+    }
+
+    let worker_did = capability.worker_did.clone();
+    node.media_gen_runtime
+        .enroll_worker(capability.clone())
+        .map_err(media_gen_err)?;
+
+    match tenzro_media_gen::encode_worker_enrolled(&capability) {
+        Ok(bytes) => broadcast_media_gen(node, &worker_did, bytes).await,
+        Err(e) => tracing::warn!(
+            worker_did = %worker_did,
+            error = %e,
+            "Failed to encode MediaGenWorkerCapability for gossip"
+        ),
+    }
+
+    Ok(serde_json::json!({ "worker_did": worker_did, "status": "enrolled" }))
+}
+
+/// `tenzro_mediaGen_listWorkers`: workers enrolled on this node.
+async fn handle_media_gen_list_workers(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let workers = node.media_gen_runtime.list_workers();
+    let count = workers.len();
+    let workers = serde_json::to_value(&workers).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize workers: {}", e),
+        data: None,
+    })?;
+    Ok(serde_json::json!({ "workers": workers, "count": count }))
+}
+
+/// `tenzro_mediaGen_claimJob`: take a job, or one half of a split job.
+///
+/// `role` is required on a split job and rejected on a whole one. A worker
+/// holding the entire model qualifies for either half, so it can claim both
+/// halves of a split job in two calls.
+///
+/// Params: `{ job_id, worker_did, role? }`
+async fn handle_media_gen_claim_job(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let job_id = p
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("job_id"))?;
+    let worker_did = p
+        .get("worker_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("worker_did"))?;
+    let role = match p.get("role").and_then(|v| v.as_str()) {
+        Some(s) => Some(
+            tenzro_types::MediaGenExpertRole::from_str_lossy(s).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("unknown expert role '{}'", s),
+                data: None,
+            })?,
+        ),
+        None => None,
+    };
+
+    let job = node
+        .media_gen_runtime
+        .claim_job(job_id, worker_did, role)
+        .map_err(media_gen_err)?;
+
+    // The claim envelope is rebuilt from the assignment the runtime recorded,
+    // not from the request, so a mirror learns the timestamp and address the
+    // authority actually committed. Look the assignment up by role when one was
+    // named: a worker holding the whole model can hold both halves, and
+    // `assignment_for` would return whichever it claimed first.
+    let assignment = match role {
+        Some(r) => job.assignment_of_role(r),
+        None => job.assignment_for(worker_did),
+    };
+    if let Some(assignment) = assignment {
+        let claim = tenzro_media_gen::MediaGenClaim {
+            job_id: job.job_id.clone(),
+            worker_did: assignment.worker_did.clone(),
+            worker_address: assignment.worker_address,
+            role: assignment.role,
+            claimed_at: assignment.claimed_at,
+        };
+        match tenzro_media_gen::encode_job_claimed(&claim) {
+            Ok(bytes) => broadcast_media_gen(node, &job.job_id, bytes).await,
+            Err(e) => tracing::warn!(
+                job_id = %job.job_id,
+                error = %e,
+                "Failed to encode MediaGenClaim for gossip"
+            ),
+        }
+    }
+
+    serde_json::to_value(&job).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize job: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_mediaGen_markRunning`: the holding worker reports the pipeline
+/// started. Local only — no gossip envelope carries this transition.
+///
+/// Params: `{ job_id, worker_did }`
+async fn handle_media_gen_mark_running(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let job_id = p
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("job_id"))?;
+    let worker_did = p
+        .get("worker_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("worker_did"))?;
+    let job = node
+        .media_gen_runtime
+        .mark_running(job_id, worker_did)
+        .map_err(media_gen_err)?;
+    serde_json::to_value(&job).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize job: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_mediaGen_failJob`: the holding worker reports it cannot finish.
+/// Local only — no gossip envelope carries this transition.
+///
+/// Params: `{ job_id, worker_did, error }`
+async fn handle_media_gen_fail_job(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let job_id = p
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("job_id"))?;
+    let worker_did = p
+        .get("worker_did")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("worker_did"))?;
+    let error = p
+        .get("error")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("error"))?
+        .to_string();
+    let job = node
+        .media_gen_runtime
+        .fail_job(job_id, worker_did, error)
+        .map_err(media_gen_err)?;
+    serde_json::to_value(&job).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize job: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_mediaGen_publishOutput`: put media bytes — a finished render, an
+/// intermediate latent, or a requester's conditioning image — into the
+/// content-addressed store and hand back both addresses of them.
+///
+/// The two hashes are of the same bytes in different hash spaces:
+/// `output_hash` is the canonical SHA-256 that goes into the receipt, handoff,
+/// or task spec that names them, `locator` is the BLAKE3 iroh-blobs indexes by
+/// and rides the gossip envelope as a routing hint. A worker calls this before
+/// building its commitment, because the commitment names the hash; a requester
+/// posting an editing job calls it before posting, because the job id is
+/// derived over `input_image_hash`.
+///
+/// Params: `{ bytes: base64 }`
+async fn handle_media_gen_publish_output(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine as _;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let b64 = p
+        .get("bytes")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("bytes"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("'bytes' must be base64: {}", e),
+            data: None,
+        })?;
+    if bytes.is_empty() {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "'bytes' must not be empty".to_string(),
+            data: None,
+        });
+    }
+
+    let store = media_gen_store(node)?;
+    let len = bytes.len() as u64;
+    let output_hash = tenzro_media_gen::MediaGenOutputStore::publish(
+        store.as_ref(),
+        bytes::Bytes::from(bytes),
+    )
+    .await
+    .map_err(media_gen_err)?;
+
+    Ok(serde_json::json!({
+        "output_hash": output_hash.to_string(),
+        "locator": store.blake3_for(&output_hash),
+        "bytes": len,
+    }))
+}
+
+/// `tenzro_mediaGen_recordHandoff`: the high-noise expert publishes the
+/// intermediate latent it hands to the low-noise expert, and announces the
+/// locator so the partner can pull the bytes.
+///
+/// Params: `{ handoff: MediaGenHandoff }`
+async fn handle_media_gen_record_handoff(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let handoff_value = p.get("handoff").ok_or_else(|| missing_param("handoff"))?;
+    let handoff: tenzro_types::MediaGenHandoff = serde_json::from_value(handoff_value.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid handoff: {}", e),
+            data: None,
+        })?;
+    let latent_hash = handoff.latent_hash;
+    let announce = handoff.clone();
+    let job = node
+        .media_gen_runtime
+        .record_handoff(handoff)
+        .map_err(media_gen_err)?;
+
+    let locator = node
+        .media_gen_output_store
+        .as_ref()
+        .and_then(|s| s.blake3_for(&latent_hash));
+    match tenzro_media_gen::encode_handoff_published(&announce, locator) {
+        Ok(bytes) => broadcast_media_gen(node, &job.job_id, bytes).await,
+        Err(e) => tracing::warn!(
+            job_id = %job.job_id,
+            error = %e,
+            "Failed to encode MediaGenHandoff for gossip"
+        ),
+    }
+
+    serde_json::to_value(&job).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize job: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_mediaGen_submitReceipt`: the worker that finished the schedule
+/// seals the job with a signed receipt and announces it with the output's
+/// locator.
+///
+/// Params: `{ receipt: MediaGenReceipt }`
+async fn handle_media_gen_submit_receipt(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let receipt_value = p.get("receipt").ok_or_else(|| missing_param("receipt"))?;
+    let receipt: tenzro_types::MediaGenReceipt = serde_json::from_value(receipt_value.clone())
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("invalid receipt: {}", e),
+            data: None,
+        })?;
+    let output_hash = receipt.output_hash;
+    let announce = receipt.clone();
+    let job = node
+        .media_gen_runtime
+        .submit_receipt(receipt)
+        .map_err(media_gen_err)?;
+
+    let locator = node
+        .media_gen_output_store
+        .as_ref()
+        .and_then(|s| s.blake3_for(&output_hash));
+    match tenzro_media_gen::encode_receipt_submitted(&announce, locator) {
+        Ok(bytes) => broadcast_media_gen(node, &job.job_id, bytes).await,
+        Err(e) => tracing::warn!(
+            job_id = %job.job_id,
+            error = %e,
+            "Failed to encode MediaGenReceipt for gossip"
+        ),
+    }
+
+    serde_json::to_value(&job).map_err(|e| JsonRpcError {
+        code: -32603,
+        message: format!("serialize job: {}", e),
+        data: None,
+    })
+}
+
+/// `tenzro_mediaGen_getReceipt`: the sealed receipt for a completed job.
+/// `null` while the job is still in flight.
+///
+/// Params: `{ job_id }`
+async fn handle_media_gen_get_receipt(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let job_id = p
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("job_id"))?;
+    match node
+        .media_gen_runtime
+        .get_receipt(job_id)
+        .map_err(media_gen_err)?
+    {
+        Some(receipt) => serde_json::to_value(&receipt).map_err(|e| JsonRpcError {
+            code: -32603,
+            message: format!("serialize receipt: {}", e),
+            data: None,
+        }),
+        None => Ok(Value::Null),
+    }
+}
+
+/// `tenzro_mediaGen_fetchOutput`: pull a completed job's rendered bytes and
+/// check them against the hash and length the receipt committed to.
+///
+/// Params: `{ job_id }`
+async fn handle_media_gen_fetch_output(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine as _;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let job_id = p
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("job_id"))?;
+    let receipt = node
+        .media_gen_runtime
+        .get_receipt(job_id)
+        .map_err(media_gen_err)?
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("job '{}' has no receipt", job_id),
+            data: None,
+        })?;
+    let bytes = node
+        .media_gen_runtime
+        .fetch_output(&receipt)
+        .await
+        .map_err(media_gen_err)?;
+    Ok(serde_json::json!({
+        "job_id": job_id,
+        "output_hash": receipt.output_hash.to_string(),
+        "output_mime": receipt.output_mime,
+        "bytes": bytes.len(),
+        "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
+}
+
+/// `tenzro_mediaGen_fetchLatent`: pull the intermediate latent of a split job
+/// and check it against the hash and length the handoff committed to. This is
+/// how the low-noise expert picks up where the high-noise expert stopped.
+///
+/// Params: `{ job_id }`
+async fn handle_media_gen_fetch_latent(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine as _;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let job_id = p
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("job_id"))?;
+    let bytes = node
+        .media_gen_runtime
+        .fetch_latent(job_id)
+        .await
+        .map_err(media_gen_err)?;
+    Ok(serde_json::json!({
+        "job_id": job_id,
+        "bytes": bytes.len(),
+        "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
+}
+
+/// `tenzro_mediaGen_fetchInput`: pull the conditioning image an editing or
+/// image-conditioned job names, checked against the hash the spec committed to.
+/// A worker on another machine cannot read the requester's disk, so this is how
+/// it obtains the frame before it starts denoising.
+///
+/// Params: `{ job_id }`
+async fn handle_media_gen_fetch_input(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    use base64::Engine as _;
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let job_id = p
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("job_id"))?;
+    let bytes = node
+        .media_gen_runtime
+        .fetch_input(job_id)
+        .await
+        .map_err(media_gen_err)?;
+    Ok(serde_json::json!({
+        "job_id": job_id,
+        "bytes": bytes.len(),
+        "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
 }
 
 // ============================================================================

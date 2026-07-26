@@ -201,14 +201,18 @@ pub use library::{
 };
 pub use download::{DownloadManager, DownloadStatus, DownloadTask};
 pub use catalog::{
-    HfModelEntry, LicenseTier, ModelArchitecture, MoeShape, MtpKind, OnnxAudioEntry, OnnxDetectionEntry,
-    OnnxForecastEntry, OnnxSegmentationEntry, OnnxTextEmbeddingEntry, OnnxTextSegmentationEntry,
-    OnnxVideoEntry, OnnxVisionEntry, custom_license_id, get_audio_catalog, get_audio_model_by_id,
-    get_detection_catalog, get_detection_model_by_id, get_forecast_catalog,
-    get_forecast_model_by_id, get_model_by_id, get_model_catalog, get_segmentation_catalog,
-    get_segmentation_model_by_id, get_text_embedding_catalog, get_text_embedding_model_by_id,
-    get_text_segmentation_catalog, get_text_segmentation_model_by_id, get_video_catalog,
-    get_video_model_by_id, get_vision_catalog, get_vision_model_by_id,
+    HfModelEntry, LicenseTier, MediaGenExpertPair, MediaGenModelEntry, ModelArchitecture, MoeShape,
+    MtpKind,
+    OnnxAudioEntry, OnnxDetectionEntry, OnnxForecastEntry, OnnxSegmentationEntry,
+    OnnxTextEmbeddingEntry, OnnxTextSegmentationEntry, OnnxVideoEntry, OnnxVisionEntry,
+    custom_license_id, get_audio_catalog, get_audio_model_by_id, get_detection_catalog,
+    get_detection_model_by_id, get_forecast_catalog, get_forecast_model_by_id,
+    get_media_gen_catalog, get_media_gen_model_by_id, get_media_gen_models_for_kind,
+    get_model_by_id, get_model_catalog, get_segmentation_catalog, get_segmentation_model_by_id,
+    media_gen_model_splits,
+    get_text_embedding_catalog, get_text_embedding_model_by_id, get_text_segmentation_catalog,
+    get_text_segmentation_model_by_id, get_video_catalog, get_video_model_by_id,
+    get_vision_catalog, get_vision_model_by_id,
 };
 pub use hf_download::{
     ArtifactSpec, BlobFetcher, DownloadProgress, DownloadState, HfArtifactDownloader,

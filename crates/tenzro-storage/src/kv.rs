@@ -135,6 +135,15 @@ pub const CF_DATABASES: &str = "databases";
 ///   `<model_id>` → JSON `CanonicalModelHash` { model_id, blake3, sha256,
 ///       recorder_did, recorded_at_epoch, manifest_hash, governance_overridden }.
 pub const CF_MODEL_HASHES: &str = "model_hashes";
+/// Tenzro Media Gen: in-flight and completed generative-media jobs
+/// (`MediaGenJob` records). Keys: `job:<job_id>`.
+pub const CF_MEDIA_GEN_RUNS: &str = "media_gen_runs";
+/// Tenzro Media Gen: sealed receipts at job completion (`MediaGenReceipt`
+/// records). Keys: `receipt:<job_id>`.
+pub const CF_MEDIA_GEN_RECEIPTS: &str = "media_gen_receipts";
+/// Tenzro Media Gen: enrolled worker capabilities
+/// (`MediaGenWorkerCapability` records). Keys: `worker:<worker_did>`.
+pub const CF_MEDIA_GEN_WORKERS: &str = "media_gen_workers";
 
 /// Key-value store trait
 pub trait KvStore: Send + Sync {
@@ -254,6 +263,9 @@ const ALL_CFS: &[&str] = &[
     CF_CHALLENGES,
     CF_DATABASES,
     CF_MODEL_HASHES,
+    CF_MEDIA_GEN_RUNS,
+    CF_MEDIA_GEN_RECEIPTS,
+    CF_MEDIA_GEN_WORKERS,
 ];
 
 /// Force a file through compaction at least this often even when write
@@ -625,6 +637,9 @@ impl MemoryStore {
         data.insert(CF_CHALLENGES.to_string(), HashMap::new());
         data.insert(CF_DATABASES.to_string(), HashMap::new());
         data.insert(CF_MODEL_HASHES.to_string(), HashMap::new());
+        data.insert(CF_MEDIA_GEN_RUNS.to_string(), HashMap::new());
+        data.insert(CF_MEDIA_GEN_RECEIPTS.to_string(), HashMap::new());
+        data.insert(CF_MEDIA_GEN_WORKERS.to_string(), HashMap::new());
 
         Self {
             data: Arc::new(RwLock::new(data)),

@@ -27,7 +27,7 @@ The inner training loop — forward/backward, optimizer step, FSDP sharding — 
 - `tenzro/training` — outer gradient submissions, fragment payloads
 - `tenzro/training/syncer` — syncer status, round transitions, finality
 
-This split mirrors how production decentralized training runs structure their stack: Python + PyTorch for the inner loop, a typed protocol crate for orchestration. See `AI.md` §7.7.1 for the full rationale.
+This split mirrors how production decentralized training runs structure their stack: Python + PyTorch for the inner loop, a typed protocol crate for orchestration. See `AI.md` §7.7.1 for the full rationale. `tenzro-media-gen` is built the same way — the crate owns the job queue, the pricing, and the signed receipts, while the denoising loop lives in the Python reference worker at `integrations/media_gen/`.
 
 When the protocol layer needs to "train," it dispatches to the Python reference trainer over JSON-RPC and ingests the resulting `OuterGradient` / safetensors payload. Aggregation operates over already-decoded `ndarray` views of those payloads.
 

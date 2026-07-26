@@ -138,6 +138,29 @@ except where they widen an attack surface.
   `finalize_round` is idempotent, and conflicting state roots surface
   as `ConflictingFinalize` for fork detection.
 
+### Generative media (`tenzro-media-gen`)
+- Overcharging: the price is a pure function of the posted spec
+  (`width × height × steps × frames`), and the requester's ceiling is
+  checked at admission rather than after a worker claims, so a worker
+  cannot inflate a job it already holds.
+- Substituted output: receipts commit to the output's size and SHA-256
+  content hash, and the requester verifies fetched bytes against that
+  commitment before accepting. A receipt whose spec differs from the
+  posted one is rejected, and a completed job cannot be re-completed
+  with a different hash.
+- Overclaimed work on a split job: the payment division reads
+  `steps_completed` from the signed handoff, not from either worker's
+  assertion, and a count above the job's total steps is rejected. A
+  second handoff cannot displace the first.
+- Job-terms substitution: the job id is a domain-tagged hash over the
+  whole spec including any conditioning-image hash, and each of the
+  three signed stages uses a distinct domain tag, so no signature is
+  replayable across stages.
+- Unlicensed weights: the node never loads media-gen weights, so
+  enrollment is where terms are enforced — a worker declaring a model
+  outside the catalog, or one whose license the operator did not
+  accept at startup, is refused.
+
 ## Residual risks (known, accepted pre-audit)
 
 1. **Bridge outer-envelope coverage is partial.** Wormhole, Hyperlane,
@@ -156,8 +179,15 @@ except where they widen an attack surface.
 4. **Raw-env-key bridge signer backend still exists** for development;
    an operator who deploys with it holds a plaintext secp256k1 key in
    the environment.
-5. **RocksDB contents are trusted on hydration.** A disk-write
+5. **A media receipt binds bytes, not fidelity.** The commitment
+   proves which bytes the worker produced, not that they are the
+   result of running the named model for the named number of steps. A
+   worker that renders at lower quality, or a low-noise expert that
+   ignores the latent it was handed, produces a receipt that verifies.
+   Requester-side rejection and reputation are the checks today;
+   proof-of-inference for diffusion is not in scope.
+6. **RocksDB contents are trusted on hydration.** A disk-write
    attacker on a validator can inject state; mitigations are host
    hardening, not protocol checks.
-6. **No external security audit has been performed yet.** This
+7. **No external security audit has been performed yet.** This
    document and `AUDIT_SCOPE.md` exist to scope that engagement.

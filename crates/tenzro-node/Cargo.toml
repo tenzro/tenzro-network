@@ -29,6 +29,7 @@ tenzro-model = { workspace = true }
 llama-cpp-2 = { workspace = true }
 tenzro-cortex = { workspace = true }
 tenzro-training = { workspace = true }
+tenzro-media-gen = { workspace = true }
 tenzro-settlement = { workspace = true }
 tenzro-storage-provider = { workspace = true }
 tenzro-database = { workspace = true }

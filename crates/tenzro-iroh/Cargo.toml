@@ -10,6 +10,7 @@ description = "Iroh (QUIC-native content-addressed transport) integration for Te
 tenzro-types = { workspace = true }
 tenzro-storage = { workspace = true }
 tenzro-training = { workspace = true }
+tenzro-media-gen = { workspace = true }
 
 # Async + error plumbing for the resolver trait surface.
 async-trait = { workspace = true }

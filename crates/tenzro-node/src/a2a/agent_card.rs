@@ -207,34 +207,6 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 output_modes: vec!["text/plain".to_string(), "application/json".to_string()],
             },
             AgentSkill {
-                id: "task-marketplace".to_string(),
-                name: "Task Marketplace Lifecycle".to_string(),
-                description: "Post → Quote → Escrow+Assign → Complete → Settle+Reputation. \
-                              Hand a unit of work to the network without picking a provider: \
-                              post a task with structured acceptance criteria, collect quotes \
-                              (optionally with TEE attestation + ERC-8004 reputation proof), \
-                              assign with on-chain escrow, and settle on proof-verified \
-                              completion with ERC-8004 reputation feedback. Disputes are \
-                              oracle/governance-arbitrated. Wire format is framework-portable \
-                              (JSON-RPC / MCP / A2A) per task-coordination-lifecycle.md."
-                    .to_string(),
-                tags: vec![
-                    "task".to_string(),
-                    "marketplace".to_string(),
-                    "escrow".to_string(),
-                    "reputation".to_string(),
-                    "erc8004".to_string(),
-                ],
-                examples: vec![
-                    "Post a task: 3-page market analysis, max 50 TNZO, 24h deadline".to_string(),
-                    "Quote task abc with price 30 TNZO and a reputation proof".to_string(),
-                    "Assign task abc to provider 0x… and fund escrow".to_string(),
-                    "Complete task abc with a TEE-attested result".to_string(),
-                ],
-                input_modes: vec!["application/json".to_string()],
-                output_modes: vec!["application/json".to_string()],
-            },
-            AgentSkill {
                 id: "workflow-coordination".to_string(),
                 name: "Multi-Agent Saga Workflow Coordination".to_string(),
                 description: "Durable, identity-bound, settlement-aware checkpoint substrate \
@@ -308,23 +280,28 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
             },
             AgentSkill {
                 id: "task_marketplace".to_string(),
-                name: "Task Marketplace".to_string(),
-                description: "Post tasks to the decentralized AI task marketplace, browse \
-                              open tasks, submit quotes, and track task completion with \
-                              TNZO escrow-based payment."
+                name: "Task Marketplace Lifecycle".to_string(),
+                description: "Post → Quote → Escrow+Assign → Complete → Settle+Reputation. \
+                              Hand a unit of work to the network without picking a provider: \
+                              post a task with structured acceptance criteria, collect quotes \
+                              (optionally with TEE attestation + ERC-8004 reputation proof), \
+                              assign with on-chain escrow, and settle on proof-verified \
+                              completion with ERC-8004 reputation feedback. Disputes are \
+                              oracle/governance-arbitrated."
                     .to_string(),
                 tags: vec![
-                    "tasks".to_string(),
+                    "task".to_string(),
                     "marketplace".to_string(),
-                    "ai".to_string(),
                     "escrow".to_string(),
+                    "reputation".to_string(),
+                    "erc8004".to_string(),
                 ],
                 examples: vec![
-                    "Post a code review task for 50 TNZO".to_string(),
+                    "Post a task: 3-page market analysis, max 50 TNZO, 24h deadline".to_string(),
+                    "Quote task abc with price 30 TNZO and a reputation proof".to_string(),
+                    "Assign task abc to provider 0x… and fund escrow".to_string(),
+                    "Complete task abc with a TEE-attested result".to_string(),
                     "List open inference tasks".to_string(),
-                    "Get task status for task-id-123".to_string(),
-                    "Cancel my pending task".to_string(),
-                    "Submit a quote for task-id-456".to_string(),
                 ],
                 input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
                 output_modes: vec!["application/json".to_string()],
@@ -1078,6 +1055,33 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 output_modes: vec!["application/json".to_string()],
             },
             AgentSkill {
+                id: "media-gen".to_string(),
+                name: "Generative Image & Video".to_string(),
+                description: "Decentralized generative image and video. Read the curated \
+                              diffusers catalog, price a job by pixel-step, post it to the \
+                              queue, follow its status, and read the signed receipt that \
+                              commits to the rendered bytes. Pipelines whose denoising \
+                              schedule splits across a high-noise and a low-noise expert are \
+                              served by two workers holding one half each, handing the \
+                              intermediate latent over the content-addressed store."
+                    .to_string(),
+                tags: vec![
+                    "media-gen".to_string(),
+                    "image".to_string(),
+                    "video".to_string(),
+                    "diffusion".to_string(),
+                    "expert-pair".to_string(),
+                ],
+                examples: vec![
+                    "List the generative-media catalog".to_string(),
+                    "Quote a 1328x1328 image at 50 steps".to_string(),
+                    "Post a text-to-video job and follow it".to_string(),
+                    "Read the receipt for a completed render".to_string(),
+                ],
+                input_modes: vec!["text/plain".to_string(), "application/json".to_string()],
+                output_modes: vec!["application/json".to_string()],
+            },
+            AgentSkill {
                 id: "discovery".to_string(),
                 name: "Local Discovery & LAN Clustering".to_string(),
                 description: "Local-segment discovery and LAN cluster planning. List peers \
@@ -1321,6 +1325,7 @@ mod tests {
         assert!(skill_ids.contains(&"seed-agent"));
         assert!(skill_ids.contains(&"erc7683"));
         assert!(skill_ids.contains(&"iroh-transport"));
+        assert!(skill_ids.contains(&"media-gen"));
     }
 
     #[test]

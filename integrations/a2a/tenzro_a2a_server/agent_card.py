@@ -1669,6 +1669,30 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "media-gen",
+                "name": "Generative Image & Video",
+                "description": (
+                    "Decentralized generative image and video. Read the curated "
+                    "diffusers catalog, price a job by pixel-step, post it to the "
+                    "queue, follow its status, and read the signed receipt that "
+                    "commits to the rendered bytes. Pipelines whose denoising "
+                    "schedule splits across a high-noise and a low-noise expert are "
+                    "served by two workers holding one half each, handing the "
+                    "intermediate latent over the content-addressed store."
+                ),
+                "tags": [
+                    "media-gen", "image", "video", "diffusion", "expert-pair",
+                ],
+                "examples": [
+                    "List the generative-media catalog",
+                    "Quote a 1328x1328 image at 50 steps",
+                    "Post a text-to-video job and follow it",
+                    "Read the receipt for a completed render",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "discovery",
                 "name": "Local Discovery & LAN Clustering",
                 "description": (

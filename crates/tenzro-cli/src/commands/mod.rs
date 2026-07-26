@@ -53,6 +53,7 @@ pub mod wormhole;
 pub mod ccip;
 pub mod cct;
 pub mod train;
+pub mod media_gen;
 pub mod multimodal;
 pub mod auth;
 pub mod x402;
@@ -150,6 +151,7 @@ pub use wormhole::WormholeCommand;
 pub use ccip::CcipCommand;
 pub use cct::CctCommand;
 pub use train::TrainCommand;
+pub use media_gen::MediaGenCommand;
 pub use multimodal::{
     DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TextSegmentCommand,
     TranscribeCommand,

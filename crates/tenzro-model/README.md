@@ -358,7 +358,7 @@ The crate is organized into several key modules:
 - `onnx_session`: Shared ONNX session builder with hardware execution providers
 - `usage`: Usage tracking and statistics
 - `load`: Load tracking and concurrency management
-- `catalog`: Static catalogs for HuggingFace plus ONNX vision, forecast, text-embedding, segmentation, detection, audio, and video models
+- `catalog`: Static catalogs for HuggingFace plus ONNX vision, forecast, text-embedding, segmentation, detection, audio, and video models, and the generative-media catalog
 - `error`: Error types and handling
 
 ## ONNX catalogs
@@ -376,6 +376,25 @@ In addition to the dynamic model registry, `tenzro-model` ships static catalogs 
 All entries carry `license_tier: Permissive | Attribution | CommercialCustom | NonCommercial`, enforced centrally in `ModelRegistry::register_model()`.
 
 Catalogs feed feature-gated runtimes (`VisionRuntime`, `TimeseriesRuntime`, `TextEmbeddingRuntime`, `SegmentationRuntime`, `DetectionRuntime`, `AudioRuntime`, `VideoRuntime`) that wrap ORT sessions for direct inference.
+
+## Generative-media catalog
+
+`MediaGenModelEntry` + `get_media_gen_catalog()` / `get_media_gen_model_by_id()` describe the image and video pipelines a media worker may serve. These are not ONNX single files: each entry is a multi-folder HuggingFace repository (transformer + text encoder + VAE + scheduler) loaded whole by `diffusers`, so the entry names a `pipeline_class` rather than an `hf_filename`.
+
+| Entry | Kinds | Split |
+|---|---|---|
+| `qwen-image` | text2image | — |
+| `qwen-image-flash` | text2image | — |
+| `qwen-image-edit` | image2image | — |
+| `z-image-turbo` | text2image | — |
+| `flux2-klein-4b` | text2image | — |
+| `wan2.2-t2v-a14b` | text2video | yes |
+| `wan2.2-i2v-a14b` | image2video | yes |
+| `wan2.2-ti2v-5b` | text2video, image2video | — |
+
+Membership requires that the repo is ungated, that `model_index.json` names a real diffusers pipeline class, and that the output is an image or a video. Entries whose `expert_pair` is set split denoising at a timestep boundary, so two workers holding one expert each can serve a job neither could serve alone; `min_vram_gb_per_expert` is what one half needs against `min_vram_gb` for the whole.
+
+Media-gen weights are loaded by the Python worker in `integrations/media_gen/`, never by the node, so `license_tier` here is held at worker enrollment rather than at model load — a capability naming a model whose terms the node was not started with is refused. `custom_license_id()` maps an entry's license text to the id `--accept-license` takes.
 
 ## Durable Catalog Persistence
 

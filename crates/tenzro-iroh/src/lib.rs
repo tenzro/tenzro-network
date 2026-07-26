@@ -72,6 +72,7 @@ pub mod da_backend;
 pub mod error;
 pub mod gradient_store;
 pub mod jsonrpc;
+pub mod media_gen_output_store;
 pub mod resolver;
 pub mod sealed_shard_store;
 pub mod tdip;
@@ -86,6 +87,7 @@ pub use jsonrpc::{
     JsonRpcProtocol, McpProtocol, McpStreamHandler, ALPN_A2A, ALPN_HTTP, ALPN_INFER, ALPN_MCP,
     ALPN_MOE,
 };
+pub use media_gen_output_store::IrohMediaGenOutputStore;
 pub use resolver::{IrohBackedResolver, IrohResolver};
 pub use sealed_shard_store::IrohSealedShardStore;
 pub use tdip::derive_iroh_secret_key_from_ed25519;

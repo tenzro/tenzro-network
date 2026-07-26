@@ -6,7 +6,7 @@ risks) and `INVARIANTS.md` (falsifiable claims with code anchors).
 
 ## Repository layout
 
-Rust workspace, edition 2024, 29 crates under `crates/` plus
+Rust workspace, edition 2024, 32 crates under `crates/` plus
 `tools/genkeys`. Fuzz harnesses live in `fuzz/` as a standalone
 package. Criterion benchmarks live in per-crate `benches/` directories.
 Python integration packages (`integrations/`), SDKs (`sdk/`), the
@@ -45,12 +45,15 @@ scope.
 `tenzro-network` (peer auth, rate limits, NAT stack),
 `tenzro-storage` (fsync discipline, trie proofs), `tenzro-iroh`
 (blob verification, ALPN dispatch), `tenzro-training` (aggregation
-rules, witness committee, sealed shards), `tenzro-agent` /
+rules, witness committee, sealed shards), `tenzro-media-gen`
+(job-id binding, pixel-step pricing ceiling, split-expert handoff and
+payment division, receipt commitment), `tenzro-agent` /
 `tenzro-agent-kit` (lifecycle, spawn tree, memory tier),
 `tenzro-events`, `tenzro-workflow`, `tenzro-cortex`, `tenzro-model`,
 `tenzro-storage-provider`, `tenzro-database` (descriptor,
-placement, access control, gossip), `tenzro-wasm` (WASI sandbox
-boundary), `tenzro-cli`, `tools/genkeys`.
+placement, access control, gossip), `tenzro-cluster` (reachability
+tiers, link-cost probing, rendezvous placement), `tenzro-wasm` (WASI
+sandbox boundary), `tenzro-cli`, `tools/genkeys`.
 
 ## Entry-point map
 

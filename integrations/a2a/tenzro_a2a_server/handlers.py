@@ -2864,7 +2864,7 @@ async def handle_auth(text: str, metadata: dict = None) -> str:
 
 async def handle_help(text: str, metadata: dict = None) -> str:
     return (
-        "Tenzro Network Agent -- 23 skills available:\n"
+        "Tenzro Network Agent -- 70 skills available. Highlights:\n"
         "\n"
         "  Blockchain:\n"
         "    wallet     - Create wallets, check balances, send TNZO\n"
@@ -2877,6 +2877,7 @@ async def handle_help(text: str, metadata: dict = None) -> str:
         "\n"
         "  AI & Agents:\n"
         "    inference   - Route AI inference requests\n"
+        "    media-gen   - Generative image and video, priced per pixel-step\n"
         "    task_marketplace - Post/browse AI tasks with escrow\n"
         "    agent_marketplace - Discover/spawn agent templates\n"
         "    agent_spawning - Spawn autonomous sub-agents\n"
@@ -3626,6 +3627,68 @@ async def handle_moe(text: str, metadata: dict = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Generative Image & Video
+# ---------------------------------------------------------------------------
+
+async def handle_media_gen(text: str, metadata: dict = None) -> str:
+    """Generative image and video: the curated diffusers catalog, a
+    pixel-step price quote, the job queue, the worker registry, a job's
+    signed receipt, and posting or cancelling a job. Job ids, task specs,
+    and quote parameters read from `metadata`.
+    """
+    t = text.lower()
+    md = metadata or {}
+    job_id = md.get("job_id")
+
+    if "catalog" in t:
+        result = await rpc_call("tenzro_mediaGen_listCatalog", [])
+        return f"Generative media catalog:\n{json.dumps(result, indent=2)}"
+
+    if "quote" in t or "price" in t or "cost" in t:
+        kind = md.get("kind", "text2image")
+        params = md.get("params")
+        if params is None:
+            params = {
+                k: md[k]
+                for k in ("prompt", "model_id", "width", "height", "steps", "frames")
+                if md.get(k) is not None
+            }
+        result = await rpc_call(
+            "tenzro_mediaGen_quote", {"kind": kind, "params": params}
+        )
+        return f"Media-gen quote:\n{json.dumps(result, indent=2)}"
+
+    if "worker" in t:
+        result = await rpc_call("tenzro_mediaGen_listWorkers", [])
+        return f"Media-gen workers:\n{json.dumps(result, indent=2)}"
+
+    if "receipt" in t and job_id:
+        result = await rpc_call("tenzro_mediaGen_getReceipt", {"job_id": job_id})
+        return f"Media-gen receipt for {job_id}:\n{json.dumps(result, indent=2)}"
+
+    if "post" in t and md.get("task_spec"):
+        result = await rpc_call(
+            "tenzro_mediaGen_postJob", {"task_spec": md["task_spec"]}
+        )
+        return f"Media-gen job posted:\n{json.dumps(result, indent=2)}"
+
+    if "cancel" in t and job_id and md.get("requester_did"):
+        result = await rpc_call("tenzro_mediaGen_cancelJob", {
+            "job_id": job_id,
+            "requester_did": md["requester_did"],
+        })
+        return f"Media-gen job cancelled:\n{json.dumps(result, indent=2)}"
+
+    if job_id:
+        result = await rpc_call("tenzro_mediaGen_getJob", {"job_id": job_id})
+        return f"Media-gen job {job_id}:\n{json.dumps(result, indent=2)}"
+
+    params = {"status": md["status"]} if md.get("status") else {}
+    result = await rpc_call("tenzro_mediaGen_listJobs", params)
+    return f"Media-gen jobs:\n{json.dumps(result, indent=2)}"
+
+
+# ---------------------------------------------------------------------------
 # Operability Inspection
 # ---------------------------------------------------------------------------
 
@@ -4203,6 +4266,7 @@ HANDLERS: dict[str, callable] = {
     "database": handle_database,
     "compute": handle_compute,
     "moe": handle_moe,
+    "media-gen": handle_media_gen,
     "operability": handle_operability,
     "discovery": handle_discovery,
     "hosting": handle_hosting,

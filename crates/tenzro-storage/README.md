@@ -8,7 +8,7 @@ The `tenzro-storage` crate provides a comprehensive storage infrastructure for t
 
 ## Features
 
-- **RocksDB Integration**: High-performance persistent storage with 30 column families
+- **RocksDB Integration**: High-performance persistent storage with 42 column families
 - **`KvStore` trait**: `get`, `put`, `delete`, `get_keys_with_prefix`, `write_batch`, `write_batch_sync` — used by upper-layer registries for write-through persistence and startup hydration
 - **Merkle Patricia Trie**: Efficient state commitment and cryptographic proof generation
 - **Block Storage**: Fast indexing and retrieval of blocks by hash and height
@@ -20,7 +20,7 @@ The `tenzro-storage` crate provides a comprehensive storage infrastructure for t
 
 ## Architecture
 
-### Column Families (28 total)
+### Column Families (42 total)
 
 The storage layer uses RocksDB with the following column families:
 
@@ -41,6 +41,8 @@ The storage layer uses RocksDB with the following column families:
 - `agent_templates` - Agent template definitions
 - `skills` - Skill registry
 - `tools` - Tool definitions
+- `knowledge` - Queryable data resources (vector indices, document corpora, data feeds)
+- `workflow_templates` - Reusable saga specs tenants instantiate
 - `tokens` - Token registry (ERC-20, SPL, CIP-56)
 - `settlements` - Settlement receipts and history
 - `model_services` - Served model endpoints
@@ -52,6 +54,18 @@ The storage layer uses RocksDB with the following column families:
 - `training_receipts` - Tenzro Train commitment receipts
 - `audit` - Audit log records
 - `approvals` - Approval state for multi-step flows
+- `api_keys` - Per-tenant API key records (subject DID, scopes, revocation)
+- `mpc_keyshares` - Sealed threshold-signing key shares, indexed by group and epoch
+- `canton_analytics` - Per-API-key Canton call counters
+- `bridge_analytics` - Per-API-key bridge call counters
+- `validator_modules` - ERC-7579 validator module configs and state
+- `da_committee` - Availability certificates and sliver assignments
+- `challenges` - Filed disputes over an inference commitment
+- `databases` - Database descriptors and partition placements
+- `model_hashes` - Canonical per-model content hashes (BLAKE3 + SHA-256)
+- `media_gen_runs` - Generative-media jobs, in flight and completed
+- `media_gen_receipts` - Sealed generative-media receipts at completion
+- `media_gen_workers` - Enrolled generative-media worker capabilities
 
 ### Data Availability Primitives (`da` module)
 

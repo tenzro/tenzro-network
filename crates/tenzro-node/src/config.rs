@@ -872,6 +872,90 @@ impl Default for PaymentsConfig {
     }
 }
 
+/// The payment posture a node actually runs with, after folding in its
+/// roles. Serving models (the `ai` role) is what the network pays providers
+/// for, so a node that serves `ai` and can name a recipient gates its
+/// inference routes by default. An operator turns this off by setting
+/// `payments.enabled = false` explicitly.
+#[derive(Debug, Clone)]
+pub struct EffectivePayments {
+    /// Whether the payment gate is wired at all.
+    pub gate_on: bool,
+    /// Address or DID payments settle to.
+    pub recipient: String,
+    /// Amount charged per challenge (smallest unit). Zero means the gate is
+    /// wired but nothing is actually withheld — the mechanism runs, the price
+    /// is not yet set.
+    pub amount: u128,
+    /// Asset the amount is denominated in.
+    pub asset: String,
+    /// Protocol used to issue challenges.
+    pub protocol: String,
+    /// Web paths gated behind payment.
+    pub paid_routes: Vec<String>,
+}
+
+impl PaymentsConfig {
+    /// Routes auto-gated for a node that serves the `ai` role: the inference
+    /// surface. Operator-supplied `paid_routes` are merged on top.
+    const AI_ROUTES: &'static [&'static str] = &["/chat"];
+
+    /// Fold the node's roles and its own address into an effective payment
+    /// posture.
+    ///
+    /// A node serving the `ai` role auto-gates its inference routes to
+    /// `default_recipient` (its own validator/proposer address) unless the
+    /// operator set `recipient` explicitly. The gate is on by default for
+    /// `ai` nodes; setting `enabled = false` in config is the opt-out for
+    /// operators who want to serve inference for free. Explicit
+    /// `enabled = true` also forces the gate on regardless of role, using the
+    /// operator-supplied `paid_routes`.
+    ///
+    /// `amount` defaults to whatever the config carries (0 for a freshly
+    /// launched node), so the mechanism can be wired and proven on the fleet
+    /// before a real price is set.
+    pub fn effective(
+        &self,
+        roles: &RoleSet,
+        default_recipient: Option<&str>,
+    ) -> EffectivePayments {
+        // Operator opt-out: an explicit `enabled = false` in a config that
+        // otherwise looks configured (non-empty recipient or routes) means the
+        // operator deliberately turned the gate off. A bare default config
+        // (enabled=false, empty recipient, empty routes) is indistinguishable
+        // from "unset", so role-driven gating still applies there.
+        let explicitly_disabled = !self.enabled
+            && (!self.recipient.is_empty() || !self.paid_routes.is_empty());
+
+        let recipient = if self.recipient.is_empty() {
+            default_recipient.unwrap_or_default().to_string()
+        } else {
+            self.recipient.clone()
+        };
+
+        let role_gate = roles.serves_ai() && !recipient.is_empty() && !explicitly_disabled;
+        let gate_on = self.enabled || role_gate;
+
+        let mut paid_routes = self.paid_routes.clone();
+        if role_gate {
+            for r in Self::AI_ROUTES {
+                if !paid_routes.iter().any(|p| p == r) {
+                    paid_routes.push((*r).to_string());
+                }
+            }
+        }
+
+        EffectivePayments {
+            gate_on,
+            recipient,
+            amount: self.default_amount,
+            asset: self.default_asset.clone(),
+            protocol: self.default_protocol.clone(),
+            paid_routes,
+        }
+    }
+}
+
 impl std::fmt::Debug for PaymentsConfig {
     /// Custom `Debug` that redacts the Stripe secret key. Presence is
     /// reported as `<redacted>` / `<unset>`; all other fields pass through.
@@ -1241,6 +1325,7 @@ pub enum DaBackendSelector {
 
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NodeConfig {
     /// Every role this node serves. A node stakes once and may hold many roles
     /// at once (e.g. validator + AI + storage). Parsed from `--roles
@@ -2099,5 +2184,96 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(temp_file);
+    }
+
+    #[test]
+    fn ai_role_gates_by_default_settling_to_own_address() {
+        let roles: RoleSet = "validator,ai,storage".parse().unwrap();
+        let cfg = PaymentsConfig::default();
+        let eff = cfg.effective(&roles, Some("addr-of-this-node"));
+        assert!(eff.gate_on, "an ai node with a recipient gates by default");
+        assert_eq!(eff.recipient, "addr-of-this-node");
+        assert!(eff.paid_routes.iter().any(|r| r == "/chat"));
+        // Zero-price at launch: mechanism wired, nothing withheld yet.
+        assert_eq!(eff.amount, 0);
+    }
+
+    #[test]
+    fn non_ai_role_does_not_gate() {
+        let roles: RoleSet = "validator".parse().unwrap();
+        let cfg = PaymentsConfig::default();
+        let eff = cfg.effective(&roles, Some("addr-of-this-node"));
+        assert!(!eff.gate_on, "a validator that serves no models does not gate");
+        assert!(eff.paid_routes.is_empty());
+    }
+
+    #[test]
+    fn ai_role_without_recipient_does_not_gate() {
+        let roles: RoleSet = "ai".parse().unwrap();
+        let cfg = PaymentsConfig::default();
+        let eff = cfg.effective(&roles, None);
+        assert!(!eff.gate_on, "no recipient means nothing to settle to");
+    }
+
+    #[test]
+    fn operator_opts_out_by_disabling_with_explicit_recipient() {
+        let roles: RoleSet = "validator,ai".parse().unwrap();
+        // enabled=false alongside a non-default recipient reads as a
+        // deliberate opt-out, not a bare default.
+        let cfg = PaymentsConfig {
+            enabled: false,
+            recipient: "operator-picked".to_string(),
+            ..PaymentsConfig::default()
+        };
+        let eff = cfg.effective(&roles, Some("own-addr"));
+        assert!(!eff.gate_on, "explicit disable turns the ai gate off");
+    }
+
+    #[test]
+    fn explicit_enable_forces_gate_regardless_of_role() {
+        let roles: RoleSet = "validator".parse().unwrap();
+        let cfg = PaymentsConfig {
+            enabled: true,
+            recipient: "operator-picked".to_string(),
+            paid_routes: vec!["/settle".to_string()],
+            ..PaymentsConfig::default()
+        };
+        let eff = cfg.effective(&roles, None);
+        assert!(eff.gate_on);
+        assert_eq!(eff.recipient, "operator-picked");
+        assert!(eff.paid_routes.iter().any(|r| r == "/settle"));
+    }
+
+    #[test]
+    fn operator_recipient_overrides_own_address() {
+        let roles: RoleSet = "ai".parse().unwrap();
+        let cfg = PaymentsConfig {
+            recipient: "treasury-addr".to_string(),
+            ..PaymentsConfig::default()
+        };
+        let eff = cfg.effective(&roles, Some("own-addr"));
+        assert!(eff.gate_on);
+        assert_eq!(eff.recipient, "treasury-addr");
+    }
+
+    /// A minimal `[payments]`-only TOML must parse: the container-level
+    /// `#[serde(default)]` on `NodeConfig` fills every absent field from
+    /// `NodeConfig::default()` so an operator can drop in a payments block
+    /// without restating the whole config.
+    #[test]
+    fn partial_payments_only_toml_parses() {
+        let toml_src = r#"
+[payments]
+enabled = true
+default_amount = "1000"
+default_asset = "USDC"
+recipient = "treasury-addr"
+paid_routes = ["/chat"]
+"#;
+        let cfg: NodeConfig = toml::from_str(toml_src).unwrap();
+        assert!(cfg.payments.enabled);
+        assert_eq!(cfg.payments.default_amount, 1000);
+        assert_eq!(cfg.payments.recipient, "treasury-addr");
+        assert!(cfg.payments.paid_routes.iter().any(|r| r == "/chat"));
     }
 }

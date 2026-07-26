@@ -51,7 +51,7 @@ The data plane lets agents on a public network connect peer-to-peer without an H
 
 ## 2. Gossipsub topics
 
-The control plane carries fourteen topics built on top of `gossipsub` with a hardened configuration (Strict validation mode, 1 MiB max message size, mesh degree D=8, peer scoring enabled).
+The control plane carries fifteen topics built on top of `gossipsub` with a hardened configuration (Strict validation mode, 1 MiB max message size, mesh degree D=8, peer scoring enabled).
 
 | Topic | Producer | Consumer | Validator-only |
 |---|---|---|---|
@@ -68,6 +68,7 @@ The control plane carries fourteen topics built on top of `gossipsub` with a har
 | `tenzro/cortex` | Cortex workers | reasoning-depth router | no |
 | `tenzro/training` | trainers + syncer | every training participant | no |
 | `tenzro/training/syncer` | witness committee | training participants | no |
+| `tenzro/media-gen` | requesters + media workers | enrolled media workers | no |
 | `/tenzro/mpc/session/<instance_id>` | DKLS23 round participants | session participants | no |
 
 Validator-only topics enforce origin on the receive side: `ValidatorRegistry::is_validator(peer_id)` is consulted before a `tenzro/blocks`, `tenzro/consensus`, or `tenzro/batches` message is admitted. Non-validators that publish on these topics get their messages dropped.

@@ -3367,6 +3367,32 @@ pub struct TrainingTaskIdParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MediaGenJobIdParams {
+    #[schemars(description = "Tenzro Media Gen job id")]
+    pub job_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MediaGenListJobsParams {
+    #[schemars(
+        description = "Optional status filter: 'pending' | 'claimed' | 'running' | 'completed' | 'failed' | 'cancelled'"
+    )]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MediaGenQuoteParams {
+    #[schemars(
+        description = "Media kind: 'text2image' | 'image2image' | 'text2video' | 'image2video'"
+    )]
+    pub kind: String,
+    #[schemars(
+        description = "MediaGenParams object: prompt, width, height, steps, guidance_scale, and (for video) num_frames and fps"
+    )]
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetProvenanceParams {
     #[schemars(description = "32-byte hex content hash (with or without 0x prefix)")]
     pub content_hash: String,
@@ -10623,6 +10649,87 @@ impl TenzroMcpServer {
         let result = rpc_dispatch(&self.node, "tenzro_training_decideRound", payload)
             .await
             .map_err(|e| err_internal(format!("training.decideRound failed: {}", e)))?;
+        json_result(result)
+    }
+
+    // ---- Tenzro Media Gen inspection surface (read-only) --------------
+
+    #[tool(description = "List the curated generative-media catalog: ungated diffusers pipelines serving text2image, image2image, text2video, or image2video. Each entry carries id, hf_repo, pipeline_class, kinds, default resolution and steps, min_vram_gb, license, and expert_pair. A non-null expert_pair means the denoising schedule splits across two workers, so a claim on that model needs a role.")]
+    async fn media_gen_list_catalog(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_mediaGen_listCatalog",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("mediaGen.listCatalog failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Price a Tenzro Media Gen job before posting it. The work unit is the pixel-step (width x height x steps x frames). Returns kind, pixel_steps, per_pixel_step, base_fee, and quote as decimal attoTNZO strings. Read-only — nothing is queued.")]
+    async fn media_gen_quote(
+        &self,
+        Parameters(params): Parameters<MediaGenQuoteParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "kind": params.kind, "params": params.params });
+        let result = rpc_dispatch(&self.node, "tenzro_mediaGen_quote", payload)
+            .await
+            .map_err(|e| err_internal(format!("mediaGen.quote failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List the Tenzro Media Gen jobs this node holds, optionally filtered by status. Each job carries job_id, task_spec, status, required_roles, assignments, handoff-if-split, and receipt-if-complete. Read-only — safe for monitoring agents.")]
+    async fn media_gen_list_jobs(
+        &self,
+        Parameters(params): Parameters<MediaGenListJobsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = match params.status {
+            Some(s) => serde_json::json!({ "status": s }),
+            None => serde_json::json!({}),
+        };
+        let result = rpc_dispatch(&self.node, "tenzro_mediaGen_listJobs", payload)
+            .await
+            .map_err(|e| err_internal(format!("mediaGen.listJobs failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Look up a single Tenzro Media Gen job by id. Returns null when this node has never seen it. On a split job the assignments array shows which halves of the denoising schedule are already claimed.")]
+    async fn media_gen_get_job(
+        &self,
+        Parameters(params): Parameters<MediaGenJobIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "job_id": params.job_id });
+        let result = rpc_dispatch(&self.node, "tenzro_mediaGen_getJob", payload)
+            .await
+            .map_err(|e| err_internal(format!("mediaGen.getJob failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "List the generative-media workers enrolled on this node. Each entry carries worker_did, supported_models, expert_holdings (the halves of a split model it has resident), max_resolution, max_frames, and gpu_vram_gb. Read-only.")]
+    async fn media_gen_list_workers(
+        &self,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let result = rpc_dispatch(
+            &self.node,
+            "tenzro_mediaGen_listWorkers",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| err_internal(format!("mediaGen.listWorkers failed: {}", e)))?;
+        json_result(result)
+    }
+
+    #[tool(description = "Fetch the signed receipt sealing a completed Tenzro Media Gen job. Returns null while the job is still open. The receipt commits to output_hash, output_mime, output_bytes, the params actually rendered, and the worker's signature.")]
+    async fn media_gen_get_receipt(
+        &self,
+        Parameters(params): Parameters<MediaGenJobIdParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let payload = serde_json::json!({ "job_id": params.job_id });
+        let result = rpc_dispatch(&self.node, "tenzro_mediaGen_getReceipt", payload)
+            .await
+            .map_err(|e| err_internal(format!("mediaGen.getReceipt failed: {}", e)))?;
         json_result(result)
     }
 

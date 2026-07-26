@@ -138,3 +138,5 @@ Both the Rust and TypeScript SDKs expose a `storage` client mirroring the RPC su
 ## 8. How storage relates to compute
 
 Storage and compute rental are two roles against one stake. They share the same `ProviderObligations` tracker and the same balance map; they differ only in the gate. Storage settles on a proof of retrievability per byte-epoch; compute settles on an availability proof per epoch. When a provider's stake no longer covers what it owes, both shed coverage through the same recheck. See [`docs/COMPUTE.md`](COMPUTE.md) for the compute side of the same substrate.
+
+Not everything content-addressed on the data plane is a storage deal. A rendered image or video lands in the producing worker's own blob store and is fetched from there by content address, which is how a requester gets bytes it can check against the hash in its receipt — but no byte-epoch is billed for it, no retrievability challenge is answered, and no redundancy is promised. A requester that wants the network to keep an output opens a deal for it like any other object. See [`AI.md`](AI.md) §8.

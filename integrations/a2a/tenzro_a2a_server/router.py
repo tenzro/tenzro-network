@@ -191,6 +191,16 @@ def route_message(text: str) -> str:
         "state-sync",
     ]):
         return "operability"
+    # Media-gen phrases must precede the MoE route: a split denoising
+    # schedule is described in terms of its high-noise and low-noise
+    # "expert" halves, which would otherwise match the MoE route.
+    if any(k in t for k in [
+        "media gen", "media-gen", "text2image", "image2image",
+        "text2video", "image2video", "generate image", "generate video",
+        "diffusers catalog", "pixel-step", "pixel step", "render job",
+        "latent handoff", "high-noise", "low-noise",
+    ]):
+        return "media-gen"
     if any(k in t for k in [
         "expert", "moe", "shard map", "shard", "expert-shard",
         "dispatch plan", "plan dispatch", "replication policy",

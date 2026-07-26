@@ -25,6 +25,7 @@ members = [
     "crates/tenzro-workflow",
     "crates/tenzro-cortex",
     "crates/tenzro-training",
+    "crates/tenzro-media-gen",
     "crates/tenzro-iroh",
     "crates/tenzro-cluster",
     "crates/tenzro-storage-provider",
@@ -88,6 +89,7 @@ tenzro-bridge = { path = "crates/tenzro-bridge", version = "0.1.0" }
 tenzro-events = { path = "crates/tenzro-events", version = "0.1.0" }
 tenzro-cortex = { path = "crates/tenzro-cortex", version = "0.1.0" }
 tenzro-training = { path = "crates/tenzro-training", version = "0.1.0" }
+tenzro-media-gen = { path = "crates/tenzro-media-gen", version = "0.1.0" }
 tenzro-iroh = { path = "crates/tenzro-iroh", version = "0.1.0" }
 tenzro-cluster = { path = "crates/tenzro-cluster", version = "0.1.0" }
 tenzro-storage-provider = { path = "crates/tenzro-storage-provider", version = "0.1.0" }
