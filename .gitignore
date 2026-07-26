@@ -118,7 +118,10 @@ deploy/terraform/
 deploy/kubernetes/
 cloudbuild-*.yaml
 config/genesis-prod.toml
+config/genesis-local.toml
 deploy/rpc-node/
+deploy/README.md
+docker-compose.yml
 scripts/deploy-testnet.sh
 scripts/rollout-validators.sh
 scripts/stop-the-world-cutover.sh
