@@ -548,7 +548,9 @@ mod onnx_backend {
     use std::time::Instant;
     use tokenizers::Tokenizer;
 
-    use super::preprocessing::{N_FRAMES, SAMPLE_RATE, decode_to_mono_16k, log_mel_spectrogram};
+    use super::preprocessing::{
+        N_FRAMES, N_SAMPLES, SAMPLE_RATE, decode_to_mono_16k, log_mel_spectrogram, samples_to_ms,
+    };
 
     /// Open an ONNX session from disk via the shared execution-provider-aware
     /// session builder (Level3 optimizations, GPU providers when compiled in).
