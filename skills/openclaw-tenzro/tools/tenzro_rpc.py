@@ -24,6 +24,10 @@ Usage:
     python tenzro_rpc.py get_block 0
     python tenzro_rpc.py chain_id
     python tenzro_rpc.py chat gemma4-9b "What is Tenzro?"
+    python tenzro_rpc.py route_intent reasoning 1000000000000000000 0.7 strong
+    python tenzro_rpc.py chat_by_intent code "Explain this trait bound"
+    python tenzro_rpc.py record_route_outcome qwen3-4b 3 escalated
+    python tenzro_rpc.py route_difficulty_stats qwen3-4b
     python tenzro_rpc.py list_model_endpoints
     python tenzro_rpc.py create_payment x402 /inference 100 USDC 0xrecipient
     python tenzro_rpc.py verify_payment <challenge_id> x402 <payer_did> 0xpayer 100 USDC 0xsig
@@ -58,6 +62,7 @@ Usage:
     python tenzro_rpc.py register_skill "web-search" "1.0.0" did:tenzro:machine:agent-abc "Searches the web" 1000000000000000000
     python tenzro_rpc.py search_skills "web search"
     python tenzro_rpc.py use_skill <skill_id> '{"query":"hello"}'
+    python tenzro_rpc.py use_skill <skill_id> '{"query":"hello"}' 1.0.0 <sha256_hex>
     python tenzro_rpc.py spawn_agent_with_skill <parent_id> "sub-agent" <skill_id> nlp,search
     python tenzro_rpc.py get_skill <skill_id>
     python tenzro_rpc.py update_skill <skill_id>
@@ -260,6 +265,21 @@ CANTON_MCP_URL = os.environ.get(
 _request_id = 0
 
 
+def _is_canton_method(method: str) -> bool:
+    """Whether a JSON-RPC method carries a Canton scope.
+
+    Matches how the node decides: any `tenzro_` method naming Canton or
+    DAML, in either the CamelCase (`tenzro_listCantonDomains`) or
+    snake-case (`tenzro_canton_health`) form.
+    """
+    return method.startswith("tenzro_") and (
+        "Canton" in method
+        or "canton" in method
+        or "Daml" in method
+        or "daml" in method
+    )
+
+
 def _rpc(method: str, params: Any = None) -> dict:
     """Send a JSON-RPC 2.0 request to Tenzro.
 
@@ -283,13 +303,29 @@ def _rpc(method: str, params: Any = None) -> dict:
     (validator set, treasury, fee schedule, system contracts — those
     flow through on-chain governance via `tenzro-token`). See
     `docs/api-keys.md` for the full sovereignty model.
+
+    Canton-scoped RPCs additionally take a network. Set
+    TENZRO_CANTON_NETWORK to `devnet` or `mainnet` and it is merged into
+    the params as `canton_network` — the node reads the choice from the
+    params rather than a header. A key authorizing exactly one network
+    needs no setting; a key authorizing several does, and the node names
+    the authorized set when the choice is missing.
     """
     global _request_id
     _request_id += 1
+    call_params = params if params is not None else {}
+    canton_network = os.environ.get("TENZRO_CANTON_NETWORK")
+    if (
+        canton_network
+        and _is_canton_method(method)
+        and isinstance(call_params, dict)
+        and "canton_network" not in call_params
+    ):
+        call_params = {**call_params, "canton_network": canton_network}
     payload = {
         "jsonrpc": "2.0",
         "method": method,
-        "params": params if params is not None else {},
+        "params": call_params,
         "id": _request_id,
     }
     headers = {"Content-Type": "application/json"}
@@ -338,11 +374,27 @@ def _mcp_tool_call(mcp_url: str, tool_name: str,
 
     Handles the MCP initialize handshake, session tracking, and
     SSE response parsing automatically.
+
+    The Canton MCP server is scope-gated: it requires an operator-issued
+    API key with scope `canton` (TENZRO_API_KEY, sent as
+    `X-Tenzro-Api-Key`), and a key authorizing more than one Canton
+    network must name the target (TENZRO_CANTON_NETWORK, sent as
+    `X-Canton-Network`). The gate sits above the MCP envelope and does
+    not read tool arguments, so the network travels as a header here
+    while the JSON-RPC surface carries it as a param. The other
+    ecosystem MCP servers are open.
     """
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
+    if mcp_url == CANTON_MCP_URL:
+        api_key = os.environ.get("TENZRO_API_KEY")
+        if api_key:
+            headers["X-Tenzro-Api-Key"] = api_key
+        canton_network = os.environ.get("TENZRO_CANTON_NETWORK")
+        if canton_network:
+            headers["X-Canton-Network"] = canton_network
     # Step 1: Initialize session
     init_payload = {
         "jsonrpc": "2.0",
@@ -410,12 +462,26 @@ def _mcp_tool_call(mcp_url: str, tool_name: str,
 # ── Wallet & Balance ──────────────────────────────────────────────
 
 
+def create_account(key_type: str = "ed25519") -> dict:
+    """Generate a plain keypair and derive its 20-byte address.
+
+    The private key is returned once, in the response, and the node keeps no
+    copy — store it yourself. `key_type` is `ed25519` (default) or
+    `secp256k1`; anything else falls back to Ed25519. Returns `address`,
+    `public_key`, `private_key`, and `key_type` (capitalized, e.g. `Ed25519`).
+
+    Use this when you want to hold the key. For custody split across shares,
+    use :func:`create_wallet`.
+    """
+    return _rpc("tenzro_createAccount", {"key_type": key_type})
+
+
 def create_wallet() -> dict:
     """Generate a new self-custody Tenzro wallet (2-of-3 FROST-Ed25519 (RFC 9591), 32-byte address).
 
     Returns the canonical Tenzro wallet shape: `wallet_id`, 32-byte hex
     `address`, base58 `display_address`, `public_key`, `key_type` (always
-    `ed25519` — FROST-Ed25519 is the only scheme), `threshold`, `total_shares`.
+    `Ed25519` — FROST-Ed25519 is the only scheme), `threshold`, `total_shares`.
     The wallet additionally carries a mandatory ML-DSA-65 post-quantum signing
     key for hybrid signatures. The faucet, `eth_getBalance`, and all
     transaction RPCs accept the 32-byte address directly.
@@ -434,7 +500,8 @@ def get_balance(address: str) -> dict:
 
 def send_transaction(from_addr: str, to_addr: str, value: int,
                      gas_limit: int = 21000,
-                     gas_price: int = 1_000_000_000) -> dict:
+                     gas_price: int = 1_000_000_000,
+                     approval_id: str = None) -> dict:
     """Send a TNZO transfer transaction via ambient OAuth/DPoP auth.
 
     The server looks up the wallet bound to the bearer DID (set
@@ -444,6 +511,11 @@ def send_transaction(from_addr: str, to_addr: str, value: int,
     including the PQ public key, signs both Ed25519 and ML-DSA-65 legs,
     verifies them, and submits atomically. Private keys never travel
     over the wire.
+
+    When the controller has put transfers on the AAP always-ask list the
+    first call returns JSON-RPC -32002 with data.approval_id. Pass that id
+    back as approval_id once the controller has approved it and the
+    transfer executes; a denial returns the approver's reason.
     """
     nonce_result = _rpc("eth_getTransactionCount", [from_addr, "latest"])
     nonce = int(nonce_result, 16) if isinstance(nonce_result, str) else 0
@@ -451,7 +523,7 @@ def send_transaction(from_addr: str, to_addr: str, value: int,
     chain_id_result = _rpc("eth_chainId", [])
     chain_id = int(chain_id_result, 16) if isinstance(chain_id_result, str) else 1337
 
-    return _rpc("tenzro_signAndSendTransaction", {
+    params = {
         "from": from_addr,
         "to": to_addr,
         # Decimal string carries the full u128 range — JSON numbers
@@ -461,7 +533,10 @@ def send_transaction(from_addr: str, to_addr: str, value: int,
         "gas_price": gas_price,
         "nonce": nonce,
         "chain_id": chain_id,
-    })
+    }
+    if approval_id is not None:
+        params["approval_id"] = approval_id
+    return _rpc("tenzro_signAndSendTransaction", params)
 
 
 def sign_transaction(from_addr: str, to_addr: str, value: int,
@@ -1061,6 +1136,113 @@ def list_model_endpoints() -> dict:
     return _rpc("tenzro_listModelEndpoints")
 
 
+def _intent_params(use_case: str, budget: int = None, optimize: float = None,
+                   quality_floor: str = None, est_input_tokens: int = None,
+                   est_output_tokens: int = None, payer_did: str = None,
+                   payer_address: str = None) -> dict:
+    """Assemble the intent fields shared by route_intent and chat_by_intent."""
+    params = {"use_case": use_case}
+    for key, value in (
+        ("budget", str(budget) if budget is not None else None),
+        ("optimize", optimize),
+        ("quality_floor", quality_floor),
+        ("est_input_tokens", est_input_tokens),
+        ("est_output_tokens", est_output_tokens),
+        ("payer_did", payer_did),
+        ("payer_address", payer_address),
+    ):
+        if value is not None:
+            params[key] = value
+    return params
+
+
+def route_intent(use_case: str, budget: int = None, optimize: float = None,
+                 quality_floor: str = None, est_input_tokens: int = None,
+                 est_output_tokens: int = None, payer_did: str = None,
+                 payer_address: str = None, prompt: str = None) -> dict:
+    """Select the best model for an intent without naming one.
+
+    use_case: chat | code | reasoning | research | summarize | extract | embed
+    budget: per-request cost cap in the smallest TNZO unit
+    optimize: cost-quality knob in [0.0, 1.0]
+    quality_floor: cheap | strong — rejects anything below the tier
+    payer_did: enables the per-DID rolling-window budget gate
+    payer_address: makes the payer's on-chain TNZO balance a hard ceiling
+    prompt: the text the model would answer, used only to place the request in
+        a difficulty cluster so selection accounts for how hard it is; it is
+        not sent to any provider
+
+    Returns the model, tier, estimated cost, fallback chain, the cluster the
+    prompt landed in, that model's error rate there, and the winning provider's
+    address and endpoint when the offer came from another operator. Discovery
+    only — nothing is dispatched and no spend is recorded, though the budget
+    gate and the wallet-balance ceiling still apply.
+    """
+    params = _intent_params(use_case, budget, optimize, quality_floor,
+                            est_input_tokens, est_output_tokens,
+                            payer_did, payer_address)
+    if prompt is not None:
+        params["prompt"] = prompt
+    return _rpc("tenzro_routeIntent", params)
+
+
+def chat_by_intent(use_case: str, message: str, budget: int = None,
+                   optimize: float = None, quality_floor: str = None,
+                   est_input_tokens: int = None, est_output_tokens: int = None,
+                   payer_did: str = None, payer_address: str = None,
+                   temperature: float = None, max_tokens: int = None) -> dict:
+    """Resolve an intent to a model and run the chat in one call.
+
+    Selection walks the cross-model fallback chain, so the intent resolves as
+    long as any model that satisfies it has a live offer, and dispatch is
+    pinned to the offer that was scored — the price quoted is the price settled
+    and the provider share goes to the address that offer named. The decision
+    is attached to the response under `route`. Difficulty feedback for resolved
+    and failed calls is recorded from the dispatch itself; report an escalation
+    with `record_route_outcome`.
+    """
+    params = _intent_params(use_case, budget, optimize, quality_floor,
+                            est_input_tokens, est_output_tokens,
+                            payer_did, payer_address)
+    params["message"] = message
+    if temperature is not None:
+        params["temperature"] = temperature
+    if max_tokens is not None:
+        params["max_tokens"] = max_tokens
+    return _rpc("tenzro_chatByIntent", params)
+
+
+def record_route_outcome(model_id: str, cluster: int, outcome: str) -> dict:
+    """Report how a routed call turned out.
+
+    outcome: resolved | escalated | failed. In practice this carries
+    `escalated` — the outcome only the caller knows, because it means the
+    caller took the answer to a stronger model; the other two are recorded by
+    `chat_by_intent` from the dispatch itself. Reporting is advisory:
+    `retained` false means the node has no difficulty index wired, so the
+    feedback was accepted and discarded.
+    """
+    return _rpc("tenzro_recordRouteOutcome", {
+        "model_id": model_id,
+        "cluster": cluster,
+        "outcome": outcome,
+    })
+
+
+def route_difficulty_stats(model_id: str = None) -> dict:
+    """Read the node's difficulty index: cluster count and prompts per cluster.
+
+    With `model_id`, also returns that model's per-cluster outcome counters and
+    error rate. An operator diagnostic — routing does not depend on it.
+    `enabled` false means the node has no embedding model loaded and routes on
+    declared metadata alone.
+    """
+    params = {}
+    if model_id:
+        params["model_id"] = model_id
+    return _rpc("tenzro_routeDifficultyStats", params)
+
+
 # ── Payments ──────────────────────────────────────────────────────
 
 
@@ -1341,19 +1523,46 @@ def get_agent_template_stats(template_id: str) -> dict:
 # ── Skills Registry ──────────────────────────────────────────────
 
 
+def _skill_bundle(uri: str, sha256: str, size_bytes: int) -> dict:
+    """Build a content-addressed artifact descriptor for a skill.
+
+    uri is a tenzro://blob/<blake3-hex> locator (iroh-blobs verifies BLAKE3
+    over the wire); sha256 is the publisher's declared canonical hash of the
+    same bytes, which callers pin at invocation without trusting the transport
+    that delivered them.
+    """
+    return {
+        "uri": uri,
+        "sha256": sha256.strip().lower(),
+        "size_bytes": size_bytes,
+    }
+
+
 def list_skills(tag: str = None, creator_did: str = None,
                 max_price: int = None, active_only: bool = True,
+                category: str = None, capability: str = None,
+                bundled_only: bool = False,
                 limit: int = 50, offset: int = 0) -> dict:
     """List skills in the decentralized Skills Registry.
 
+    The registry is permissionless: anyone may publish, and a skill is either
+    free or priced in TNZO paid to its creator.
+
     max_price: optional filter in wei (10^-18 TNZO), sent as decimal string
     to preserve full u128 precision over JSON.
+    bundled_only: keep only skills publishing a pinnable artifact.
     """
     params = {"active_only": active_only}
     if tag:
         params["tag"] = tag
     if creator_did:
         params["creator_did"] = creator_did
+    if category:
+        params["category"] = category
+    if capability:
+        params["capability"] = capability
+    if bundled_only:
+        params["bundled_only"] = True
     if max_price is not None:
         params["max_price"] = str(max_price)
     if limit != 50:
@@ -1367,11 +1576,18 @@ def register_skill(name: str, version: str, creator_did: str,
                    description: str, price_per_call: int,
                    tags: list = None, required_capabilities: list = None,
                    endpoint: str = None, input_schema: dict = None,
-                   output_schema: dict = None) -> dict:
-    """Register a new skill in the Skills Registry.
+                   output_schema: dict = None, category: str = None,
+                   creator_wallet: str = None,
+                   bundle_uri: str = None, bundle_sha256: str = None,
+                   bundle_size: int = None) -> dict:
+    """Register a new skill in the permissionless Skills Registry.
 
     price_per_call: amount in wei (10^-18 TNZO), sent as decimal string
-    to preserve full u128 precision over JSON.
+    to preserve full u128 precision over JSON. Any non-zero price requires
+    creator_wallet as the payout address.
+
+    Supplying the bundle triple (locator, hex SHA-256 of the bytes, size) lets
+    callers pin exactly which artifact they are paying to run.
     """
     params = {
         "name": name,
@@ -1390,12 +1606,19 @@ def register_skill(name: str, version: str, creator_did: str,
         params["input_schema"] = input_schema
     if output_schema:
         params["output_schema"] = output_schema
+    if category:
+        params["category"] = category
+    if creator_wallet:
+        params["creator_wallet"] = creator_wallet
+    if bundle_uri and bundle_sha256 and bundle_size:
+        params["bundle"] = _skill_bundle(bundle_uri, bundle_sha256, bundle_size)
     return _rpc("tenzro_registerSkill", params)
 
 
 def search_skills(query: str, tag: str = None, max_price: int = None,
-                  limit: int = 20) -> dict:
-    """Search skills by free-text query.
+                  category: str = None, capability: str = None,
+                  bundled_only: bool = False, limit: int = 20) -> dict:
+    """Search skills by free-text query over name, description and tags.
 
     max_price: optional filter in wei (10^-18 TNZO), sent as decimal string
     to preserve full u128 precision over JSON.
@@ -1403,6 +1626,12 @@ def search_skills(query: str, tag: str = None, max_price: int = None,
     params = {"query": query, "active_only": True}
     if tag:
         params["tag"] = tag
+    if category:
+        params["category"] = category
+    if capability:
+        params["capability"] = capability
+    if bundled_only:
+        params["bundled_only"] = True
     if max_price is not None:
         params["max_price"] = str(max_price)
     if limit != 20:
@@ -1410,12 +1639,25 @@ def search_skills(query: str, tag: str = None, max_price: int = None,
     return _rpc("tenzro_searchSkills", params)
 
 
-def use_skill(skill_id: str, input_data: dict = None) -> dict:
-    """Invoke a skill by ID with given input payload."""
-    return _rpc("tenzro_useSkill", {
+def use_skill(skill_id: str, input_data: dict = None,
+              expected_version: str = None,
+              expected_sha256: str = None) -> dict:
+    """Invoke a skill by ID with given input payload.
+
+    Because the registry is permissionless, pinning is how a caller fixes which
+    bytes it pays to run: pass expected_version and/or expected_sha256 and a
+    mismatch is refused (-32006) before any settlement, so a refused call is
+    free. Pinning nothing accepts whatever the publisher currently serves.
+    """
+    params = {
         "skill_id": skill_id,
         "input": input_data or {},
-    })
+    }
+    if expected_version:
+        params["expected_version"] = expected_version
+    if expected_sha256:
+        params["expected_sha256"] = expected_sha256
+    return _rpc("tenzro_useSkill", params)
 
 
 def get_skill_usage(skill_id: str) -> dict:
@@ -1550,7 +1792,7 @@ def bridge_tokens(source_chain: str, dest_chain: str, asset: str,
     """
     return _rpc("tenzro_bridgeTokens", {
         "source_chain": source_chain,
-        "destination_chain": dest_chain,
+        "dest_chain": dest_chain,
         "asset": asset,
         "amount": str(amount_wei),
         "sender": sender,
@@ -1701,7 +1943,7 @@ def transfer_nft(collection_id: str, from_addr: str, to: str,
 
 def get_nft_owner(collection_id: str, token_id: str) -> dict:
     """Get the owner of a specific NFT."""
-    return _rpc("tenzro_getNftOwner", {
+    return _rpc("tenzro_nftOwnerOf", {
         "collection_id": collection_id,
         "token_id": token_id,
     })
@@ -1709,7 +1951,7 @@ def get_nft_owner(collection_id: str, token_id: str) -> dict:
 
 def get_nft_balance(collection_id: str, address: str) -> dict:
     """Get the number of NFTs an address owns in a collection."""
-    return _rpc("tenzro_getNftBalance", {
+    return _rpc("tenzro_nftBalanceOf", {
         "collection_id": collection_id,
         "address": address,
     })
@@ -1760,22 +2002,22 @@ def bridge_execute(from_chain: str, to_chain: str, token: str,
     from_chain: source chain
     to_chain: destination chain
     token: token symbol
-    amount: amount in wei
+    amount: amount in wei, sent as a decimal string to preserve u128 precision
     sender: sender address on source chain
     recipient: recipient address on destination chain
-    protocol: optional bridge protocol to use
+    protocol: pin a specific bridge adapter; omit to let the router choose
     """
     params = {
-        "from_chain": from_chain,
-        "to_chain": to_chain,
-        "token": token,
-        "amount": amount,
+        "source_chain": from_chain,
+        "dest_chain": to_chain,
+        "asset": token,
+        "amount": str(amount),
         "sender": sender,
         "recipient": recipient,
     }
     if protocol:
         params["protocol"] = protocol
-    return _rpc("tenzro_bridgeExecute", params)
+    return _rpc("tenzro_bridgeTokens", params)
 
 
 def bridge_status(transfer_id: str, protocol: str = None) -> dict:
@@ -2110,14 +2352,14 @@ def recover_tokens(token_id: str, from_addr: str, to: str,
     })
 
 
-def add_identity_claim(address: str, topic: str, issuer: str,
+def add_identity_claim(address: str, topic: int, issuer: str,
                        envelope: str, data: str = "",
-                       valid_from: str = None,
-                       valid_to: str = None) -> dict:
+                       valid_from: str = "",
+                       valid_to: str = "") -> dict:
     """Add an identity claim to an address for compliance verification.
 
     address: the address to add the claim for
-    topic: claim topic (e.g. "kyc", "accredited_investor", "jurisdiction")
+    topic: numeric ERC-3643 claim topic
     issuer: DID of the claim issuer (must be an active trusted issuer
         registered for this topic; the envelope must be signed by this DID)
     envelope: hex DID-envelope header signed by the issuer over the
@@ -2125,19 +2367,20 @@ def add_identity_claim(address: str, topic: str, issuer: str,
     data: optional claim data payload
     valid_from: optional ISO-8601 start time
     valid_to: optional ISO-8601 expiry time
+
+    Every field is sent unconditionally because the envelope signature covers
+    the canonical params: omitting one here would sign a different preimage
+    than the node reconstructs.
     """
-    params = {
+    return _rpc("tenzro_addIdentityClaim", {
         "address": address,
         "topic": topic,
         "issuer": issuer,
         "data": data,
+        "valid_from": valid_from,
+        "valid_to": valid_to,
         "envelope": envelope,
-    }
-    if valid_from:
-        params["valid_from"] = valid_from
-    if valid_to:
-        params["valid_to"] = valid_to
-    return _rpc("tenzro_addIdentityClaim", params)
+    })
 
 
 def add_trusted_issuer(issuer_did: str, name: str,
@@ -2186,7 +2429,7 @@ def get_events(filter: dict = None, from_sequence: int = None,
 
 def get_event_status() -> dict:
     """Get the current event stream status (latest sequence, lag, etc.)."""
-    return _rpc("tenzro_getEventStatus")
+    return _rpc("tenzro_eventStatus")
 
 
 def register_webhook(url: str,
@@ -2860,11 +3103,20 @@ def get_skill(skill_id: str) -> dict:
 def update_skill(skill_id: str, description: str = None,
                  version: str = None, price_per_call: int = None,
                  tags: list = None, endpoint: str = None,
-                 status: str = None) -> dict:
+                 status: str = None, category: str = None,
+                 creator_wallet: str = None,
+                 required_capabilities: list = None,
+                 bundle_uri: str = None, bundle_sha256: str = None,
+                 bundle_size: int = None,
+                 withdraw_bundle: bool = False) -> dict:
     """Update an existing skill registration.
 
     skill_id: skill to update
     Only provided fields are updated.
+
+    Republishing an artifact (bundle triple) is a version bump, not a mutation
+    of the bytes a pinned caller already agreed to run: pins on the old digest
+    fail closed against the new row. Pass withdraw_bundle to drop the artifact.
     """
     params = {"skill_id": skill_id}
     if description:
@@ -2879,6 +3131,16 @@ def update_skill(skill_id: str, description: str = None,
         params["endpoint"] = endpoint
     if status:
         params["status"] = status
+    if category:
+        params["category"] = category
+    if creator_wallet:
+        params["creator_wallet"] = creator_wallet
+    if required_capabilities:
+        params["required_capabilities"] = required_capabilities
+    if withdraw_bundle:
+        params["bundle"] = None
+    elif bundle_uri and bundle_sha256 and bundle_size:
+        params["bundle"] = _skill_bundle(bundle_uri, bundle_sha256, bundle_size)
     return _rpc("tenzro_updateSkill", [params])
 
 
@@ -3101,6 +3363,24 @@ def get_agent_daily_spend(agent_did: str) -> dict:
     last_reset}`.
     """
     return _rpc("tenzro_getAgentDailySpend", {"agent_did": agent_did})
+
+
+def list_capabilities() -> dict:
+    """List every capability registered on this node, with how many
+    agents claim it and how many attestations back those claims.
+
+    This is the entry point for capability composition: call it first to
+    discover what specialized work the local agent runtime can route,
+    then narrow with `get_capability_attestations` or pick a worker with
+    `find_best_agent_for_capability`.
+
+    Returns `{capabilities: [{capability, agent_count,
+    attestation_count, agents}], total, truncated,
+    rejected_attestation_count}`. A non-zero `rejected_attestation_count`
+    means the registry has refused attestations since boot (signature
+    mismatch or malformed payload) and is worth investigating.
+    """
+    return _rpc("tenzro_listCapabilities", {})
 
 
 def get_capability_attestations(capability: str,
@@ -3740,7 +4020,7 @@ def download_model(model_id: str, source: str = None) -> dict:
         (HuggingFace only), or omit for network-first with HuggingFace fallback
 
     Fetch is peer-first: weights are pulled from Tenzro peers over iroh blobs
-    (BLAKE3-verified end-to-end on transfer), falling back to HuggingFace when
+    (BLAKE3-verified on transfer), falling back to HuggingFace when
     no peer holds them. Downloaded weights are checked against the canonical
     hash record before load.
     """
@@ -5298,15 +5578,18 @@ def list_zk_circuits() -> dict:
 
 
 def create_mpc_wallet_advanced(threshold: int = 2,
-                               total_shares: int = 3) -> dict:
+                               total_shares: int = 3,
+                               key_type: str = "ed25519") -> dict:
     """Create a FROST-Ed25519 (RFC 9591) threshold wallet with custom config.
 
     Pairs the FROST-Ed25519 classical leg with a mandatory ML-DSA-65
-    post-quantum signing key for hybrid signatures.
+    post-quantum signing key for hybrid signatures. `key_type` is `ed25519`
+    (default) or `secp256k1`; any other value is rejected with `-32602`.
     """
     return _rpc("tenzro_createMpcWallet", {
         "threshold": threshold,
         "total_shares": total_shares,
+        "key_type": key_type,
     })
 
 
@@ -5728,13 +6011,21 @@ def list_pending_approvals(approver_did):
     return _rpc("tenzro_listPendingApprovals", {"approver_did": approver_did})
 
 
-def decide_approval(approval_id, decision, approver_did):
-    """Decide a pending approval — `decision` is `"approved"` or `"denied"`."""
-    return _rpc("tenzro_decideApproval", {
+def decide_approval(approval_id, decision, approver_did, deny_reason=None):
+    """Decide a pending approval — `decision` is `"approved"` or `"denied"`.
+
+    `deny_reason` is recorded on a denial and returned to the requesting
+    agent when it retries, so the agent can act on why it was refused. It
+    is ignored for an approval.
+    """
+    params = {
         "approval_id": approval_id,
         "decision": decision,
         "approver_did": approver_did,
-    })
+    }
+    if deny_reason is not None:
+        params["deny_reason"] = deny_reason
+    return _rpc("tenzro_decideApproval", params)
 
 
 def get_approval(approval_id):
@@ -6563,12 +6854,15 @@ def list_forecast_models() -> dict:
     return _rpc("tenzro_listForecastModels", {})
 
 
-def forecast(model_id: str, series: list, horizon: int,
-             quantiles: list = None) -> dict:
-    """Run a probabilistic forecast on the given series."""
-    params = {"model_id": model_id, "series": series, "horizon": horizon}
+def forecast(model_id: str, history: list, horizon: int,
+             quantiles: list = None,
+             frequency_seconds: int = None) -> dict:
+    """Run a probabilistic forecast. `history` is oldest-first observations."""
+    params = {"model_id": model_id, "history": history, "horizon": horizon}
     if quantiles is not None:
         params["quantiles"] = quantiles
+    if frequency_seconds is not None:
+        params["frequency_seconds"] = frequency_seconds
     return _rpc("tenzro_forecast", params)
 
 
@@ -6623,9 +6917,10 @@ def list_text_embedding_models() -> dict:
 
 
 def text_embed(model_id: str, inputs: list,
-               requested_dim: int = None) -> dict:
+               requested_dim: int = None,
+               normalize: bool = False) -> dict:
     """Embed a batch of strings; optional Matryoshka truncation."""
-    params = {"model_id": model_id, "inputs": inputs}
+    params = {"model_id": model_id, "inputs": inputs, "normalize": normalize}
     if requested_dim is not None:
         params["requested_dim"] = requested_dim
     return _rpc("tenzro_textEmbed", params)
@@ -6634,7 +6929,11 @@ def text_embed(model_id: str, inputs: list,
 # Segmentation ----------------------------------------------------------
 
 def list_segmentation_catalog() -> dict:
-    """List the curated segmentation catalog (SAM 3, SAM 2, EdgeSAM, MobileSAM)."""
+    """List the curated prompt-driven segmentation catalog (SAM 2, EdgeSAM, MobileSAM).
+
+    Text-promptable SAM 3 is a separate runtime with its own catalog —
+    see `list_text_segmentation_catalog`.
+    """
     return _rpc("tenzro_listSegmentationCatalog", {})
 
 
@@ -6644,12 +6943,62 @@ def list_segmentation_models() -> dict:
 
 
 def segment(model_id: str, image_b64: str, prompts: list) -> dict:
-    """Run promptable segmentation. Prompts: [{"type":"point",...} | {"type":"box",...}, ...]."""
+    """Run promptable segmentation.
+
+    Prompts are original-image pixel coordinates, either
+    `{"type": "point", "x": .., "y": .., "is_foreground": true}` or
+    `{"type": "box", "x0": .., "y0": .., "x1": .., "y1": ..}`.
+    """
     return _rpc("tenzro_segment", {
         "model_id": model_id,
-        "image_b64": image_b64,
+        "image_base64": image_b64,
         "prompts": prompts,
     })
+
+
+# Text-promptable segmentation (SAM 3) ----------------------------------
+
+def list_text_segmentation_catalog() -> dict:
+    """List the curated open-vocabulary segmentation catalog (SAM 3 family)."""
+    return _rpc("tenzro_listTextSegmentationCatalog", {})
+
+
+def list_text_segmentation_models() -> dict:
+    """List text-promptable segmenters currently loaded on this node."""
+    return _rpc("tenzro_listTextSegmentationModels", {})
+
+
+def load_text_segmentation_model(model_id: str) -> dict:
+    """Load a SAM-3-family segmenter by catalog id.
+
+    The node fetches the ONNX bundle from HuggingFace Hub (or reuses its
+    cache) and registers it under the same id — no filesystem path needed.
+    """
+    return _rpc("tenzro_loadTextSegmentationModel", {"model_id": model_id})
+
+
+def unload_text_segmentation_model(model_id: str) -> dict:
+    """Drop a registered text-promptable segmenter."""
+    return _rpc("tenzro_unloadTextSegmentationModel", {"model_id": model_id})
+
+
+def text_segment(model_id: str, image_b64: str, text_prompt: str,
+                 box_prompt: dict = None,
+                 score_threshold: float = 0.5) -> dict:
+    """Segment by free-text label (e.g. "dog", "sofa") — no click needed.
+
+    Pass an empty `text_prompt` with a `box_prompt` of
+    `{"cx": .., "cy": .., "w": .., "h": ..}` to run box-only mode.
+    """
+    params = {
+        "model_id": model_id,
+        "image_base64": image_b64,
+        "text_prompt": text_prompt,
+        "score_threshold": score_threshold,
+    }
+    if box_prompt is not None:
+        params["box_prompt"] = box_prompt
+    return _rpc("tenzro_textSegment", params)
 
 
 # Detection -------------------------------------------------------------
@@ -6669,7 +7018,7 @@ def detect(model_id: str, image_b64: str,
     """Run object detection on the given image."""
     return _rpc("tenzro_detect", {
         "model_id": model_id,
-        "image_b64": image_b64,
+        "image_base64": image_b64,
         "score_threshold": score_threshold,
     })
 
@@ -6687,22 +7036,25 @@ def list_audio_models() -> dict:
 
 
 def transcribe(model_id: str, audio_b64: str, language: str = None,
-               timestamps: bool = False) -> dict:
-    """Transcribe a base64-encoded audio buffer."""
+               timestamps: bool = False,
+               temperature: float = None) -> dict:
+    """Transcribe a base64-encoded audio buffer (WAV/MP3/FLAC)."""
     params = {
         "model_id": model_id,
-        "audio_b64": audio_b64,
+        "audio_base64": audio_b64,
         "timestamps": timestamps,
     }
     if language is not None:
         params["language"] = language
+    if temperature is not None:
+        params["temperature"] = temperature
     return _rpc("tenzro_transcribe", params)
 
 
 # Video -----------------------------------------------------------------
 
 def list_video_catalog() -> dict:
-    """List the curated video catalog (currently empty — license/export gap)."""
+    """List the curated video encoder catalog (V-JEPA 2 ViT-L / ViT-H / ViT-g)."""
     return _rpc("tenzro_listVideoCatalog", {})
 
 
@@ -6711,36 +7063,58 @@ def list_video_models() -> dict:
     return _rpc("tenzro_listVideoModels", {})
 
 
-def video_embed(model_id: str, video_b64: str,
-                frame_stride: int = 30) -> dict:
-    """Embed a base64-encoded video clip."""
-    return _rpc("tenzro_videoEmbed", {
+def video_embed(model_id: str, video_b64: str, normalize: bool = False,
+                frame_stride: int = None) -> dict:
+    """Embed a base64-encoded video clip into one clip-level vector.
+
+    The node extracts evenly-spaced frames, embeds each through the image
+    encoder the clip encoder was registered over, and mean-pools.
+    `frame_stride` replaces the even spacing with a fixed stride.
+    """
+    params = {
         "model_id": model_id,
-        "video_b64": video_b64,
-        "frame_stride": frame_stride,
-    })
+        "video_base64": video_b64,
+        "normalize": normalize,
+    }
+    if frame_stride is not None:
+        params["frame_stride"] = frame_stride
+    return _rpc("tenzro_videoEmbed", params)
 
 
 # Multi-modal load / unload --------------------------------------------
 #
 # Symmetric load/unload pair per modality. `load_*_model` registers an
 # ONNX file with the node's runtime; `unload_*_model` drops the ORT
-# session. For stubbed modalities (text-embed, segmentation,
-# detection, video) the underlying RPC handler returns JSON-RPC -32004
-# until the ONNX loader for that modality lands — wrappers are exposed
-# for surface symmetry so agent code can detect availability uniformly.
+# session.
+#
+# Most loaders need the ONNX already on the node's filesystem — the paths
+# are node-local, not client-local. Two exceptions fetch from HuggingFace
+# Hub themselves: `load_text_embedding_model` when called with a catalog
+# id and no path, and `load_text_segmentation_model` always.
+#
+# `catalog_id` inherits the structural parameters from the curated catalog
+# entry and enforces its license tier: the node refuses with JSON-RPC
+# -32010 when the operator has not accepted that entry's terms (started
+# with `--accept-license <id>` or `--accept-non-commercial`). Those are
+# node-operator startup flags, never client parameters.
+#
+# The ORT-backed runtimes are feature-gated. A node built without
+# `tenzro-model/onnx` answers every load and inference call with
+# JSON-RPC -32011 (ProviderNotAvailable).
 
 
-def load_forecast_model(model_id: str, path: str, context_length: int,
-                        max_horizon: int, output_name: str = None,
+def load_forecast_model(model_id: str, path: str, catalog_id: str = None,
+                        context_length: int = None, max_horizon: int = None,
+                        output_name: str = None,
                         batch_size: int = None) -> dict:
-    """Load a forecast (timeseries) ONNX. For TimesFM 2.5 transformers export pass output_name + batch_size=2."""
-    params = {
-        "model_id": model_id,
-        "path": path,
-        "context_length": context_length,
-        "max_horizon": max_horizon,
-    }
+    """Load a forecast (timeseries) ONNX. Pass catalog_id to inherit context_length/max_horizon/output_name/batch_size and enforce the entry's license tier."""
+    params = {"model_id": model_id, "path": path}
+    if catalog_id is not None:
+        params["catalog_id"] = catalog_id
+    if context_length is not None:
+        params["context_length"] = context_length
+    if max_horizon is not None:
+        params["max_horizon"] = max_horizon
     if output_name is not None:
         params["output_name"] = output_name
     if batch_size is not None:
@@ -6770,11 +7144,29 @@ def unload_vision_model(model_id: str) -> dict:
     return _rpc("tenzro_unloadVisionModel", {"model_id": model_id})
 
 
-def load_text_embedding_model(model_id: str, path: str,
-                              catalog_id: str = None) -> dict:
-    """Load a text-embedding ONNX. Stub: returns -32004 until the ONNX loader is wired."""
-    params = {"model_id": model_id, "path": path}
+def load_text_embedding_model(model_id: str, path: str = None,
+                              tokenizer_path: str = None,
+                              family: str = None,
+                              catalog_id: str = None,
+                              embedding_dim: int = None,
+                              max_sequence_length: int = None) -> dict:
+    """Load a text encoder. Two paths.
+
+    Pass a catalog id as `model_id` and omit `path`, and the node fetches
+    the ONNX graph and tokenizer from HuggingFace onto its models
+    directory. Or pass `path` + `tokenizer_path` + `family` ('qwen3',
+    'cls', 'mean', 'sentence_embedding') for files already on the node,
+    with `catalog_id` supplying embedding_dim and max_sequence_length —
+    or set those two explicitly.
+    """
+    params = {"model_id": model_id}
+    if path is not None: params["path"] = path
+    if tokenizer_path is not None: params["tokenizer_path"] = tokenizer_path
+    if family is not None: params["family"] = family
     if catalog_id is not None: params["catalog_id"] = catalog_id
+    if embedding_dim is not None: params["embedding_dim"] = embedding_dim
+    if max_sequence_length is not None:
+        params["max_sequence_length"] = max_sequence_length
     return _rpc("tenzro_loadTextEmbeddingModel", params)
 
 
@@ -6785,14 +7177,21 @@ def unload_text_embedding_model(model_id: str) -> dict:
 
 def load_segmentation_model(model_id: str, encoder_path: str,
                             decoder_path: str, family: str = None,
+                            input_size: int = None,
                             catalog_id: str = None) -> dict:
-    """Load a segmenter (SAM 2 / EdgeSAM / MobileSAM). Loader stub."""
+    """Load a segmenter (SAM 2 / EdgeSAM / MobileSAM) from node-local ONNX.
+
+    Pass `catalog_id` to inherit family and input_size from the catalog,
+    or set both yourself. `family` is 'sam1' (EdgeSAM, MobileSAM —
+    6-input decoder) or 'sam2' (7-input decoder with high-res taps).
+    """
     params = {
         "model_id": model_id,
         "encoder_path": encoder_path,
         "decoder_path": decoder_path,
     }
     if family is not None: params["family"] = family
+    if input_size is not None: params["input_size"] = input_size
     if catalog_id is not None: params["catalog_id"] = catalog_id
     return _rpc("tenzro_loadSegmentationModel", params)
 
@@ -6803,10 +7202,18 @@ def unload_segmentation_model(model_id: str) -> dict:
 
 
 def load_detection_model(model_id: str, path: str, family: str = None,
+                         input_size: int = None, num_classes: int = None,
                          catalog_id: str = None) -> dict:
-    """Load a detector (RF-DETR / D-FINE). Loader stub."""
+    """Load a detector from a node-local ONNX file.
+
+    Pass `catalog_id` to inherit family, input_size and num_classes from
+    the catalog, or set all three. `family` is 'rf_detr' (90-class COCO
+    indexing) or 'd_fine' (80-class). Both are NMS-free.
+    """
     params = {"model_id": model_id, "path": path}
     if family is not None: params["family"] = family
+    if input_size is not None: params["input_size"] = input_size
+    if num_classes is not None: params["num_classes"] = num_classes
     if catalog_id is not None: params["catalog_id"] = catalog_id
     return _rpc("tenzro_loadDetectionModel", params)
 
@@ -6817,20 +7224,37 @@ def unload_detection_model(model_id: str) -> dict:
 
 
 def load_audio_model(model_id: str, encoder_path: str, decoder_path: str,
-                     tokenizer_path: str, catalog_id: str = None,
+                     tokenizer_path: str = None,
+                     preprocessor_path: str = None, vocab_path: str = None,
+                     catalog_id: str = None,
                      family: str = None, max_audio_seconds: int = None,
-                     whisper_variant: str = None) -> dict:
-    """Load an ASR model. Pass catalog_id to inherit family/max_audio_seconds/whisper_variant."""
+                     whisper_variant: str = None,
+                     source_lang: str = None,
+                     target_lang: str = None) -> dict:
+    """Load an ASR model from node-local ONNX files.
+
+    Which auxiliary paths are required depends on the family: 'moonshine'
+    and 'whisper' need `tokenizer_path`; 'parakeet' and 'canary' need
+    `preprocessor_path` + `vocab_path`. For 'canary', `source_lang` and
+    `target_lang` (both default 'en', one of en/de/es/fr) build the
+    decoder prefix — set them differently to translate rather than
+    transcribe. Pass `catalog_id` to inherit family, max_audio_seconds
+    and whisper_variant from the catalog.
+    """
     params = {
         "model_id": model_id,
         "encoder_path": encoder_path,
         "decoder_path": decoder_path,
-        "tokenizer_path": tokenizer_path,
     }
+    if tokenizer_path is not None: params["tokenizer_path"] = tokenizer_path
+    if preprocessor_path is not None: params["preprocessor_path"] = preprocessor_path
+    if vocab_path is not None: params["vocab_path"] = vocab_path
     if catalog_id is not None: params["catalog_id"] = catalog_id
     if family is not None: params["family"] = family
     if max_audio_seconds is not None: params["max_audio_seconds"] = max_audio_seconds
     if whisper_variant is not None: params["whisper_variant"] = whisper_variant
+    if source_lang is not None: params["source_lang"] = source_lang
+    if target_lang is not None: params["target_lang"] = target_lang
     return _rpc("tenzro_loadAudioModel", params)
 
 
@@ -6839,11 +7263,18 @@ def unload_audio_model(model_id: str) -> dict:
     return _rpc("tenzro_unloadAudioModel", {"model_id": model_id})
 
 
-def load_video_model(model_id: str, path: str,
-                     catalog_id: str = None) -> dict:
-    """Load a video encoder ONNX. Loader stub: catalog ships empty pending license clearance."""
-    params = {"model_id": model_id, "path": path}
-    if catalog_id is not None: params["catalog_id"] = catalog_id
+def load_video_model(model_id: str, vision_model_id: str,
+                     num_frames: int = None) -> dict:
+    """Register a clip encoder over an already-loaded image encoder.
+
+    Video embedding is frame-based: the node extracts `num_frames`
+    evenly-spaced frames (default 8, clamped to 1..128), embeds each
+    through the encoder named by `vision_model_id`, and mean-pools. Load
+    that image encoder with `load_vision_model` first — an unloaded id is
+    refused with JSON-RPC -32004.
+    """
+    params = {"model_id": model_id, "vision_model_id": vision_model_id}
+    if num_frames is not None: params["num_frames"] = num_frames
     return _rpc("tenzro_loadVideoModel", params)
 
 
@@ -7357,8 +7788,8 @@ def get_account_contention(address: str) -> dict:
 def get_da_backends() -> dict:
     """List configured DA backends and their health status.
 
-    Only `inline_fallback` ships today; EigenDA / Celestia / Avail entries
-    appear when their feature-gated adapters land.
+    Only `inline_fallback` is configured today; EigenDA / Celestia / Avail
+    entries appear once their feature-gated adapters are wired.
     """
     return _rpc("tenzro_getDaBackends", {})
 
@@ -7472,6 +7903,23 @@ def list_inference_usage(model_id: str = None,
     return _rpc("tenzro_listInferenceUsage", params)
 
 
+def get_generation(generation_id: str) -> dict:
+    """Read the recorded stats for one generation by the id you already hold.
+
+    `generation_id` is the `chatcmpl-...` from any chat route, or the
+    `request_id` of an inference dispatched over JSON-RPC. Returns
+    `{ id, model, provider, input_tokens, output_tokens, total_tokens,
+    bytes_in, bytes_out, cost_wei, latency_ms, tokens_per_second, created }`.
+
+    Useful after consuming a stream: the token counts and cost arrive in the
+    terminal chunk, which a client that stops reading at the last token never
+    sees. A generation is recorded when it finishes, so an error means the id
+    is unknown to this node, the generation is still running, or it failed
+    before completing.
+    """
+    return _rpc("tenzro_getGeneration", {"id": generation_id})
+
+
 def get_provider_reputation(provider_address: str) -> dict:
     """Read the current reputation score for an inference provider.
 
@@ -7562,9 +8010,9 @@ def rotate_validator_key(
                 new_consensus(32) || new_pq(1952) || new_bls(48) ||
                 nonce_le(8))
 
-    The rotation lands on the receiving node only — until the
-    consensus-mediated typed transaction lands, operators must fan out
-    the same call to every active validator before the next epoch
+    The rotation applies to the receiving node only. There is no
+    consensus-mediated typed transaction for it, so operators must fan
+    out the same call to every active validator before the next epoch
     boundary or consensus will fork. See
     `tools/deploy/rotate-validator-key.sh` in the network repo for the
     fan-out script.
@@ -8038,23 +8486,29 @@ def list_database_engines() -> dict:
 
 def create_database(database_id: str, engine_id: str, owner_did: str = None,
                     access_policy: dict = None, placement: str = "local",
-                    partitions: int = 1, replicas: int = 1,
+                    partitions: int = 1, min_replication: int = None,
+                    max_replication: int = None,
                     engine_config: dict = None,
                     confidential: bool = False) -> dict:
     """Register a database this node serves and compute its partition
     placement over the live cluster.
 
     Provide either `owner_did` (owner-only access policy) or an explicit
-    `access_policy`. `placement` is local | lan_cluster | network. Set
-    `confidential` for encryption at rest.
+    `access_policy`. `placement` is local | lan_cluster | network.
+    `min_replication`/`max_replication` set the holders-per-partition policy
+    (node default 2/4). Set `confidential` for encryption at rest.
     """
     params = {
         "database_id": database_id,
         "engine_id": engine_id,
         "placement": placement,
         "partitions": partitions,
-        "replicas": replicas,
     }
+    if min_replication is not None or max_replication is not None:
+        params["replication"] = {
+            "min_replication": min_replication if min_replication is not None else 2,
+            "max_replication": max_replication if max_replication is not None else 4,
+        }
     if owner_did is not None:
         params["owner_did"] = owner_did
     if access_policy is not None:
@@ -8114,13 +8568,15 @@ def issue_database_connection(database_id: str, caller_did: str,
 
 def database_query(database_id: str, caller_did: str, body: dict,
                    partition_index: int = 0, write: bool = False,
-                   capability: str = None) -> dict:
+                   capability: str = None, consistency: str = None) -> dict:
     """Run an engine-dialect query against a database partition.
 
     `body` is the engine dialect ({sql, params} for Postgres, {op, ...} for
-    Qdrant/Lance/Tantivy, {command: [...]} for Valkey). When this node holds
-    the target partition the result carries served_here=true and the engine
-    result; otherwise it carries the holder endpoints.
+    Qdrant/Lance/Tantivy, {command: [...]} for Valkey). `consistency` is the
+    write acknowledgement level — 'quorum' (default) or 'all'; ignored on the
+    read path. When this node holds the target partition the result carries
+    served_here=true and the engine result; otherwise it carries the holder
+    endpoints.
     """
     params = {
         "database_id": database_id,
@@ -8131,6 +8587,8 @@ def database_query(database_id: str, caller_did: str, body: dict,
     }
     if capability is not None:
         params["capability"] = capability
+    if consistency is not None:
+        params["consistency"] = consistency
     return _rpc("tenzro_databaseQuery", params)
 
 
@@ -8145,10 +8603,13 @@ def authorize_database_read(database_id: str, caller_did: str,
 
 
 def rescale_database(database_id: str, caller_did: str, placement: str,
-                     partitions: int = None, replicas: int = None,
+                     partitions: int = None, min_replication: int = None,
+                     max_replication: int = None,
                      capability: str = None) -> dict:
     """Grow or shrink a database along the local → LAN-cluster → network
-    continuum in place. Gated on the write action."""
+    continuum in place. Gated on the write action. `min_replication` and
+    `max_replication` must be supplied together; omitted, the database's
+    current policy is kept."""
     params = {
         "database_id": database_id,
         "caller_did": caller_did,
@@ -8156,8 +8617,11 @@ def rescale_database(database_id: str, caller_did: str, placement: str,
     }
     if partitions is not None:
         params["partitions"] = partitions
-    if replicas is not None:
-        params["replicas"] = replicas
+    if min_replication is not None and max_replication is not None:
+        params["replication"] = {
+            "min_replication": min_replication,
+            "max_replication": max_replication,
+        }
     if capability is not None:
         params["capability"] = capability
     return _rpc("tenzro_rescaleDatabase", params)
@@ -8331,13 +8795,15 @@ COMMANDS = {
         args[0] if args else "Tenzro User",
         args[1] if len(args) > 1 else "cli",
     ),
-    "create_wallet": lambda args: create_wallet(args[0] if args else "ed25519"),
+    "create_account": lambda args: create_account(args[0] if args else "ed25519"),
+    "create_wallet": lambda args: create_wallet(),
     "get_balance": lambda args: get_balance(args[0]),
     "balance": lambda args: get_balance(args[0]),
     "send": lambda args: send_transaction(
         args[0],
         args[1],
         int(args[2]),
+        approval_id=args[3] if len(args) > 3 else None,
     ),
     "faucet": lambda args: request_faucet(args[0]),
     # Saga workflows + DID envelope verification
@@ -8498,6 +8964,19 @@ COMMANDS = {
     "list_models": lambda args: list_models(),
     "chat": lambda args: chat(args[0], " ".join(args[1:]) if len(args) > 1 else args[1]),
     "list_model_endpoints": lambda args: list_model_endpoints(),
+    "route_intent": lambda args: route_intent(
+        args[0],
+        int(args[1]) if len(args) > 1 else None,
+        float(args[2]) if len(args) > 2 else None,
+        args[3] if len(args) > 3 else None,
+    ),
+    "chat_by_intent": lambda args: chat_by_intent(args[0], " ".join(args[1:])),
+    "record_route_outcome": lambda args: record_route_outcome(
+        args[0], int(args[1]), args[2]
+    ),
+    "route_difficulty_stats": lambda args: route_difficulty_stats(
+        args[0] if args else None
+    ),
     # Payments
     "create_payment": lambda args: create_payment_challenge(
         args[0], args[1], int(args[2]),
@@ -8514,6 +8993,8 @@ COMMANDS = {
     # Task Marketplace
     "post_task": lambda args: post_task(
         args[0], args[1], args[2], int(args[3]),
+        args[4],                                                 # poster address
+        input_text=args[5] if len(args) > 5 else "",
     ),
     "list_tasks": lambda args: list_tasks(
         args[0] if args else None,
@@ -8566,6 +9047,8 @@ COMMANDS = {
     "use_skill": lambda args: use_skill(
         args[0],
         json.loads(args[1]) if len(args) > 1 else None,
+        args[2] if len(args) > 2 else None,
+        args[3] if len(args) > 3 else None,
     ),
     "spawn_agent_with_skill": lambda args: spawn_agent_with_skill(
         args[0], args[1], args[2],
@@ -9222,9 +9705,7 @@ COMMANDS = {
     "debridge_create_tx": lambda args: debridge_create_tx(args[0], args[1], args[2], args[3], args[4], args[5]),
     "debridge_same_chain_swap": lambda args: debridge_same_chain_swap(args[0], args[1], args[2], args[3]),
     # ── Crypto ──
-    "sign_message": lambda args: sign_message(
-        args[0], args[1], args[2] if len(args) > 2 else "ed25519",
-    ),
+    "sign_message": lambda args: sign_message(args[0]),
     "verify_signature": lambda args: verify_signature(args[0], args[1], args[2]),
     "encrypt_data": lambda args: encrypt_data(args[0], args[1]),
     "decrypt_data": lambda args: decrypt_data(args[0], args[1], args[2]),
@@ -9311,7 +9792,9 @@ COMMANDS = {
     "revoke_jwt": lambda args: revoke_jwt(args[0], args[1] if len(args) > 1 else "revoked"),
     "revoke_did": lambda args: revoke_did(args[0], args[1] if len(args) > 1 else "revoked"),
     "list_pending_approvals": lambda args: list_pending_approvals(args[0]),
-    "decide_approval": lambda args: decide_approval(args[0], args[1], args[2]),
+    "decide_approval": lambda args: decide_approval(
+        args[0], args[1], args[2], args[3] if len(args) > 3 else None
+    ),
     "get_approval": lambda args: get_approval(args[0]),
     # ── AP2 (Agent Payments Protocol) ──
     "ap2_protocol_info": lambda args: ap2_protocol_info(),
@@ -9395,14 +9878,16 @@ COMMANDS = {
     # ── CCT (Chainlink Cross-Chain Token) ──
     "cct_list_pools": lambda args: cct_list_pools(),
     "cct_get_pool": lambda args: cct_get_pool(args[0]),
-    # ── Multi-modal: forecast / vision / text-embed / segment / detect / transcribe / video ──
+    # ── Multi-modal: forecast / vision / text-embed / segment / text-segment /
+    #    detect / transcribe / video ──
     "list_forecast_catalog": lambda args: list_forecast_catalog(),
     "list_forecast_models": lambda args: list_forecast_models(),
     "forecast": lambda args: forecast(
         args[0],
         json.loads(args[1]),
         int(args[2]),
-        json.loads(args[3]) if len(args) > 3 else None,
+        json.loads(args[3]) if len(args) > 3 and args[3] else None,
+        int(args[4]) if len(args) > 4 and args[4] else None,
     ),
     "list_vision_catalog": lambda args: list_vision_catalog(),
     "list_vision_models": lambda args: list_vision_models(),
@@ -9416,11 +9901,19 @@ COMMANDS = {
     "text_embed": lambda args: text_embed(
         args[0],
         json.loads(args[1]),
-        int(args[2]) if len(args) > 2 else None,
+        int(args[2]) if len(args) > 2 and args[2] else None,
+        args[3].lower() == "true" if len(args) > 3 and args[3] else False,
     ),
     "list_segmentation_catalog": lambda args: list_segmentation_catalog(),
     "list_segmentation_models": lambda args: list_segmentation_models(),
     "segment": lambda args: segment(args[0], args[1], json.loads(args[2])),
+    "list_text_segmentation_catalog": lambda args: list_text_segmentation_catalog(),
+    "list_text_segmentation_models": lambda args: list_text_segmentation_models(),
+    "text_segment": lambda args: text_segment(
+        args[0], args[1], args[2],
+        box_prompt=json.loads(args[3]) if len(args) > 3 and args[3] else None,
+        score_threshold=float(args[4]) if len(args) > 4 and args[4] else 0.5,
+    ),
     "list_detection_catalog": lambda args: list_detection_catalog(),
     "list_detection_models": lambda args: list_detection_models(),
     "detect": lambda args: detect(
@@ -9431,20 +9924,25 @@ COMMANDS = {
     "list_audio_models": lambda args: list_audio_models(),
     "transcribe": lambda args: transcribe(
         args[0], args[1],
-        args[2] if len(args) > 2 else None,
-        args[3].lower() == "true" if len(args) > 3 else False,
+        args[2] if len(args) > 2 and args[2] else None,
+        args[3].lower() == "true" if len(args) > 3 and args[3] else False,
+        float(args[4]) if len(args) > 4 and args[4] else None,
     ),
     "list_video_catalog": lambda args: list_video_catalog(),
     "list_video_models": lambda args: list_video_models(),
     "video_embed": lambda args: video_embed(
         args[0], args[1],
-        int(args[2]) if len(args) > 2 else 30,
+        args[2].lower() == "true" if len(args) > 2 and args[2] else False,
+        int(args[3]) if len(args) > 3 and args[3] else None,
     ),
     # ── Multi-modal load / unload (surface symmetry) ──
     "load_forecast_model": lambda args: load_forecast_model(
-        args[0], args[1], int(args[2]), int(args[3]),
-        args[4] if len(args) > 4 and args[4] else None,
-        int(args[5]) if len(args) > 5 and args[5] else None,
+        args[0], args[1],
+        catalog_id=args[2] if len(args) > 2 and args[2] else None,
+        context_length=int(args[3]) if len(args) > 3 and args[3] else None,
+        max_horizon=int(args[4]) if len(args) > 4 and args[4] else None,
+        output_name=args[5] if len(args) > 5 and args[5] else None,
+        batch_size=int(args[6]) if len(args) > 6 and args[6] else None,
     ),
     "unload_forecast_model": lambda args: unload_forecast_model(args[0]),
     "load_vision_model": lambda args: load_vision_model(
@@ -9456,33 +9954,48 @@ COMMANDS = {
     ),
     "unload_vision_model": lambda args: unload_vision_model(args[0]),
     "load_text_embedding_model": lambda args: load_text_embedding_model(
-        args[0], args[1],
-        catalog_id=args[2] if len(args) > 2 and args[2] else None,
+        args[0],
+        path=args[1] if len(args) > 1 and args[1] else None,
+        tokenizer_path=args[2] if len(args) > 2 and args[2] else None,
+        family=args[3] if len(args) > 3 and args[3] else None,
+        catalog_id=args[4] if len(args) > 4 and args[4] else None,
+        embedding_dim=int(args[5]) if len(args) > 5 and args[5] else None,
+        max_sequence_length=int(args[6]) if len(args) > 6 and args[6] else None,
     ),
     "unload_text_embedding_model": lambda args: unload_text_embedding_model(args[0]),
+    "load_text_segmentation_model": lambda args: load_text_segmentation_model(args[0]),
+    "unload_text_segmentation_model": lambda args: unload_text_segmentation_model(args[0]),
     "load_segmentation_model": lambda args: load_segmentation_model(
         args[0], args[1], args[2],
         family=args[3] if len(args) > 3 and args[3] else None,
-        catalog_id=args[4] if len(args) > 4 and args[4] else None,
+        input_size=int(args[4]) if len(args) > 4 and args[4] else None,
+        catalog_id=args[5] if len(args) > 5 and args[5] else None,
     ),
     "unload_segmentation_model": lambda args: unload_segmentation_model(args[0]),
     "load_detection_model": lambda args: load_detection_model(
         args[0], args[1],
         family=args[2] if len(args) > 2 and args[2] else None,
-        catalog_id=args[3] if len(args) > 3 and args[3] else None,
+        input_size=int(args[3]) if len(args) > 3 and args[3] else None,
+        num_classes=int(args[4]) if len(args) > 4 and args[4] else None,
+        catalog_id=args[5] if len(args) > 5 and args[5] else None,
     ),
     "unload_detection_model": lambda args: unload_detection_model(args[0]),
     "load_audio_model": lambda args: load_audio_model(
-        args[0], args[1], args[2], args[3],
-        catalog_id=args[4] if len(args) > 4 and args[4] else None,
-        family=args[5] if len(args) > 5 and args[5] else None,
-        max_audio_seconds=int(args[6]) if len(args) > 6 and args[6] else None,
-        whisper_variant=args[7] if len(args) > 7 and args[7] else None,
+        args[0], args[1], args[2],
+        tokenizer_path=args[3] if len(args) > 3 and args[3] else None,
+        preprocessor_path=args[4] if len(args) > 4 and args[4] else None,
+        vocab_path=args[5] if len(args) > 5 and args[5] else None,
+        catalog_id=args[6] if len(args) > 6 and args[6] else None,
+        family=args[7] if len(args) > 7 and args[7] else None,
+        max_audio_seconds=int(args[8]) if len(args) > 8 and args[8] else None,
+        whisper_variant=args[9] if len(args) > 9 and args[9] else None,
+        source_lang=args[10] if len(args) > 10 and args[10] else None,
+        target_lang=args[11] if len(args) > 11 and args[11] else None,
     ),
     "unload_audio_model": lambda args: unload_audio_model(args[0]),
     "load_video_model": lambda args: load_video_model(
         args[0], args[1],
-        catalog_id=args[2] if len(args) > 2 and args[2] else None,
+        num_frames=int(args[2]) if len(args) > 2 and args[2] else None,
     ),
     "unload_video_model": lambda args: unload_video_model(args[0]),
     # ── Agent memory tier ──
@@ -9622,6 +10135,7 @@ COMMANDS = {
     "list_agent_jwks": lambda args: list_agent_jwks(),
     "get_agent_jwk": lambda args: get_agent_jwk(args[0]),
     "get_agent_daily_spend": lambda args: get_agent_daily_spend(args[0]),
+    "list_capabilities": lambda args: list_capabilities(),
     "get_capability_attestations": lambda args: get_capability_attestations(
         args[0],
         args[1].lower() == "true" if len(args) > 1 else False,
@@ -9656,11 +10170,12 @@ COMMANDS = {
         args[0], args[1],
         owner_did=args[2] if len(args) > 2 and args[2] else None,
         placement=args[3] if len(args) > 3 and args[3] else "local",
-        partitions=int(args[4]) if len(args) > 4 else 1,
-        replicas=int(args[5]) if len(args) > 5 else 1,
-        engine_config=json.loads(args[6]) if len(args) > 6 and args[6] else None,
-        confidential=(args[7].lower() in ("1", "true", "yes"))
-        if len(args) > 7 else False,
+        partitions=int(args[4]) if len(args) > 4 and args[4] else 1,
+        min_replication=int(args[5]) if len(args) > 5 and args[5] else None,
+        max_replication=int(args[6]) if len(args) > 6 and args[6] else None,
+        engine_config=json.loads(args[7]) if len(args) > 7 and args[7] else None,
+        confidential=(args[8].lower() in ("1", "true", "yes"))
+        if len(args) > 8 else False,
     ),
     "get_database": lambda args: get_database(args[0]),
     "list_databases": lambda args: list_databases(),
@@ -9686,7 +10201,9 @@ COMMANDS = {
     "rescale_database": lambda args: rescale_database(
         args[0], args[1], args[2],
         partitions=int(args[3]) if len(args) > 3 and args[3] else None,
-        replicas=int(args[4]) if len(args) > 4 and args[4] else None,
+        min_replication=int(args[4]) if len(args) > 4 and args[4] else None,
+        max_replication=int(args[5]) if len(args) > 5 and args[5] else None,
+        capability=args[6] if len(args) > 6 and args[6] else None,
     ),
     "drop_database": lambda args: drop_database(args[0]),
     # ── Compute Rental ──

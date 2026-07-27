@@ -373,9 +373,9 @@ mod tests {
 
 #[cfg(test)]
 mod persistence_tests {
-    //! Persistence-mode tests use the real RocksDB-backed `KvStore` so the
-    //! hydration path is exercised end-to-end, not just the in-memory
-    //! DashMap. Each test gets its own tempdir.
+    //! Persistence-mode tests use the RocksDB-backed `KvStore` so the
+    //! write-through and hydration paths are both exercised, not just the
+    //! in-memory DashMap. Each test gets its own tempdir.
     use super::*;
     use tempfile::TempDir;
     use tenzro_storage::RocksDbStore;

@@ -48,6 +48,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ModelError, Result};
 
+/// Read an encoded image's pixel dimensions without decoding its pixels.
+///
+/// Billing an image call needs the geometry — a model's
+/// [`tenzro_types::model::ImageTokenization`] descriptor turns width and
+/// height into a token count — but not the pixels. `into_dimensions` stops
+/// after the header, so a 4K JPEG costs a few hundred bytes of parsing
+/// instead of a full RGB decode.
+///
+/// Returns `None` for bytes no supported decoder recognizes; the caller
+/// bills such a call at its per-request floor rather than rejecting it,
+/// since the encoder itself is what decides whether the bytes are usable.
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 /// Per-channel mean and std used to normalize pixel values before feeding
 /// the encoder. Channels are RGB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +378,13 @@ impl VisionRuntime {
 
     pub fn loaded_models(&self) -> Vec<String> {
         self.models.iter().map(|kv| kv.key().clone()).collect()
+    }
+
+    /// Hand out a loaded encoder so another runtime can build on it. The video
+    /// runtime uses this to wrap an image encoder as a frame-pooling clip
+    /// encoder without loading a second copy of the graph.
+    pub fn encoder(&self, model_id: &str) -> Option<Arc<dyn ImageEncoder>> {
+        self.models.get(model_id).map(|kv| Arc::clone(kv.value()))
     }
 
     /// Embed an image with a registered encoder. Inference is dispatched

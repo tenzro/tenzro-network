@@ -1,7 +1,7 @@
 """Tenzro Network MCP Server — coordination tools for AI agents.
 
 Exposes the full Tenzro Network JSON-RPC interface as MCP tools,
-enabling AI agents to interact with the Tenzro L1 settlement layer,
+enabling AI agents to interact with the Tenzro settlement layer,
 manage wallets, stake tokens, bridge cross-chain, run inference,
 coordinate agent swarms, and more.
 """
@@ -50,6 +50,7 @@ async def send_transaction(
     amount: str,
     gas_limit: int = 21000,
     gas_price: int = 1_000_000_000,
+    approval_id: str = None,
 ) -> dict:
     """Send a TNZO transfer transaction via ambient OAuth/DPoP auth.
 
@@ -59,6 +60,11 @@ async def send_transaction(
     Transaction::hash() preimage on its behalf, then submits atomically.
     The node synchronously verifies the Ed25519 signature before
     accepting the transaction. Private keys never travel over the wire.
+
+    When the controller has put transfers on the always-ask list the
+    first call returns JSON-RPC -32002 with data.approval_id. Pass that
+    id back as approval_id once the controller has approved it and the
+    transfer executes; a denial returns the approver's reason.
     """
     nonce_hex = await rpc_call("eth_getTransactionCount", [from_addr, "latest"])
     chain_id_hex = await rpc_call("eth_chainId", [])
@@ -68,20 +74,20 @@ async def send_transaction(
         value_int = int(amount, 16)
     else:
         value_int = int(amount)
-    result = await rpc_call(
-        "tenzro_signAndSendTransaction",
-        {
-            "from": from_addr,
-            "to": to_addr,
-            # Decimal string carries the full u128 range — JSON numbers
-            # clamp to u64 in the handler's numeric path.
-            "value": str(value_int),
-            "gas_limit": gas_limit,
-            "gas_price": gas_price,
-            "nonce": nonce,
-            "chain_id": chain_id,
-        },
-    )
+    params = {
+        "from": from_addr,
+        "to": to_addr,
+        # Decimal string carries the full u128 range — JSON numbers
+        # clamp to u64 in the handler's numeric path.
+        "value": str(value_int),
+        "gas_limit": gas_limit,
+        "gas_price": gas_price,
+        "nonce": nonce,
+        "chain_id": chain_id,
+    }
+    if approval_id is not None:
+        params["approval_id"] = approval_id
+    result = await rpc_call("tenzro_signAndSendTransaction", params)
     return {"tx_hash": result} if isinstance(result, str) else result
 
 
@@ -336,7 +342,7 @@ async def oauth_discovery() -> dict:
 
     Returns the same metadata document published at
     ``GET /.well-known/openid-configuration``, augmented with AAP
-    extensions: ``authorization_details_types_supported`` (8 RAR
+    extensions: ``authorization_details_types_supported`` (9 RAR
     types), ``aap_claims_supported`` (7 AAP claims), and
     ``dpop_signing_alg_values_supported`` (``["EdDSA"]``).
     """
@@ -1244,7 +1250,7 @@ async def ap2_protocol_info() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# AI Models (10 tools)
+# AI Models (16 tools)
 # ---------------------------------------------------------------------------
 
 
@@ -1279,6 +1285,181 @@ async def chat_completion(
             "max_tokens": max_tokens,
         },
     )
+    return result
+
+
+def _intent_params(
+    use_case: str,
+    budget: str | None,
+    optimize: float | None,
+    quality_floor: str | None,
+    est_input_tokens: int | None,
+    est_output_tokens: int | None,
+    payer_did: str | None,
+    payer_address: str | None,
+) -> dict:
+    """Assemble the intent fields shared by route_by_intent and chat_by_intent."""
+    params: dict = {"use_case": use_case}
+    for key, value in (
+        ("budget", budget),
+        ("optimize", optimize),
+        ("quality_floor", quality_floor),
+        ("est_input_tokens", est_input_tokens),
+        ("est_output_tokens", est_output_tokens),
+        ("payer_did", payer_did),
+        ("payer_address", payer_address),
+    ):
+        if value is not None:
+            params[key] = value
+    return params
+
+
+@mcp.tool
+async def route_by_intent(
+    use_case: str,
+    budget: str = None,
+    optimize: float = None,
+    quality_floor: str = None,
+    est_input_tokens: int = None,
+    est_output_tokens: int = None,
+    payer_did: str = None,
+    payer_address: str = None,
+    prompt: str = None,
+) -> dict:
+    """Discover the best model for an intent without naming a model.
+
+    Args:
+        use_case: One of chat, code, reasoning, research, summarize, extract,
+            embed. Maps to a modality and biases quality tiering.
+        budget: Per-request cost cap in the smallest TNZO unit, as a decimal
+            string. Absent means no per-request cap.
+        optimize: Cost-quality knob in [0.0, 1.0] — 0.0 is the cheapest
+            acceptable model, 1.0 the strongest.
+        quality_floor: Reject any model below this tier: "cheap" or "strong".
+        est_input_tokens: Estimated input tokens, used for cost estimation.
+        est_output_tokens: Estimated output tokens, used for cost estimation.
+        payer_did: When set, the per-DID rolling-window budget gate applies.
+        payer_address: When set, the payer's on-chain TNZO balance is a hard
+            ceiling and unaffordable models are dropped.
+        prompt: The text the model would answer. Used only to place the request
+            in a difficulty cluster so selection accounts for how hard the
+            prompt is; it is not sent to any provider.
+
+    Returns the selected ``model_id``, ``tier``, ``estimated_cost``,
+    ``fallback_chain``, the ``cluster`` the prompt landed in, that model's
+    ``expected_error`` in the cluster, and the winning ``provider`` address and
+    ``endpoint`` when the offer came from another operator. Discovery only —
+    nothing is dispatched and no spend is recorded, though the budget gate and
+    the wallet-balance ceiling still apply, so an unaffordable request is
+    refused here. Use ``chat_by_intent`` to select and run in one call.
+    """
+    params = _intent_params(
+        use_case, budget, optimize, quality_floor,
+        est_input_tokens, est_output_tokens, payer_did, payer_address,
+    )
+    if prompt is not None:
+        params["prompt"] = prompt
+    result = await rpc_call("tenzro_routeIntent", params)
+    return result
+
+
+@mcp.tool
+async def chat_by_intent(
+    use_case: str,
+    message: str,
+    budget: str = None,
+    optimize: float = None,
+    quality_floor: str = None,
+    est_input_tokens: int = None,
+    est_output_tokens: int = None,
+    payer_did: str = None,
+    payer_address: str = None,
+    temperature: float = None,
+    max_tokens: int = None,
+) -> dict:
+    """Resolve an intent to a model and run the chat in one call.
+
+    Args:
+        use_case: One of chat, code, reasoning, research, summarize, extract,
+            embed.
+        message: The user message. Difficulty scoring reads it, so no separate
+            prompt is needed.
+        budget: Per-request cost cap in the smallest TNZO unit, decimal string.
+        optimize: Cost-quality knob in [0.0, 1.0].
+        quality_floor: Reject any model below this tier: "cheap" or "strong".
+        est_input_tokens: Estimated input tokens for cost estimation.
+        est_output_tokens: Estimated output tokens for cost estimation.
+        payer_did: Enables the per-DID rolling-window budget gate.
+        payer_address: Makes the payer's on-chain TNZO balance a hard ceiling
+            and bills the call to it.
+        temperature: Sampling temperature (0.0-2.0).
+        max_tokens: Maximum tokens to generate.
+
+    Selection walks the cross-model fallback chain, so the intent resolves as
+    long as any model that satisfies it has a live offer, and dispatch is
+    pinned to the offer that was scored — the price quoted is the price settled
+    and the provider share goes to the address that offer named. The chosen
+    decision is attached to the response under ``route``. Difficulty feedback
+    for resolved and failed calls is recorded from the dispatch itself; report
+    an escalation with ``record_route_outcome``.
+    """
+    params = _intent_params(
+        use_case, budget, optimize, quality_floor,
+        est_input_tokens, est_output_tokens, payer_did, payer_address,
+    )
+    params["message"] = message
+    if temperature is not None:
+        params["temperature"] = temperature
+    if max_tokens is not None:
+        params["max_tokens"] = max_tokens
+    result = await rpc_call("tenzro_chatByIntent", params)
+    return result
+
+
+@mcp.tool
+async def record_route_outcome(
+    model_id: str, cluster: int, outcome: str
+) -> dict:
+    """Report how a routed call turned out.
+
+    Args:
+        model_id: The model that served the call, from the routing decision.
+        cluster: The difficulty cluster the request landed in, from the
+            routing decision's ``cluster``.
+        outcome: "resolved" (answered acceptably), "escalated" (you took the
+            answer to a stronger model), or "failed" (no usable answer).
+
+    Per-cluster error rates then reflect what happened rather than only what
+    the catalog declares. In practice this carries "escalated" — the outcome
+    only the caller knows; "resolved" and "failed" are already recorded by
+    ``chat_by_intent`` from the dispatch itself. Reporting is advisory:
+    ``retained: false`` means the node has no difficulty index wired, so the
+    feedback was accepted and discarded.
+    """
+    result = await rpc_call(
+        "tenzro_recordRouteOutcome",
+        {"model_id": model_id, "cluster": cluster, "outcome": outcome},
+    )
+    return result
+
+
+@mcp.tool
+async def route_difficulty_stats(model_id: str = None) -> dict:
+    """Read the node's difficulty index.
+
+    Args:
+        model_id: Model to report per-cluster outcome counters and error rate
+            for. Omit for the cluster map alone.
+
+    Returns how many prompt clusters the node has discovered and how many
+    prompts landed in each. An operator diagnostic — routing does not depend on
+    it. ``enabled: false`` means the node has no embedding model loaded and
+    routes on declared metadata alone.
+    """
+    params = {}
+    if model_id:
+        params["model_id"] = model_id
+    result = await rpc_call("tenzro_routeDifficultyStats", params)
     return result
 
 
@@ -1488,7 +1669,7 @@ async def rotate_validator_key(
     with the *current* Ed25519 consensus key. All hex fields are
     0x-prefixed.
 
-    The rotation lands on the receiving node only. Operators must
+    The rotation applies to the receiving node only. Operators must
     fan out the same call to every active validator before the next
     epoch boundary — see tools/deploy/rotate-validator-key.sh.
     """
@@ -1890,6 +2071,79 @@ async def deregister_agent(agent_id: str, reason: str = "Operator deregister") -
 
 
 # ---------------------------------------------------------------------------
+# Capability Registry (4 tools)
+#
+# Read-only views over the node's capability registry. Composing work
+# across agents starts here: list what the node can route, inspect the
+# attestations behind a claim, then pick a worker.
+#
+# Capability names are the short forms `nlp`, `vision`, `code`, `data`,
+# `blockchain`, `smart_contract`, `api_integration`, `coordination`;
+# anything else is treated as a custom capability of that name.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_capabilities() -> dict:
+    """List every capability registered on this node.
+
+    Returns each capability with the number of agents claiming it, the
+    number of attestations backing those claims, and the agent IDs. A
+    non-zero `rejected_attestation_count` means the registry has refused
+    attestations since boot (signature mismatch or malformed payload).
+    """
+    result = await rpc_call("tenzro_listCapabilities", {})
+    return result
+
+
+@mcp.tool
+async def get_capability_attestations(
+    capability: str, verified_only: bool = False
+) -> dict:
+    """Fetch the attestations registered for a capability.
+
+    Each attestation carries the agent ID, timestamp, TEE-backed flag,
+    attester address and public key, signature, and metadata. Set
+    verified_only=True to have the node re-run signature and expiry
+    checks before returning.
+    """
+    result = await rpc_call(
+        "tenzro_getCapabilityAttestations",
+        {"capability": capability, "verified_only": verified_only},
+    )
+    return result
+
+
+@mcp.tool
+async def get_agent_capability_attestations(agent_id: str) -> dict:
+    """Fetch every capability attestation issued for one agent.
+
+    Returns the agent's registered capabilities, every attestation naming
+    it across all capabilities, and the wallet address the registry holds
+    for it.
+    """
+    result = await rpc_call(
+        "tenzro_getAgentCapabilityAttestations", {"agent_id": agent_id}
+    )
+    return result
+
+
+@mcp.tool
+async def find_best_agent_for_capability(capability: str) -> dict:
+    """Pick the best agent on this node for a capability.
+
+    Selection prefers TEE-backed attestations (most recent wins), falling
+    back to any agent with the capability registered. Returns
+    `{capability, best_agent, total_candidates}`; `best_agent` is null
+    when nothing claims it.
+    """
+    result = await rpc_call(
+        "tenzro_findBestAgentForCapability", {"capability": capability}
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Agent Templates (7 tools)
 # ---------------------------------------------------------------------------
 
@@ -2286,33 +2540,104 @@ async def join_as_participant(display_name: str) -> dict:
 
 
 @mcp.tool
-async def list_skills() -> dict:
-    """List all registered skills in the Tenzro skills registry."""
-    result = await rpc_call("tenzro_listSkills", [])
+async def list_skills(
+    category: str | None = None,
+    capability: str | None = None,
+    tag: str | None = None,
+    bundled_only: bool = False,
+    include_inactive: bool = False,
+) -> dict:
+    """List registered skills in the Tenzro skills registry.
+
+    The registry is permissionless: anyone may publish, and a skill is either
+    free or priced in TNZO paid to its creator. Set bundled_only to see only
+    skills that publish a content-addressed artifact you can pin.
+    """
+    params: dict = {}
+    if category:
+        params["category"] = category
+    if capability:
+        params["capability"] = capability
+    if tag:
+        params["tag"] = tag
+    if bundled_only:
+        params["bundled_only"] = True
+    if include_inactive:
+        params["active_only"] = False
+    result = await rpc_call("tenzro_listSkills", params)
     return result
 
 
 @mcp.tool
 async def register_skill(
-    name: str, category: str, description: str, tags: list[str]
+    name: str,
+    version: str,
+    creator_did: str,
+    description: str,
+    category: str | None = None,
+    tags: list[str] | None = None,
+    required_capabilities: list[str] | None = None,
+    endpoint: str | None = None,
+    price_per_call: str | None = None,
+    creator_wallet: str | None = None,
+    bundle_uri: str | None = None,
+    bundle_sha256: str | None = None,
+    bundle_size: int | None = None,
 ) -> dict:
-    """Register a new skill in the skills registry."""
-    result = await rpc_call(
-        "tenzro_registerSkill",
-        {
-            "name": name,
-            "category": category,
-            "description": description,
-            "tags": tags,
-        },
-    )
+    """Register a new skill in the permissionless skills registry.
+
+    price_per_call is in TNZO atto-tokens; any non-zero price requires
+    creator_wallet as the payout address. Supplying the bundle triple
+    (tenzro://blob/<blake3-hex> locator, hex SHA-256 of the bytes, and size)
+    lets callers pin exactly which artifact they are paying to run.
+    """
+    params: dict = {
+        "name": name,
+        "version": version,
+        "creator_did": creator_did,
+        "description": description,
+    }
+    if category:
+        params["category"] = category
+    if tags:
+        params["tags"] = tags
+    if required_capabilities:
+        params["required_capabilities"] = required_capabilities
+    if endpoint:
+        params["endpoint"] = endpoint
+    if price_per_call:
+        params["price_per_call"] = price_per_call
+    if creator_wallet:
+        params["creator_wallet"] = creator_wallet
+    if bundle_uri and bundle_sha256 and bundle_size:
+        params["bundle"] = {
+            "uri": bundle_uri,
+            "sha256": bundle_sha256.strip().lower(),
+            "size_bytes": bundle_size,
+        }
+    result = await rpc_call("tenzro_registerSkill", params)
     return result
 
 
 @mcp.tool
-async def search_skills(query: str) -> dict:
-    """Search the skills registry by keyword or tag."""
-    result = await rpc_call("tenzro_searchSkills", {"query": query})
+async def search_skills(
+    query: str,
+    category: str | None = None,
+    capability: str | None = None,
+    bundled_only: bool = False,
+    max_price: str | None = None,
+) -> dict:
+    """Search the skills registry by keyword over name, description and tags."""
+    params: dict = {"query": query}
+    if category:
+        params["category"] = category
+    if capability:
+        params["capability"] = capability
+    if bundled_only:
+        params["bundled_only"] = True
+    if max_price:
+        params["max_price"] = max_price
+    result = await rpc_call("tenzro_searchSkills", params)
     return result
 
 
@@ -2324,11 +2649,24 @@ async def get_skill(skill_id: str) -> dict:
 
 
 @mcp.tool
-async def use_skill(skill_id: str, input_data: str) -> dict:
-    """Invoke a registered skill with the given input data."""
-    result = await rpc_call(
-        "tenzro_useSkill", {"skill_id": skill_id, "input": input_data}
-    )
+async def use_skill(
+    skill_id: str,
+    input_data: str,
+    expected_version: str | None = None,
+    expected_sha256: str | None = None,
+) -> dict:
+    """Invoke a registered skill with the given input data.
+
+    Because the registry is permissionless, pinning is how you fix which bytes
+    you pay to run: pass expected_version and/or expected_sha256 and a mismatch
+    is refused (-32006) before any settlement, so a refused call is free.
+    """
+    params: dict = {"skill_id": skill_id, "input": input_data}
+    if expected_version:
+        params["expected_version"] = expected_version
+    if expected_sha256:
+        params["expected_sha256"] = expected_sha256
+    result = await rpc_call("tenzro_useSkill", params)
     return result
 
 
@@ -3912,8 +4250,8 @@ async def ivms101_canonical_hash(envelope: dict) -> dict:
     beneficiary_vasp + transfer`` records per the FATF JSON schema. The
     returned hash anchors a settlement receipt to a specific
     originator/beneficiary/VASP/transfer-data record — auditors trace
-    receipt → IVMS101 envelope → VASP DIDs end-to-end without PII
-    landing on-chain (the envelope itself stays off-chain, typically
+    the whole chain from receipt → IVMS101 envelope → VASP DIDs without
+    PII reaching the chain (the envelope itself stays off-chain, typically
     carried via TRP).
     """
     return await rpc_call("tenzro_ivms101Hash", envelope)
@@ -3941,7 +4279,7 @@ async def signed_agent_card_canonical_hash(agent_card: dict) -> dict:
     Domain owners hash + JWS-sign the agent card; relying parties
     re-verify the canonical hash to detect a hostile reverse-proxy or
     intermediate-cache rewrite of ``url`` / ``skills`` /
-    ``securitySchemes``. Production-grade A2A 2026 conformance bar.
+    ``securitySchemes``. This is the highest A2A 2026 conformance bar.
     """
     return await rpc_call("tenzro_signedAgentCardCanonicalHash", agent_card)
 
@@ -4538,6 +4876,683 @@ async def cluster_preview(
             "force_single": force_single,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-Modal AI — Forecast (5 tools)
+#
+# Every modality follows the same five-verb shape: list_*_catalog (curated
+# entries the node knows how to load), list_*_models (what is loaded right
+# now), load_*_model, unload_*_model, and the modality verb itself.
+#
+# Passing `catalog_id` to a loader inherits the structural parameters from
+# the catalog entry and runs the node's license check — a Attribution,
+# CommercialCustom or NonCommercial entry is refused with JSON-RPC -32010
+# unless the node operator started tenzro-node accepting that license.
+# Supplying the structural parameters explicitly instead skips the check.
+#
+# `model_id` on a loader is the id you register under; `model_id` on an
+# inference call is that same registered id, never the catalog id.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_forecast_catalog() -> dict:
+    """List the curated timeseries forecast models this node can load.
+
+    Each entry carries the ONNX repo, context length, horizon ceiling,
+    output tensor name and license tier. Use the entry `id` as
+    `catalog_id` when loading.
+    """
+    return await rpc_call("tenzro_listForecastCatalog", {})
+
+
+@mcp.tool
+async def list_forecast_models() -> dict:
+    """List the forecast models currently loaded on this node."""
+    return await rpc_call("tenzro_listForecastModels", {})
+
+
+@mcp.tool
+async def load_forecast_model(
+    model_id: str,
+    path: str,
+    catalog_id: str | None = None,
+    context_length: int | None = None,
+    max_horizon: int | None = None,
+    output_name: str | None = None,
+    batch_size: int | None = None,
+) -> dict:
+    """Load a timeseries forecast ONNX graph and register it under `model_id`.
+
+    `path` is a filesystem path on the node — the graph must already be
+    there. With `catalog_id`, the context length, horizon ceiling, output
+    tensor name and batch size come from the catalog entry and the license
+    check runs. Without it, supply `context_length` and `max_horizon`
+    yourself.
+    """
+    params: dict = {"model_id": model_id, "path": path}
+    if catalog_id is not None:
+        params["catalog_id"] = catalog_id
+    if context_length is not None:
+        params["context_length"] = context_length
+    if max_horizon is not None:
+        params["max_horizon"] = max_horizon
+    if output_name is not None:
+        params["output_name"] = output_name
+    if batch_size is not None:
+        params["batch_size"] = batch_size
+    return await rpc_call("tenzro_loadForecastModel", params)
+
+
+@mcp.tool
+async def unload_forecast_model(model_id: str) -> dict:
+    """Unload a forecast model and free its ONNX session."""
+    return await rpc_call("tenzro_unloadForecastModel", {"model_id": model_id})
+
+
+@mcp.tool
+async def forecast(
+    model_id: str,
+    history: list,
+    horizon: int,
+    quantiles: list | None = None,
+    frequency_seconds: int | None = None,
+) -> dict:
+    """Run a univariate timeseries forecast on a loaded model.
+
+    `history` is a flat array of floats, one observation per step, oldest
+    first. `horizon` is how many steps ahead to predict. Passing
+    `quantiles` (e.g. [0.1, 0.5, 0.9]) returns prediction intervals
+    instead of a single point path, where the model supports it.
+    """
+    params: dict = {"model_id": model_id, "history": history, "horizon": horizon}
+    if quantiles is not None:
+        params["quantiles"] = quantiles
+    if frequency_seconds is not None:
+        params["frequency_seconds"] = frequency_seconds
+    return await rpc_call("tenzro_forecast", params)
+
+
+# ---------------------------------------------------------------------------
+# Multi-Modal AI — Vision Embeddings (6 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_vision_catalog() -> dict:
+    """List the curated image encoders this node can load.
+
+    Covers the CLIP, SigLIP2 and DINOv3 families with input size,
+    embedding dimension, normalization and license tier per entry.
+    """
+    return await rpc_call("tenzro_listVisionCatalog", {})
+
+
+@mcp.tool
+async def list_vision_models() -> dict:
+    """List the image encoders currently loaded on this node."""
+    return await rpc_call("tenzro_listVisionModels", {})
+
+
+@mcp.tool
+async def load_vision_model(
+    model_id: str,
+    path: str,
+    catalog_id: str | None = None,
+    input_size: int | None = None,
+    embedding_dim: int | None = None,
+    normalization: str | None = None,
+) -> dict:
+    """Load an image encoder ONNX graph and register it under `model_id`.
+
+    `path` is a filesystem path on the node. With `catalog_id`, the input
+    size, embedding dimension and normalization come from the catalog and
+    the license check runs — DINOv3 is under Meta's commercial-custom
+    terms and is refused unless the operator accepted it. Without a
+    catalog id, supply `input_size` and `embedding_dim`;
+    `normalization` is one of `clip` (default), `imagenet`, `siglip`.
+    """
+    params: dict = {"model_id": model_id, "path": path}
+    if catalog_id is not None:
+        params["catalog_id"] = catalog_id
+    if input_size is not None:
+        params["input_size"] = input_size
+    if embedding_dim is not None:
+        params["embedding_dim"] = embedding_dim
+    if normalization is not None:
+        params["normalization"] = normalization
+    return await rpc_call("tenzro_loadVisionModel", params)
+
+
+@mcp.tool
+async def unload_vision_model(model_id: str) -> dict:
+    """Unload an image encoder and free its ONNX session."""
+    return await rpc_call("tenzro_unloadVisionModel", {"model_id": model_id})
+
+
+@mcp.tool
+async def vision_embed(
+    model_id: str,
+    image_base64: str,
+    normalize: bool = False,
+) -> dict:
+    """Embed a single image with a loaded encoder.
+
+    `image_base64` is the raw PNG, JPEG or WebP bytes, base64-encoded —
+    decode, resize and normalization all happen on the node. `normalize`
+    L2-normalizes the vector so cosine similarity reduces to a dot
+    product.
+    """
+    return await rpc_call(
+        "tenzro_imageEmbed",
+        {
+            "model_id": model_id,
+            "image_base64": image_base64,
+            "normalize": normalize,
+        },
+    )
+
+
+@mcp.tool
+async def vision_similarity(
+    image_embedding: list,
+    text_embedding: list,
+) -> dict:
+    """Cosine similarity between two equal-length embeddings.
+
+    Pure math — loads no model. Cosine is only meaningful inside one
+    shared embedding space, so pair an image with the text tower it was
+    jointly trained with (CLIP or SigLIP2). Mismatched dimensions are
+    refused. Two image embeddings from the same encoder also score
+    correctly, which is the DINOv3 use.
+    """
+    return await rpc_call(
+        "tenzro_imageTextSimilarity",
+        {"image_embedding": image_embedding, "text_embedding": text_embedding},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-Modal AI — Text Embeddings (5 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_text_embedding_catalog() -> dict:
+    """List the curated text embedding models this node can load.
+
+    Each entry carries embedding dimension, maximum sequence length,
+    pooling family and license tier.
+    """
+    return await rpc_call("tenzro_listTextEmbeddingCatalog", {})
+
+
+@mcp.tool
+async def list_text_embedding_models() -> dict:
+    """List the text encoders currently loaded on this node."""
+    return await rpc_call("tenzro_listTextEmbeddingModels", {})
+
+
+@mcp.tool
+async def load_text_embedding_model(
+    model_id: str,
+    path: str | None = None,
+    tokenizer_path: str | None = None,
+    family: str | None = None,
+    catalog_id: str | None = None,
+    embedding_dim: int | None = None,
+    max_sequence_length: int | None = None,
+) -> dict:
+    """Load a text encoder and register it under `model_id`.
+
+    Two paths. Pass a catalog entry id as `model_id` with no `path` and
+    the node fetches the ONNX graph and tokenizer from HuggingFace onto
+    its models directory, then registers the encoder under that same id.
+    Or pass explicit `path` + `tokenizer_path` + `family` (`qwen3`,
+    `cls`, `mean` or `sentence_embedding`) for a graph already on the
+    node, with either `catalog_id` for the dimensions or explicit
+    `embedding_dim` + `max_sequence_length`.
+    """
+    params: dict = {"model_id": model_id}
+    if path is not None:
+        params["path"] = path
+    if tokenizer_path is not None:
+        params["tokenizer_path"] = tokenizer_path
+    if family is not None:
+        params["family"] = family
+    if catalog_id is not None:
+        params["catalog_id"] = catalog_id
+    if embedding_dim is not None:
+        params["embedding_dim"] = embedding_dim
+    if max_sequence_length is not None:
+        params["max_sequence_length"] = max_sequence_length
+    return await rpc_call("tenzro_loadTextEmbeddingModel", params)
+
+
+@mcp.tool
+async def unload_text_embedding_model(model_id: str) -> dict:
+    """Unload a text encoder and free its ONNX session."""
+    return await rpc_call("tenzro_unloadTextEmbeddingModel", {"model_id": model_id})
+
+
+@mcp.tool
+async def text_embed(
+    model_id: str,
+    inputs: list,
+    normalize: bool = False,
+    requested_dim: int | None = None,
+) -> dict:
+    """Embed one or more strings with a loaded text encoder.
+
+    `inputs` is an array, so a single call embeds a whole batch.
+    `requested_dim` truncates and re-normalizes for Matryoshka models
+    (EmbeddingGemma supports 768/512/256/128) — useful when storing
+    millions of vectors.
+    """
+    params: dict = {"model_id": model_id, "inputs": inputs, "normalize": normalize}
+    if requested_dim is not None:
+        params["requested_dim"] = requested_dim
+    return await rpc_call("tenzro_textEmbed", params)
+
+
+# ---------------------------------------------------------------------------
+# Multi-Modal AI — Segmentation (5 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_segmentation_catalog() -> dict:
+    """List the curated point/box-promptable segmentation models.
+
+    Covers SAM 2 base/large, EdgeSAM and MobileSAM, with decoder ABI
+    family, input resolution and license tier per entry.
+    """
+    return await rpc_call("tenzro_listSegmentationCatalog", {})
+
+
+@mcp.tool
+async def list_segmentation_models() -> dict:
+    """List the segmentation models currently loaded on this node."""
+    return await rpc_call("tenzro_listSegmentationModels", {})
+
+
+@mcp.tool
+async def load_segmentation_model(
+    model_id: str,
+    encoder_path: str,
+    decoder_path: str,
+    catalog_id: str | None = None,
+    family: str | None = None,
+    input_size: int | None = None,
+) -> dict:
+    """Load a SAM encoder/decoder pair and register it under `model_id`.
+
+    SAM ships as two graphs, both already on the node's filesystem. With
+    `catalog_id`, the decoder ABI family and input resolution come from
+    the catalog and the license check runs — SAM is under Meta's
+    commercial-custom terms and is refused unless the operator accepted
+    it. Without a catalog id, supply `family` (`sam1`, `sam2`, `edgesam`
+    or `mobilesam`) and `input_size`.
+    """
+    params: dict = {
+        "model_id": model_id,
+        "encoder_path": encoder_path,
+        "decoder_path": decoder_path,
+    }
+    if catalog_id is not None:
+        params["catalog_id"] = catalog_id
+    if family is not None:
+        params["family"] = family
+    if input_size is not None:
+        params["input_size"] = input_size
+    return await rpc_call("tenzro_loadSegmentationModel", params)
+
+
+@mcp.tool
+async def unload_segmentation_model(model_id: str) -> dict:
+    """Unload a segmentation model and free its ONNX sessions."""
+    return await rpc_call("tenzro_unloadSegmentationModel", {"model_id": model_id})
+
+
+@mcp.tool
+async def segment(model_id: str, image_base64: str, prompts: list) -> dict:
+    """Segment an image from point or box prompts. Returns mask data and IOU scores.
+
+    `prompts` is an array of `{"type": "point", "x": int, "y": int,
+    "is_foreground": bool}` or `{"type": "box", "x0": int, "y0": int,
+    "x1": int, "y1": int}`. Coordinates are original-image pixels;
+    `is_foreground` marks whether a point sits inside the object or
+    outside it. The encoder caches the per-image embedding, so repeated
+    prompts against the same image only re-run the decoder.
+    """
+    return await rpc_call(
+        "tenzro_segment",
+        {"model_id": model_id, "image_base64": image_base64, "prompts": prompts},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-Modal AI — Text-Promptable Segmentation (5 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_text_segmentation_catalog() -> dict:
+    """List the curated open-vocabulary segmentation models (SAM 3 family)."""
+    return await rpc_call("tenzro_listTextSegmentationCatalog", {})
+
+
+@mcp.tool
+async def list_text_segmentation_models() -> dict:
+    """List the text-promptable segmentation models currently loaded."""
+    return await rpc_call("tenzro_listTextSegmentationModels", {})
+
+
+@mcp.tool
+async def load_text_segmentation_model(model_id: str) -> dict:
+    """Load a text-promptable segmentation model by catalog id.
+
+    `model_id` names a catalog entry; the node fetches the bundle from
+    HuggingFace onto its models directory and registers it under that
+    same id. The license check runs, so an entry under commercial-custom
+    terms is refused unless the operator accepted it.
+    """
+    return await rpc_call("tenzro_loadTextSegmentationModel", {"model_id": model_id})
+
+
+@mcp.tool
+async def unload_text_segmentation_model(model_id: str) -> dict:
+    """Unload a text-promptable segmentation model and free its sessions."""
+    return await rpc_call(
+        "tenzro_unloadTextSegmentationModel", {"model_id": model_id}
+    )
+
+
+@mcp.tool
+async def text_segment(
+    model_id: str,
+    image_base64: str,
+    text_prompt: str,
+    box_prompt: dict | None = None,
+    score_threshold: float = 0.5,
+) -> dict:
+    """Segment every instance matching a text phrase — open-vocabulary, no point prompts.
+
+    `text_prompt` is a noun phrase ("the red car", "traffic light").
+    `box_prompt` optionally restricts the search to a region as
+    `{"x0": int, "y0": int, "x1": int, "y1": int}` in original-image
+    pixels. `score_threshold` filters weak instances.
+    """
+    params: dict = {
+        "model_id": model_id,
+        "image_base64": image_base64,
+        "text_prompt": text_prompt,
+        "score_threshold": score_threshold,
+    }
+    if box_prompt is not None:
+        params["box_prompt"] = box_prompt
+    return await rpc_call("tenzro_textSegment", params)
+
+
+# ---------------------------------------------------------------------------
+# Multi-Modal AI — Object Detection (5 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_detection_catalog() -> dict:
+    """List the curated object detection models this node can load.
+
+    Covers RF-DETR (90-class COCO indexing) and D-FINE (80-class), both
+    NMS-free, with input resolution and license tier per entry.
+    """
+    return await rpc_call("tenzro_listDetectionCatalog", {})
+
+
+@mcp.tool
+async def list_detection_models() -> dict:
+    """List the detection models currently loaded on this node."""
+    return await rpc_call("tenzro_listDetectionModels", {})
+
+
+@mcp.tool
+async def load_detection_model(
+    model_id: str,
+    path: str,
+    catalog_id: str | None = None,
+    family: str | None = None,
+    input_size: int | None = None,
+    num_classes: int | None = None,
+) -> dict:
+    """Load a detection ONNX graph and register it under `model_id`.
+
+    `path` is a filesystem path on the node. With `catalog_id`, the ABI
+    family, input resolution and class count come from the catalog and
+    the license check runs. Without it, supply `family` (`rf_detr` or
+    `d_fine`), `input_size` and `num_classes` — the two families differ
+    in preprocessing and output layout, so the family must be right.
+    """
+    params: dict = {"model_id": model_id, "path": path}
+    if catalog_id is not None:
+        params["catalog_id"] = catalog_id
+    if family is not None:
+        params["family"] = family
+    if input_size is not None:
+        params["input_size"] = input_size
+    if num_classes is not None:
+        params["num_classes"] = num_classes
+    return await rpc_call("tenzro_loadDetectionModel", params)
+
+
+@mcp.tool
+async def unload_detection_model(model_id: str) -> dict:
+    """Unload a detection model and free its ONNX session."""
+    return await rpc_call("tenzro_unloadDetectionModel", {"model_id": model_id})
+
+
+@mcp.tool
+async def detect(
+    model_id: str,
+    image_base64: str,
+    score_threshold: float = 0.25,
+) -> dict:
+    """Detect objects in an image. Returns boxes in original-image pixels with labels and scores.
+
+    Boxes come back as xyxy pixel coordinates with a class id and
+    confidence. Both families are NMS-free, so the returned set needs no
+    post-filtering beyond `score_threshold`.
+    """
+    return await rpc_call(
+        "tenzro_detect",
+        {
+            "model_id": model_id,
+            "image_base64": image_base64,
+            "score_threshold": score_threshold,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-Modal AI — Audio Transcription (5 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_audio_catalog() -> dict:
+    """List the curated speech-recognition models this node can load.
+
+    Covers the Moonshine, Distil-Whisper, Whisper-turbo, Parakeet and
+    Canary families with per-entry audio length ceiling, language
+    coverage and license tier.
+    """
+    return await rpc_call("tenzro_listAudioCatalog", {})
+
+
+@mcp.tool
+async def list_audio_models() -> dict:
+    """List the transcription models currently loaded on this node."""
+    return await rpc_call("tenzro_listAudioModels", {})
+
+
+@mcp.tool
+async def load_audio_model(
+    model_id: str,
+    encoder_path: str,
+    decoder_path: str,
+    catalog_id: str | None = None,
+    family: str | None = None,
+    tokenizer_path: str | None = None,
+    preprocessor_path: str | None = None,
+    vocab_path: str | None = None,
+    max_audio_seconds: int | None = None,
+    whisper_variant: str | None = None,
+    source_lang: str | None = None,
+    target_lang: str | None = None,
+) -> dict:
+    """Load an ASR encoder/decoder pair and register it under `model_id`.
+
+    Both graphs must already be on the node's filesystem. With
+    `catalog_id`, the family, audio ceiling and (for Whisper) the variant
+    come from the catalog and the license check runs; otherwise pass
+    `family` explicitly.
+
+    The remaining files are per-family: `moonshine` and `whisper` need
+    `tokenizer_path`; `parakeet` and `canary` need `preprocessor_path` +
+    `vocab_path`. `whisper_variant` is `distil-en`, `distil-large-v3` or
+    `large-v3-turbo`. Canary builds its decoder prefix from
+    `source_lang` and `target_lang` (both default `en`, i.e. English ASR
+    with no translation).
+    """
+    params: dict = {
+        "model_id": model_id,
+        "encoder_path": encoder_path,
+        "decoder_path": decoder_path,
+    }
+    if catalog_id is not None:
+        params["catalog_id"] = catalog_id
+    if family is not None:
+        params["family"] = family
+    if tokenizer_path is not None:
+        params["tokenizer_path"] = tokenizer_path
+    if preprocessor_path is not None:
+        params["preprocessor_path"] = preprocessor_path
+    if vocab_path is not None:
+        params["vocab_path"] = vocab_path
+    if max_audio_seconds is not None:
+        params["max_audio_seconds"] = max_audio_seconds
+    if whisper_variant is not None:
+        params["whisper_variant"] = whisper_variant
+    if source_lang is not None:
+        params["source_lang"] = source_lang
+    if target_lang is not None:
+        params["target_lang"] = target_lang
+    return await rpc_call("tenzro_loadAudioModel", params)
+
+
+@mcp.tool
+async def unload_audio_model(model_id: str) -> dict:
+    """Unload a transcription model and free its ONNX sessions."""
+    return await rpc_call("tenzro_unloadAudioModel", {"model_id": model_id})
+
+
+@mcp.tool
+async def transcribe(
+    model_id: str,
+    audio_base64: str,
+    timestamps: bool = False,
+    language: str | None = None,
+    temperature: float | None = None,
+) -> dict:
+    """Transcribe speech to text with a loaded ASR model.
+
+    `audio_base64` is the raw audio bytes, base64-encoded — resampling
+    and mel-spectrogram extraction happen on the node. `timestamps`
+    requests segment boundaries alongside the text. `language` is an
+    ISO-639-1 code for the multilingual families; English-only models
+    ignore it.
+    """
+    params: dict = {
+        "model_id": model_id,
+        "audio_base64": audio_base64,
+        "timestamps": timestamps,
+    }
+    if language is not None:
+        params["language"] = language
+    if temperature is not None:
+        params["temperature"] = temperature
+    return await rpc_call("tenzro_transcribe", params)
+
+
+# ---------------------------------------------------------------------------
+# Multi-Modal AI — Video Embeddings (5 tools)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def list_video_catalog() -> dict:
+    """List the curated video encoders this node can load."""
+    return await rpc_call("tenzro_listVideoCatalog", {})
+
+
+@mcp.tool
+async def list_video_models() -> dict:
+    """List the video encoders currently loaded on this node."""
+    return await rpc_call("tenzro_listVideoModels", {})
+
+
+@mcp.tool
+async def load_video_model(
+    model_id: str,
+    vision_model_id: str,
+    num_frames: int = 8,
+) -> dict:
+    """Register a clip-level video encoder over an already-loaded image encoder.
+
+    Video embedding is frame-based: the node extracts `num_frames`
+    evenly-spaced frames, embeds each through the image encoder named by
+    `vision_model_id`, and mean-pools. So load the image encoder first
+    with load_vision_model — an unloaded `vision_model_id` is refused
+    with JSON-RPC -32004. `num_frames` is clamped to 1..128.
+    """
+    return await rpc_call(
+        "tenzro_loadVideoModel",
+        {
+            "model_id": model_id,
+            "vision_model_id": vision_model_id,
+            "num_frames": num_frames,
+        },
+    )
+
+
+@mcp.tool
+async def unload_video_model(model_id: str) -> dict:
+    """Unload a video encoder."""
+    return await rpc_call("tenzro_unloadVideoModel", {"model_id": model_id})
+
+
+@mcp.tool
+async def video_embed(
+    model_id: str,
+    video_base64: str,
+    normalize: bool = False,
+    frame_stride: int | None = None,
+) -> dict:
+    """Embed a video clip as a single vector.
+
+    `video_base64` is the raw container bytes, base64-encoded — frame
+    extraction runs on the node and needs ffmpeg present. `normalize`
+    L2-normalizes the pooled vector. `frame_stride` overrides
+    evenly-spaced sampling with fixed-interval sampling.
+    """
+    params: dict = {
+        "model_id": model_id,
+        "video_base64": video_base64,
+        "normalize": normalize,
+    }
+    if frame_stride is not None:
+        params["frame_stride"] = frame_stride
+    return await rpc_call("tenzro_videoEmbed", params)
 
 
 # ---------------------------------------------------------------------------

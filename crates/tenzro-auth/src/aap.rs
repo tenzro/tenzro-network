@@ -348,6 +348,7 @@ pub fn is_valid_action_name(s: &str) -> bool {
 /// - `Vote` → `"governance.vote"`
 /// - `Contract` → `"contract.call"`
 /// - `RegisterIdentity` → `"identity.register"`
+/// - `InvokeResource` → `"resource.invoke"`
 pub fn rar_to_aap_action(detail: &AuthorizationDetail) -> &'static str {
     match detail {
         AuthorizationDetail::Transfer { .. } => "payments.transfer",
@@ -358,6 +359,7 @@ pub fn rar_to_aap_action(detail: &AuthorizationDetail) -> &'static str {
         AuthorizationDetail::Vote { .. } => "governance.vote",
         AuthorizationDetail::Contract { .. } => "contract.call",
         AuthorizationDetail::RegisterIdentity { .. } => "identity.register",
+        AuthorizationDetail::ResourceInvocation { .. } => "resource.invoke",
     }
 }
 
@@ -374,6 +376,7 @@ pub fn authority_action_to_aap(action: crate::AuthorityAction) -> &'static str {
         A::Vote => "governance.vote",
         A::Contract => "contract.call",
         A::RegisterIdentity => "identity.register",
+        A::InvokeResource => "resource.invoke",
     }
 }
 

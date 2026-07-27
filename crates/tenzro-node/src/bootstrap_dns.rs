@@ -1,7 +1,7 @@
 //! Bootstrap discovery via DNS.
 //!
 //! Replaces the failure-prone "hardcoded BOOT_PEER_ID in the wrapper script"
-//! model. When a validator boots, instead of relying on operator-shipped
+//! model. When a validator boots, instead of relying on operator-supplied
 //! peer IDs in `--boot-nodes`, it can resolve `--bootstrap-dns <name>` to
 //! an SRV record list of currently-healthy bootstrap targets and a paired
 //! TXT record list of their libp2p peer IDs.

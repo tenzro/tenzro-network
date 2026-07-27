@@ -271,14 +271,18 @@ pub async fn resource_metadata_handler(
 
         // RFC 9396 — Rich Authorization Requests are how clients ask for
         // signing / escrow / spend authority bound to a specific wallet
-        // and scope. The `tenzro_*` types are interpreted by this server's
-        // RAR validator (see crate `tenzro-auth`).
+        // and scope. These types are interpreted by this server's RAR
+        // validator (see crate `tenzro-auth`).
         "authorization_details_types_supported": [
-            "tenzro_wallet_sign",
-            "tenzro_escrow_create",
-            "tenzro_escrow_release",
-            "tenzro_escrow_refund",
-            "tenzro_settlement",
+            "transfer",
+            "create_escrow",
+            "discharge_escrow",
+            "inference",
+            "stake",
+            "vote",
+            "contract",
+            "register_identity",
+            "resource_invocation",
         ],
 
         // Token signing algorithms accepted by the protected resource for
@@ -1048,6 +1052,7 @@ fn render_scope(details: &AuthorizationDetails) -> String {
             AuthorizationDetail::Vote { .. } => parts.push("vote"),
             AuthorizationDetail::Contract { .. } => parts.push("contract"),
             AuthorizationDetail::RegisterIdentity { .. } => parts.push("register_identity"),
+            AuthorizationDetail::ResourceInvocation { .. } => parts.push("resource_invocation"),
         }
     }
     parts.sort_unstable();
@@ -1202,6 +1207,11 @@ fn developer_scope_envelope() -> AuthorizationDetails {
             allowed_contracts: None,
             allow_deploy: false,
         })
+        .with(AuthorizationDetail::ResourceInvocation {
+            max_amount_per_call: one_tnzo,
+            class: None,
+            allowed_resource_ids: None,
+        })
 }
 
 fn unauthorized_response(oauth_state: &OAuthState, reason: &str) -> Response {
@@ -1278,6 +1288,7 @@ mod tests {
                 AuthorizationDetail::Vote { .. } => "vote",
                 AuthorizationDetail::Contract { .. } => "contract",
                 AuthorizationDetail::RegisterIdentity { .. } => "register_identity",
+                AuthorizationDetail::ResourceInvocation { .. } => "resource_invocation",
             })
             .collect();
         assert!(kinds.contains(&"transfer"));

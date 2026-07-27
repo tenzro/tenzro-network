@@ -153,9 +153,9 @@ The `ProofType` enum exposes only `Plonky3`.
 | `libp2p-tls` | `0.6.2` | PQ-capable transport |
 | `p3-poseidon2` | `0.5.2` | For STARK follow-up; expect 0.x churn |
 
-**Composite signature wire format:** No production-grade Rust crate publishes `draft-ietf-lamps-pq-composite-sigs-16`. Hand-roll per draft §4 (`Ed25519||ML-DSA-65` SEQUENCE-of-BIT-STRING with OID `id-MLDSA65-Ed25519`); test against Bouncy Castle vectors.
+**Composite signature wire format:** No Rust crate implements `draft-ietf-lamps-pq-composite-sigs-16`. Hand-roll per draft §4 (`Ed25519||ML-DSA-65` SEQUENCE-of-BIT-STRING with OID `id-MLDSA65-Ed25519`); test against Bouncy Castle vectors.
 
-**Critical caveat:** ml-dsa is not 1.0 yet, no independent audit. **This is the single biggest reason to do hybrid not pure-PQ** — Ed25519 is a known-good fallback if a future ml-dsa CVE lands.
+**Critical caveat:** ml-dsa is not 1.0 yet, no independent audit. **This is the single biggest reason to do hybrid not pure-PQ** — Ed25519 is a known-good fallback if a future ml-dsa CVE is disclosed.
 
 ---
 

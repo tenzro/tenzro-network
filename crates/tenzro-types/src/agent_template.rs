@@ -248,7 +248,7 @@ pub struct AgentTemplate {
 
     /// Optional declarative execution spec consumed by autonomous runtimes
     /// (e.g. `tenzro-agent-kit`). When present, a runtime can instantiate
-    /// the agent end-to-end (identity, wallet, delegation, tools, skills,
+    /// the whole agent (identity, wallet, delegation, tools, skills,
     /// execution steps) from the spec alone — no Rust code required.
     ///
     /// Templates without this field still deserialize cleanly via
@@ -822,7 +822,7 @@ mod execution_spec_tests {
     #[test]
     fn agent_template_without_execution_spec_still_deserializes() {
         // A template without execution_spec must round-trip cleanly through
-        // serde. We build it from a real `AgentTemplate::new()` (so the
+        // serde. We build it via `AgentTemplate::new()` (so the
         // Address shape is correct), then serialize, strip the
         // execution_spec field from the JSON, then deserialize the stripped
         // JSON and confirm the field defaults to None.

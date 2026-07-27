@@ -28,7 +28,7 @@ pub struct BlockHeader {
     ///
     /// Mirrors HotStuff-2 (Malkhi & Nayak, eprint 2023/397) Figure 1: the
     /// proposal message `⟨propose, B_k, v, C_{v'}(B_{k-1})⟩_{L_v}` carries
-    /// `v` as a first-class field: the consensus round number for this block.
+    /// `v` as its own field: the consensus round number for this block.
     #[serde(default)]
     pub view: u64,
     /// Hash of the previous block

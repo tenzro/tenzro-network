@@ -9,8 +9,9 @@
 //! `FeeCollector`). They do **not** measure the on-chain consensus path
 //! (signed `CreateEscrow` / `ReleaseEscrow` / `RefundEscrow` transactions
 //! flowing through mempool → block → Native VM dispatch), which is the
-//! source of truth for funds in production. For end-to-end on-chain
-//! benchmarks, see `crates/tenzro-node/tests/escrow_onchain_integration.rs`.
+//! source of truth for funds in production. For on-chain benchmarks that
+//! cover the full transaction path, see
+//! `crates/tenzro-node/tests/escrow_onchain_integration.rs`.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use dashmap::DashMap;

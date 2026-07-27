@@ -1,6 +1,6 @@
 # Tenzro Network Protocol Buffers
 
-This directory contains the Protocol Buffer definitions for Tenzro Network's P2P communication and RPC interfaces. These messages are used across Tenzro Ledger (the L1 settlement layer).
+This directory contains the Protocol Buffer definitions for Tenzro Network's P2P communication and RPC interfaces. These messages are used across Tenzro Ledger (the settlement layer).
 
 ## Directory Structure
 

@@ -30,7 +30,7 @@
 //! ```
 //!
 //! No compression in v1 — chunks cap at [`CHUNK_MAX_BYTES`] of raw KV
-//! payload. flate2/zstd are an obvious follow-up but not load-bearing
+//! payload. flate2/zstd are an obvious follow-up but are not required
 //! for correctness.
 //!
 //! # Trust anchoring

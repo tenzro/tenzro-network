@@ -10,8 +10,9 @@
 //!   revenue dashboards. Stored in `u64` with saturating-add at the
 //!   boundary; per-request `cost_wei` is `u128`, so a single observation
 //!   that overflows the cumulative counter saturates at `u64::MAX`.
-//! - **Latency** — per-request end-to-end wall-clock duration, recorded
-//!   as a histogram fallback: `sum + count + per-bucket counters` in ms.
+//! - **Latency** — per-request wall-clock duration from accept to response,
+//!   recorded as a histogram fallback: `sum + count + per-bucket counters`
+//!   in ms.
 //! - **Rejections** — budget violations, attestation misconfiguration,
 //!   and cost-exceeded errors broken down by reason.
 //! - **Attestations** — TEE quotes and ZK proofs produced, for operators
@@ -462,7 +463,7 @@ impl CortexMetrics {
 
         // Histogram
         out.push_str(
-            "# HELP cortex_request_latency_ms Cortex request end-to-end latency in milliseconds\n",
+            "# HELP cortex_request_latency_ms Cortex request accept-to-response latency in milliseconds\n",
         );
         out.push_str("# TYPE cortex_request_latency_ms histogram\n");
         for (idx, upper) in LATENCY_BUCKETS_MS.iter().enumerate() {

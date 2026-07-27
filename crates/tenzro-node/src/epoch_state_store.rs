@@ -8,7 +8,7 @@
 //!
 //! ## Why this matters
 //!
-//! Before this adapter shipped, `EpochManager` was reconstructed from genesis
+//! Before this adapter existed, `EpochManager` was reconstructed from genesis
 //! on every node restart with `max_history: 10` and an empty in-memory history
 //! vec — meaning the validator-set history for past epochs was unrecoverable.
 //! A node that fell behind across an epoch boundary then verified incoming

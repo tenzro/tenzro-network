@@ -32,6 +32,12 @@
 //! 5. **Sample** — for each sequence, sample from its own logits index with its
 //!    own `LlamaSampler` (so repetition/penalty state is per-request), stream the
 //!    decoded piece, and advance or finish the sequence.
+//!
+//! A sequence finishes on an end-of-generation token, on one of its configured
+//! stop sequences, on reaching its position ceiling, or when a streaming caller
+//! drops the receiver. Stop sequences are matched over decoded text rather than
+//! token ids, so a delimiter that spans several tokens still matches; the
+//! matched delimiter is trimmed from the result and never streamed.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -47,7 +53,7 @@ use llama_cpp_2::token::LlamaToken;
 use tracing::{info, warn};
 
 use crate::error::{ModelError, Result};
-use crate::runtime::{ChatMessage, GenerationConfig, InferenceResult};
+use crate::runtime::{ChatMessage, GenerationConfig, InferenceResult, StopReason, StopStream};
 
 /// Number of concurrent sequence slots a batched context serves. This is the
 /// KV-cache `n_seq_max` and the ceiling on requests decoded in one step. 32 is
@@ -199,7 +205,10 @@ struct Sequence {
     output_tokens: u32,
     /// Absolute position ceiling: `input_tokens + max_tokens`, capped at context.
     max_pos: i32,
-    output_text: String,
+    /// Accumulates decoded pieces, trims a configured stop sequence out of the
+    /// text, and holds back bytes that could still turn out to be the start of
+    /// one so a delimiter never reaches a streaming client.
+    stream: StopStream,
     started: Instant,
     /// The token to feed at the next decode step (the one just sampled). `None`
     /// during prefill, where logits come from the prompt tail instead.
@@ -207,7 +216,7 @@ struct Sequence {
 }
 
 impl Sequence {
-    fn finish(&mut self) {
+    fn finish(mut self) {
         let elapsed = self.started.elapsed();
         let generation_time_ms = elapsed.as_millis() as u64;
         let tokens_per_second = if generation_time_ms > 0 {
@@ -215,13 +224,26 @@ impl Sequence {
         } else {
             0.0
         };
+        // A stop sequence outranks the position ceiling, which outranks
+        // end-of-generation: the sequence is what halted decoding, and the
+        // trimmed text alone cannot tell the caller which of the three it was.
+        let stop_reason = if self.stream.hit_stop() {
+            StopReason::StopSequence
+        } else if self.input_tokens as i32 + self.output_tokens as i32 >= self.max_pos {
+            StopReason::Length
+        } else {
+            StopReason::Eos
+        };
+        let token_tx = self.token_tx.take();
+        let text = self.stream.finish(token_tx.as_ref());
         if let Some(result_tx) = self.result_tx.take() {
             let _ = result_tx.send(Ok(InferenceResult {
-                text: std::mem::take(&mut self.output_text),
+                text,
                 input_tokens: self.input_tokens,
                 output_tokens: self.output_tokens,
                 generation_time_ms,
                 tokens_per_second,
+                stop_reason,
                 commitment: None,
             }));
         }
@@ -394,14 +416,11 @@ fn scheduler_loop(
                 } else {
                     match model.token_to_piece(token, &mut seq.decoder, true, None) {
                         Ok(piece) => {
-                            let receiver_gone = seq
-                                .token_tx
-                                .as_ref()
-                                .map(|tx| tx.blocking_send(piece.clone()).is_err())
-                                .unwrap_or(false);
-                            seq.output_text.push_str(&piece);
+                            let open = seq.stream.push(&piece, seq.token_tx.as_ref());
                             seq.output_tokens += 1;
-                            if receiver_gone {
+                            // Either the receiver went away or the decoded text
+                            // just completed a configured stop sequence.
+                            if !open || seq.stream.hit_stop() {
                                 free_slot = true;
                             }
                         }
@@ -446,7 +465,7 @@ fn finalize_and_free(
     slots: &mut [Option<Sequence>],
     slot_idx: usize,
 ) {
-    if let Some(mut seq) = slots[slot_idx].take() {
+    if let Some(seq) = slots[slot_idx].take() {
         let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
         seq.finish();
     }
@@ -516,7 +535,7 @@ fn admit(model: &LlamaModel, ctx_size: i32, slots: &mut [Option<Sequence>], req:
         input_tokens,
         output_tokens: 0,
         max_pos,
-        output_text: String::new(),
+        stream: StopStream::new(req.config.stop),
         started: Instant::now(),
         pending_token: None,
     });

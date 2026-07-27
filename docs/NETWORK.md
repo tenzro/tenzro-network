@@ -215,7 +215,7 @@ The transport is hidden behind the scheme — callers do not write `iroh://` URI
 
 ## 8. Roles
 
-The node binary `tenzro-node` ships four roles, all running the same wire protocol:
+The node binary `tenzro-node` has four roles, all running the same wire protocol:
 
 - **`Validator`** — produces blocks, runs HotStuff-2 consensus, gets the 1.5× multiplier on leader-selection draw when TEE-attested. Runs the server halves of relay + AutoNAT for community joiners.
 - **`ModelProvider`** — serves AI inference (chat / multi-modal / MoE expert shards / MTP). Subscribes to `tenzro/inference` and `tenzro/models`. Bonds optionally; bond required for Verified / Confidential tiers.

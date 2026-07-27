@@ -53,7 +53,7 @@ use tenzro_types::transaction::SignedTransaction;
 
 /// Length-checked serde for a 96-byte BLS aggregate (G2 compressed point).
 /// Mirrors `voter::bls_aggregate_serde` — `serde` won't auto-derive for arrays
-/// wider than 32 bytes, and the 96-byte invariant is load-bearing for
+/// wider than 32 bytes, and the 96-byte invariant is required by
 /// `BlsSignature::from_bytes`, so widening to `Vec<u8>` would lose it.
 mod bls_aggregate_serde {
     use serde::{Deserialize, Deserializer, Serializer};

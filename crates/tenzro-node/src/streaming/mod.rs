@@ -37,7 +37,9 @@ pub use cursor::{
     parse_last_event_id, BackpressureSignal, StreamCursor, StreamCursorStore,
     DEFAULT_TTL, MAX_BUFFERED_CHUNKS,
 };
-pub use failover::{extract_delta_content, ChatTurn, SamplingState};
+pub use failover::{
+    extract_delta_content, extract_usage_units, usage_units, ChatTurn, SamplingState,
+};
 pub use heartbeat::{
     with_heartbeat, HeartbeatConfig, HeartbeatedChunk, DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MISSED_THRESHOLD,

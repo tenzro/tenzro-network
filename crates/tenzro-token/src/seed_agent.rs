@@ -20,16 +20,16 @@
 //! - [`SeedAgentEarmarkManager`] — owns the singleton + charter set +
 //!   per-agent registry with optional RocksDB write-through.
 //!
-//! All of Spec 10 is now shipped: the primitives + hydration + read
-//! access, the governance executor wiring (charter add/modify/terminate /
-//! earmark / status), the per-month decay enforcement at refill, the
-//! off-chain [`SeedAgentDaemon`](crate::seed_agent_daemon::SeedAgentDaemon)
-//! that drives monthly refills and pauses agents under sunsetted charters,
-//! the [`SEED_AGENTS_TOPIC`](crate::seed_agent_gossip::SEED_AGENTS_TOPIC)
-//! gossipsub fan-out (`tenzro/seed-agents`), and the sunset wind-down sweep
-//! ([`SeedAgentEarmarkManager::sunset_wind_down_sweep`]) that
-//! Paused→Quarantined→Terminated agents under sunsetted charters and
-//! disposes the residual surplus.
+//! Spec 10 covers the primitives + hydration + read access, the
+//! governance executor wiring (charter add/modify/terminate / earmark /
+//! status), the per-month decay enforcement at refill, the off-chain
+//! [`SeedAgentDaemon`](crate::seed_agent_daemon::SeedAgentDaemon) that
+//! drives monthly refills and pauses agents under sunsetted charters, the
+//! [`SEED_AGENTS_TOPIC`](crate::seed_agent_gossip::SEED_AGENTS_TOPIC)
+//! gossipsub fan-out (`tenzro/seed-agents`), and the sunset wind-down
+//! sweep ([`SeedAgentEarmarkManager::sunset_wind_down_sweep`]) that walks
+//! agents under sunsetted charters through
+//! Paused→Quarantined→Terminated and disposes the residual surplus.
 //!
 //! Storage layout (`CF_TOKENS`):
 //! - `seed_earmark:singleton` → JSON-encoded [`TreasuryEarmark`].

@@ -14,7 +14,7 @@
 //! the `ProofRoute` enum (which underlying bridge ferries the fill proof), and
 //! the on-chain `Tenzro7683Order` envelope. Settler precompile bytecode, EIP-712
 //! verification, escrow integration, gossipsub indexing, and bridge-adapter
-//! glue land alongside their respective subsystems and consume these types
+//! glue live alongside their respective subsystems and consume these types
 //! verbatim.
 //!
 //! ### CAIP-2 chain-id mapping

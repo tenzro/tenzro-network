@@ -103,7 +103,7 @@ fn forecast_catalog_is_non_empty_and_well_formed() {
     let catalog = get_forecast_catalog();
     assert!(
         !catalog.is_empty(),
-        "forecast catalog must ship TimesFM 2.5"
+        "forecast catalog must include TimesFM 2.5"
     );
     for entry in &catalog {
         assert!(!entry.id.is_empty(), "forecast entry has empty id");
@@ -117,7 +117,7 @@ fn vision_catalog_is_non_empty_and_well_formed() {
     let catalog = get_vision_catalog();
     assert!(
         !catalog.is_empty(),
-        "vision catalog must ship CLIP/SigLIP2/DINOv3 entries"
+        "vision catalog must include CLIP/SigLIP2/DINOv3 entries"
     );
     for entry in &catalog {
         assert!(entry.input_size > 0, "vision entry has zero input_size");
@@ -130,7 +130,7 @@ fn text_embedding_catalog_is_non_empty_and_well_formed() {
     let catalog = get_text_embedding_catalog();
     assert!(
         !catalog.is_empty(),
-        "text embedding catalog must ship Qwen3-Embedding / EmbeddingGemma / BGE-M3"
+        "text embedding catalog must include Qwen3-Embedding / EmbeddingGemma / BGE-M3"
     );
     for entry in &catalog {
         assert!(!entry.id.is_empty(), "text-embed entry has empty id");
@@ -143,7 +143,7 @@ fn segmentation_catalog_is_non_empty_and_well_formed() {
     let catalog = get_segmentation_catalog();
     assert!(
         !catalog.is_empty(),
-        "segmentation catalog must ship SAM 2 / EdgeSAM / MobileSAM"
+        "segmentation catalog must include SAM 2 / EdgeSAM / MobileSAM"
     );
     for entry in &catalog {
         assert!(!entry.id.is_empty(), "seg entry has empty id");
@@ -155,7 +155,7 @@ fn detection_catalog_is_non_empty_and_well_formed() {
     let catalog = get_detection_catalog();
     assert!(
         !catalog.is_empty(),
-        "detection catalog must ship RF-DETR / D-FINE entries"
+        "detection catalog must include RF-DETR / D-FINE entries"
     );
     for entry in &catalog {
         assert!(!entry.id.is_empty(), "detection entry has empty id");
@@ -167,7 +167,7 @@ fn audio_catalog_is_non_empty_and_well_formed() {
     let catalog = get_audio_catalog();
     assert!(
         !catalog.is_empty(),
-        "audio catalog must ship Moonshine / Distil-Whisper / Whisper-v3-turbo / Parakeet / Canary"
+        "audio catalog must include Moonshine / Distil-Whisper / Whisper-v3-turbo / Parakeet / Canary"
     );
     for entry in &catalog {
         assert!(!entry.id.is_empty(), "audio entry has empty id");
@@ -180,9 +180,9 @@ fn video_catalog_advertises_vjepa2_family() {
     // The video catalog advertises V-JEPA 2 ViT-L (MIT), ViT-H (MIT),
     // and ViT-g (Apache-2.0) — all LicenseTier::Permissive. Loading
     // currently rejects at `tenzro_loadVideoModel` (-32004) because
-    // facebook/vjepa2-* ships safetensors only; the catalog exists so
+    // facebook/vjepa2-* carries safetensors only; the catalog exists so
     // discovery, CLI listing, and MCP enumeration return the right
-    // options once the ONNX export step lands.
+    // options once the ONNX export step is available.
     let catalog = get_video_catalog();
     let ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
     assert_eq!(

@@ -93,7 +93,9 @@ pub use sponsorship::{
     REAPPLICATION_BAR_MS, SLOT_EXPIRY_MS, SPONSORSHIP_POOL, SPONSOR_POOL_KEY,
     SPONSOR_SLOT_PREFIX, T2_DELEGATION, T2_JUNIOR_BOND, T3_DELEGATION, T3_JUNIOR_BOND,
 };
-pub use fee_distribution::{FeeProcessor, FeeStats, DistributionHistory};
+pub use fee_distribution::{
+    DistributionHistory, FeeProcessor, FeeRecord, FeeSource, FeeStats,
+};
 pub use liquid_staking::{LiquidStakingPool, LiquidStakingConfig, LiquidStakingStats};
 pub use cross_vm::{
     TokenVmType, VmAddresses, TokenPermissions, TokenMetadata, TokenId,

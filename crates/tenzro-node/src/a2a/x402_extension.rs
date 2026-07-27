@@ -271,12 +271,12 @@ fn set_status(md: &mut HashMap<String, serde_json::Value>, status: PaymentStatus
 // Verifier trait — concrete scheme implementations live elsewhere
 // ─────────────────────────────────────────────────────────────────────
 
-/// Reasons a payment payload can fail. Slice (a) ships only the three
+/// Reasons a payment payload can fail. Slice (a) defines only the three
 /// dispatcher-level failure modes — task-id replay, scheme-not-offered,
 /// and scheme-not-implemented. Slice (c) extends this enum with
 /// scheme-internal failures (`InvalidAuthorization`, `SettlementFailed`)
 /// when the concrete `exact-eip3009` / `exact-permit2` / `exact-erc7710`
-/// backends land.
+/// backends are implemented.
 #[derive(Debug, Clone)]
 pub enum VerifyFailure {
     /// The payload's `taskId` doesn't match the task it was posted against —

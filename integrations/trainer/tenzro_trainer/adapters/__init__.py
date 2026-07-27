@@ -1,6 +1,6 @@
 """Modality-specific trainer adapters.
 
-Phase 1 ships:
+Phase 1 covers:
 
 * :mod:`tenzro_trainer.adapters.timeseries` — lead modality (TimesFM-class).
 * :mod:`tenzro_trainer.adapters.language` — Qwen 3 0.6B (default) and any

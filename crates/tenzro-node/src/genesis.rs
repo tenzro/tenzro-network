@@ -564,7 +564,7 @@ fn compute_erc8004_bundle_commitment() -> Hash {
 /// Cross-check the configured genesis against what's already persisted on
 /// disk. Refuse to start on any drift in chain_id or genesis state_root.
 ///
-/// This is the production-grade safety check that lets validators preserve
+/// This is the safety check that lets validators preserve
 /// their RocksDB across binary upgrades without risking silent state
 /// corruption. The decision tree is:
 ///
@@ -578,7 +578,7 @@ fn compute_erc8004_bundle_commitment() -> Hash {
 ///   intentionally wipe the data directory.
 /// - **state_root drift on the same chain_id**: also a hard error.
 ///   Either the genesis file was edited (different accounts, faucet, or
-///   predeploy bundle) or the binary itself shipped a new predeploy
+///   predeploy bundle) or the binary itself carries a new predeploy
 ///   commitment. Both demand operator action — there is no safe
 ///   automatic recovery.
 /// - **No `genesis_state_root` key persisted**: only possible on a pre-fix
@@ -662,7 +662,7 @@ fn verify_chain_compat(
                 "Genesis state_root mismatch: configured genesis hashes to {} but \
                  on-disk genesis was {}. Either the genesis.toml was edited (different \
                  accounts, faucet, validators, or ERC-8004 predeploy bundle), or this \
-                 binary ships a different predeploy bundle than the one used to \
+                 binary carries a different predeploy bundle than the one used to \
                  bootstrap the on-disk chain. Refusing to start to prevent silent \
                  state corruption. Resolve by (a) reverting the genesis change, or \
                  (b) intentionally wiping the data directory to bootstrap a fresh chain.",

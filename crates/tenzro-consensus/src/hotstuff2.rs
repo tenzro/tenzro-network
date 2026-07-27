@@ -421,7 +421,7 @@ impl ViewChangeTimer {
     /// Records the observed view-to-QC formation latency for a
     /// successful view and updates the adaptive base timeout.
     ///
-    /// This is the load-bearing adaptive mechanism. Each successful
+    /// This is where the timeout adapts. Each successful
     /// view contributes its wall-clock latency to the EWMA; the
     /// updated base timeout is `safety_multiplier × ewma`, clamped to
     /// `[base_floor, base_ceiling]`. The timer then resets backoff
@@ -674,9 +674,9 @@ pub struct HotStuff2Engine {
     /// The highest view at which this replica has observed a Prepare QC.
     /// Used as the `high_qc_view` field of any [`crate::timeout::TimeoutMsg`]
     /// this replica emits. The new leader after a TC formation extends from
-    /// `max{tc.signers[i].high_qc_view}` so this monotonic value is the
-    /// load-bearing signal that the next view's proposal lands on the
-    /// freshest committed branch.
+    /// `max{tc.signers[i].high_qc_view}` so this monotonic value is what
+    /// forces the next view's proposal to extend the freshest committed
+    /// branch.
     ///
     /// Monotonic: only updated when a strictly higher view's Prepare QC is
     /// observed, never reset on view advance. Initial value 0 means "no QC
@@ -1646,7 +1646,7 @@ impl HotStuff2Engine {
 
     /// Returns the validator set that was active at the given block height.
     ///
-    /// This is the load-bearing accessor for cross-epoch block-sync: a node
+    /// This is the accessor cross-epoch block-sync depends on: a node
     /// catching up from far behind must verify each historical block's
     /// commit-QC against the validator set that signed it, not the current
     /// epoch's set. Returns `None` if the epoch covering `height` has been

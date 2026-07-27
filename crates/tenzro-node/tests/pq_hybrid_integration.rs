@@ -1,7 +1,7 @@
 //! Post-quantum hybrid integration tests.
 //!
 //! Per the migration plan (`docs/security/quantum-resistance-migration-plan.md` §6.1)
-//! these tests exercise the end-to-end PQ-hybrid surface that Waves 3a–3d
+//! these tests exercise the full PQ-hybrid surface that stages 3a–3d
 //! cascaded across the workspace:
 //!
 //! 1. `hybrid_signed_tx_round_trip` — a wallet-signed `SignedTransaction`
@@ -109,7 +109,7 @@ async fn hybrid_signed_tx_round_trip() {
 // ---------------------------------------------------------------------------
 
 /// The pure-PQ wire format is mandatory. Payloads that omit `pq_signature` or
-/// `pq_public_key` — or that ship the wrong byte length — are rejected by
+/// `pq_public_key` — or that carry the wrong byte length — are rejected by
 /// `bounded_pq_signature_bytes` / `bounded_pq_public_key_bytes` before any
 /// VM logic gets a chance to look at them.
 #[test]

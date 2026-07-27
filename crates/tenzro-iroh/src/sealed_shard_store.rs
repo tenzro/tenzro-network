@@ -25,7 +25,7 @@
 //!
 //! # Integrity contract
 //!
-//! iroh-blobs verifies BLAKE3 end-to-end on transfer. The
+//! iroh-blobs verifies BLAKE3 over the whole transfer. The
 //! [`SealedShardStore::fetch`] contract additionally requires the
 //! protocol-side [`verify_shard_ciphertext`] check (SHA-256 + size) so a
 //! wiring bug between the resolver and the trainer surfaces immediately
@@ -72,9 +72,9 @@ use crate::resolver::{IrohBackedResolver, IrohResolver};
 /// fine because the sponsor node is also reachable for direct
 /// `tenzro://blob/<sha256>` round-trips through the same content store.
 /// For multi-region Confidential-tier runs the manifest will need to carry
-/// per-envelope BLAKE3 tickets — that lands once iroh-blobs ships ticket
-/// distribution alongside the iroh 1.0 cut (deferred from B2 to keep this
-/// wave focused on the manifest plane). Until then, sponsors run a single
+/// per-envelope BLAKE3 tickets — that depends on iroh-blobs exposing ticket
+/// distribution alongside the iroh 1.0 cut (deferred from B2 to keep that
+/// change focused on the manifest plane). Until then, sponsors run a single
 /// iroh-blobs publish node and trainers in the same region fetch via the
 /// gossipsub-announced manifest.
 pub struct IrohSealedShardStore {
@@ -109,7 +109,7 @@ impl IrohSealedShardStore {
     /// Pre-populate the SHA-256 → BLAKE3 mapping for a remotely-fetched
     /// shard. Used by callers that learn the BLAKE3 locator out-of-band
     /// (e.g. a future per-envelope ticket field on
-    /// [`SealedShardEnvelope`]). Not exercised in the B2 wave; included
+    /// [`SealedShardEnvelope`]). Not exercised by the Phase B2 path; included
     /// so the multi-region path doesn't require a second adapter type.
     pub fn record_blake3(&self, sha256: Hash, blake3_hex: String) {
         self.sha256_to_blake3.insert(sha256, blake3_hex);

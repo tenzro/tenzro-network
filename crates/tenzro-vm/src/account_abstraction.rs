@@ -1042,7 +1042,7 @@ impl EntryPoint {
         receipts
     }
 
-    /// Handle a single UserOperation end-to-end: validate → execute → charge gas.
+    /// Handle a single UserOperation: validate → execute → charge gas.
     ///
     /// Execution flow:
     /// 1. Validate the UserOp (nonce, signature via validator registry, gas limits).

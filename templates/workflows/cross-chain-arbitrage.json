@@ -1,7 +1,7 @@
 {
   "name": "cross-chain-arbitrage",
   "version": "1.0.0",
-  "description": "Detect cross-chain price spread → quote LLM-driven trade → open ERC-7683 origin order.",
+  "description": "Compare an asset's price across two chains against the bridge cost, size the trade with a model, then open an ERC-7683 order on the origin side.",
   "category": "trading",
   "capabilities": ["arbitrage", "cross-chain", "erc7683"],
   "required_inputs": {
@@ -10,21 +10,109 @@
       "asset": { "type": "string" },
       "source_chain": { "type": "string" },
       "dest_chain": { "type": "string" },
-      "max_size": { "type": "string" }
+      "max_size": {
+        "type": "string",
+        "description": "Ceiling on the order size, decimal, in the source token's smallest unit."
+      },
+      "bridge_fee_source_id": {
+        "type": "string",
+        "description": "Registry id of a bridge-fee knowledge base. Discover one with tenzro_listKnowledge."
+      },
+      "price_feed_id": {
+        "type": "string",
+        "description": "Registry id of a price-feed knowledge base. Queried once per chain."
+      },
+      "settlement_contract": {
+        "type": "string",
+        "description": "Hex address of the origin settler that will hold the order."
+      },
+      "swapper": {
+        "type": "string",
+        "description": "Hex address opening the order — the account whose escrow is locked."
+      },
+      "nonce": {
+        "type": "integer",
+        "description": "Per-swapper order nonce. Reusing one returns the existing order unchanged."
+      },
+      "origin_chain_id": { "type": "integer" },
+      "fill_deadline": {
+        "type": "integer",
+        "description": "Unix seconds after which an unfilled order is refundable."
+      },
+      "order_data_type": {
+        "type": "string",
+        "description": "32-byte hex EIP-712 typehash for the order payload."
+      },
+      "escrow_id": {
+        "type": "string",
+        "description": "32-byte hex id of the escrow locking the inputs. Create one with a CreateEscrow transaction first."
+      },
+      "proof_route": {
+        "type": "string",
+        "enum": ["layerzero", "wormhole", "debridge", "hyperlane"]
+      },
+      "source_token": {
+        "type": "string",
+        "description": "Hex contract address of the asset on the source chain."
+      },
+      "dest_token": {
+        "type": "string",
+        "description": "Hex contract address of the asset on the destination chain."
+      },
+      "dest_chain_id": { "type": "integer" },
+      "dest_recipient": {
+        "type": "string",
+        "description": "Hex recipient on the destination chain — 20-byte address or 32-byte chain-discriminated value."
+      }
     },
-    "required": ["asset", "source_chain", "dest_chain", "max_size"]
+    "required": [
+      "asset",
+      "source_chain",
+      "dest_chain",
+      "max_size",
+      "bridge_fee_source_id",
+      "price_feed_id",
+      "settlement_contract",
+      "swapper",
+      "nonce",
+      "origin_chain_id",
+      "fill_deadline",
+      "order_data_type",
+      "escrow_id",
+      "proof_route",
+      "source_token",
+      "dest_token",
+      "dest_chain_id",
+      "dest_recipient"
+    ]
   },
   "expected_outputs": {
     "type": "object",
     "properties": {
-      "order_id": { "type": "string" },
-      "expected_pnl": { "type": "string" }
+      "bridge_quote": { "type": "object" },
+      "src_price": { "type": "object" },
+      "dst_price": { "type": "object" },
+      "decision": {
+        "type": "object",
+        "properties": {
+          "size": { "type": "string" },
+          "side": { "type": "string" },
+          "expected_pnl": { "type": "string" }
+        }
+      },
+      "order": {
+        "type": "object",
+        "properties": {
+          "opened": { "type": "boolean" },
+          "order_id": { "type": "string" }
+        }
+      }
     }
   },
   "steps": [
     {
       "kind": "use_knowledge",
-      "knowledge_id": "kb-bridge-fee-default",
+      "knowledge_id": "{{ inputs.bridge_fee_source_id }}",
       "params": {
         "asset": "{{ inputs.asset }}",
         "source": "{{ inputs.source_chain }}",
@@ -34,21 +122,21 @@
     },
     {
       "kind": "use_knowledge",
-      "knowledge_id": "kb-price-feed-default",
+      "knowledge_id": "{{ inputs.price_feed_id }}",
       "params": { "symbol": "{{ inputs.asset }}", "chain": "{{ inputs.source_chain }}" },
       "output_as": "src_price"
     },
     {
       "kind": "use_knowledge",
-      "knowledge_id": "kb-price-feed-default",
+      "knowledge_id": "{{ inputs.price_feed_id }}",
       "params": { "symbol": "{{ inputs.asset }}", "chain": "{{ inputs.dest_chain }}" },
       "output_as": "dst_price"
     },
     {
       "kind": "use_model",
-      "model_id": "qwen3-7b",
+      "model_id": "qwen3-8b",
       "params": {
-        "prompt": "Source price: {{ steps.src_price.output }}, Dest price: {{ steps.dst_price.output }}, Bridge cost: {{ steps.bridge_quote.output }}. Max size: {{ inputs.max_size }}. Recommend trade size and side. JSON: {size, side, expected_pnl}."
+        "prompt": "Source price: {{ steps.src_price.output }}, Dest price: {{ steps.dst_price.output }}, Bridge cost: {{ steps.bridge_quote.output }}. Ceiling: {{ inputs.max_size }} in the source token's smallest unit. Recommend an order size at or below the ceiling. Reply JSON only: {\"size\": \"<decimal string>\", \"side\": \"buy|sell\", \"expected_pnl\": \"<decimal string>\"}."
       },
       "output_as": "decision"
     },
@@ -57,10 +145,34 @@
       "tool_id": "tool-erc7683-origin",
       "tool_name": "open_order",
       "params": {
-        "asset": "{{ inputs.asset }}",
-        "source_chain": "{{ inputs.source_chain }}",
-        "dest_chain": "{{ inputs.dest_chain }}",
-        "size": "{{ steps.decision.output.size }}"
+        "settlement_contract": "{{ inputs.settlement_contract }}",
+        "swapper": "{{ inputs.swapper }}",
+        "nonce": "{{ inputs.nonce }}",
+        "origin_chain_id": "{{ inputs.origin_chain_id }}",
+        "fill_deadline": "{{ inputs.fill_deadline }}",
+        "order_data_type": "{{ inputs.order_data_type }}",
+        "escrow_id": "{{ inputs.escrow_id }}",
+        "proof_route": "{{ inputs.proof_route }}",
+        "order_data": {
+          "inputs": [
+            {
+              "token": "{{ inputs.source_token }}",
+              "amount": "{{ steps.decision.output.size }}"
+            }
+          ],
+          "outputs": [
+            {
+              "token": "{{ inputs.dest_token }}",
+              "amount": "{{ steps.decision.output.size }}",
+              "recipient": "{{ inputs.dest_recipient }}",
+              "chain_id": "{{ inputs.dest_chain_id }}"
+            }
+          ],
+          "dest_chain_id": "{{ inputs.dest_chain_id }}",
+          "dest_recipient": "{{ inputs.dest_recipient }}",
+          "fill_deadline": "{{ inputs.fill_deadline }}",
+          "proof_route": "{{ inputs.proof_route }}"
+        }
       },
       "output_as": "order"
     }

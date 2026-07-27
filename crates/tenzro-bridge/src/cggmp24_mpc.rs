@@ -4,11 +4,11 @@
 //! distributed signing path for bridge custody. It pins the upstream
 //! `cggmp24` / `cggmp24-keygen` / `round-based` / `generic-ec` versions,
 //! defines the `MpcTransport` abstraction that decouples the protocol from
-//! any specific wire (libp2p / iroh / in-memory), and ships an
+//! any specific wire (libp2p / iroh / in-memory), and provides an
 //! `InMemoryMpcTransport` for local multi-party unit tests.
 //!
-//! Live distributed key generation and signing through real party-to-party
-//! networking lands in a follow-up wave. The Phase D bridge currently
+//! Distributed key generation and signing over live party-to-party
+//! networking is not implemented here. The Phase D bridge currently
 //! defaults to [`crate::evm_signer::SignerBackend::SealedKey`] for single-key
 //! TEE-sealed custody; `Cggmp24Signer` is the seam where the t-of-n backend
 //! is introduced once the live flow is wired.

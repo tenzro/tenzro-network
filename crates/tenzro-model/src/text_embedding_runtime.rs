@@ -64,6 +64,11 @@ pub struct TextEmbedResult {
     pub embeddings: Vec<Vec<f32>>,
     /// Effective embedding dim used (after Matryoshka truncation).
     pub dim: usize,
+    /// Tokens consumed across the batch, excluding padding. Batching pads every
+    /// input up to the longest one in the batch; those pad positions are an
+    /// artifact of how the tensor is shaped, not work the caller asked for, so
+    /// this counts attention-mask positions rather than `batch × seq_len`.
+    pub prompt_tokens: u32,
     /// Total inference wall time in milliseconds (tokenize + ORT run).
     pub generation_time_ms: u64,
 }
@@ -156,7 +161,7 @@ mod onnx_backend {
         /// Optional `position_ids` input — required by some Qwen3 exports.
         position_ids_name: Option<String>,
         /// Optional `token_type_ids` input — required by some BERT-style
-        /// exports (BGE-M3 ships with it but accepts all-zeros).
+        /// exports (BGE-M3 declares it but accepts all-zeros).
         token_type_ids_name: Option<String>,
         /// Output name to read. Either `sentence_embedding` (pre-pooled)
         /// or `last_hidden_state` (needs pooling).
@@ -294,12 +299,14 @@ mod onnx_backend {
                 return Ok(TextEmbedResult {
                     embeddings: vec![],
                     dim: 0,
+                    prompt_tokens: 0,
                     generation_time_ms: 0,
                 });
             }
             let start = Instant::now();
             let (input_ids, attention_mask) = self.tokenize(inputs)?;
             let (batch_size, seq_len) = (input_ids.shape()[0], input_ids.shape()[1]);
+            let prompt_tokens = attention_mask.iter().filter(|m| **m != 0).count() as u32;
 
             // Build extra optional inputs before the lock.
             let position_ids: Option<Array2<i64>> = if self.position_ids_name.is_some() {
@@ -437,6 +444,7 @@ mod onnx_backend {
             Ok(TextEmbedResult {
                 embeddings,
                 dim: effective_dim,
+                prompt_tokens,
                 generation_time_ms: start.elapsed().as_millis() as u64,
             })
         }
@@ -695,6 +703,11 @@ mod tests {
             Ok(TextEmbedResult {
                 embeddings,
                 dim: effective,
+                // No tokenizer behind this mock, so approximate by word count.
+                prompt_tokens: inputs
+                    .iter()
+                    .map(|s| s.split_whitespace().count() as u32)
+                    .sum(),
                 generation_time_ms: 0,
             })
         }

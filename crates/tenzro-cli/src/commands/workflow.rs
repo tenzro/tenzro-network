@@ -8,7 +8,7 @@
 //! AP2 / x402 / MPP / Stripe SPT / Visa TAP / Mastercard Agent Pay
 //! mandate.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 
 use crate::output;
@@ -154,13 +154,27 @@ impl WorkflowIdCmd {
     }
 }
 
+/// Operator-only: mirror a finalized workflow onto a Canton
+/// synchronizer. The mirror allocates participant state on the
+/// operator's behalf, so it takes the operator's admin token rather than
+/// a tenant API key.
 #[derive(Debug, Parser)]
 pub struct WorkflowMirrorCmd {
     #[arg(long)]
     workflow_id: String,
 
+    /// Canton synchronizer to mirror onto
     #[arg(long)]
-    synchronizer: String,
+    synchronizer_id: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`). Falls back to
+    /// `TENZRO_ADMIN_TOKEN` env var.
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 
     #[arg(long, default_value_t = default_rpc())]
     rpc: String,
@@ -169,13 +183,23 @@ pub struct WorkflowMirrorCmd {
 impl WorkflowMirrorCmd {
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Workflow — Mirror to Canton");
-        let rpc = RpcClient::new(&self.rpc);
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
+        }
         let v: serde_json::Value = rpc
             .call(
                 "tenzro_mirrorWorkflowToCanton",
                 serde_json::json!({
                     "workflow_id": self.workflow_id,
-                    "synchronizer": self.synchronizer,
+                    "synchronizer_id": self.synchronizer_id,
                 }),
             )
             .await?;

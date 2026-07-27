@@ -33,7 +33,28 @@
 //! node implements it against `TnzoToken::balance_of` so the model crate gains
 //! no token dependency. The ceiling is applied as a discovery pre-filter (a
 //! cheaper model still routes even when the strongest one is unaffordable).
+//!
+//! ## Declared tier vs measured difficulty
+//!
+//! Two scoring paths coexist, and which one runs depends on the evidence
+//! available, not on configuration:
+//!
+//! - **Declared tier.** With no prompt embedding, or in a prompt neighbourhood
+//!   nothing has served yet, candidates are partitioned into
+//!   [`QualityTier::Cheap`] / [`QualityTier::Strong`] from declared metadata
+//!   (parameter count, context window, capability tags) and the cost-quality
+//!   knob picks the tier. Cheapest wins within it.
+//! - **Measured difficulty.** When the intent carries a prompt (or a
+//!   pre-computed embedding) and a [`DifficultyIndex`] is wired, the prompt is
+//!   placed in a cluster and each candidate's *observed* error rate for that
+//!   cluster is blended with its cost by the same knob. This is what lets a
+//!   cheap model win a hard-looking request it has actually been resolving, and
+//!   lose an easy-looking one it has been escalating.
+//!
+//! `quality_floor` is a caller instruction and is honored in both paths.
+//! Feedback arrives through [`MetaRouter::record_outcome`].
 
+use crate::difficulty::{DifficultyIndex, PromptEmbedder, RouteOutcome};
 use crate::error::{ModelError, Result};
 use crate::registry::{ModelFilter, ModelRegistry};
 use crate::routing::InferenceRouter;
@@ -42,6 +63,7 @@ use tenzro_types::model::{
     InferenceRequest, ModelInfo, ModelModality, ModelStatus,
 };
 use tenzro_types::primitives::Address;
+use tracing::debug;
 
 use std::sync::Arc;
 
@@ -176,6 +198,13 @@ pub struct RouteIntent {
     /// payer's on-chain TNZO balance is a hard ceiling: models whose estimated
     /// cost exceeds it are dropped during discovery.
     pub payer_address: Option<Address>,
+    /// The prompt this intent will run. Used only to place the request in a
+    /// difficulty cluster; never sent anywhere by the router itself.
+    pub prompt: Option<String>,
+    /// Pre-computed prompt embedding. Set directly by callers that already hold
+    /// one, or filled by [`MetaRouter::route_intent`] from `prompt` via the
+    /// wired [`PromptEmbedder`].
+    pub prompt_embedding: Option<Vec<f32>>,
 }
 
 impl RouteIntent {
@@ -193,6 +222,8 @@ impl RouteIntent {
             est_output_tokens: 256,
             payer_did: None,
             payer_address: None,
+            prompt: None,
+            prompt_embedding: None,
         }
     }
 
@@ -231,6 +262,20 @@ impl RouteIntent {
         self.payer_address = Some(address);
         self
     }
+
+    /// Sets the prompt used for difficulty clustering.
+    #[must_use]
+    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompt = Some(prompt.into());
+        self
+    }
+
+    /// Supplies a pre-computed prompt embedding, skipping the embedder.
+    #[must_use]
+    pub fn with_prompt_embedding(mut self, embedding: Vec<f32>) -> Self {
+        self.prompt_embedding = Some(embedding);
+        self
+    }
 }
 
 /// The outcome of running the selection pipeline: the chosen model plus the
@@ -246,6 +291,22 @@ pub struct RouteDecision {
     /// Ordered alternative `model_id`s to try if the selected model has no
     /// healthy provider. Same tier, same budget admission.
     pub fallback_chain: Vec<String>,
+    /// Difficulty cluster the prompt was placed in, when the intent carried an
+    /// embedding and a [`DifficultyIndex`] is wired. Callers must echo this back
+    /// to [`MetaRouter::record_outcome`] so the observation lands on the right
+    /// cluster.
+    pub cluster: Option<u32>,
+    /// The selected model's observed error rate for `cluster`. `None` when the
+    /// declared-tier path ran.
+    pub expected_error: Option<f32>,
+    /// The provider that will serve the call and receive the provider share,
+    /// when the winner came from a live network offer. `None` means the winner
+    /// came from this node's own catalog and the serving provider is resolved
+    /// through the inference router — [`MetaRouter::route_and_select`] returns the
+    /// authoritative address in both cases.
+    pub provider: Option<Address>,
+    /// Endpoint to dispatch to, set together with `provider`.
+    pub endpoint: Option<String>,
     /// Human-readable selection trace.
     pub reason: String,
 }
@@ -275,6 +336,35 @@ pub trait BalanceProvider: Send + Sync {
     fn balance_of(&self, payer_address: &Address) -> u128;
 }
 
+/// One provider's live offer to serve a model.
+///
+/// `model.provider` is the address that serves the request and receives the
+/// provider share of the settlement, and `model.pricing` is that provider's own
+/// advertised rate — two providers offering the same `model_id` are two offers at
+/// two prices, scored independently.
+#[derive(Debug, Clone)]
+pub struct ModelOffer {
+    /// The model as the offering provider describes and prices it.
+    pub model: ModelInfo,
+    /// JSON-RPC endpoint to dispatch the call to.
+    pub endpoint: String,
+}
+
+/// The set of model offers live on the network right now.
+///
+/// Providers gossip signed announcements carrying capabilities, their own price,
+/// and a TTL; each node keeps the unexpired set. Implementing this trait hands
+/// that set to selection, so routing considers what the network is serving at
+/// this moment rather than only what is in this node's own catalog — a node with
+/// an empty catalog still routes. The model crate gains no network dependency:
+/// the node adapts its announcement map.
+pub trait NetworkCatalog: Send + Sync {
+    /// Returns every unexpired offer in `modality`. Called once per routing
+    /// decision, so implementations should read an in-memory map rather than
+    /// hitting storage or the network.
+    fn live_offers(&self, modality: ModelModality) -> Vec<ModelOffer>;
+}
+
 /// A model candidate scored during selection.
 struct Candidate {
     model: ModelInfo,
@@ -285,6 +375,13 @@ struct Candidate {
     measured_cost: Option<u64>,
     /// Measured average latency, for tie-breaking within equal cost.
     measured_latency: Option<u64>,
+    /// Observed error rate for the prompt's difficulty cluster. `None` when no
+    /// cluster was resolved.
+    expected_error: Option<f32>,
+    /// Dispatch endpoint when this candidate came from a live network offer.
+    /// `None` for a candidate from this node's own catalog, whose serving provider
+    /// is resolved through the inference router instead.
+    endpoint: Option<String>,
 }
 
 /// Resolves an intent to a model and dispatches it through the inference
@@ -295,6 +392,9 @@ pub struct MetaRouter {
     router: Arc<InferenceRouter>,
     budget_gate: Option<Arc<dyn BudgetGate>>,
     balance_provider: Option<Arc<dyn BalanceProvider>>,
+    difficulty: Option<Arc<DifficultyIndex>>,
+    embedder: Option<Arc<dyn PromptEmbedder>>,
+    network_catalog: Option<Arc<dyn NetworkCatalog>>,
 }
 
 impl MetaRouter {
@@ -312,7 +412,19 @@ impl MetaRouter {
             router,
             budget_gate: None,
             balance_provider: None,
+            difficulty: None,
+            embedder: None,
+            network_catalog: None,
         }
+    }
+
+    /// Attaches the live [`NetworkCatalog`]. Without it, selection sees only this
+    /// node's own catalog, which makes routing depend on what the operator
+    /// happens to have registered locally.
+    #[must_use]
+    pub fn with_network_catalog(mut self, catalog: Arc<dyn NetworkCatalog>) -> Self {
+        self.network_catalog = Some(catalog);
+        self
     }
 
     /// Attaches a per-DID rolling-window [`BudgetGate`]. When set and the
@@ -333,6 +445,48 @@ impl MetaRouter {
         self
     }
 
+    /// Attaches the measured-difficulty index. Without it the router uses the
+    /// declared-tier path for every request.
+    #[must_use]
+    pub fn with_difficulty_index(mut self, index: Arc<DifficultyIndex>) -> Self {
+        self.difficulty = Some(index);
+        self
+    }
+
+    /// Attaches a [`PromptEmbedder`] so [`MetaRouter::route_intent`] can derive
+    /// an embedding from `RouteIntent::prompt`. Callers that supply
+    /// `prompt_embedding` directly do not need one.
+    #[must_use]
+    pub fn with_prompt_embedder(mut self, embedder: Arc<dyn PromptEmbedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
+    /// The wired difficulty index, if any. Exposed so handlers can report
+    /// cluster counts and record outcomes without holding a second reference.
+    pub fn difficulty_index(&self) -> Option<Arc<DifficultyIndex>> {
+        self.difficulty.clone()
+    }
+
+    /// Records a serving outcome against the cluster a decision was made in.
+    ///
+    /// Returns `Ok(false)` when no difficulty index is wired — the caller's
+    /// feedback is simply not retained, which is not an error.
+    pub fn record_outcome(
+        &self,
+        model_id: &str,
+        cluster: u32,
+        outcome: RouteOutcome,
+    ) -> Result<bool> {
+        match &self.difficulty {
+            Some(index) => {
+                index.record_outcome(model_id, cluster, outcome)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Runs the selection pipeline and returns a [`RouteDecision`] without
     /// dispatching. Discovery only — no spend, no provider call.
     ///
@@ -347,8 +501,22 @@ impl MetaRouter {
         let filter = ModelFilter::new()
             .with_modality(intent.modality)
             .with_status(ModelStatus::Active);
-        let models = self.registry.search_models(&filter);
-        if models.is_empty() {
+        // Discovery spans two sources, scored together: this node's own catalog,
+        // and the offers other providers are announcing on the network right now.
+        // A cheaper or better-performing remote offer therefore wins on its
+        // merits, and a node with an empty local catalog still routes.
+        let mut discovered: Vec<(ModelInfo, Option<String>)> = self
+            .registry
+            .search_models(&filter)
+            .into_iter()
+            .map(|m| (m, None))
+            .collect();
+        if let Some(catalog) = &self.network_catalog {
+            for offer in catalog.live_offers(intent.modality) {
+                discovered.push((offer.model, Some(offer.endpoint)));
+            }
+        }
+        if discovered.is_empty() {
             return Err(ModelError::NoProvidersAvailable(format!(
                 "no active {:?} model for use case {}",
                 intent.modality,
@@ -367,8 +535,22 @@ impl MetaRouter {
             _ => None,
         };
 
+        // Place the prompt in a difficulty cluster. Assignment also refines the
+        // cluster map, so every routed prompt improves future placement.
+        let cluster = match (&intent.prompt_embedding, &self.difficulty) {
+            (Some(embedding), Some(index)) => index.observe_prompt(embedding),
+            _ => None,
+        };
+        // Measured scoring only takes over once something has served this
+        // cluster; before that, declared metadata is the only signal there is.
+        let measured = cluster.filter(|c| {
+            self.difficulty
+                .as_ref()
+                .is_some_and(|index| index.has_observations(*c))
+        });
+
         let mut candidates: Vec<Candidate> = Vec::new();
-        for model in models {
+        for (model, endpoint) in discovered {
             let tier = quality_tier(&model);
 
             // Quality floor: drop anything below the requested tier.
@@ -403,12 +585,19 @@ impl MetaRouter {
             let measured_cost = stats.as_ref().map(|s| s.avg_cost());
             let measured_latency = stats.as_ref().map(|s| s.avg_latency_ms());
 
+            let expected_error = match (cluster, &self.difficulty) {
+                (Some(c), Some(index)) => Some(index.expected_error(&model.model_id, c)),
+                _ => None,
+            };
+
             candidates.push(Candidate {
                 model,
+                endpoint,
                 tier,
                 est_cost,
                 measured_cost,
                 measured_latency,
+                expected_error,
             });
         }
 
@@ -423,19 +612,39 @@ impl MetaRouter {
             )));
         }
 
-        // Resolve the target tier from the cost-quality knob, then keep only
-        // candidates in that tier if any exist; otherwise fall back to the
-        // whole survivor set (so a budget that only affords cheap models still
-        // routes even when the knob leans strong).
-        let target = target_tier(intent);
-        let has_target = candidates.iter().any(|c| c.tier == target);
-        if has_target {
-            candidates.retain(|c| c.tier == target);
+        // 5. Score. Which path runs depends on the evidence available, not on
+        // configuration.
+        match measured {
+            // Measured: blend each candidate's observed error rate for the
+            // prompt's cluster with its cost, weighted by the knob. Declared
+            // tier is not consulted — observations supersede metadata.
+            Some(_) => {
+                let (min_cost, max_cost) = candidates.iter().fold(
+                    (u128::MAX, 0u128),
+                    |(lo, hi), c| (lo.min(c.est_cost), hi.max(c.est_cost)),
+                );
+                let span = max_cost.saturating_sub(min_cost);
+                let w = intent.optimize;
+                candidates.sort_by(|a, b| {
+                    let sa = blended_score(a, w, min_cost, span);
+                    let sb = blended_score(b, w, min_cost, span);
+                    sa.total_cmp(&sb).then_with(|| cost_key(a).cmp(&cost_key(b)))
+                });
+            }
+            // Declared: resolve the target tier from the cost-quality knob and
+            // keep only candidates in that tier if any exist; otherwise fall
+            // back to the whole survivor set (so a budget that only affords
+            // cheap models still routes even when the knob leans strong).
+            // Within the tier, cheapest measured cost wins; models with no
+            // history sort after models with a record; latency breaks ties.
+            None => {
+                let target = target_tier(intent);
+                if candidates.iter().any(|c| c.tier == target) {
+                    candidates.retain(|c| c.tier == target);
+                }
+                candidates.sort_by_key(cost_key);
+            }
         }
-
-        // 5. Score: cheapest measured cost wins within the tier; models with
-        // no history sort after models with a record; latency breaks ties.
-        candidates.sort_by_key(cost_key);
 
         let best = &candidates[0];
 
@@ -449,15 +658,32 @@ impl MetaRouter {
             })?;
         }
 
-        let fallback_chain: Vec<String> = candidates
-            .iter()
-            .skip(1)
-            .map(|c| c.model.model_id.clone())
-            .collect();
+        // One model can appear several times — once from the local catalog and
+        // once per provider announcing it — so the chain carries each model id
+        // once, in score order, with the winner's own id excluded.
+        let mut fallback_chain: Vec<String> = Vec::new();
+        for c in candidates.iter().skip(1) {
+            let id = &c.model.model_id;
+            if id != &best.model.model_id && !fallback_chain.iter().any(|f| f == id) {
+                fallback_chain.push(id.clone());
+            }
+        }
+
+        let scoring = match measured {
+            Some(c) => format!(
+                "measured cluster={c} expected_error={:.3}",
+                best.expected_error.unwrap_or(0.5)
+            ),
+            None => match cluster {
+                Some(c) => format!("declared (cluster={c}, no observations yet)"),
+                None => "declared (no prompt embedding)".to_string(),
+            },
+        };
 
         let reason = format!(
             "use_case={} modality={:?} tier={:?} optimize={:.2} \
-             est_cost={} survivors={} (picked {} at {}; {} fallback{})",
+             est_cost={} survivors={} scoring={scoring} \
+             (picked {} at {}; {} fallback{})",
             intent.use_case.as_str(),
             intent.modality,
             best.tier,
@@ -477,28 +703,80 @@ impl MetaRouter {
             tier: best.tier,
             estimated_cost: best.est_cost,
             fallback_chain,
+            cluster,
+            expected_error: if measured.is_some() {
+                best.expected_error
+            } else {
+                None
+            },
+            // A network offer names the address that serves it and takes the
+            // provider share; a local catalog entry names its creator, which is
+            // not necessarily the serving operator, so it is left unset and
+            // resolved through the inference router instead.
+            provider: best.endpoint.as_ref().map(|_| best.model.provider),
+            endpoint: best.endpoint.clone(),
             reason,
         })
+    }
+
+    /// Resolves an intent, embedding its prompt first when one is present and a
+    /// [`PromptEmbedder`] is wired. Callers that already hold an embedding can
+    /// set [`RouteIntent::prompt_embedding`] and call [`MetaRouter::route`]
+    /// directly.
+    ///
+    /// A failing embedder does not fail the route. Difficulty estimation
+    /// sharpens the decision; it is not required to make one, so an embedding
+    /// failure degrades to the declared-tier path.
+    ///
+    /// # Errors
+    ///
+    /// Propagates every [`MetaRouter::route`] error.
+    pub async fn route_intent(&self, intent: &RouteIntent) -> Result<RouteDecision> {
+        if intent.prompt_embedding.is_none()
+            && let (Some(prompt), Some(embedder)) = (&intent.prompt, &self.embedder)
+        {
+            match embedder.embed_prompt(prompt).await {
+                Ok(embedding) => {
+                    let mut filled = intent.clone();
+                    filled.prompt_embedding = Some(embedding);
+                    return self.route(&filled);
+                }
+                Err(e) => {
+                    debug!("prompt embedding unavailable, routing on declared tier: {e}");
+                }
+            }
+        }
+        self.route(intent)
     }
 
     /// Resolves an intent to a model, then selects a provider through the
     /// inference router. Walks the cross-model fallback chain if the chosen
     /// model has no healthy provider.
     ///
-    /// Returns the resolved `model_id` and the provider [`Address`] chosen by
-    /// the inference router, plus the full [`RouteDecision`] for observability.
+    /// Returns the resolved `model_id`, the address that will serve the call and
+    /// take the provider share, and the full [`RouteDecision`] for
+    /// observability. When the winner is a live network offer, that address
+    /// comes from the signed announcement itself; otherwise the inference router
+    /// selects among the operators serving the model locally.
     ///
     /// # Errors
     ///
     /// Propagates [`MetaRouter::route`] errors. Returns
     /// [`ModelError::NoProvidersAvailable`] naming every model tried when the
     /// whole chain lacks a healthy provider.
-    pub fn route_and_select(
+    pub async fn route_and_select(
         &self,
         intent: &RouteIntent,
         requester: Address,
     ) -> Result<(String, Address, RouteDecision)> {
-        let decision = self.route(intent)?;
+        let decision = self.route_intent(intent).await?;
+
+        // A network offer was scored on the price and capabilities its provider
+        // signed, so that provider is the one to dispatch to and pay — there is
+        // nothing left for the inference router to choose.
+        if let Some(provider) = decision.provider {
+            return Ok((decision.model_id.clone(), provider, decision));
+        }
 
         // Build the ordered list of models to try: the winner first, then the
         // fallback chain.
@@ -550,6 +828,19 @@ fn cost_key(c: &Candidate) -> (u64, u128, u64) {
         c.est_cost,
         c.measured_latency.unwrap_or(u64::MAX),
     )
+}
+
+/// Blended objective, lower is better: `optimize` weights the observed error
+/// rate against cost normalized across the surviving candidates. A candidate
+/// with no observation in the cluster scores at the neutral prior.
+fn blended_score(c: &Candidate, optimize: f32, min_cost: u128, span: u128) -> f32 {
+    let norm_cost = if span == 0 {
+        0.0
+    } else {
+        (c.est_cost.saturating_sub(min_cost) as f64 / span as f64) as f32
+    };
+    let error = c.expected_error.unwrap_or(0.5);
+    optimize * error + (1.0 - optimize) * norm_cost
 }
 
 /// Estimates the cost of a request against a model's pricing, in smallest TNZO
@@ -767,5 +1058,125 @@ mod tests {
             .with_tokens(10, 10)
             .with_payer_address(Address::new([9; 32]));
         assert!(matches!(mr.route(&intent), Err(ModelError::NoProvidersAvailable(_))));
+    }
+
+    /// Two same-priced candidates, one cheap-tier and one strong-tier, plus a
+    /// knob that leans cheap. Cost cannot separate them, so measurement is the
+    /// only differentiator once it exists.
+    fn measured_stack() -> (MetaRouter, Arc<DifficultyIndex>) {
+        let (registry, usage, router) = router_stack();
+        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
+        registry.register_model(model("strong", 70_000_000_000, 8192, 1, 1)).unwrap();
+        let index = Arc::new(DifficultyIndex::new(crate::difficulty::DEFAULT_CLUSTER_CAPACITY));
+        let mr = MetaRouter::new(registry, usage, router)
+            .with_difficulty_index(index.clone());
+        (mr, index)
+    }
+
+    fn measured_intent(embedding: Vec<f32>) -> RouteIntent {
+        RouteIntent::new(UseCase::Chat, Budget::None)
+            .with_optimize(0.5)
+            .with_tokens(10, 10)
+            .with_prompt_embedding(embedding)
+    }
+
+    #[test]
+    fn no_embedding_takes_the_declared_path() {
+        let (mr, _index) = measured_stack();
+        let intent = RouteIntent::new(UseCase::Chat, Budget::None)
+            .with_optimize(0.5)
+            .with_tokens(10, 10);
+        let d = mr.route(&intent).unwrap();
+        assert_eq!(d.cluster, None);
+        assert_eq!(d.expected_error, None);
+        assert_eq!(d.model_id, "cheap");
+    }
+
+    #[test]
+    fn embedding_without_observations_takes_the_declared_path() {
+        let (mr, index) = measured_stack();
+        let d = mr.route(&measured_intent(vec![1.0, 0.0, 0.0])).unwrap();
+        // The prompt was placed, so future requests can be scored against it,
+        // but with nothing served yet declared metadata still decides.
+        assert_eq!(d.cluster, Some(0));
+        assert_eq!(d.expected_error, None);
+        assert_eq!(d.model_id, "cheap");
+        assert_eq!(index.cluster_count(), 1);
+    }
+
+    #[test]
+    fn escalations_flip_the_winner_within_the_cluster() {
+        let (mr, _index) = measured_stack();
+        let embedding = vec![1.0, 0.0, 0.0];
+
+        // First request places the prompt and takes the declared path.
+        let first = mr.route(&measured_intent(embedding.clone())).unwrap();
+        assert_eq!(first.model_id, "cheap");
+        let cluster = first.cluster.unwrap();
+
+        // The cheap model repeatedly failed to resolve prompts here.
+        for _ in 0..20 {
+            assert!(mr.record_outcome("cheap", cluster, RouteOutcome::Escalated).unwrap());
+        }
+
+        // Same neighbourhood, same knob, same cost — now the strong model wins.
+        let second = mr.route(&measured_intent(embedding)).unwrap();
+        assert_eq!(second.cluster, Some(cluster));
+        assert_eq!(second.model_id, "strong");
+        assert!(second.expected_error.is_some());
+        assert_eq!(second.fallback_chain, vec!["cheap".to_string()]);
+    }
+
+    #[test]
+    fn quality_floor_binds_in_the_measured_path() {
+        let (mr, _index) = measured_stack();
+        let embedding = vec![0.0, 1.0, 0.0];
+        let cluster = mr
+            .route(&measured_intent(embedding.clone()))
+            .unwrap()
+            .cluster
+            .unwrap();
+        // The cheap model measures well here, so unconstrained routing would
+        // pick it. A caller-declared floor overrides the measurement.
+        for _ in 0..20 {
+            mr.record_outcome("cheap", cluster, RouteOutcome::Resolved).unwrap();
+        }
+        let intent = measured_intent(embedding).with_quality_floor(QualityTier::Strong);
+        let d = mr.route(&intent).unwrap();
+        assert_eq!(d.model_id, "strong");
+        assert_eq!(d.tier, QualityTier::Strong);
+    }
+
+    #[test]
+    fn outcome_without_an_index_is_not_an_error() {
+        let (registry, usage, router) = router_stack();
+        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
+        let mr = MetaRouter::new(registry, usage, router);
+        assert!(!mr.record_outcome("cheap", 0, RouteOutcome::Failed).unwrap());
+    }
+
+    struct ConstantEmbedder(Vec<f32>);
+
+    #[async_trait::async_trait]
+    impl PromptEmbedder for ConstantEmbedder {
+        async fn embed_prompt(&self, _prompt: &str) -> Result<Vec<f32>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn route_intent_embeds_the_prompt() {
+        let (registry, usage, router) = router_stack();
+        registry.register_model(model("cheap", 3_000_000_000, 8192, 1, 1)).unwrap();
+        let index = Arc::new(DifficultyIndex::new(crate::difficulty::DEFAULT_CLUSTER_CAPACITY));
+        let mr = MetaRouter::new(registry, usage, router)
+            .with_difficulty_index(index.clone())
+            .with_prompt_embedder(Arc::new(ConstantEmbedder(vec![0.0, 0.0, 1.0])));
+        let intent = RouteIntent::new(UseCase::Chat, Budget::None)
+            .with_tokens(10, 10)
+            .with_prompt("summarize this contract");
+        let d = mr.route_intent(&intent).await.unwrap();
+        assert_eq!(d.cluster, Some(0));
+        assert_eq!(index.cluster_count(), 1);
     }
 }

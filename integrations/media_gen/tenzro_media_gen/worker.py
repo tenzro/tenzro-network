@@ -78,7 +78,7 @@ class WorkerConfig:
 
     ``served_models`` are models it holds whole; ``expert_holdings`` are single
     halves of a split model. A model may appear in both only if the worker
-    really holds both transformers, in which case it qualifies for either half.
+    holds both transformers, in which case it qualifies for either half.
     """
 
     worker_did: str
@@ -357,10 +357,19 @@ class MediaGenWorker:
             worker_signature=Signature.empty(),
         )
         receipt.worker_signature = sign_receipt(receipt, self.key)
-        self.client.submit_receipt(receipt)
+        sealed = self.client.submit_receipt(receipt)
         log.info(
             "job %s: completed, %d bytes of %s",
             job.job_id,
             published.byte_len,
             result.mime,
         )
+        if sealed.settlement is not None:
+            mine = sealed.settlement.payout_for(self.config.worker_did)
+            log.info(
+                "job %s: paid %s attoTNZO of %d at %d bps",
+                job.job_id,
+                mine.amount if mine is not None else 0,
+                sealed.settlement.price_paid,
+                mine.share_bps if mine is not None else 0,
+            )

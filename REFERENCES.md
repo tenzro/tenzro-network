@@ -52,6 +52,19 @@ are credited in [NOTICE](NOTICE) under their own licenses.
 - EIP-3009 — `transferWithAuthorization` meta-transactions (gasless USDC transfers).
 - AP2 — agent payment mandates.
 
+## Model routing
+
+- LLM request routers that learn from preference data which queries need a
+  stronger model, and the open reference implementations thereof (RouteLLM).
+  Tenzro's meta-router differs in shape: it routes over an open catalog rather
+  than a fixed model pair, and learns from routing outcomes rather than an
+  offline preference corpus.
+- Sequential (online) k-means for streaming vector clustering.
+- Laplace / Beta(1,1) smoothing for rate estimates over small samples.
+- UCB1 — upper-confidence-bound action selection, adapted to give unobserved
+  model/cluster pairs a bounded exploration allowance.
+- Reciprocal rank fusion for merging ranked result lists.
+
 ## Transport and data availability
 
 - iroh / iroh-blobs — QUIC-native content-addressed transfer, BLAKE3-verified.

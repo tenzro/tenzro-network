@@ -60,7 +60,7 @@ pub enum AuthError {
 
     /// The requested action references a DID that does not exist in the
     /// local identity registry, or whose controller chain cannot be
-    /// resolved end-to-end.
+    /// resolved all the way back to a root controller.
     #[error("unknown DID: {0}")]
     UnknownDid(String),
 

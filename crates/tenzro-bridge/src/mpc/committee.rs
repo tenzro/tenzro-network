@@ -451,7 +451,7 @@ mod tests {
         // else fixed) must redraw a different quorum, so a payer cannot
         // pre-elect signers by choosing the message hash. This complements
         // the unit-level `quorum_changes_when_entropy_changes` test by
-        // verifying the property end-to-end through the higher-level
+        // verifying the property through the higher-level
         // build_committee_bound_sign_config entry point.
         let g = sample_group();
         let members = members(7);

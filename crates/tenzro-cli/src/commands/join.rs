@@ -81,7 +81,7 @@ impl JoinCmd {
                     anyhow::anyhow!(
                         "Cannot connect to your local node at {}: {}\n\
                          Provider mode registers on your own node. Start it first:\n\
-                         \n    tenzro-node --role model-provider\n\
+                         \n    tenzro-node --roles model-provider\n\
                          \nor point at a node you operate with --rpc <url>.",
                         rpc_url, e
                     )

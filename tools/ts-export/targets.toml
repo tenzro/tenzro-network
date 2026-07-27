@@ -6,19 +6,26 @@
 # Tenzro `TimeseriesRuntime` when the resulting artifact is registered
 # (`tenzro_loadForecastModel` RPC).
 #
-# Note: the entry currently shipped in `get_forecast_catalog`
-# (TimesFM 2.5 200M) points at the community ONNX export at
+# Note: the TimesFM 2.5 200M entry in `get_forecast_catalog` points at
+# the community ONNX export at
 # `pdufour/timesfm-2.5-200m-transformers-onnx`. The harness below is
 # the fallback path for producing our own ONNX if that community
 # export ever goes offline or falls behind upstream.
+#
+# Only Apache-2.0 / MIT weights belong here — re-exporting produces an
+# artifact we host ourselves, and `test_all_licenses_are_redistributable`
+# enforces that. Forecasters under attribution or revenue-threshold
+# terms (NXAI TiRex, for one) are served from the upstream ONNX via
+# `get_forecast_catalog` under a `CommercialCustom` licence gate, so the
+# harness is never their acquisition path.
 
 [[target]]
 id = "timesfm-2.5-200m"
-hf_repo = "google/timesfm-2.5-200m-pytorch"
+hf_repo = "google/timesfm-2.5-200m-transformers"
 arch = "timesfm"                # Decoder-only transformer with patch tokenizer
 license = "Apache-2.0"
 params = "200M"
 context_length = 2048
 max_horizon = 128
 n_quantiles = 10
-notes = "Decoder-only patch-tokenized transformer. Community export at pdufour/timesfm-2.5-200m-transformers-onnx pins batch_size=2 because of force_flip_invariance=true; any re-export must preserve that contract."
+notes = "Decoder-only patch-tokenized transformer. The transformers-format repo is the maintained source: google/timesfm-2.5-200m-pytorch has not moved since 2025-10 and the community ONNX derives from the transformers layout. That export at pdufour/timesfm-2.5-200m-transformers-onnx pins batch_size=2 because of force_flip_invariance=true; any re-export must preserve that contract."

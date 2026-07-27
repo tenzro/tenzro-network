@@ -1177,7 +1177,7 @@ pub(crate) fn cortex_model_info(
     arch_label: &str,
 ) -> tenzro_types::model::ModelInfo {
     use tenzro_types::model::{
-        ModelInfo, ModelModality, ModelParameters, ModelStatus, MoeMetadata,
+        ModalityRates, ModelInfo, ModelModality, ModelParameters, ModelStatus, MoeMetadata,
         MoeRoutingStrategy, PricingConfig, PricingModel,
     };
 
@@ -1244,12 +1244,24 @@ pub(crate) fn cortex_model_info(
             "recurrent-depth".to_string(),
             "cortex".to_string(),
         ],
+        // Text-only, so the geometry descriptor stays at its default and is
+        // never consulted.
+        ..Default::default()
     };
     info.pricing = PricingConfig {
         price_per_input_token: pricing.price_per_input_token_wei,
         price_per_output_token: pricing.price_per_output_token_wei,
         minimum_price: pricing.base_request_fee_wei,
         pricing_model: PricingModel::PerToken,
+        // A reasoning worker charges per recurrent loop, so the catalog quote a
+        // caller reads carries the same loop rate the worker settles on. The
+        // remaining dimensions are unpriced rather than defaulted: cortex is
+        // text-only, and these rates are wei while the defaults are nominal.
+        modality_rates: ModalityRates {
+            price_per_request: pricing.base_request_fee_wei,
+            price_per_reasoning_loop: pricing.price_per_loop_wei,
+            ..ModalityRates::unpriced()
+        },
     };
     info.status = ModelStatus::Active;
     info.metadata = metadata;
@@ -1364,17 +1376,202 @@ pub struct ProviderPricing {
     /// Network-enforced ceiling on output price (decimal string)
     #[serde(with = "tenzro_types::primitives::u128_serde")]
     pub network_max_output_wei: u128,
+    /// Rates for every billable unit that is not an input or output token:
+    /// cached tokens, reasoning loops, image tokens, audio and video seconds,
+    /// denoising pixel-steps, and frames. An operator setting only token prices
+    /// omits this and inherits [`default_modality_rates`].
+    ///
+    /// The fallback is the wei-scale card rather than `ModalityRates::default`:
+    /// the token prices above are wei and the type default is nominal, so
+    /// inheriting the type default would price a second of audio far under a
+    /// single token.
+    #[serde(default = "default_modality_rates")]
+    pub modality_rates: tenzro_types::model::ModalityRates,
+    /// The scheme the rates above are charged under. Decides which of them a
+    /// finished call is actually billed on — see [`ProviderPricing::price`].
+    ///
+    /// An operator who posts rates without naming a scheme is charging for the
+    /// work those rates describe, which is [`PricingModel::PerToken`].
+    #[serde(default)]
+    pub pricing_model: tenzro_types::model::PricingModel,
+}
+
+/// Network ceiling on the price of one input token: 0.001 TNZO.
+pub const NETWORK_MAX_INPUT_WEI: u128 = 1_000_000_000_000_000;
+
+/// Network ceiling on the price of one output token: 0.002 TNZO.
+///
+/// Also the ceiling on every other metered unit, so an operator cannot route
+/// around the token ceiling by charging per audio second or per frame instead.
+pub const NETWORK_MAX_OUTPUT_WEI: u128 = 2_000_000_000_000_000;
+
+impl ProviderPricing {
+    /// Holds every rate at or below the network per-unit ceiling and restates
+    /// the ceilings themselves, so an operator cannot advertise a rate the
+    /// network will not honour.
+    ///
+    /// Every path that accepts operator-supplied pricing runs this before the
+    /// card becomes readable: a rate that escaped it would be quoted to callers
+    /// and settled on.
+    pub fn clamp_to_network_maximums(&mut self) {
+        self.input_price_per_token_wei = self.input_price_per_token_wei.min(NETWORK_MAX_INPUT_WEI);
+        self.output_price_per_token_wei = self.output_price_per_token_wei.min(NETWORK_MAX_OUTPUT_WEI);
+        self.network_max_input_wei = NETWORK_MAX_INPUT_WEI;
+        self.network_max_output_wei = NETWORK_MAX_OUTPUT_WEI;
+
+        // ModalityRates is u64 while the ceiling is u128, so the ceiling is
+        // itself capped at u64::MAX before comparison.
+        let unit_ceiling = NETWORK_MAX_OUTPUT_WEI.min(u64::MAX as u128) as u64;
+        let rates = &mut self.modality_rates;
+        rates.price_per_request = rates.price_per_request.min(unit_ceiling);
+        rates.price_per_compute_ms = rates.price_per_compute_ms.min(unit_ceiling);
+        rates.price_per_cached_read_token = rates.price_per_cached_read_token.min(unit_ceiling);
+        rates.price_per_cached_write_token = rates.price_per_cached_write_token.min(unit_ceiling);
+        rates.price_per_reasoning_loop = rates.price_per_reasoning_loop.min(unit_ceiling);
+        rates.price_per_image_token = rates.price_per_image_token.min(unit_ceiling);
+        rates.price_per_audio_second = rates.price_per_audio_second.min(unit_ceiling);
+        rates.price_per_video_second = rates.price_per_video_second.min(unit_ceiling);
+        rates.price_per_pixel_step = rates.price_per_pixel_step.min(unit_ceiling);
+        rates.price_per_frame = rates.price_per_frame.min(unit_ceiling);
+    }
+
+    /// Prices one locally-served call under the scheme this card declares.
+    ///
+    /// [`ProviderPricing::meter`] is the per-unit metering the default scheme
+    /// charges on. The other three settle on something else entirely — a flat
+    /// charge per call, the measured wall-clock, or the metered cost pulled
+    /// toward what the model has recently been settling at — so a card that
+    /// declares one of them and is then billed per token would charge a caller
+    /// something other than what it advertised.
+    ///
+    /// `market_average` is the average cost this model's finished calls have
+    /// settled at, which is the only demand signal a serving node holds without
+    /// asking the network. `None` leaves a dynamic quote at its metered cost
+    /// rather than guessing a scale.
+    pub fn price(
+        &self,
+        units: &tenzro_types::model::BillableUnits,
+        latency_ms: u64,
+        market_average: Option<u128>,
+    ) -> u128 {
+        use tenzro_types::model::PricingModel;
+        let rates = &self.modality_rates;
+        match self.pricing_model {
+            PricingModel::PerToken => self.meter(units),
+            PricingModel::PerRequest => rates.price_per_request as u128,
+            PricingModel::PerComputeTime => {
+                (latency_ms as u128).saturating_mul(rates.price_per_compute_ms as u128)
+            }
+            PricingModel::Dynamic => Self::scale_to_market(self.meter(units), market_average),
+        }
+    }
+
+    /// Pulls a metered cost toward what the model has recently settled at,
+    /// bounded to between half and twice the metered figure.
+    ///
+    /// The bound is what keeps this a price signal rather than an unbounded
+    /// multiplier: one outlier settlement in a thin market must not multiply a
+    /// caller's bill without limit, and a soft market must not drive the price
+    /// to zero. Absent history, the metered cost stands.
+    fn scale_to_market(metered: u128, market_average: Option<u128>) -> u128 {
+        match market_average {
+            Some(average) if average > 0 && metered > 0 => {
+                let ratio = (average as f64 / metered as f64).clamp(0.5, 2.0);
+                (metered as f64 * ratio) as u128
+            }
+            _ => metered,
+        }
+    }
+
+    /// Meters one call across every billable dimension it reported, in wei.
+    ///
+    /// This is the single place a locally-served call is metered, so a modality
+    /// that starts reporting a new unit begins billing for it everywhere at
+    /// once. Arithmetic is u128 throughout because the token prices are u128 and
+    /// a high-resolution video's pixel-step count exceeds u64.
+    ///
+    /// Frames are charged only when the call reported no pixel-steps. A
+    /// generation's frame count is already a factor of its pixel-steps, so
+    /// charging both would bill the same work twice; frames stand alone only for
+    /// a call that *consumed* them, as when a video encoder samples a clip.
+    pub fn meter(&self, units: &tenzro_types::model::BillableUnits) -> u128 {
+        let rates = &self.modality_rates;
+        let charge = |quantity: u64, rate: u64| -> u128 {
+            (quantity as u128).saturating_mul(rate as u128)
+        };
+
+        let frames = if units.pixel_steps == 0 {
+            charge(units.frames as u64, rates.price_per_frame)
+        } else {
+            0
+        };
+
+        [
+            (units.input_tokens as u128).saturating_mul(self.input_price_per_token_wei),
+            (units.output_tokens as u128).saturating_mul(self.output_price_per_token_wei),
+            charge(
+                units.cached_read_tokens as u64,
+                rates.price_per_cached_read_token,
+            ),
+            charge(
+                units.cached_write_tokens as u64,
+                rates.price_per_cached_write_token,
+            ),
+            charge(units.reasoning_loops as u64, rates.price_per_reasoning_loop),
+            charge(units.image_tokens as u64, rates.price_per_image_token),
+            charge(units.audio_seconds(), rates.price_per_audio_second),
+            charge(units.video_seconds(), rates.price_per_video_second),
+            units
+                .pixel_steps
+                .saturating_mul(rates.price_per_pixel_step as u128),
+            frames,
+        ]
+        .into_iter()
+        .fold(0u128, |acc, term| acc.saturating_add(term))
+    }
 }
 
 impl Default for ProviderPricing {
     fn default() -> Self {
         // Defaults: 0.0001 / 0.0002 TNZO per token, max 0.001 / 0.002 TNZO per token.
         Self {
-            input_price_per_token_wei: 100_000_000_000_000,        // 1e14 wei = 0.0001 TNZO
-            output_price_per_token_wei: 200_000_000_000_000,       // 2e14 wei = 0.0002 TNZO
-            network_max_input_wei: 1_000_000_000_000_000,          // 1e15 wei = 0.001 TNZO
-            network_max_output_wei: 2_000_000_000_000_000,         // 2e15 wei = 0.002 TNZO
+            input_price_per_token_wei: 100_000_000_000_000,  // 1e14 wei = 0.0001 TNZO
+            output_price_per_token_wei: 200_000_000_000_000, // 2e14 wei = 0.0002 TNZO
+            network_max_input_wei: NETWORK_MAX_INPUT_WEI,
+            network_max_output_wei: NETWORK_MAX_OUTPUT_WEI,
+            modality_rates: default_modality_rates(),
+            pricing_model: tenzro_types::model::PricingModel::PerToken,
         }
+    }
+}
+
+/// Wei-scale rates for the non-token billable units, in the same order of
+/// magnitude as the default token prices (1e14 wei per input token).
+///
+/// A cached read is a tenth of a fresh input token because the provider skipped
+/// the prefill for it; a cache write is priced above a fresh token because the
+/// provider pays to retain it. The denoising and base-fee rates match
+/// `tenzro_media_gen::pricing`, which meters the same pixel-steps, so a
+/// generation quoted by the media runtime and one metered here agree.
+///
+/// Pixel-steps price frames a provider *generates*; `price_per_frame` prices
+/// frames a provider *consumes*, as when sampling a clip for embedding. A
+/// request carries one or the other, never both.
+///
+/// Every rate sits at or below the `network_max_output_wei` per-unit ceiling
+/// enforced when an operator sets pricing.
+pub fn default_modality_rates() -> tenzro_types::model::ModalityRates {
+    tenzro_types::model::ModalityRates {
+        price_per_request: 1_000_000_000_000_000,          // 1e15 wei
+        price_per_compute_ms: 1_000_000_000,               // 1e9 wei
+        price_per_cached_read_token: 10_000_000_000_000,   // 1e13 wei
+        price_per_cached_write_token: 300_000_000_000_000, // 3e14 wei
+        price_per_reasoning_loop: 1_000_000_000_000_000,   // 1e15 wei
+        price_per_image_token: 100_000_000_000_000,        // 1e14 wei
+        price_per_audio_second: 500_000_000_000_000,       // 5e14 wei
+        price_per_video_second: 1_000_000_000_000_000,     // 1e15 wei
+        price_per_pixel_step: 1_000_000_000,               // 1e9 wei
+        price_per_frame: 100_000_000_000_000,              // 1e14 wei
     }
 }
 
@@ -1569,6 +1766,10 @@ pub struct TenzroNode {
     // Services
     wallet_service: Option<Arc<TenzroWalletService>>,
     token: Option<Arc<TnzoToken>>,
+    /// Accounts for the gas the executor debits per transaction. The event
+    /// loop settles the fee market's treasury/burn split onto the ledger at
+    /// every finalized block and records the movement here.
+    fee_processor: Option<Arc<tenzro_token::FeeProcessor>>,
     staking: Option<Arc<StakingManager>>,
     /// AgentBond surety primitive (Agent-Swarm Spec 9). Single source of
     /// truth for bond state across lane resolution, RPC reads, and
@@ -1722,7 +1923,7 @@ pub struct TenzroNode {
     tee_bound_validator: Option<Arc<tenzro_vm::TeeBoundValidator>>,
     /// BurnQuota singleton (Agent-Swarm Spec 3). Tracks the
     /// protocol-side TNZO budget the stablecoin paymaster will draw from
-    /// once the dual-rail-gas paymaster + oracle + AMM swap loop lands.
+    /// once the dual-rail-gas paymaster + oracle + AMM swap loop is in place.
     /// Currently only the read RPC `tenzro_getBurnQuota` is wired;
     /// `try_drain` / `refill` are public on the manager but no caller
     /// invokes them yet. Persists to CF_TOKENS via
@@ -1817,7 +2018,7 @@ pub struct TenzroNode {
 
     /// Per-client API key manager. Gates access to scoped RPC surfaces
     /// (currently `Canton` — `tenzro_*Canton*` methods). The server-side
-    /// Canton credentials live in [`Self::canton_adapter`] and are never
+    /// Canton credentials live in [`Self::canton_adapters`] and are never
     /// exposed to clients; instead, clients authenticate to Tenzro with
     /// an opaque `tnz_*` API key, and the dispatch path in `rpc.rs`
     /// calls `authorize(plaintext, method)` to gate scoped methods.
@@ -2110,6 +2311,13 @@ pub struct TenzroNode {
     #[cfg(feature = "wasi-skills")]
     function_components: Arc<crate::functions::FunctionComponentCache>,
 
+    /// Sandbox for caller-supplied WASI 0.2 components, backing the
+    /// `code-executor` builtin tool. Present only when the node is built
+    /// with the `wasi-skills` feature; without it the tool reports itself
+    /// unavailable rather than pretending to execute.
+    #[cfg(feature = "wasi-skills")]
+    sandboxed_tools: crate::mcp::wasm_tools::SandboxedToolRegistry,
+
     /// Machine-deployment registry — unmodified long-lived server processes run
     /// in a Firecracker microVM, served over the same `tenzro/http` ingress as
     /// static sites and functions. Shares the site naming layer. RocksDB-backed
@@ -2159,7 +2367,12 @@ pub struct TenzroNode {
     /// post-execute log scan — the choice of which workflows mirror to
     /// which synchronizer is per-workflow operator policy, not a global
     /// node default).
-    canton_adapter: Option<Arc<tenzro_bridge::canton::CantonAdapter>>,
+    /// One adapter per Canton network the operator serves. Empty when
+    /// the Canton subsystem is disabled or no network is configured.
+    canton_adapters: std::collections::BTreeMap<
+        crate::config::CantonNetwork,
+        Arc<tenzro_bridge::canton::CantonAdapter>,
+    >,
 
     /// TNZO CCT bridge — Chainlink CCT (Cross-Chain Token) helper that wraps
     /// a `ChainlinkCcipAdapter` plus the canonical TNZO pool registry
@@ -2542,6 +2755,7 @@ impl TenzroNode {
             vm_runtime: None,
             wallet_service: None,
             token: None,
+            fee_processor: None,
             staking: None,
             bond_manager: None,
             compute_bond_manager: None,
@@ -2652,6 +2866,13 @@ impl TenzroNode {
                     ))
                 })?,
             ),
+            #[cfg(feature = "wasi-skills")]
+            sandboxed_tools: crate::mcp::wasm_tools::SandboxedToolRegistry::with_default_host()
+                .map_err(|e| {
+                    crate::error::NodeError::Internal(format!(
+                        "wasm engine init for the component sandbox: {e}"
+                    ))
+                })?,
             machine_registry: Arc::new(crate::machines::MachineRegistry::new()),
             #[cfg(feature = "firecracker")]
             machine_supervisor: None,
@@ -2662,7 +2883,7 @@ impl TenzroNode {
             token_registry: None,
             bridge_router: None,
             price_oracle: None,
-            canton_adapter: None,
+            canton_adapters: std::collections::BTreeMap::new(),
             cct_bridge: None,
             hyperlane_adapter: Arc::new(HyperlaneAdapter::new(HyperlaneConfig::new(
                 10_000,
@@ -3231,7 +3452,7 @@ impl TenzroNode {
         //      mempool. Has to happen AFTER both consensus (#7) and identity
         //      (#10) are up — `NodeLaneResolver` reads from
         //      `IdentityRegistry` + `StakingManager`, neither of which exists
-        //      at `init_consensus` time. Until this call lands the mempool
+        //      at `init_consensus` time. Until this call executes the mempool
         //      runs in legacy size-only mode; the window is bounded by the
         //      few async steps between init_consensus() and here, during
         //      which the node has not yet started servicing inbound traffic.
@@ -3423,6 +3644,7 @@ impl TenzroNode {
         self.governance = None;
         self.staking = None;
         self.token = None;
+        self.fee_processor = None;
         self.wallet_service = None;
         self.vm_runtime = None;
         self.consensus = None;
@@ -3966,10 +4188,14 @@ impl TenzroNode {
             info!("Canton/DAML disabled — DAML VM will not be active");
         }
 
+        // The DAML VM holds a single participant connection, so it targets
+        // the default network. Per-request network selection applies to the
+        // `tenzro_canton_*` RPC surface, which goes through the adapter map.
+        let daml_target = self.config.canton.network(self.config.canton.default_network);
         let vm_runtime = Arc::new(MultiVmRuntime::with_canton_config(
             vm_config,
-            &self.config.canton.host,
-            self.config.canton.port,
+            daml_target.map(|c| c.host.as_str()).unwrap_or("localhost"),
+            daml_target.map(|c| c.port).unwrap_or(7575),
         ).await?);
 
         // Wire the EIP-1559 fee market into the VM gas oracle. The oracle owns
@@ -3984,11 +4210,17 @@ impl TenzroNode {
         self.health_monitor.mark_healthy("vm");
 
         if self.config.canton.enabled {
-            info!(
-                "Canton configured at {}:{} (connection deferred until first DAML operation)",
-                self.config.canton.host,
-                self.config.canton.port,
-            );
+            for net in self.config.canton.configured_networks() {
+                if let Some(c) = self.config.canton.network(net) {
+                    info!(
+                        network = %net,
+                        "Canton configured at {}:{} (connection deferred until first \
+                         DAML operation)",
+                        c.host,
+                        c.port,
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -4006,7 +4238,24 @@ impl TenzroNode {
         } else {
             Arc::new(TnzoToken::new())
         };
+        // Commission settlement resolves the payee through the token's treasury
+        // address; without this every commissioned settlement fails closed.
+        // The address is derived, so it is identical on every replica.
+        token.set_treasury_address(tenzro_types::network_treasury_address());
         self.token = Some(token);
+
+        // Fee accounting for the gas the executor debits per transaction.
+        let fee_processor = if let Some(storage) = &self.storage {
+            Arc::new(
+                tenzro_token::FeeProcessor::with_storage(storage.clone() as Arc<dyn KvStore>)
+                    .map_err(|e| {
+                        NodeError::Other(format!("Failed to init fee processor: {}", e))
+                    })?,
+            )
+        } else {
+            Arc::new(tenzro_token::FeeProcessor::new())
+        };
+        self.fee_processor = Some(fee_processor);
 
         // Initialize staking with persistent storage if available
         let staking = if let Some(storage) = &self.storage {
@@ -4016,7 +4265,7 @@ impl TenzroNode {
         };
         self.staking = Some(staking);
 
-        // Initialize liquid staking pool (stTNZO). Ships the pool
+        // Initialize liquid staking pool (stTNZO). Creates the pool
         // with default config (10% protocol fee, 7-day unbonding, 0.1 TNZO
         // min deposit). Persists holder balances + withdrawal requests +
         // aggregate totals to CF_TOKENS so the pool survives restarts.
@@ -4128,9 +4377,9 @@ impl TenzroNode {
         self.validator_registry = Some(validator_registry);
 
         // Initialize BurnQuota singleton (Agent-Swarm Spec 3).
-        // The full dual-rail-gas paymaster ships later once the
+        // The full dual-rail-gas paymaster comes later once the
         // bridge mesh (Wormhole NTT USDC pool) and Chainlink/Pyth oracles
-        // are in place; for now we land the on-chain accounting
+        // are in place; for now we add the on-chain accounting
         // primitive only, persisted under CF_TOKENS so genesis and any
         // operator-initiated refill survive restarts.
         let burn_quota_manager = if let Some(storage) = &self.storage {
@@ -4152,9 +4401,9 @@ impl TenzroNode {
         self.burn_quota_manager = Some(burn_quota_manager);
 
         // Initialize adaptive burn governance dial (Agent-Swarm Spec 8).
-        // Lands the protocol primitives + read RPCs; the
+        // Registers the protocol primitives + read RPCs; the
         // auto-proposal generator and the EIP-1559 fee-market consumer
-        // ship alongside the governance executor wiring later.
+        // are wired alongside the governance executor later.
         let burn_rate_manager = if let Some(storage) = &self.storage {
             match tenzro_token::adaptive_burn::BurnRateConfigManager::with_storage(
                 storage.clone() as Arc<dyn KvStore>,
@@ -4186,9 +4435,9 @@ impl TenzroNode {
         }
 
         // Initialize SeedAgent treasury earmark manager (Agent-Swarm Spec 10).
-        // Lands the protocol primitives, persistence, and read-only
+        // Registers the protocol primitives, persistence, and read-only
         // RPCs. The off-chain provisioning daemon, monthly decay enforcement,
-        // sunset wind-down sweep, and governance-executor mutation paths land
+        // sunset wind-down sweep, and governance-executor mutation paths come
         // later.
         let seed_agent_manager = if let Some(storage) = &self.storage {
             match tenzro_token::seed_agent::SeedAgentEarmarkManager::with_storage(
@@ -4298,7 +4547,7 @@ impl TenzroNode {
         self.governance = Some(governance);
 
         // Initialize treasury with persistent storage if available
-        let treasury_addr = Address::default(); // In production, this would be a proper address
+        let treasury_addr = tenzro_types::network_treasury_address();
         let treasury = if let Some(storage) = &self.storage {
             use tenzro_token::treasury::TreasuryStorageBackend;
             let backend = Arc::new(TreasuryStorageBackend::new(storage.clone() as Arc<dyn KvStore>));
@@ -4494,7 +4743,7 @@ impl TenzroNode {
         }
 
         // Register canonical Tempo L1 TIP-20 stablecoins so the catalog reflects
-        // Tempo as a first-class settlement venue. Operator-supplied addresses
+        // Tempo as a settlement venue of its own. Operator-supplied addresses
         // from `[payments] tempo_stablecoins` take precedence; symbols not
         // overridden fall back to deterministic placeholders so seeing-the-symbol
         // still gives downstream consumers a stable token_id pending canonical
@@ -4674,7 +4923,7 @@ impl TenzroNode {
         //
         // If no genesis validators are configured, fall back to a single-node
         // validator set containing only this node — useful for local dev
-        // (`tenzro-node --role validator` without a genesis file).
+        // (`tenzro-node --roles validator` without a genesis file).
         //
         // The local node's keypair is ALWAYS the signing identity it uses for
         // votes. If the local public key isn't present in the genesis set,
@@ -5153,7 +5402,7 @@ impl TenzroNode {
     async fn init_settlement(&mut self) -> Result<()> {
         info!("Initializing settlement engine...");
 
-        let treasury_addr = Address::default();
+        let treasury_addr = tenzro_types::network_treasury_address();
         let config = SettlementConfig::new(treasury_addr);
         let treasury = self.treasury.clone().unwrap();
 
@@ -5971,16 +6220,7 @@ impl TenzroNode {
             && let Some(staking) = self.staking.as_ref()
         {
             let staking = staking.clone();
-            let provider_address = self
-                .identity_registry
-                .as_ref()
-                .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
-                .or_else(|| {
-                    self.announce_signer
-                        .as_ref()
-                        .and_then(|s| announce_signer_wallet_address(s.as_ref()))
-                })
-                .unwrap_or_default();
+            let provider_address = self.operator_payee().unwrap_or_default();
             let stake_ledger: Arc<dyn tenzro_settlement::rental::StakeLedger> = Arc::new(
                 crate::storage_provider_runtime::StakingStakeLedger::new(staking),
             );
@@ -6352,8 +6592,46 @@ impl TenzroNode {
                 ));
                 meta = meta.with_balance_provider(balance);
             }
+            // Per-query difficulty: cluster prompts by embedding and score
+            // candidates on the error rate each has actually shown in that
+            // neighbourhood, instead of on declared parameter counts alone.
+            // Observations persist so the index survives restarts.
+            let difficulty = match self.storage.clone() {
+                Some(storage) => tenzro_model::difficulty::DifficultyIndex::with_storage(
+                    tenzro_model::difficulty::DEFAULT_CLUSTER_CAPACITY,
+                    storage as Arc<dyn tenzro_storage::KvStore>,
+                )
+                .unwrap_or_else(|e| {
+                    warn!("route difficulty index starting empty (hydrate failed): {e}");
+                    tenzro_model::difficulty::DifficultyIndex::new(
+                        tenzro_model::difficulty::DEFAULT_CLUSTER_CAPACITY,
+                    )
+                }),
+                None => tenzro_model::difficulty::DifficultyIndex::new(
+                    tenzro_model::difficulty::DEFAULT_CLUSTER_CAPACITY,
+                ),
+            };
+            let clusters = difficulty.cluster_count();
+            meta = meta.with_difficulty_index(Arc::new(difficulty));
+            // Prompt embedding reuses the text-embedding runtime shared with the
+            // agent memory tier. With no embedding model loaded, routing falls
+            // back to declared metadata rather than failing.
+            meta = meta.with_prompt_embedder(Arc::new(
+                crate::spending_policy_bridge::RuntimePromptEmbedder::new(
+                    self.text_embedding_runtime.clone(),
+                ),
+            ));
+            // The offers other providers are announcing on `tenzro/models` right
+            // now, scored alongside this node's own catalog. Without this the
+            // intent tier only ever sees what this operator registered locally,
+            // so what the network can serve would depend on per-node curation.
+            // Each offer also names the address that serves it, so the provider
+            // share follows from the winning offer.
+            meta = meta.with_network_catalog(Arc::new(
+                crate::network_catalog::GossipNetworkCatalog::new(self.network_models.clone()),
+            ));
             self.meta_router = Some(Arc::new(meta));
-            info!("Meta-router (intent → model) initialized");
+            info!("Meta-router (intent → model) initialized with {clusters} difficulty cluster(s)");
         }
 
         // Background liveness sweeper. Marks silent skills/tools/templates/
@@ -6605,9 +6883,31 @@ impl TenzroNode {
                 },
             ];
 
+            // Drop the builtins whose upstream this operator has not
+            // configured, so discovery lists only what the node can serve.
+            // Reconciliation below deletes any row a prior configuration
+            // left behind.
+            let mut builtin_skills = builtin_skills;
+            let search_configured = self.config.builtins.search_url.is_some();
+            let oneinch_configured = self.config.builtins.oneinch_api_key.is_some();
+            builtin_skills.retain(|s| match s.name.as_str() {
+                "web-search" => search_configured,
+                "oneinch-aggregator" => oneinch_configured,
+                _ => true,
+            });
+
+            // Derive each id from the name so it is the same on every node
+            // and a caller can pin one. `SkillDefinition::new` assigns a
+            // random id — right for a provider registering its own skill,
+            // wrong for the node's own, which have to be addressable from
+            // outside.
+            for s in &mut builtin_skills {
+                s.skill_id = format!("skill-{}", s.name);
+            }
+
             // Reconcile system-creator rows in CF_SKILLS to exactly the
-            // builtin set: refresh matching rows in place (preserving id,
-            // creation time, and usage counters), insert missing ones, and
+            // builtin set: refresh matching rows in place (preserving
+            // creation time and usage counters), insert missing ones, and
             // delete strays from prior builds. Builtins never heartbeat —
             // boot-time reconciliation owns their lifecycle and the
             // liveness sweeper exempts system-creator rows.
@@ -6624,24 +6924,27 @@ impl TenzroNode {
             let mut skills_registered = 0usize;
             let mut skill_keys_kept: Vec<Vec<u8>> = Vec::new();
             for skill in &builtin_skills {
-                if let Some((key, old)) = existing_system_skills
+                // Match on the key, not the name: the id is derived, so a
+                // row an earlier build wrote under a random id carries the
+                // same name but a different key and falls to the removal
+                // sweep below.
+                let key = skill.skill_id.as_bytes().to_vec();
+                let mut updated = skill.clone();
+                match existing_system_skills
                     .iter()
-                    .find(|(_, s)| s.name == skill.name)
+                    .find(|(k, _)| k.as_slice() == key.as_slice())
                 {
-                    let mut updated = skill.clone();
-                    updated.skill_id = old.skill_id.clone();
-                    updated.created_at = old.created_at;
-                    updated.invocation_count = old.invocation_count;
-                    updated.rating = old.rating;
-                    if let Ok(value) = serde_json::to_vec(&updated) {
-                        let _ = storage.put(CF_SKILLS, key, &value);
+                    Some((_, old)) => {
+                        updated.created_at = old.created_at;
+                        updated.invocation_count = old.invocation_count;
+                        updated.rating = old.rating;
                     }
-                    skill_keys_kept.push(key.clone());
-                } else if let Ok(value) = serde_json::to_vec(skill)
-                    && storage.put(CF_SKILLS, skill.skill_id.as_bytes(), &value).is_ok()
-                {
-                    skills_registered += 1;
+                    None => skills_registered += 1,
                 }
+                if let Ok(value) = serde_json::to_vec(&updated) {
+                    let _ = storage.put(CF_SKILLS, &key, &value);
+                }
+                skill_keys_kept.push(key);
             }
             let mut skills_removed = 0usize;
             for (key, _) in &existing_system_skills {
@@ -6688,10 +6991,14 @@ impl TenzroNode {
                     let mut t = ToolDefinition::new(
                         "code-executor".to_string(), "1.0.0".to_string(),
                         "mcp".to_string(), "builtin://code-executor".to_string(),
-                        "Execute code in sandboxed environments (Python, JavaScript, Rust)".to_string(),
+                        "Execute a caller-supplied WASI 0.2 component under a fuel and deadline budget".to_string(),
                         "code".to_string(),
                     );
-                    t.capabilities = vec!["python".to_string(), "javascript".to_string(), "rust".to_string()];
+                    t.capabilities = vec![
+                        "wasi-component".to_string(),
+                        "content-addressed".to_string(),
+                        "metered".to_string(),
+                    ];
                     t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
                     t
                 },
@@ -6717,7 +7024,91 @@ impl TenzroNode {
                     t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
                     t
                 },
+                {
+                    let mut t = ToolDefinition::new(
+                        "canton-submit-mandate".to_string(), "1.0.0".to_string(),
+                        "native".to_string(), "builtin://canton-submit-mandate".to_string(),
+                        "Submit a DAML command to Canton behind an AP2 mandate pair, returning both the validation and the ledger receipt".to_string(),
+                        "settlement".to_string(),
+                    );
+                    t.capabilities = vec![
+                        "daml-command".to_string(),
+                        "ap2-mandate".to_string(),
+                        "receipt".to_string(),
+                    ];
+                    t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
+                    t
+                },
+                {
+                    let mut t = ToolDefinition::new(
+                        "identity-register".to_string(), "1.0.0".to_string(),
+                        "native".to_string(), "builtin://identity-register".to_string(),
+                        "Register a human or machine identity under TDIP and provision its wallet".to_string(),
+                        "identity".to_string(),
+                    );
+                    t.capabilities = vec![
+                        "tdip".to_string(),
+                        "did-document".to_string(),
+                        "wallet-provisioning".to_string(),
+                    ];
+                    t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
+                    t
+                },
+                {
+                    let mut t = ToolDefinition::new(
+                        "da-publish".to_string(), "1.0.0".to_string(),
+                        "native".to_string(), "builtin://da-publish".to_string(),
+                        "Publish bytes to the node's content-addressed blob store and return the tenzro:// URI".to_string(),
+                        "storage".to_string(),
+                    );
+                    t.capabilities = vec![
+                        "content-addressed".to_string(),
+                        "blob-publish".to_string(),
+                    ];
+                    t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
+                    t
+                },
+                {
+                    let mut t = ToolDefinition::new(
+                        "erc7683-origin".to_string(), "1.0.0".to_string(),
+                        "native".to_string(), "builtin://erc7683-origin".to_string(),
+                        "Open an ERC-7683 cross-chain order on the origin side and return the order id".to_string(),
+                        "crosschain".to_string(),
+                    );
+                    t.capabilities = vec![
+                        "erc7683".to_string(),
+                        "intent".to_string(),
+                        "order-open".to_string(),
+                    ];
+                    t.creator_did = Some(tenzro_types::SYSTEM_CREATOR_DID.to_string());
+                    t
+                },
             ];
+
+            // Same upstream gating as the builtin skills. `code-executor`
+            // needs the component sandbox, which is compiled in only with
+            // the `wasi-skills` feature.
+            let mut builtin_tools = builtin_tools;
+            let sandbox_available = cfg!(feature = "wasi-skills");
+            let canton_configured = self.config.canton.enabled;
+            let blobs_available = self.iroh_resolver.is_some();
+            builtin_tools.retain(|t| match t.name.as_str() {
+                "web-search-mcp" => search_configured,
+                "code-executor" => sandbox_available,
+                "canton-submit-mandate" => canton_configured,
+                "da-publish" => blobs_available,
+                _ => true,
+            });
+
+            // Derive each id from the name so the row key is the same on
+            // every node and across restarts, which is what lets a
+            // workflow template or a doc pin one. `ToolDefinition::new`
+            // assigns a random id — correct for a provider registering
+            // its own tool, but it leaves the node's own tools
+            // unaddressable from outside.
+            for t in &mut builtin_tools {
+                t.tool_id = format!("tool-{}", t.name);
+            }
 
             // Same reconciliation discipline as the builtin skills above.
             let existing_system_tools: Vec<(Vec<u8>, ToolDefinition)> = storage
@@ -6734,23 +7125,25 @@ impl TenzroNode {
             let mut tools_registered = 0usize;
             let mut tool_keys_kept: Vec<Vec<u8>> = Vec::new();
             for tool in &builtin_tools {
-                if let Some((key, old)) = existing_system_tools
+                // Match on the key, not the name: the id is derived, so a
+                // row written under an earlier random id carries the same
+                // name but a different key and falls to the removal sweep.
+                let key = tool.tool_id.as_bytes().to_vec();
+                let mut updated = tool.clone();
+                match existing_system_tools
                     .iter()
-                    .find(|(_, t)| t.name == tool.name)
+                    .find(|(k, _)| k.as_slice() == key.as_slice())
                 {
-                    let mut updated = tool.clone();
-                    updated.tool_id = old.tool_id.clone();
-                    updated.created_at = old.created_at;
-                    updated.invocation_count = old.invocation_count;
-                    if let Ok(value) = serde_json::to_vec(&updated) {
-                        let _ = storage.put(CF_TOOLS, key, &value);
+                    Some((_, old)) => {
+                        updated.created_at = old.created_at;
+                        updated.invocation_count = old.invocation_count;
                     }
-                    tool_keys_kept.push(key.clone());
-                } else if let Ok(value) = serde_json::to_vec(tool)
-                    && storage.put(CF_TOOLS, tool.tool_id.as_bytes(), &value).is_ok()
-                {
-                    tools_registered += 1;
+                    None => tools_registered += 1,
                 }
+                if let Ok(value) = serde_json::to_vec(&updated) {
+                    let _ = storage.put(CF_TOOLS, &key, &value);
+                }
+                tool_keys_kept.push(key);
             }
             let mut tools_removed = 0usize;
             for (key, _) in &existing_system_tools {
@@ -6825,17 +7218,28 @@ impl TenzroNode {
                 },
             ];
 
-            // Storage key scheme for CF_AGENT_TEMPLATES is raw UUID bytes so that
-            // list_agent_templates → get_agent_template / spawn_agent_from_template
-            // lookups (by template_id) resolve correctly.
+            // Derive each id from the name. `AgentTemplate::new` assigns a
+            // random one, which the seed below would then rewrite under a
+            // new key on every boot — nothing outside the node could pin
+            // it. The reference workflow templates under
+            // `templates/workflows/` address these ids directly.
+            let mut builtin_templates = builtin_templates;
+            for t in &mut builtin_templates {
+                let slug = t.name.to_lowercase().replace(' ', "-");
+                let slug = slug.strip_suffix("-agent").unwrap_or(&slug);
+                t.template_id = format!("agent-template-{slug}");
+            }
+
+            // Storage key scheme for CF_AGENT_TEMPLATES is the template id so
+            // that list_agent_templates → get_agent_template /
+            // spawn_agent_from_template lookups resolve correctly.
             //
-            // Migration-safe seed: for each built-in template,
-            //   1. Check if a record exists at the raw-UUID key specifically.
-            //   2. If not, sweep any legacy entries matching by (name, creator)
-            //      under a non-matching key and delete them, then write the
-            //      canonical raw-UUID-keyed record.
-            // This prevents stale prefixed-key seeds written by older node images
-            // from silently blocking re-seed under the canonical key scheme.
+            // For each built-in template: check the derived key, and if the
+            // row is absent, delete any row matching by (name, creator)
+            // under a different key before writing. That sweep is what
+            // clears a row an earlier build left under a random id, so two
+            // entries for the same template never both appear in
+            // discovery.
             let mut templates_registered = 0usize;
             let mut templates_migrated = 0usize;
             let all_keys = storage
@@ -8350,93 +8754,80 @@ impl TenzroNode {
         // configure Canton via the top-level `[canton]` config section,
         // not under `[bridge.*]`.
         if self.config.canton.enabled {
-            // Three Canton profiles:
-            //  (1) Operator-hosted devnet — fixed host + Auth0 issuer +
-            //      operator's shared validator party.
-            //  (2) Operator-run validator — operator's host:port, with
-            //      either operator-supplied OAuth2 client-credentials or
-            //      a long-lived static JWT.
-            //  (3) Local unauth — plaintext HTTP, no bearer, dev/test.
+            // One adapter per configured network. Within a network, auth is
+            // one of three profiles: OAuth2 client-credentials, a long-lived
+            // static JWT, or unauthenticated (plaintext HTTP over a private
+            // path, dev/test only).
             use tenzro_bridge::canton::{CantonAdapter, CantonConfig as BridgeCantonConfig};
             use tenzro_bridge::canton_auth::{CantonAuthConfig, CantonTokenProvider};
 
-            let (mut canton_cfg, token_provider, static_jwt, profile_label) =
-                if self.config.canton.devnet {
-                    let secret = self
-                        .config
-                        .canton
-                        .devnet_client_secret
-                        .clone()
-                        .ok_or_else(|| NodeError::Internal(
-                            "Canton devnet enabled but CANTON_DEVNET_CLIENT_SECRET is not set"
-                                .to_string(),
-                        ))?;
-                    let provider = CantonTokenProvider::new(
-                        CantonAuthConfig::devnet(secret),
-                    );
-                    (
-                        BridgeCantonConfig::devnet(),
-                        Some(provider),
-                        None,
-                        "tenzro-operated devnet".to_string(),
-                    )
-                } else {
-                    let cfg = BridgeCantonConfig::new(
-                        self.config.canton.host.clone(),
-                        self.config.canton.port,
-                        Vec::<String>::new(),
-                        String::new(),
-                        "tenzro-node-workflow-mirror",
-                    );
+            let networks = self.config.canton.configured_networks();
+            if networks.is_empty() {
+                return Err(NodeError::Internal(
+                    "Canton enabled but no network is configured — set \
+                     CANTON_DEVNET_LEDGER_API_HOST and/or \
+                     CANTON_MAINNET_LEDGER_API_HOST"
+                        .to_string(),
+                ));
+            }
 
-                    if let Some(oauth) = &self.config.canton.oauth {
-                        let auth_cfg = CantonAuthConfig {
-                            token_url: oauth.token_url.clone(),
-                            client_id: oauth.client_id.clone(),
-                            client_secret: oauth.client_secret.clone(),
-                            audience: oauth.audience.clone(),
-                            scope: oauth.scope.clone(),
-                        };
-                        let provider = CantonTokenProvider::new(auth_cfg);
-                        (
-                            cfg,
-                            Some(provider),
-                            None,
-                            "operator-run validator (oauth2)".to_string(),
-                        )
-                    } else if let Some(jwt) = &self.config.canton.static_jwt {
-                        (
-                            cfg,
-                            None,
-                            Some(jwt.clone()),
-                            "operator-run validator (static jwt)".to_string(),
-                        )
-                    } else {
-                        (cfg, None, None, "local unauth".to_string())
-                    }
+            for net in networks {
+                let net_cfg = match self.config.canton.network(net) {
+                    Some(c) => c,
+                    None => continue,
                 };
 
-            if self.config.canton.tls || self.config.canton.devnet {
-                canton_cfg = canton_cfg.with_tls(true);
-            }
-            if let Some(jwt) = static_jwt {
-                canton_cfg = canton_cfg.with_jwt_token(jwt);
+                let mut canton_cfg = BridgeCantonConfig::new(
+                    net_cfg.host.clone(),
+                    net_cfg.port,
+                    Vec::<String>::new(),
+                    String::new(),
+                    "tenzro-node-workflow-mirror",
+                );
+
+                let (token_provider, profile_label) = if let Some(oauth) = &net_cfg.oauth {
+                    let provider = CantonTokenProvider::new(CantonAuthConfig {
+                        token_url: oauth.token_url.clone(),
+                        client_id: oauth.client_id.clone(),
+                        client_secret: oauth.client_secret.clone(),
+                        audience: oauth.audience.clone(),
+                        scope: oauth.scope.clone(),
+                    });
+                    (Some(provider), "oauth2")
+                } else if let Some(jwt) = &net_cfg.static_jwt {
+                    canton_cfg = canton_cfg.with_jwt_token(jwt.clone());
+                    (None, "static jwt")
+                } else {
+                    (None, "unauthenticated")
+                };
+
+                if net_cfg.tls {
+                    canton_cfg = canton_cfg.with_tls(true);
+                }
+
+                let mut adapter = CantonAdapter::new(canton_cfg);
+                if let Some(provider) = token_provider {
+                    adapter = adapter.with_token_provider(provider);
+                }
+
+                info!(
+                    network = %net,
+                    host = %net_cfg.host,
+                    port = net_cfg.port,
+                    tls = net_cfg.tls,
+                    auth = profile_label,
+                    "Canton adapter initialized"
+                );
+                self.canton_adapters.insert(net, Arc::new(adapter));
             }
 
-            let mut adapter = CantonAdapter::new(canton_cfg);
-            if let Some(provider) = token_provider {
-                adapter = adapter.with_token_provider(provider);
+            if self.config.canton.network(self.config.canton.default_network).is_none() {
+                warn!(
+                    default_network = %self.config.canton.default_network,
+                    "Canton default_network is not configured — requests that do not \
+                     name a network will be refused"
+                );
             }
-            let canton_adapter = Arc::new(adapter);
-
-            info!(
-                host = %self.config.canton.host,
-                port = self.config.canton.port,
-                tls = self.config.canton.tls || self.config.canton.devnet,
-                profile = %profile_label,
-                "Canton adapter initialized"
-            );
-            self.canton_adapter = Some(canton_adapter);
         } else {
             info!("Canton subsystem disabled — workflow mirror surface inactive");
         }
@@ -9064,7 +9455,7 @@ impl TenzroNode {
         // registry wrapped in `DidResolverAgentRegistry::did_only` so
         // that DID-form keyids (`did:tenzro:machine:*`) resolve against
         // our local registry. Non-DID keyids are rejected — Tenzro-only
-        // mesh until JWKS federation lands.
+        // mesh until JWKS federation is implemented.
         #[cfg(feature = "visa-tap")]
         {
             use tenzro_payments::rfc9421::TenzroAgentRegistry;
@@ -9675,7 +10066,7 @@ impl TenzroNode {
             ("tenzro-layerzero-mcp", "mcp", "/mcp", "LayerZero V2 cross-chain messaging — fee quoting, message tracking, OFT transfers, DVN configuration", &["layerzero", "cross-chain", "bridge", "omnichain", "oft"]),
             ("tenzro-chainlink-mcp", "mcp", "/mcp", "Chainlink tools — CCIP cross-chain messaging, data feeds (price oracles), automation, functions", &["chainlink", "ccip", "oracle", "data-feeds", "automation"]),
             ("debridge-mcp", "mcp", "https://agents.debridge.com/mcp", "deBridge DLN cross-chain swaps — intent-based bridging, order creation, tracking. Official hosted MCP.", &["debridge", "cross-chain", "bridge", "dln", "swap"]),
-            ("1inch-mcp", "mcp", "https://api.1inch.dev", "1inch DEX aggregator — swap across 400+ DEXes, Fusion+ cross-chain, portfolio tracking. Requires API key.", &["1inch", "dex", "aggregator", "swap", "defi", "fusion"]),
+            ("1inch-mcp", "mcp", "https://api.1inch.com", "1inch DEX aggregator — swap across 400+ DEXes, Fusion+ cross-chain, portfolio tracking. Requires API key.", &["1inch", "dex", "aggregator", "swap", "defi", "fusion"]),
         ];
 
         let mut tool_registered = 0u32;
@@ -9925,14 +10316,7 @@ impl TenzroNode {
             hardware.tee_available = self.config.tee_enabled && self.tee_provider.is_some();
 
             let provider_address = self
-                .identity_registry
-                .as_ref()
-                .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
-                .or_else(|| {
-                    self.announce_signer
-                        .as_ref()
-                        .and_then(|s| announce_signer_wallet_address(s.as_ref()))
-                })
+                .operator_payee()
                 .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
                 .unwrap_or_default();
 
@@ -10214,6 +10598,15 @@ impl TenzroNode {
             event_loop
         };
 
+        // Wire the fee processor so per-block gas settlement is recorded.
+        let event_loop = if let (Some(processor), Some(token)) =
+            (self.fee_processor.clone(), self.token.clone())
+        {
+            event_loop.with_fee_processor(processor, token)
+        } else {
+            event_loop
+        };
+
         // Store the event sender for RPC to submit transactions
         self.event_loop_tx = Some(event_loop.event_sender());
 
@@ -10268,7 +10661,7 @@ impl TenzroNode {
             //
             // Without this subscriber, RPC pods publish transactions to the
             // gossipsub mesh but no validator's mempool ever receives them,
-            // so every block proposer ships an empty block. That was the
+            // so every block proposer emits an empty block. That was the
             // root cause of the testnet wedge where `eth_blockNumber`
             // advanced normally but every finalized block had `tx_count=0`
             // and no transaction (faucet, transfer, contract call) ever
@@ -11540,6 +11933,91 @@ impl TenzroNode {
         self.identity_registry.as_ref()
     }
 
+    /// The wallet this node is paid at.
+    ///
+    /// Both the advertised payee (model / provider gossip announcements) and
+    /// the settled payee (inference, hosting, rental, storage) resolve through
+    /// here, so the address a consumer sees in an offer is the address the
+    /// transfer lands at. Resolution is total-ordered rather than
+    /// registry-iteration-ordered, which means it is stable across restarts and
+    /// identical for every caller on the node:
+    ///
+    /// 1. the identity whose wallet is the node's own announce key
+    ///    (`sha256(announce_pubkey)`) — an exact key ↔ wallet binding;
+    /// 2. the lowest-DID active human or institution — the owner classes;
+    /// 3. the lowest-DID active autonomous agent (no controller) — a node run by
+    ///    an agent on its own behalf earns into that agent's wallet;
+    /// 4. the lowest-DID active delegated agent — earns into the agent's own
+    ///    wallet, with the controller retaining oversight through its
+    ///    delegation scope;
+    /// 5. `sha256(announce_pubkey)` with no registry entry at all, so a node
+    ///    that never provisioned an identity still has a self-custodial payee
+    ///    instead of the zero address.
+    pub fn operator_payee(&self) -> Option<Address> {
+        match self.operator_identity() {
+            Some((_, wallet)) => Some(wallet),
+            None => self.announce_signer_payee(),
+        }
+    }
+
+    /// The DID that owns [`TenzroNode::operator_payee`]. `None` when this node
+    /// has no provisioned identity and is falling back to its announce key, so
+    /// a caller that needs an attributable DID (transparency-log recorder,
+    /// provider announcement) can tell the difference instead of recording an
+    /// empty string against a real wallet.
+    pub fn operator_did(&self) -> Option<String> {
+        self.operator_identity().map(|(did, _)| did)
+    }
+
+    /// Payee derived from this node's own announce key, when it has one.
+    fn announce_signer_payee(&self) -> Option<Address> {
+        self.announce_signer
+            .as_ref()
+            .and_then(|s| announce_signer_wallet_address(s.as_ref()))
+            .filter(|a| *a != Address::default())
+    }
+
+    /// The (DID, wallet) pair this node earns as, both taken from the same
+    /// identity so an announcement's DID and payee never disagree.
+    fn operator_identity(&self) -> Option<(String, Address)> {
+        use tenzro_identity::{IdentityData, IdentityStatus};
+
+        let registry = self.identity_registry.as_ref()?;
+        let all = registry.list_all();
+        let usable = |identity: &tenzro_identity::TenzroIdentity| {
+            identity.status == IdentityStatus::Active
+                && identity.wallet_address != Address::default()
+        };
+
+        if let Some(wallet) = self.announce_signer_payee()
+            && let Some((did, _)) = all
+                .iter()
+                .filter(|(_, id)| usable(id) && id.wallet_address == wallet)
+                .min_by(|a, b| a.0.cmp(&b.0))
+        {
+            return Some((did.clone(), wallet));
+        }
+
+        // Lower rank wins; ties break on the DID string.
+        let rank = |data: &IdentityData| match data {
+            IdentityData::Human { .. } | IdentityData::Institution { .. } => 0u8,
+            IdentityData::Machine {
+                controller_did: None,
+                ..
+            } => 1,
+            IdentityData::Machine { .. } => 2,
+        };
+
+        all.iter()
+            .filter(|(_, id)| usable(id))
+            .min_by(|a, b| {
+                rank(&a.1.identity_data)
+                    .cmp(&rank(&b.1.identity_data))
+                    .then_with(|| a.0.cmp(&b.0))
+            })
+            .map(|(did, id)| (did.clone(), id.wallet_address))
+    }
+
     /// Returns the validator-owned hybrid signer (Ed25519 + ML-DSA-65)
     /// constructed in [`init_consensus`]. Webhook-sourced TDIP revocation
     /// paths (Stripe SPT `granted_token.deactivated`, future PSP-side
@@ -11753,6 +12231,13 @@ impl TenzroNode {
         &self.function_components
     }
 
+    /// Returns the WASI 0.2 component sandbox backing the `code-executor`
+    /// builtin tool. Present only when built with the `wasi-skills` feature.
+    #[cfg(feature = "wasi-skills")]
+    pub fn sandboxed_tools(&self) -> &crate::mcp::wasm_tools::SandboxedToolRegistry {
+        &self.sandboxed_tools
+    }
+
     /// Returns the machine-deployment registry (always present; durable once
     /// storage is up).
     pub fn machine_registry(&self) -> &Arc<crate::machines::MachineRegistry> {
@@ -11787,21 +12272,12 @@ impl TenzroNode {
         self.provider_manager.as_ref()
     }
 
-    /// This node's own provider wallet address: the first identity-registry
-    /// entry's wallet when one is provisioned, else the address derived from
-    /// the announce signer's Ed25519 public key. Same derivation the
-    /// provider-announcement context uses, so self-installed provider
-    /// entries (e.g. MoE expert-shard declarations) key to the identical
-    /// address remote peers see on gossip.
+    /// This node's own provider wallet address, resolved by
+    /// [`TenzroNode::operator_payee`]. Self-installed provider entries (e.g.
+    /// MoE expert-shard declarations) therefore key to the identical address
+    /// remote peers see on gossip and pay at settlement.
     pub(crate) fn self_provider_address(&self) -> Option<Address> {
-        self.identity_registry
-            .as_ref()
-            .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
-            .or_else(|| {
-                self.announce_signer
-                    .as_ref()
-                    .and_then(|s| announce_signer_wallet_address(s.as_ref()))
-            })
+        self.operator_payee()
     }
 
     /// Returns the inference router if initialized. Wired into the web
@@ -12903,10 +13379,20 @@ impl TenzroNode {
         self.price_oracle.as_ref()
     }
 
-    /// Returns the Canton bridge adapter if Canton is enabled in config.
-    /// Used by `tenzro_mirror*` / `tenzro_consumeDamlEvents` RPC handlers.
-    pub fn canton_adapter(&self) -> Option<&Arc<tenzro_bridge::canton::CantonAdapter>> {
-        self.canton_adapter.as_ref()
+    /// Returns the Canton bridge adapter for `net`, if that network is
+    /// configured. Used by `tenzro_mirror*` / `tenzro_consumeDamlEvents`
+    /// RPC handlers via `canton_adapter_or_err`, which resolves the
+    /// network from the presenting API key.
+    pub fn canton_adapter(
+        &self,
+        net: crate::config::CantonNetwork,
+    ) -> Option<&Arc<tenzro_bridge::canton::CantonAdapter>> {
+        self.canton_adapters.get(&net)
+    }
+
+    /// Every Canton network this node serves, in canonical order.
+    pub fn canton_networks(&self) -> Vec<crate::config::CantonNetwork> {
+        self.canton_adapters.keys().copied().collect()
     }
 
     /// Returns the TNZO CCT bridge if CCIP was enabled at init time.
@@ -12977,7 +13463,13 @@ impl TenzroNode {
             .map_err(|e| NodeError::Internal(format!("Failed to submit block: {}", e)))
     }
 
-    /// Register a model service instance (local or network)
+    /// Register a model service instance (local or network).
+    ///
+    /// The instance is paid out to this node's operator payee in both cases. For
+    /// a `Local` instance that is the node serving its own weights; for a
+    /// `Network` instance the operator is registering an external endpoint they
+    /// broker, so they are the counterparty of record on-chain and settle with
+    /// the upstream themselves.
     pub fn register_model_service(
         &self,
         model_id: &str,
@@ -12997,7 +13489,10 @@ impl TenzroNode {
             instance_id: instance_id.clone(),
             model_id: model_id.to_string(),
             model_name: model_name.to_string(),
-            provider_address: Address::default(),
+            // Named so a routed call that pinned this node's own offer resolves
+            // against this instance rather than being treated as a remote
+            // provider's, and so the provider share has a real payee.
+            provider_address: self.operator_payee().unwrap_or_default(),
             provider_name: provider_name.to_string(),
             location,
             api_endpoint: api_endpoint.to_string(),
@@ -13009,6 +13504,14 @@ impl TenzroNode {
                 // i.e. ~18 TNZO per token — far above any realistic per-token rate).
                 price_per_input_token: pricing.input_price_per_token_wei.min(u64::MAX as u128) as u64,
                 price_per_output_token: pricing.output_price_per_token_wei.min(u64::MAX as u128) as u64,
+                // The operator's own card, not the type default: the token rates
+                // above are wei and the defaults are nominal, so inheriting them
+                // would quote audio seconds and denoising steps a billion times
+                // under the rate a token is charged at.
+                modality_rates: pricing.modality_rates.clone(),
+                // The scheme the operator declared, so the listing quotes what
+                // this node will actually settle the call on.
+                pricing_model: pricing.pricing_model,
                 ..PricingConfig::default()
             },
             created_at: std::time::SystemTime::now()

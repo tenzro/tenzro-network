@@ -1,9 +1,9 @@
-//! End-to-end auth integration tests.
+//! Auth integration tests.
 //!
 //! Spins up a full TenzroNode (storage + RPC + auth engine) per test and
-//! exercises the OAuth 2.1 + DPoP + RAR surface end-to-end:
+//! exercises the OAuth 2.1 + DPoP + RAR surface in full:
 //!
-//!   1. Onboarding RPCs (human / delegated / autonomous) issue real JWTs.
+//!   1. Onboarding RPCs (human / delegated / autonomous) issue signed JWTs.
 //!   2. Issued JWTs validate against the live `AuthEngine`, with DPoP
 //!      proofs produced by signing canonical JWS over an in-test Ed25519
 //!      keypair.
@@ -452,6 +452,7 @@ fn make_pending_approval(requester: &str, approver: &str) -> ApprovalRecord {
         summary: "Pay 50 TNZO to acme.eth for invoice #1234".to_string(),
         status: ApprovalStatus::Pending,
         decided_at_ms: None,
+        deny_reason: None,
     }
 }
 
@@ -826,6 +827,7 @@ async fn test_authority_request_within_rar_envelope_permits() {
             counterparty: None,
             resource_id: None,
         },
+        approval_id: None,
     };
     let decision = engine
         .resolve_authority(&claims, &request, None)
@@ -985,6 +987,7 @@ async fn test_empty_rar_envelope_denies_privileged_action() {
             counterparty: None,
             resource_id: None,
         },
+        approval_id: None,
     };
     let decision = engine
         .resolve_authority(&claims, &request, None)

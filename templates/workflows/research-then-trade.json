@@ -8,35 +8,50 @@
     "type": "object",
     "properties": {
       "symbol": { "type": "string", "description": "Trading symbol (e.g. SOL/USD)" },
-      "max_position_size": { "type": "string", "description": "Max position in atto-TNZO" }
+      "max_position_size": { "type": "string", "description": "Max position in atto-TNZO" },
+      "price_feed_id": {
+        "type": "string",
+        "description": "Registry id of a price-feed knowledge base. Discover one with tenzro_listKnowledge."
+      },
+      "trade_tool_id": {
+        "type": "string",
+        "description": "Registry id of a trade-execution tool exposing a submit_order operation. Discover one with tenzro_listTools."
+      }
     },
-    "required": ["symbol", "max_position_size"]
+    "required": ["symbol", "max_position_size", "price_feed_id", "trade_tool_id"]
   },
   "expected_outputs": {
     "type": "object",
     "properties": {
-      "analysis": { "type": "object" },
+      "price_quote": { "type": "object" },
+      "analysis": {
+        "type": "object",
+        "properties": {
+          "recommendation": { "type": "string" },
+          "size": { "type": "string" }
+        }
+      },
       "trade": { "type": "object" }
     }
   },
   "steps": [
     {
       "kind": "use_knowledge",
-      "knowledge_id": "kb-price-feed-default",
+      "knowledge_id": "{{ inputs.price_feed_id }}",
       "params": { "symbol": "{{ inputs.symbol }}" },
       "output_as": "price_quote"
     },
     {
       "kind": "use_model",
-      "model_id": "qwen3-7b",
+      "model_id": "qwen3-8b",
       "params": {
-        "prompt": "Given price quote {{ steps.price_quote.output }} and max size {{ inputs.max_position_size }}, recommend buy/sell/hold with size. Reply JSON: {recommendation, size}."
+        "prompt": "Given price quote {{ steps.price_quote.output }} and max size {{ inputs.max_position_size }} in atto-TNZO, recommend a side and a size at or below the ceiling. Reply JSON only: {\"recommendation\": \"buy|sell|hold\", \"size\": \"<decimal string>\"}."
       },
       "output_as": "analysis"
     },
     {
       "kind": "use_tool",
-      "tool_id": "tool-trade-execution-default",
+      "tool_id": "{{ inputs.trade_tool_id }}",
       "tool_name": "submit_order",
       "params": {
         "symbol": "{{ inputs.symbol }}",

@@ -27,7 +27,7 @@
 //! When the local Canton participant is offline (the default in dev), the
 //! example still runs every step, prints the constructed `DamlCommand`,
 //! and notes that the dispatch was skipped — so the workflow itself is
-//! always exercised end-to-end against the real types.
+//! always exercised in full against the concrete types.
 //!
 //! Run it with:
 //!
@@ -169,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("→ Canton participant at localhost:5001 is REACHABLE");
     } else {
         println!("→ Canton participant at localhost:5001 is offline (dev default)");
-        println!("  All commands will still be constructed and the walkthrough will run end-to-end;");
+        println!("  All commands will still be constructed and the walkthrough will run in full;");
         println!("  the actual ledger dispatch will be skipped per leg.");
     }
 

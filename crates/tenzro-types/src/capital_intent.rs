@@ -163,7 +163,7 @@ pub struct CapitalIntent {
 
 impl CapitalIntent {
     /// Deterministic bytes the principal signs (everything except the signature),
-    /// so every surface (RPC, MCP, A2A) verifies an identical preimage. Layout is
+    /// so RPC, MCP, and A2A all verify an identical preimage. Layout is
     /// length-prefixed and field-ordered for cross-language reproducibility.
     pub fn signing_payload(&self) -> Vec<u8> {
         fn push_str(buf: &mut Vec<u8>, s: &str) {

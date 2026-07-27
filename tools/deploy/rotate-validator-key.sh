@@ -3,14 +3,12 @@
 # active validator so each node's local registry + EpochManager converges
 # on the new key tuple at the same epoch boundary.
 #
-# Until the cross-node consensus-mediated path lands (see
-# `handle_rotate_validator_key` rustdoc), this script is the operational
-# answer to "I want to rotate keys without splitting consensus." The
-# pattern is identical to what other modern L1s do during the bootstrap
-# phase before consensus-level key rotation lands (Cosmos uses
-# `MsgEditValidator`, Aptos uses `rotate_consensus_key` — both
-# eventually land in a block but are also fan-out-driven during the
-# preview).
+# There is no cross-node consensus-mediated rotation path (see
+# `handle_rotate_validator_key` rustdoc), so this script is the operational
+# answer to "I want to rotate keys without splitting consensus." Other
+# settlement layers use the same fan-out pattern during their bootstrap
+# phase — Cosmos exposes `MsgEditValidator`, for example: the rotation is
+# eventually recorded in a block, but it is fan-out-driven until then.
 #
 # Inputs (env or args):
 #   VALIDATOR_RPCS — comma-separated list of validator RPC URLs (https://...).

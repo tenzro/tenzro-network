@@ -879,10 +879,10 @@ mod tests {
         assert!(s.contains("<redacted>"), "Debug must not leak share bytes");
     }
 
-    /// End-to-end DKG (no trusted dealer): three participants run
+    /// Full DKG round (no trusted dealer): three participants run
     /// part1/part2/part3, then a 2-of-3 quorum signs and the result verifies
     /// under the jointly-derived group key — proving the no-dealer path
-    /// produces real, standard-Ed25519-verifiable signatures.
+    /// produces standard-Ed25519-verifiable signatures.
     #[test]
     fn dkg_end_to_end_2_of_3_signs_and_verifies() {
         let threshold: u16 = 2;

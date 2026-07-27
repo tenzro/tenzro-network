@@ -485,6 +485,50 @@ class MediaGenAssignment:
 
 
 @dataclass
+class MediaGenPayout:
+    """One worker's share of a settled job, in attoTNZO."""
+
+    worker_did: str
+    role: MediaGenExpertRole | None
+    share_bps: int
+    amount: int
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "MediaGenPayout":
+        raw_role = obj.get("role")
+        return cls(
+            worker_did=obj["worker_did"],
+            role=MediaGenExpertRole(raw_role) if raw_role is not None else None,
+            share_bps=int(obj.get("share_bps") or 0),
+            amount=int(obj["amount"]),
+        )
+
+
+@dataclass
+class MediaGenSettlement:
+    """What the requester paid for a job and where it went.
+
+    The network commission is carved out of `price_paid` rather than added on
+    top, so `commission_wei` plus every payout sums back to `price_paid`.
+    """
+
+    price_paid: int
+    commission_wei: int
+    payouts: list[MediaGenPayout]
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "MediaGenSettlement":
+        return cls(
+            price_paid=int(obj["price_paid"]),
+            commission_wei=int(obj["commission_wei"]),
+            payouts=[MediaGenPayout.from_json(p) for p in (obj.get("payouts") or [])],
+        )
+
+    def payout_for(self, worker_did: str) -> MediaGenPayout | None:
+        return next((p for p in self.payouts if p.worker_did == worker_did), None)
+
+
+@dataclass
 class MediaGenJob:
     job_id: str
     task_spec: MediaGenTaskSpec
@@ -496,6 +540,9 @@ class MediaGenJob:
     error: str | None
     created_at: int
     last_update: int
+    # Carried only on the submit-receipt response: what the node paid out when
+    # it sealed the job, not durable job state.
+    settlement: MediaGenSettlement | None = None
 
     @classmethod
     def from_json(cls, obj: dict[str, Any]) -> "MediaGenJob":
@@ -522,6 +569,11 @@ class MediaGenJob:
             error=obj.get("error"),
             created_at=int(obj["created_at"]),
             last_update=int(obj["last_update"]),
+            settlement=(
+                MediaGenSettlement.from_json(obj["settlement"])
+                if obj.get("settlement") is not None
+                else None
+            ),
         )
 
     @property

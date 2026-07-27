@@ -21,7 +21,7 @@ TDIP is designed for the AI age — where autonomous agents act on behalf of hum
 ## 1. Design Principles
 
 ### 1.1 AI-Native
-TDIP treats machines and AI agents as first-class citizens. Machine identities have capabilities, delegation scopes, reputation scores, and can inherit credentials from their human controllers. Autonomous machines can operate without a human controller.
+TDIP registers machines and AI agents on the same terms as humans. Machine identities have capabilities, delegation scopes, reputation scores, and can inherit credentials from their human controllers. Autonomous machines can operate without a human controller.
 
 ### 1.2 Seamless Onboarding
 Every TDIP identity is auto-provisioned with an MPC threshold wallet (default 2-of-3). No seed phrases, no manual key management. Users and agents get an identity + wallet in a single step.
@@ -305,13 +305,15 @@ The `SpendingPolicyResolver` trait is wired into `IdentityPaymentBinder::with_sp
 
 ### 6.6 AP2 Mandate Validation
 
-For AP2-mediated agent commerce, `Ap2Validator::validate_with_delegation_and_policy` enforces all three nested ceilings on the PaymentMandate in one pass:
+For AP2-mediated agent commerce, `MandateValidator::validate_with_delegation_policy_escrow_and_spt` enforces the nested ceilings on the PaymentMandate in one pass:
 
-1. AP2 v0.2 CheckoutMandate constraints (item set, max_amount).
+1. AP2 v0.2 CheckoutMandate constraints (item set, max_amount, merchant / category / chain allow-lists).
 2. TDIP DelegationScope (`enforce_operation`).
 3. Runtime SpendingPolicy (`SpendingPolicySnapshot::check`).
+4. On-chain escrow balance, when the mandate pair carries an `escrow_id`.
+5. Stripe SPT `usage_limits`, when the mandate pair carries a `spt_grant_id`.
 
-This is wired into `tenzro_validateMandatePair` and the `ap2-payments` A2A skill.
+Ceilings 4 and 5 are skipped only when the mandate pair commits to no escrow and no SPT; an identifier that fails to resolve is a refusal, not a skip. This is wired into `tenzro_ap2ValidateMandatePair` and the `ap2-payments` A2A skill.
 
 ---
 

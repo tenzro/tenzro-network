@@ -972,7 +972,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
-    // ZK-in-TEE end-to-end tests using the inference AIR.
+    // ZK-in-TEE prove-then-verify tests using the inference AIR.
     // ----------------------------------------------------------------------
 
     use crate::circuits::airs::inference::{

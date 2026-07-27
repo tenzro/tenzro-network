@@ -29,6 +29,100 @@ pub enum SkillStatus {
 }
 
 
+/// URI prefix for a content-addressed blob locator.
+pub const BLOB_URI_PREFIX: &str = "tenzro://blob/";
+
+/// Content-addressed executable artifact backing a skill.
+///
+/// The registry is permissionless: nothing decides who may publish, so a
+/// caller's protection is naming the exact bytes it is willing to run.
+/// `uri` is a `tenzro://blob/<blake3-hex>` locator, so iroh-blobs verifies
+/// BLAKE3 over the wire on fetch. `sha256` is the canonical Tenzro hash of
+/// the same bytes, declared by the publisher, so a caller can pin the
+/// artifact without having to trust the transport that delivered it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillBundle {
+    /// `tenzro://blob/<blake3-hex>` locator for the artifact bytes.
+    pub uri: String,
+
+    /// Hex-encoded SHA-256 of the artifact bytes (64 lowercase chars).
+    pub sha256: String,
+
+    /// Size of the artifact in bytes.
+    pub size_bytes: u64,
+}
+
+impl SkillBundle {
+    /// The 64-char BLAKE3 hex from the `tenzro://blob/` locator.
+    pub fn blake3_hex(&self) -> &str {
+        &self.uri[BLOB_URI_PREFIX.len()..]
+    }
+
+    /// Reject a bundle whose locator or hash cannot name bytes.
+    pub fn validate(&self) -> Result<(), SkillPinError> {
+        let Some(blake3_hex) = self.uri.strip_prefix(BLOB_URI_PREFIX) else {
+            return Err(SkillPinError::MalformedBundle(format!(
+                "bundle uri must start with {BLOB_URI_PREFIX}"
+            )));
+        };
+        if !is_hash_hex(blake3_hex) {
+            return Err(SkillPinError::MalformedBundle(
+                "bundle uri must carry a 64-char lowercase hex BLAKE3 hash".to_string(),
+            ));
+        }
+        if !is_hash_hex(&self.sha256) {
+            return Err(SkillPinError::MalformedBundle(
+                "bundle sha256 must be a 64-char lowercase hex digest".to_string(),
+            ));
+        }
+        if self.size_bytes == 0 {
+            return Err(SkillPinError::MalformedBundle(
+                "bundle size_bytes must be non-zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_hash_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Why a caller's version/hash pin was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillPinError {
+    /// The registry row declares a different version than the caller pinned.
+    VersionMismatch { expected: String, actual: String },
+    /// The caller pinned an artifact hash but the row publishes no bundle.
+    NoBundlePublished,
+    /// The registry row's artifact is not the one the caller pinned.
+    HashMismatch { expected: String, actual: String },
+    /// The bundle recorded on the row (or the pin itself) is not well-formed.
+    MalformedBundle(String),
+}
+
+impl std::fmt::Display for SkillPinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VersionMismatch { expected, actual } => write!(
+                f,
+                "version pin refused: caller pinned '{expected}', registry holds '{actual}'"
+            ),
+            Self::NoBundlePublished => write!(
+                f,
+                "artifact pin refused: skill publishes no content-addressed bundle to pin against"
+            ),
+            Self::HashMismatch { expected, actual } => write!(
+                f,
+                "artifact pin refused: caller pinned sha256 {expected}, registry holds {actual}"
+            ),
+            Self::MalformedBundle(why) => write!(f, "malformed bundle: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for SkillPinError {}
+
 /// A callable skill published to the Tenzro Network skills registry
 ///
 /// Skills are atomic, reusable capabilities that agents can discover
@@ -76,6 +170,12 @@ pub struct SkillDefinition {
     /// Optional HTTP/RPC endpoint for remote invocation
     /// If None, the skill is executed locally by the registered agent
     pub endpoint: Option<String>,
+
+    /// Content-addressed artifact the skill runs, when the publisher supplies
+    /// bytes rather than only pointing at an `endpoint`. Callers pin
+    /// `bundle.sha256` at invocation time to fix exactly which artifact
+    /// they are paying to run.
+    pub bundle: Option<SkillBundle>,
 
     /// Unix timestamp (seconds) when the skill was registered
     pub created_at: u64,
@@ -143,6 +243,7 @@ impl SkillDefinition {
             tags: Vec::new(),
             required_capabilities: Vec::new(),
             endpoint: None,
+            bundle: None,
             created_at,
             status: SkillStatus::Active,
             category: default_skill_category(),
@@ -174,10 +275,55 @@ impl SkillDefinition {
     /// otherwise the creator share would have no destination and the
     /// network commission would have nothing to split against. Free
     /// skills (`price_per_call == 0`) may omit `creator_wallet`.
-    pub fn validate_for_registration(&self) -> Result<(), &'static str> {
+    pub fn validate_for_registration(&self) -> Result<(), String> {
         if self.is_paid() && self.creator_wallet.is_none() {
-            return Err("Paid skill (price_per_call > 0) requires a creator_wallet");
+            return Err("Paid skill (price_per_call > 0) requires a creator_wallet".to_string());
         }
+        if let Some(ref bundle) = self.bundle {
+            bundle.validate().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Check a caller-supplied pin against what the registry actually holds.
+    ///
+    /// A permissionless registry has no admission gate, so this is where a
+    /// caller gets certainty: pin the version and/or the artifact digest and
+    /// the invocation is refused unless the row names exactly those bytes.
+    /// Pinning nothing accepts whatever the publisher currently serves.
+    pub fn check_pin(
+        &self,
+        expected_version: Option<&str>,
+        expected_sha256: Option<&str>,
+    ) -> Result<(), SkillPinError> {
+        if let Some(want) = expected_version
+            && want != self.version
+        {
+            return Err(SkillPinError::VersionMismatch {
+                expected: want.to_string(),
+                actual: self.version.clone(),
+            });
+        }
+
+        if let Some(want) = expected_sha256 {
+            let want = want.trim().to_ascii_lowercase();
+            if !is_hash_hex(&want) {
+                return Err(SkillPinError::MalformedBundle(
+                    "expected_sha256 must be a 64-char hex digest".to_string(),
+                ));
+            }
+            let Some(ref bundle) = self.bundle else {
+                return Err(SkillPinError::NoBundlePublished);
+            };
+            bundle.validate()?;
+            if bundle.sha256 != want {
+                return Err(SkillPinError::HashMismatch {
+                    expected: want,
+                    actual: bundle.sha256.clone(),
+                });
+            }
+        }
+
         Ok(())
     }
 }
@@ -193,6 +339,13 @@ pub struct SkillFilter {
 
     /// Filter by required capability
     pub capability: Option<String>,
+
+    /// Filter by category (e.g. "ai", "defi", "data")
+    pub category: Option<String>,
+
+    /// Only return skills that publish a content-addressed bundle, i.e.
+    /// skills whose artifact a caller can pin.
+    pub bundled_only: Option<bool>,
 
     /// Maximum price per call in atto-TNZO (inclusive)
     pub max_price: Option<u128>,
@@ -292,6 +445,129 @@ mod tests {
         );
         skill.creator_wallet = Some(Address::default());
         assert!(skill.validate_for_registration().is_ok());
+    }
+
+    fn bundled_skill() -> SkillDefinition {
+        let mut skill = SkillDefinition::new(
+            "web-search".to_string(),
+            "1.2.0".to_string(),
+            "did:tenzro:human:creator".to_string(),
+            "Bundled skill".to_string(),
+            0,
+        );
+        skill.bundle = Some(SkillBundle {
+            uri: format!("{BLOB_URI_PREFIX}{}", "ab".repeat(32)),
+            sha256: "cd".repeat(32),
+            size_bytes: 4096,
+        });
+        skill
+    }
+
+    #[test]
+    fn no_pin_accepts_whatever_the_publisher_serves() {
+        assert!(bundled_skill().check_pin(None, None).is_ok());
+    }
+
+    #[test]
+    fn matching_version_and_hash_pin_pass() {
+        let skill = bundled_skill();
+        let sha = skill.bundle.as_ref().unwrap().sha256.clone();
+        assert!(skill.check_pin(Some("1.2.0"), Some(&sha)).is_ok());
+    }
+
+    #[test]
+    fn version_pin_refuses_a_different_version() {
+        let skill = bundled_skill();
+        assert_eq!(
+            skill.check_pin(Some("1.3.0"), None),
+            Err(SkillPinError::VersionMismatch {
+                expected: "1.3.0".to_string(),
+                actual: "1.2.0".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn hash_pin_refuses_a_different_artifact() {
+        let skill = bundled_skill();
+        let other = "ef".repeat(32);
+        assert_eq!(
+            skill.check_pin(None, Some(&other)),
+            Err(SkillPinError::HashMismatch {
+                expected: other,
+                actual: "cd".repeat(32),
+            })
+        );
+    }
+
+    #[test]
+    fn hash_pin_is_case_insensitive_on_the_caller_side() {
+        let skill = bundled_skill();
+        let upper = "CD".repeat(32);
+        assert!(skill.check_pin(None, Some(&upper)).is_ok());
+    }
+
+    #[test]
+    fn hash_pin_refuses_an_unbundled_skill() {
+        let skill = SkillDefinition::new(
+            "endpoint-only".to_string(),
+            "1.0.0".to_string(),
+            "did:tenzro:human:creator".to_string(),
+            "No bundle".to_string(),
+            0,
+        );
+        assert_eq!(
+            skill.check_pin(None, Some(&"cd".repeat(32))),
+            Err(SkillPinError::NoBundlePublished)
+        );
+    }
+
+    #[test]
+    fn malformed_pin_is_rejected_before_comparison() {
+        let skill = bundled_skill();
+        assert!(matches!(
+            skill.check_pin(None, Some("not-a-digest")),
+            Err(SkillPinError::MalformedBundle(_))
+        ));
+    }
+
+    #[test]
+    fn bundle_uri_must_be_a_blob_locator() {
+        let bundle = SkillBundle {
+            uri: format!("https://example.com/{}", "ab".repeat(32)),
+            sha256: "cd".repeat(32),
+            size_bytes: 1,
+        };
+        assert!(matches!(
+            bundle.validate(),
+            Err(SkillPinError::MalformedBundle(_))
+        ));
+    }
+
+    #[test]
+    fn bundle_locator_must_carry_a_full_hex_hash() {
+        let bundle = SkillBundle {
+            uri: format!("{BLOB_URI_PREFIX}deadbeef"),
+            sha256: "cd".repeat(32),
+            size_bytes: 1,
+        };
+        assert!(matches!(
+            bundle.validate(),
+            Err(SkillPinError::MalformedBundle(_))
+        ));
+    }
+
+    #[test]
+    fn empty_bundle_is_rejected_at_registration() {
+        let mut skill = bundled_skill();
+        skill.bundle.as_mut().unwrap().size_bytes = 0;
+        assert!(skill.validate_for_registration().is_err());
+    }
+
+    #[test]
+    fn blake3_hex_strips_the_locator_prefix() {
+        let skill = bundled_skill();
+        assert_eq!(skill.bundle.unwrap().blake3_hex(), "ab".repeat(32));
     }
 
     #[test]

@@ -90,7 +90,7 @@ Feature-gated ONNX runtimes covering 7 modalities. Each runtime caches sessions,
 - **`SegmentationRuntime`** — two-pass encoder/decoder runtime. `SamFamily::{Sam1, Sam2}` dispatches the two ABIs: SAM 1 (6-input decoder + `orig_im_size` + longest-side pad to 1024 + raw 0–255 SAM mean/std) and SAM 2 (7-input decoder + `high_res_feats_0/1` + bilinear resize + ImageNet norm). Encoder caches per-image embedding; decoder takes embedding + prompts (points/boxes) → masks. API: `segment(model_id, image_bytes, Vec<SegmentPrompt>)`. Catalog: SAM 2 base/large, EdgeSAM, MobileSAM. SAM 3 / 3.1 are text-promptable with a 14-input box-output decoder, incompatible with the point/box `Segmenter` trait, exposed through the separate `TextSegmentationRuntime`.
 - **`DetectionRuntime`** — `DetrFamily::{RfDetr, DFine}` dispatches two NMS-free DETR-family ABIs: RF-DETR (single input, ImageNet norm, raw `labels` logits + cxcywh-normalized `dets`, client does sigmoid + top-1 + cxcywh→xyxy + scale, **90-class** COCO) and D-FINE (2 inputs incl. `orig_target_sizes` int64, pixel scale-to-[0,1] only, post-sigmoid sorted outputs in xyxy pixels, **80-class**). API: `detect(model_id, image_bytes, score_threshold) -> Vec<Detection>` with `{bbox, label_id, score}`. Catalog: RF-DETR n/s/m/b/l/2xl, D-FINE n/s/m/l/x.
 - **`AudioRuntime`** — ASR. Two ORT-backed `Transcriber` implementations cover the catalog: `MoonshineTranscriber` (raw 16 kHz waveform input, encoder + merged-decoder autoregressive loop with `use_cache_branch` KV-cache, SentencePiece detokenization) and `WhisperTranscriber` (80- or 128-mel log-spectrogram input via Slaney filterbank + Hanning STFT, encoder + merged-decoder autoregressive loop with `use_cache_branch` KV-cache, BPE detokenization, language/SOT/transcribe/no-timestamps prompt prefix). `WhisperFamily::{DistilEn, DistilLargeV3, LargeV3Turbo}` selects mel count and multilingual prompt behavior. Audio decode: `hound` for WAV, `symphonia` for MP3/FLAC/OGG; `rubato` sinc resampler to 16 kHz mono. Catalog: Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo.
-- **`VideoRuntime`** — frame extraction (shell-out to `ffmpeg`) + per-frame embedding via vision encoder fallback (DINOv3/SigLIP2 mean-pooled across frames). Native video catalog (`get_video_catalog()`) returns empty — no permissive ONNX-shippable encoder-only video model exists in the 2026 OSS landscape; runtime scaffolding ships ready for future entries.
+- **`VideoRuntime`** — frame extraction (shell-out to `ffmpeg`) + per-frame embedding via vision encoder fallback (DINOv3/SigLIP2 mean-pooled across frames). Native video catalog (`get_video_catalog()`) returns empty — no permissive ONNX-shippable encoder-only video model exists in the 2026 OSS landscape; the runtime scaffolding is in place for future entries.
 
 ### Distributed MoE Execution
 
@@ -127,7 +127,7 @@ When no single member fits a model, the `cluster` module places it across machin
 - `assign_layers(total_layers, members)` partitions the layers into contiguous per-member stages by **VRAM-weighted largest-remainder** apportionment, returning `HashMap<Address, PipelineStage { start_layer, end_layer }>`.
 - `order_stages(head, members, probes, activation_bytes)` orders the stages greedily by nearest-neighbour link cost and emits a `NetworkGate { ordered, excluded }`; the reachability gate drops any member without a `data_plane_eligible` link.
 
-Only the boundary activation crosses the wire between adjacent stages — `hidden_dim × ACTIVATION_DTYPE_BYTES` per token, fp16 (`ModelShape::activation_bytes_per_token`). Members must share one runtime build commit (`LLAMA_CPP_COMMIT`); mixed backends across members are supported. The planner is a pure function of its inputs and reads no node state — exposed end-to-end via `tenzro_clusterPlan`.
+Only the boundary activation crosses the wire between adjacent stages — `hidden_dim × ACTIVATION_DTYPE_BYTES` per token, fp16 (`ModelShape::activation_bytes_per_token`). Members must share one runtime build commit (`LLAMA_CPP_COMMIT`); mixed backends across members are supported. The planner is a pure function of its inputs and reads no node state — the whole planning path is exposed via `tenzro_clusterPlan`.
 
 The `ModelShape` does not have to be supplied by the caller: `gguf_shape::read_model_shape(path)` parses just the GGUF metadata header (no tensor load) to pull `<arch>.block_count` and `<arch>.embedding_length`, deriving `total_vram_gb` from the file size. This lets the serving path size a model and decide whether to cluster without first loading it — see `tenzro-node`'s serve runtime, which folds this shape, the local `NodeProfile`, and gossip-discovered members into the planner and, when a cluster forms, drives the per-stage ggml `rpc-server` pipeline over the authenticated cluster tunnel (NETWORK.md).
 
@@ -151,6 +151,8 @@ The score is read by:
 ### Usage Tracking
 
 `InferenceRouter::with_usage_tracker(Arc<UsageTracker>)` attaches a usage tracker; on every successful inference the router calls `tracker.record_usage(UsageRecord::new(model_id, provider, input_tokens, output_tokens, bytes_in, bytes_out, cost, latency_ms))`. `bytes_in` / `bytes_out` are measured at the HTTP boundary (request body length sent to the provider; response body length received from the provider) and aggregated alongside token counts on `ModelUsageStats`, `ProviderUsageStats`, and `GlobalUsageStats` (`total_bytes_in` / `total_bytes_out` / `total_bytes()`). The tracker maintains per-model, per-provider, and global aggregates plus a bounded ring of recent records, all persisted to CF_MODELS under the `usage:` prefix when constructed via `with_storage()`. Surfaced through `tenzro_listInferenceUsage`.
+
+The router keys each record on the `request_id` of the inference it served, via `UsageRecord::with_record_id`, so a caller holding only the id it was handed can read the record back with `UsageTracker::get_record(&id)`. That read checks the in-memory ring newest-first, then falls back to storage: the ring is bounded and is not rehydrated on restart, whereas the per-record row survives one. Inference records are DA-offloaded, so the storage path resolves the envelope's pointer through the configured `DaBackend` and verifies the payload commitment before decoding. `get_record` returns `None` for an unknown id rather than a zeroed record. Surfaced through `tenzro_getGeneration` and `GET /v1/generation`.
 
 ### Streaming Inference with Per-Token Billing
 
@@ -273,7 +275,7 @@ manager.verify_checksum("gemma4-9b").await?;
 
 A model can be fetched from either source class: the centralized HuggingFace
 Hub, or the set of verified network providers that hold the blob at its content
-hash (BLAKE3, checked end-to-end on transfer, plus the canonical SHA-256).
+hash (BLAKE3, checked over the whole transfer, plus the canonical SHA-256).
 `SourcePolicy` selects between them — `Auto` tries verified providers first and
 falls back to HuggingFace, `Network` fetches only from verified providers and
 never contacts HuggingFace, and `HuggingFace` streams only from the Hub.
@@ -363,7 +365,7 @@ The crate is organized into several key modules:
 
 ## ONNX catalogs
 
-In addition to the dynamic model registry, `tenzro-model` ships static catalogs of verified ONNX-exported models per modality for direct runtime registration.
+In addition to the dynamic model registry, `tenzro-model` provides static catalogs of verified ONNX-exported models per modality for direct runtime registration.
 
 - **Vision** — `OnnxVisionEntry` + `get_vision_catalog()`: CLIP ViT-B/32 + ViT-L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16. Each entry carries `input_size`, `embedding_dim`, and a normalization key (CLIP / ImageNet / SigLIP).
 - **Timeseries forecast** — `OnnxForecastEntry` + `get_forecast_catalog()`: TimesFM 2.5 200M.
@@ -410,7 +412,7 @@ On startup, hydration restores the full catalog so models survive node restarts 
 
 ## GPU Acceleration
 
-llama.cpp ships every ggml backend; each is exposed as a cargo feature that sets the matching `GGML_<X>` cmake define on the vendored `llama-cpp-sys-2` build. A build enables one backend; a build with no backend feature is CPU-only. These features are forwarded through `tenzro-node` (`--features tenzro-node/<name>`).
+llama.cpp includes every ggml backend; each is exposed as a cargo feature that sets the matching `GGML_<X>` cmake define on the vendored `llama-cpp-sys-2` build. A build enables one backend; a build with no backend feature is CPU-only. These features are forwarded through `tenzro-node` (`--features tenzro-node/<name>`).
 
 - **cuda** — NVIDIA CUDA (datacenter: A100/H100/B200; consumer: RTX 3090/4090)
 - **cuda-no-vmm** — NVIDIA CUDA without virtual memory (older drivers/embedded)

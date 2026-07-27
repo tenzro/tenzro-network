@@ -1,7 +1,7 @@
 //! `IrohResolver` trait — the dispatch surface that crates depend on
 //! without pulling in the iroh runtime, and `IrohBackedResolver` — the
-//! concrete iroh-blobs-backed implementation that lands as part of
-//! Phase A2 (#214) alongside the `DaBackend` impl in `tenzro-storage::da`.
+//! concrete iroh-blobs-backed implementation added in Phase A2 (#214)
+//! alongside the `DaBackend` impl in `tenzro-storage::da`.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::ops::Deref;

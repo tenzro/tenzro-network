@@ -1,4 +1,4 @@
-//! End-to-end integration tests for Tenzro Cortex.
+//! Full-lifecycle integration tests for Tenzro Cortex.
 //!
 //! Covers the full lifecycle a network operator walks through when standing
 //! up a Cortex worker:

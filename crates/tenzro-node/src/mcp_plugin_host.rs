@@ -7,11 +7,11 @@
 //!   Used for hosted MCPs (Anthropic-hosted MCPs, partner MCPs).
 //!   Credentials injected via outbound header per [`UpstreamAuth`].
 //! - **`mcp-stdio`** — local MCP subprocess speaking JSON-RPC over
-//!   stdin/stdout. Used for most third-party MCPs that ship as npm
+//!   stdin/stdout. Used for most third-party MCPs distributed as npm
 //!   packages or executables (Stripe MCP, GitHub MCP, Notion MCP,
 //!   Linear MCP, etc.). Credentials injected via env var.
 //! - **`mcp-sse`** — legacy Server-Sent Events MCP transport. Some
-//!   older MCPs still ship this. Behavior matches `mcp` for the
+//!   older MCPs still use this. Behavior matches `mcp` for the
 //!   request side; the SSE-streamed response is collected synchronously.
 //!
 //! The operator's upstream credentials are never exposed to the

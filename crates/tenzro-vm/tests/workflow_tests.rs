@@ -1,7 +1,7 @@
-//! End-to-end agentic commerce, trading, payments, and automation
+//! Full-lifecycle agentic commerce, trading, payments, and automation
 //! workflows across EVM, SVM, and Canton/DAML VMs.
 //!
-//! These tests exercise the real executors (revm for EVM, the SPL/native
+//! These tests exercise the actual executors (revm for EVM, the SPL/native
 //! dispatch path for SVM, tonic gRPC for Canton/DAML) with minimal hand-crafted
 //! bytecode / payloads so the suite is robust across backend version
 //! bumps. Canton tests are gated on a live participant probe and

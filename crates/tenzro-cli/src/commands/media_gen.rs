@@ -297,6 +297,38 @@ fn print_job_summary(job: &serde_json::Value) {
             ),
         );
     }
+    if let Some(s) = job.get("settlement") {
+        output::print_field(
+            "Paid",
+            s.get("price_paid").and_then(|v| v.as_str()).unwrap_or("0"),
+        );
+        output::print_field(
+            "Commission",
+            s.get("commission_wei")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0"),
+        );
+        for p in s
+            .get("payouts")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let who = p
+                .get("role")
+                .and_then(|v| v.as_str())
+                .or_else(|| p.get("worker_did").and_then(|v| v.as_str()))
+                .unwrap_or("worker");
+            output::print_field(
+                &format!("  {}", who),
+                &format!(
+                    "{} ({} bps)",
+                    p.get("amount").and_then(|v| v.as_str()).unwrap_or("0"),
+                    p.get("share_bps").and_then(|v| v.as_u64()).unwrap_or(0)
+                ),
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

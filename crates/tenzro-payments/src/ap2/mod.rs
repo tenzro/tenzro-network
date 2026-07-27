@@ -20,7 +20,7 @@
 //! - **`Vdc`** — a generic Verifiable Digital Credential wrapper over any
 //!   mandate, carrying an Ed25519 signature plus a JCS-style canonical
 //!   preimage so verification is deterministic.
-//! - **`MandateValidator`** — composes intent → cart verification,
+//! - **`MandateValidator`** — composes checkout → payment verification,
 //!   including scope checks, expiry, merchant whitelisting, and optional
 //!   TDIP delegation-scope enforcement.
 //!
@@ -157,7 +157,7 @@ pub struct CheckoutMandate {
     /// Tenzro extension — Stripe SharedPaymentToken granted-token ID
     /// (`spt_grant_...`) the agent is authorized to confirm against.
     /// When present, the AP2 validator additionally consults the
-    /// configured `SptCeilingResolver` so the cart is bounded by the
+    /// configured `SptCeilingResolver` so the payment is bounded by the
     /// SPT's `usage_limits.max_amount` and currency. The child
     /// PaymentMandate must reference the same `spt_grant_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -267,7 +267,7 @@ impl CheckoutMandate {
     /// Bind a Stripe SPT granted-token ID. When present, the validator's
     /// SPT ceiling check (`validate_with_delegation_policy_escrow_and_spt`)
     /// resolves the snapshot and verifies `usage_limits.max_amount ≥
-    /// cart.total_amount` plus currency match against the resolver.
+    /// payment.total_amount` plus currency match against the resolver.
     pub fn with_spt_grant(mut self, granted_token_id: impl Into<String>) -> Self {
         self.spt_grant_id = Some(granted_token_id.into());
         self
@@ -305,12 +305,12 @@ pub struct CartItem {
 /// human-present flows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentMandate {
-    /// Unique cart mandate ID.
+    /// Unique payment mandate ID.
     pub mandate_id: String,
     /// ID of the parent [`CheckoutMandate`]. Must exist and be non-expired
-    /// when the cart is validated.
+    /// when the payment mandate is validated.
     pub checkout_mandate_id: String,
-    /// Agent committing to this cart.
+    /// Agent committing to this payment mandate.
     pub agent_did: String,
     /// Merchant receiving the payment.
     pub merchant_did: String,
@@ -318,13 +318,13 @@ pub struct PaymentMandate {
     pub items: Vec<CartItem>,
     /// Total (should equal the sum of line `total`s).
     pub total_amount: u128,
-    /// Asset (must match the parent intent).
+    /// Asset (must match the parent CheckoutMandate).
     pub asset: String,
     /// Chain / settlement rail.
     pub chain: String,
-    /// When the agent committed to this cart.
+    /// When the agent committed to this payment mandate.
     pub committed_at: DateTime<Utc>,
-    /// Expiry of the cart offer.
+    /// Expiry of the offer.
     pub expires_at: DateTime<Utc>,
     /// AP2 v0.2 §6.2.3 — SHA-256 hash of the parent CheckoutMandate VDC
     /// (lowercase hex). Cryptographically binds the PaymentMandate to a
@@ -347,7 +347,7 @@ pub struct PaymentMandate {
     /// `spt_grant_id`, the two MUST match. The validator's SPT ceiling
     /// check resolves this ID against the configured
     /// `SptCeilingResolver` and verifies `usage_limits.max_amount ≥
-    /// cart.total_amount` plus currency match.
+    /// payment.total_amount` plus currency match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spt_grant_id: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -389,7 +389,7 @@ impl PaymentMandate {
     ///
     /// AP2 v0.2 §6.2.3: the PaymentMandate carries `checkout_hash =
     /// sha256(parent_checkout_vdc_bytes)` so settlement infrastructure can
-    /// verify the cart commits to a specific authorization without having
+    /// verify the payment mandate commits to a specific authorization without having
     /// to re-resolve the parent VDC by `checkout_mandate_id`.
     pub fn with_checkout_hash(mut self, hash: impl Into<String>) -> Self {
         self.checkout_hash = Some(hash.into());
@@ -489,7 +489,7 @@ pub struct Vdc {
     pub kind: MandateKind,
     /// The mandate itself.
     pub payload: MandatePayload,
-    /// DID of the signer (principal for intent, agent for cart).
+    /// DID of the signer (principal for checkout, agent for payment).
     pub signer_did: String,
     /// Signer's Ed25519 public key (32 bytes).
     pub signer_public_key: Vec<u8>,
@@ -741,7 +741,7 @@ impl Vdc {
     }
 }
 
-/// Composite validator enforcing intent → cart constraints.
+/// Composite validator enforcing checkout → payment constraints.
 ///
 /// Typical flow:
 ///
@@ -749,7 +749,7 @@ impl Vdc {
 ///    the agent.
 /// 2. Merchant also holds the signed `Vdc` wrapping the parent
 ///    `CheckoutMandate` (provided by the principal out-of-band or
-///    attached to the cart envelope).
+///    attached to the payment envelope).
 /// 3. Merchant calls [`MandateValidator::validate`] passing both.
 /// 4. On success, the merchant submits the cart total on-chain.
 #[derive(Default)]
@@ -924,7 +924,7 @@ impl MandateValidator {
     /// caps the agent's broader operating envelope (`max_transaction_value`,
     /// `allowed_operations`, reputation floor, controller liveness).
     ///
-    /// Returns `Ok(())` only when both layers admit the cart. Failures from
+    /// Returns `Ok(())` only when both layers admit the payment. Failures from
     /// the TDIP layer are wrapped as [`PaymentError::VerificationFailed`] so
     /// the caller does not need to bridge two error types.
     ///
@@ -947,11 +947,12 @@ impl MandateValidator {
     }
 
     /// Like [`Self::validate_with_delegation`], but additionally consults a
-    /// runtime [`SpendingPolicyResolver`] so the cart is rejected if the
-    /// agent's *runtime* per-transaction or per-day ceiling would be
+    /// runtime [`SpendingPolicyResolver`] so the payment mandate is rejected
+    /// if the agent's *runtime* per-transaction or per-day ceiling would be
     /// exceeded.
     ///
-    /// AP2 carries three nested ceilings, all of which must admit the cart:
+    /// This variant applies three nested ceilings, all of which must admit
+    /// the payment total:
     ///
     /// 1. **AP2 CheckoutMandate** — the principal-signed declaration of intent
     ///    (caps `max_amount`, `allowed_merchants`, `allowed_categories`).
@@ -983,13 +984,13 @@ impl MandateValidator {
 
     /// Like [`Self::validate_with_delegation_and_policy`], but additionally
     /// consults a [`EscrowResolver`](crate::identity_binding::EscrowResolver)
-    /// so the cart is rejected if the on-chain escrow referenced by the
+    /// so the payment is rejected if the on-chain escrow referenced by the
     /// mandate pair does not exist, has already been settled, has expired,
     /// has insufficient balance, or is bound to the wrong principal /
     /// agent.
     ///
     /// AP2 carries **four** nested ceilings on the Tenzro deployment, all
-    /// of which must admit the cart:
+    /// of which must admit the payment:
     ///
     /// 1. **AP2 CheckoutMandate** — principal-signed declaration of intent
     ///    (caps `max_amount`, `allowed_merchants`, `allowed_categories`).
@@ -998,7 +999,7 @@ impl MandateValidator {
     /// 3. **Runtime SpendingPolicy** — execution-facing ceiling tracking
     ///    current daily spend and per-transaction bound.
     /// 4. **On-chain Escrow** — pre-funded `CreateEscrow` (selector
-    ///    `0x01000010`) account; the cart is bounded by `escrow.amount`,
+    ///    `0x01000010`) account; the payment is bounded by `escrow.amount`,
     ///    `escrow.releasable`, `escrow.payer == principal`,
     ///    `escrow.payee == agent`. Enforced here when both the mandate
     ///    pair carries an `escrow_id` and `escrow_resolver` is `Some`.
@@ -1017,8 +1018,8 @@ impl MandateValidator {
         escrow_resolver: Option<&dyn crate::identity_binding::EscrowResolver>,
     ) -> Result<()> {
         // Enforce cnf binding via registry resolution before applying the
-        // intent → cart structural checks. A VDC whose cnf binding doesn't
-        // resolve must never reach the spend-ceiling stage.
+        // checkout → payment structural checks. A VDC whose cnf binding
+        // doesn't resolve must never reach the spend-ceiling stage.
         checkout_vdc.verify_with_registry(identity_registry)?;
         payment_vdc.verify_with_registry(identity_registry)?;
         self.validate(checkout_vdc, payment_vdc)?;
@@ -1027,26 +1028,26 @@ impl MandateValidator {
         let checkout = checkout_vdc
             .as_checkout()
             .expect("validate() established checkout payload");
-        let cart = payment_vdc
+        let payment = payment_vdc
             .as_payment()
-            .expect("validate() established cart payload");
+            .expect("validate() established payment payload");
 
         identity_registry
-            .enforce_operation(&cart.agent_did, "payment", Some(cart.total_amount))
+            .enforce_operation(&payment.agent_did, "payment", Some(payment.total_amount))
             .map_err(|e| {
                 PaymentError::VerificationFailed(format!(
-                    "TDIP delegation rejected AP2 cart for agent {}: {}",
-                    cart.agent_did, e
+                    "TDIP delegation rejected AP2 payment mandate for agent {}: {}",
+                    payment.agent_did, e
                 ))
             })?;
 
         if let Some(resolver) = policy_resolver
-            && let Some(snap) = resolver.resolve(&cart.agent_did)?
+            && let Some(snap) = resolver.resolve(&payment.agent_did)?
         {
-            snap.check(cart.total_amount).map_err(|e| {
+            snap.check(payment.total_amount).map_err(|e| {
                 PaymentError::VerificationFailed(format!(
-                    "runtime SpendingPolicy rejected AP2 cart for agent {}: {}",
-                    cart.agent_did, e
+                    "runtime SpendingPolicy rejected AP2 payment mandate for agent {}: {}",
+                    payment.agent_did, e
                 ))
             })?;
         }
@@ -1054,7 +1055,10 @@ impl MandateValidator {
         // Fourth ceiling — on-chain escrow. Only checked when the mandate
         // pair commits to an escrow_id. Both mandates must agree on the
         // ID; `validate()` already enforced that invariant.
-        let escrow_id = cart.escrow_id.as_deref().or(checkout.escrow_id.as_deref());
+        let escrow_id = payment
+            .escrow_id
+            .as_deref()
+            .or(checkout.escrow_id.as_deref());
         if let Some(escrow_id) = escrow_id {
             let resolver = escrow_resolver.ok_or_else(|| {
                 PaymentError::VerificationFailed(format!(
@@ -1070,8 +1074,8 @@ impl MandateValidator {
             })?;
             snapshot.check(
                 &checkout.principal_did,
-                &cart.agent_did,
-                cart.total_amount,
+                &payment.agent_did,
+                payment.total_amount,
             )?;
         }
 
@@ -1079,15 +1083,15 @@ impl MandateValidator {
     }
 
     /// Like [`Self::validate_with_delegation_policy_and_escrow`], but
-    /// additionally consults a [`SptCeilingResolver`] so the cart is
+    /// additionally consults a [`SptCeilingResolver`] so the payment is
     /// rejected if the Stripe SharedPaymentToken referenced by the
     /// mandate pair is not `Active`, has expired, or has a
-    /// `usage_limits.max_amount` below `cart.total_amount`. The
+    /// `usage_limits.max_amount` below `payment.total_amount`. The
     /// resolver also enforces a currency match: `usage_limits.currency`
     /// must equal `payment.asset` (case-insensitive).
     ///
     /// AP2 carries **five** nested ceilings on the Tenzro deployment, all
-    /// of which must admit the cart:
+    /// of which must admit the payment:
     ///
     /// 1. **AP2 CheckoutMandate** — principal-signed declaration of intent.
     /// 2. **TDIP DelegationScope** — protocol-facing structural ceiling.
@@ -1103,10 +1107,10 @@ impl MandateValidator {
     /// `spt_grant_id` skip the fifth ceiling entirely (off-Stripe
     /// settlement path; e.g. on-chain escrow only, x402, MPP).
     ///
-    /// `cart.total_amount` is `u128` (smallest-unit of the AP2 asset);
+    /// `payment.total_amount` is `u128` (smallest-unit of the AP2 asset);
     /// SPT's `usage_limits.max_amount` is `u64` (smallest-unit of the
     /// Stripe currency). The conversion saturates at `u64::MAX` — a
-    /// cart total exceeding that bound is, by construction, also above
+    /// payment total exceeding that bound is, by construction, also above
     /// any plausible SPT cap, so saturation is a conservative fail.
     pub fn validate_with_delegation_policy_escrow_and_spt(
         &self,
@@ -1129,13 +1133,13 @@ impl MandateValidator {
         // mandate pair commits to a `spt_grant_id`. `validate()` already
         // enforced that the two mandates agree on the value when both
         // carry one.
-        let cart = payment_vdc
+        let payment = payment_vdc
             .as_payment()
             .expect("validate_with_delegation_policy_and_escrow established payment payload");
         let checkout = checkout_vdc
             .as_checkout()
             .expect("validate_with_delegation_policy_and_escrow established checkout payload");
-        let spt_grant_id = cart
+        let spt_grant_id = payment
             .spt_grant_id
             .as_deref()
             .or(checkout.spt_grant_id.as_deref());
@@ -1152,18 +1156,20 @@ impl MandateValidator {
                     spt_grant_id
                 ))
             })?;
-            // u128 → u64 saturation: cart totals above u64::MAX cannot
+            // u128 → u64 saturation: payment totals above u64::MAX cannot
             // possibly fit any SPT `usage_limits.max_amount` (also u64),
             // so saturating to u64::MAX preserves the rejection
             // semantics. `SptCeilingSnapshot::check` will then fail on
             // amount > max_amount.
-            let cart_total_u64 = u64::try_from(cart.total_amount).unwrap_or(u64::MAX);
-            snapshot.check(cart_total_u64, &cart.asset).map_err(|e| {
-                PaymentError::VerificationFailed(format!(
-                    "Stripe SPT {} rejected AP2 cart for agent {}: {}",
-                    spt_grant_id, cart.agent_did, e
-                ))
-            })?;
+            let payment_total_u64 = u64::try_from(payment.total_amount).unwrap_or(u64::MAX);
+            snapshot
+                .check(payment_total_u64, &payment.asset)
+                .map_err(|e| {
+                    PaymentError::VerificationFailed(format!(
+                        "Stripe SPT {} rejected AP2 payment mandate for agent {}: {}",
+                        spt_grant_id, payment.agent_did, e
+                    ))
+                })?;
         }
 
         Ok(())
@@ -1500,7 +1506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_with_delegation_rejects_when_cart_exceeds_tdip_cap() {
+    async fn validate_with_delegation_rejects_when_payment_exceeds_tdip_cap() {
         // AP2 intent allows up to 10_000, but TDIP scope caps at 1_000.
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
@@ -1522,7 +1528,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_with_delegation_rejects_unknown_agent_did() {
-        // Registry has a different machine; the AP2 cart references one
+        // Registry has a different machine; the AP2 payment mandate references one
         // that was never registered.
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
@@ -1545,7 +1551,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_with_delegation_rejects_when_ap2_validation_fails() {
-        // AP2 layer should fail first (cart total > intent ceiling) — the
+        // AP2 layer should fail first (payment total > checkout ceiling) — the
         // method must short-circuit before touching the registry.
         let scope = DelegationScope::unrestricted()
             .with_allowed_operations(vec!["payment".into()])
@@ -1680,7 +1686,7 @@ mod tests {
                 &registry,
                 Some(&resolver),
             )
-            .expect("all three layers should admit the cart");
+            .expect("all three layers should admit the payment");
     }
 
     #[tokio::test]
@@ -1695,7 +1701,7 @@ mod tests {
             signed_checkout_and_payment(&human_did, &machine_did, 10_000, 5_000);
 
         // Tight ceilings that *would* reject — but `enabled: false` flips
-        // the policy off entirely, so the cart goes through.
+        // the policy off entirely, so the payment goes through.
         let resolver = StaticPolicyResolver(
             crate::identity_binding::SpendingPolicySnapshot {
                 max_per_transaction: 1,
@@ -1742,7 +1748,7 @@ mod tests {
 
     /// Sign a checkout/payment VDC pair AND attach `cnf=did` claims that
     /// point back at the principal/agent DIDs. Used to drive
-    /// `verify_with_registry` end-to-end.
+    /// `verify_with_registry` through its full check sequence.
     fn signed_checkout_and_payment_with_cnf(
         principal_signer: &Ed25519SignerImpl,
         agent_signer: &Ed25519SignerImpl,
@@ -2350,7 +2356,7 @@ mod tests {
             .unwrap();
     }
 
-    // ─── SptCeilingResolver wiring (#383 SPT cart-mandate ceiling) ────
+    // ─── SptCeilingResolver wiring (#383 SPT payment-mandate ceiling) ────
 
     use crate::mpp::stripe_spt::{
         SptCeilingResolver, SptCeilingSnapshot, SptStatus, UsageLimits,
@@ -2451,7 +2457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spt_path_admits_when_snapshot_covers_cart_total() {
+    async fn spt_path_admits_when_snapshot_covers_payment_total() {
         let principal = principal_signer();
         let agent = Ed25519SignerImpl::generate().unwrap();
         let scope = DelegationScope::unrestricted()
@@ -2493,7 +2499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spt_path_rejects_when_cart_exceeds_max_amount() {
+    async fn spt_path_rejects_when_payment_exceeds_max_amount() {
         let principal = principal_signer();
         let agent = Ed25519SignerImpl::generate().unwrap();
         let scope = DelegationScope::unrestricted()

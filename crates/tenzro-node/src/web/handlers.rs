@@ -1823,10 +1823,14 @@ pub async fn chat_completion(
                         },
                         finish_reason: response.metadata.finish_reason.unwrap_or_else(|| "stop".to_string()),
                     }],
+                    // `input_tokens` counts only what was prefilled fresh, because
+                    // the cached share is metered at its own rate. The wire field
+                    // is the whole prompt, so the cached reads are added back.
                     usage: super::types::ChatUsage {
-                        prompt_tokens: response.metadata.input_tokens as u64,
-                        completion_tokens: response.metadata.output_tokens as u64,
-                        total_tokens: (response.metadata.input_tokens + response.metadata.output_tokens) as u64,
+                        prompt_tokens: response.metadata.units.prompt_tokens() as u64,
+                        completion_tokens: response.metadata.units.output_tokens as u64,
+                        total_tokens: (response.metadata.units.prompt_tokens()
+                            + response.metadata.units.output_tokens) as u64,
                     },
                 };
 

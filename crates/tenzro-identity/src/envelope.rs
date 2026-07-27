@@ -410,7 +410,7 @@ fn check_envelope_sig_ethr(env: &TenzroDidEnvelope) -> Result<(), EnvelopeError>
     }
 }
 
-/// Verify a `did:ethr` envelope end-to-end (nonce + freshness + recoverable
+/// Verify every check on a `did:ethr` envelope (nonce + freshness + recoverable
 /// secp256k1 signature + address binding). The key is recovered from the
 /// signature, so no registry entry is needed.
 pub fn verify_envelope_ethr(env: &TenzroDidEnvelope) -> Result<(), EnvelopeError> {

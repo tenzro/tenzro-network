@@ -16,7 +16,7 @@
 //!
 //! # Integrity contract
 //!
-//! iroh-blobs verifies BLAKE3 end-to-end on transfer, which proves "these are
+//! iroh-blobs verifies BLAKE3 over the whole transfer, which proves "these are
 //! the bytes I asked for" — not "these are the bytes the receipt committed
 //! to". [`verify_output`] closes that gap on every fetch, so a wiring bug
 //! between the resolver and the runtime surfaces immediately instead of

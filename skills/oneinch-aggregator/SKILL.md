@@ -24,9 +24,9 @@ DEX aggregation across 400+ liquidity sources on 12+ chains. Supports instant sw
 | Service | URL | Description |
 |---------|-----|-------------|
 | 1inch MCP | Via 1inch Business Portal | Official 1inch MCP (requires API key) |
-| 1inch API | `https://api.1inch.dev` | REST API (15 endpoints, 1 rps public) |
+| 1inch API | `https://api.1inch.com` | REST API (15 endpoints, 1 rps public) |
 
-**Setup:** Obtain an API key from the 1inch Developer Portal and configure it in the Tenzro node settings.
+**Setup:** Obtain an API key from the 1inch Developer Portal and set it as `builtins.oneinch_api_key` in the node config. A node without the key does not register this skill.
 
 ## Supported Chains
 

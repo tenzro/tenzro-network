@@ -38,7 +38,7 @@
               └────────────────────┘
 ```
 
-Transport and Tx wire format can run in parallel after the crypto foundation lands. Wire consumers depend on the Tx wire format. Integration tests depend on transport + wire consumers.
+Transport and Tx wire format can run in parallel once the crypto foundation is in place. Wire consumers depend on the Tx wire format. Integration tests depend on transport + wire consumers.
 
 ---
 
@@ -114,7 +114,7 @@ pub struct CompositePublicKey {
 ### 2.5 `crates/tenzro-crypto/src/{bls.rs,vrf.rs,mpc.rs}` — relax fixed lengths
 
 - `bls.rs:358,372,598` — `[u8; 96]` → `Vec<u8>` (reasoning: when BLS validator pubkeys also gain ML-DSA companions, aggregate signature payloads grow).
-- `vrf.rs:63` — `PROOF_LEN = 80` constant: keep for VRF (RFC 9381 ECVRF stays Ed25519-rooted; VRF doesn't have a PQ replacement that matches the 64-byte hash output API). VRF is a Shor-vulnerable consensus path but the input/output API is stable. **Decision:** document residual; revisit when a NIST-blessed PQ VRF lands.
+- `vrf.rs:63` — `PROOF_LEN = 80` constant: keep for VRF (RFC 9381 ECVRF stays Ed25519-rooted; VRF doesn't have a PQ replacement that matches the 64-byte hash output API). VRF is a Shor-vulnerable consensus path but the input/output API is stable. **Decision:** document residual; revisit when NIST standardizes a PQ VRF.
 - `mpc.rs:718` — test `assert_eq!(64, ...)` becomes `assert_eq!(64 + ML_DSA_65_SIG_LEN, ...)` and asserts on `CompositeSignature` len.
 
 ### 2.6 New file: `crates/tenzro-crypto/src/pq.rs`
@@ -284,7 +284,7 @@ async fn revocation_broadcast_signature_required() {
 
 - `cargo test --workspace` — must pass with the new types
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `tenzro-zk` ships 40 unit tests covering the Plonky3 dispatcher, Poseidon2 hashing, and the three AIRs (inference, settlement, identity) — already post-quantum-conjectured-sound under STARKs over KoalaBear, so no PQ migration is required for the ZK layer.
+- `tenzro-zk` has 40 unit tests covering the Plonky3 dispatcher, Poseidon2 hashing, and the three AIRs (inference, settlement, identity) — already post-quantum-conjectured-sound under STARKs over KoalaBear, so no PQ migration is required for the ZK layer.
 
 ### 6.3 Network smoke (after deploy authorization)
 

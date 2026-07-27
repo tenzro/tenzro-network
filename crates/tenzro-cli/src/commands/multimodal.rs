@@ -1,15 +1,23 @@
 //! Multi-modal inference commands for the Tenzro CLI.
 //!
 //! Wraps the JSON-RPC multi-modal surface:
-//!   - `embed-text`  → `tenzro_textEmbed` (+ `load`/`unload` to serve a catalog encoder locally)
-//!   - `segment`     → `tenzro_segment`
-//!   - `detect`      → `tenzro_detect`
-//!   - `transcribe`  → `tenzro_transcribe`
-//!   - `embed-video` → `tenzro_videoEmbed`
+//!   - `forecast`      → `tenzro_forecast`
+//!   - `embed-text`    → `tenzro_textEmbed` (+ `load`/`unload` to serve a catalog encoder locally)
+//!   - `embed-image`   → `tenzro_imageEmbed`, `tenzro_imageTextSimilarity`
+//!   - `segment`       → `tenzro_segment`
+//!   - `text-segment`  → `tenzro_textSegment`
+//!   - `detect`        → `tenzro_detect`
+//!   - `transcribe`    → `tenzro_transcribe`
+//!   - `embed-video`   → `tenzro_videoEmbed`
 //!
 //! Each subcommand reads the input from a local path (image / audio / video),
 //! base64-encodes it, and dispatches to the node. List/catalog subcommands
-//! cover the discovery side; `load` downloads a catalog model onto the node.
+//! cover the discovery side.
+//!
+//! `load` differs by modality. `embed-text load` fetches the artifact onto the
+//! node, because a download path exists for text encoders. Every other
+//! modality registers an ONNX file that is already on the node's filesystem, so
+//! those arms take `--path` and resolve it node-side.
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
@@ -76,7 +84,7 @@ impl EmbedTextLoadCmd {
                 json!({ "model_id": self.model }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -98,7 +106,7 @@ impl EmbedTextUnloadCmd {
                 json!({ "model_id": self.model }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -113,7 +121,7 @@ impl EmbedTextCatalogCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listTextEmbeddingCatalog", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -128,7 +136,7 @@ impl EmbedTextListCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listTextEmbeddingModels", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -168,7 +176,7 @@ impl EmbedTextRunCmd {
                 }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -183,6 +191,10 @@ pub enum SegmentCommand {
     Catalog(SegmentCatalogCmd),
     /// List currently-loaded segmenters.
     List(SegmentListCmd),
+    /// Register an encoder/decoder ONNX pair already on the node's filesystem.
+    Load(SegmentLoadCmd),
+    /// Unregister a previously-loaded segmenter.
+    Unload(SegmentUnloadCmd),
     /// Run a segmentation request given prompts.
     Run(SegmentRunCmd),
 }
@@ -192,6 +204,8 @@ impl SegmentCommand {
         match self {
             Self::Catalog(c) => c.execute().await,
             Self::List(c) => c.execute().await,
+            Self::Load(c) => c.execute().await,
+            Self::Unload(c) => c.execute().await,
             Self::Run(c) => c.execute().await,
         }
     }
@@ -207,7 +221,7 @@ impl SegmentCatalogCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listSegmentationCatalog", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -222,7 +236,83 @@ impl SegmentListCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listSegmentationModels", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct SegmentLoadCmd {
+    /// Model id to register the segmenter under.
+    #[arg(long)]
+    model: String,
+    /// Path on the node to the image-encoder ONNX file.
+    #[arg(long = "encoder-path")]
+    encoder_path: String,
+    /// Path on the node to the mask-decoder ONNX file.
+    #[arg(long = "decoder-path")]
+    decoder_path: String,
+    /// Catalog id (e.g. `sam2-base`) to inherit the family and input resolution
+    /// from, and to apply the licence gate.
+    #[arg(long = "catalog-id")]
+    catalog_id: Option<String>,
+    /// Decoder ABI, when not inheriting from the catalog: `sam1` (also EdgeSAM,
+    /// MobileSAM) or `sam2`.
+    #[arg(long)]
+    family: Option<String>,
+    /// Native input resolution, when not inheriting from the catalog.
+    #[arg(long = "input-size")]
+    input_size: Option<u32>,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl SegmentLoadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        if self.catalog_id.is_none() && (self.family.is_none() || self.input_size.is_none()) {
+            return Err(anyhow!(
+                "pass --catalog-id, or both --family and --input-size"
+            ));
+        }
+        let mut payload = json!({
+            "model_id": self.model,
+            "encoder_path": self.encoder_path,
+            "decoder_path": self.decoder_path,
+        });
+        if let Some(c) = &self.catalog_id {
+            payload["catalog_id"] = json!(c);
+        }
+        if let Some(f) = &self.family {
+            payload["family"] = json!(f);
+        }
+        if let Some(s) = self.input_size {
+            payload["input_size"] = json!(s);
+        }
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_loadSegmentationModel", payload).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct SegmentUnloadCmd {
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl SegmentUnloadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_unloadSegmentationModel",
+                json!({ "model_id": self.model }),
+            )
+            .await?;
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -234,9 +324,11 @@ pub struct SegmentRunCmd {
     /// Path to the input image (PNG/JPEG/WebP).
     #[arg(long)]
     image: String,
-    /// JSON file containing a list of SegmentPrompt values
-    /// (`{"type":"point","x":0.5,"y":0.5,"is_foreground":true}`,
-    ///  `{"type":"box","x0":..,"y0":..,"x1":..,"y1":..}`).
+    /// JSON file containing a list of SegmentPrompt values. Coordinates are in
+    /// original-image pixels:
+    /// `{"type":"point","x":412,"y":310,"is_foreground":true}`,
+    /// `{"type":"points","points":[{"x":412,"y":310,"is_foreground":true}]}`,
+    /// `{"type":"box","x0":120,"y0":80,"x1":540,"y1":420}`.
     #[arg(long)]
     prompts: String,
     #[arg(long, default_value = DEFAULT_RPC)]
@@ -261,7 +353,7 @@ impl SegmentRunCmd {
                 }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -307,7 +399,7 @@ impl TextSegmentCatalogCmd {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value =
             rpc.call("tenzro_listTextSegmentationCatalog", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -323,7 +415,7 @@ impl TextSegmentListCmd {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value =
             rpc.call("tenzro_listTextSegmentationModels", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -346,7 +438,7 @@ impl TextSegmentLoadCmd {
                 json!({ "model_id": self.model }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -368,7 +460,7 @@ impl TextSegmentUnloadCmd {
                 json!({ "model_id": self.model }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -432,7 +524,7 @@ impl TextSegmentRunCmd {
                 }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -447,6 +539,10 @@ pub enum DetectCommand {
     Catalog(DetectCatalogCmd),
     /// List currently-loaded detectors.
     List(DetectListCmd),
+    /// Register a detector ONNX file already on the node's filesystem.
+    Load(DetectLoadCmd),
+    /// Unregister a previously-loaded detector.
+    Unload(DetectUnloadCmd),
     /// Run object detection.
     Run(DetectRunCmd),
 }
@@ -456,8 +552,90 @@ impl DetectCommand {
         match self {
             Self::Catalog(c) => c.execute().await,
             Self::List(c) => c.execute().await,
+            Self::Load(c) => c.execute().await,
+            Self::Unload(c) => c.execute().await,
             Self::Run(c) => c.execute().await,
         }
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct DetectLoadCmd {
+    /// Model id to register the detector under.
+    #[arg(long)]
+    model: String,
+    /// Path on the node to the detector ONNX file.
+    #[arg(long)]
+    path: String,
+    /// Catalog id (e.g. `rf-detr-medium`) to inherit the family, input
+    /// resolution and class count from, and to apply the licence gate.
+    #[arg(long = "catalog-id")]
+    catalog_id: Option<String>,
+    /// Output ABI, when not inheriting from the catalog: `rf_detr` or `d_fine`.
+    #[arg(long)]
+    family: Option<String>,
+    /// Native input resolution, when not inheriting from the catalog.
+    #[arg(long = "input-size")]
+    input_size: Option<u32>,
+    /// Class-label count, when not inheriting from the catalog (RF-DETR indexes
+    /// 90 COCO slots, D-FINE 80).
+    #[arg(long = "num-classes")]
+    num_classes: Option<u32>,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl DetectLoadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        if self.catalog_id.is_none()
+            && (self.family.is_none() || self.input_size.is_none() || self.num_classes.is_none())
+        {
+            return Err(anyhow!(
+                "pass --catalog-id, or all of --family, --input-size and --num-classes"
+            ));
+        }
+        let mut payload = json!({
+            "model_id": self.model,
+            "path": self.path,
+        });
+        if let Some(c) = &self.catalog_id {
+            payload["catalog_id"] = json!(c);
+        }
+        if let Some(f) = &self.family {
+            payload["family"] = json!(f);
+        }
+        if let Some(s) = self.input_size {
+            payload["input_size"] = json!(s);
+        }
+        if let Some(n) = self.num_classes {
+            payload["num_classes"] = json!(n);
+        }
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_loadDetectionModel", payload).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct DetectUnloadCmd {
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl DetectUnloadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_unloadDetectionModel",
+                json!({ "model_id": self.model }),
+            )
+            .await?;
+        output::print_json(&res)?;
+        Ok(())
     }
 }
 
@@ -471,7 +649,7 @@ impl DetectCatalogCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listDetectionCatalog", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -486,7 +664,7 @@ impl DetectListCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listDetectionModels", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -518,7 +696,7 @@ impl DetectRunCmd {
                 }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -533,6 +711,10 @@ pub enum TranscribeCommand {
     Catalog(TranscribeCatalogCmd),
     /// List currently-loaded transcribers.
     List(TranscribeListCmd),
+    /// Register an ASR bundle already on the node's filesystem.
+    Load(TranscribeLoadCmd),
+    /// Unregister a previously-loaded transcriber.
+    Unload(TranscribeUnloadCmd),
     /// Run an ASR request on an audio file.
     Run(TranscribeRunCmd),
 }
@@ -542,8 +724,125 @@ impl TranscribeCommand {
         match self {
             Self::Catalog(c) => c.execute().await,
             Self::List(c) => c.execute().await,
+            Self::Load(c) => c.execute().await,
+            Self::Unload(c) => c.execute().await,
             Self::Run(c) => c.execute().await,
         }
+    }
+}
+
+/// Which paths are required depends on the family. Moonshine and Whisper take
+/// `--tokenizer-path`; Parakeet and Canary take `--preprocessor-path` and
+/// `--vocab-path` instead. The node reports what is missing.
+#[derive(Debug, Parser)]
+pub struct TranscribeLoadCmd {
+    /// Model id to register the transcriber under.
+    #[arg(long)]
+    model: String,
+    /// Path on the node to the encoder ONNX file.
+    #[arg(long = "encoder-path")]
+    encoder_path: String,
+    /// Path on the node to the decoder ONNX file (the KV-cache merged decoder
+    /// for Moonshine and Whisper, the joint network for Parakeet and Canary).
+    #[arg(long = "decoder-path")]
+    decoder_path: String,
+    /// Catalog id (e.g. `parakeet-tdt-0.6b-v3`) to inherit the family, audio
+    /// window and Whisper variant from, and to apply the licence gate.
+    #[arg(long = "catalog-id")]
+    catalog_id: Option<String>,
+    /// Decoding pipeline, when not inheriting from the catalog: `moonshine`,
+    /// `whisper`, `parakeet` or `canary`.
+    #[arg(long)]
+    family: Option<String>,
+    /// Path on the node to `tokenizer.json` (Moonshine, Whisper).
+    #[arg(long = "tokenizer-path")]
+    tokenizer_path: Option<String>,
+    /// Path on the node to the mel-spectrogram preprocessor ONNX file
+    /// (Parakeet, Canary).
+    #[arg(long = "preprocessor-path")]
+    preprocessor_path: Option<String>,
+    /// Path on the node to the vocabulary file (Parakeet, Canary).
+    #[arg(long = "vocab-path")]
+    vocab_path: Option<String>,
+    /// Whisper checkpoint shape, when the family is `whisper` and no catalog id
+    /// is given: `distil-en`, `distil-large-v3` or `large-v3-turbo`.
+    #[arg(long = "whisper-variant")]
+    whisper_variant: Option<String>,
+    /// Longest audio window the encoder accepts, in seconds. Defaults to 30
+    /// node-side when neither this nor a catalog id is given.
+    #[arg(long = "max-audio-seconds")]
+    max_audio_seconds: Option<u32>,
+    /// Canary source language (default `en`).
+    #[arg(long = "source-lang")]
+    source_lang: Option<String>,
+    /// Canary target language — set it different from the source to translate
+    /// rather than transcribe (default `en`).
+    #[arg(long = "target-lang")]
+    target_lang: Option<String>,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl TranscribeLoadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        if self.catalog_id.is_none() && self.family.is_none() {
+            return Err(anyhow!("pass --catalog-id or --family"));
+        }
+        let mut payload = json!({
+            "model_id": self.model,
+            "encoder_path": self.encoder_path,
+            "decoder_path": self.decoder_path,
+        });
+        if let Some(c) = &self.catalog_id {
+            payload["catalog_id"] = json!(c);
+        }
+        if let Some(f) = &self.family {
+            payload["family"] = json!(f);
+        }
+        if let Some(t) = &self.tokenizer_path {
+            payload["tokenizer_path"] = json!(t);
+        }
+        if let Some(pp) = &self.preprocessor_path {
+            payload["preprocessor_path"] = json!(pp);
+        }
+        if let Some(v) = &self.vocab_path {
+            payload["vocab_path"] = json!(v);
+        }
+        if let Some(w) = &self.whisper_variant {
+            payload["whisper_variant"] = json!(w);
+        }
+        if let Some(m) = self.max_audio_seconds {
+            payload["max_audio_seconds"] = json!(m);
+        }
+        if let Some(s) = &self.source_lang {
+            payload["source_lang"] = json!(s);
+        }
+        if let Some(t) = &self.target_lang {
+            payload["target_lang"] = json!(t);
+        }
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_loadAudioModel", payload).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct TranscribeUnloadCmd {
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl TranscribeUnloadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call("tenzro_unloadAudioModel", json!({ "model_id": self.model }))
+            .await?;
+        output::print_json(&res)?;
+        Ok(())
     }
 }
 
@@ -557,7 +856,7 @@ impl TranscribeCatalogCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listAudioCatalog", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -572,7 +871,7 @@ impl TranscribeListCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listAudioModels", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -613,7 +912,7 @@ impl TranscribeRunCmd {
                 }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -624,10 +923,14 @@ impl TranscribeRunCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum EmbedVideoCommand {
-    /// List the curated video catalog (V-JEPA 2 ViT-L/H/g; loader pending per-model ONNX export).
+    /// List the curated video catalog (V-JEPA 2 ViT-L/H/g).
     Catalog(EmbedVideoCatalogCmd),
     /// List currently-loaded video encoders.
     List(EmbedVideoListCmd),
+    /// Register a frame-pooling clip encoder over a loaded image encoder.
+    Load(EmbedVideoLoadCmd),
+    /// Unregister a previously-loaded video encoder.
+    Unload(EmbedVideoUnloadCmd),
     /// Embed a video file into a clip-level vector.
     Run(EmbedVideoRunCmd),
 }
@@ -637,8 +940,63 @@ impl EmbedVideoCommand {
         match self {
             Self::Catalog(c) => c.execute().await,
             Self::List(c) => c.execute().await,
+            Self::Load(c) => c.execute().await,
+            Self::Unload(c) => c.execute().await,
             Self::Run(c) => c.execute().await,
         }
+    }
+}
+
+/// The upstream V-JEPA 2 repos ship safetensors only, so there is no native
+/// video graph to register. What the runtime serves is frame pooling over an
+/// image tower: load one with `embed-image load`, then name it here.
+#[derive(Debug, Parser)]
+pub struct EmbedVideoLoadCmd {
+    /// Model id to register the clip encoder under.
+    #[arg(long)]
+    model: String,
+    /// Model id of an already-loaded image encoder to pool frames through.
+    #[arg(long = "vision-model")]
+    vision_model: String,
+    /// Evenly-spaced frames sampled per clip. Defaults to 8 node-side.
+    #[arg(long = "num-frames")]
+    num_frames: Option<u32>,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedVideoLoadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let mut payload = json!({
+            "model_id": self.model,
+            "vision_model_id": self.vision_model,
+        });
+        if let Some(n) = self.num_frames {
+            payload["num_frames"] = json!(n);
+        }
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_loadVideoModel", payload).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbedVideoUnloadCmd {
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedVideoUnloadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call("tenzro_unloadVideoModel", json!({ "model_id": self.model }))
+            .await?;
+        output::print_json(&res)?;
+        Ok(())
     }
 }
 
@@ -652,7 +1010,7 @@ impl EmbedVideoCatalogCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listVideoCatalog", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -667,7 +1025,7 @@ impl EmbedVideoListCmd {
     pub async fn execute(&self) -> Result<()> {
         let rpc = RpcClient::new(&self.rpc);
         let res: serde_json::Value = rpc.call("tenzro_listVideoModels", json!({})).await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
+        output::print_json(&res)?;
         Ok(())
     }
 }
@@ -681,7 +1039,8 @@ pub struct EmbedVideoRunCmd {
     video: String,
     #[arg(long, default_value_t = false)]
     normalize: bool,
-    /// Optional frame stride override.
+    /// Keep every Nth decoded frame instead of spreading the samples evenly
+    /// across the clip. Still capped at the encoder's frame budget.
     #[arg(long)]
     frame_stride: Option<u32>,
     #[arg(long, default_value = DEFAULT_RPC)]
@@ -703,8 +1062,422 @@ impl EmbedVideoRunCmd {
                 }),
             )
             .await?;
-        println!("{}", serde_json::to_string_pretty(&res)?);
-        let _ = output::print_success;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+// ============================================================================
+// forecast
+// ============================================================================
+
+#[derive(Debug, Subcommand)]
+pub enum ForecastCommand {
+    /// List the curated forecast catalog (TimesFM 2.5, TiRex).
+    Catalog(ForecastCatalogCmd),
+    /// List currently-loaded forecasters on this node.
+    List(ForecastListCmd),
+    /// Register a forecast ONNX already present on the node's filesystem.
+    Load(ForecastLoadCmd),
+    /// Unregister a previously-loaded forecaster.
+    Unload(ForecastUnloadCmd),
+    /// Run a univariate forecast.
+    Run(ForecastRunCmd),
+}
+
+impl ForecastCommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::Catalog(c) => c.execute().await,
+            Self::List(c) => c.execute().await,
+            Self::Load(c) => c.execute().await,
+            Self::Unload(c) => c.execute().await,
+            Self::Run(c) => c.execute().await,
+        }
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct ForecastCatalogCmd {
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl ForecastCatalogCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_listForecastCatalog", json!({})).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct ForecastListCmd {
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl ForecastListCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_listForecastModels", json!({})).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+/// Unlike `embed-text load`, there is no fetch step here: the node registers
+/// an ONNX file that already exists on its own filesystem, so `--path` is
+/// resolved node-side.
+#[derive(Debug, Parser)]
+pub struct ForecastLoadCmd {
+    /// Model id to register the forecaster under.
+    #[arg(long)]
+    model: String,
+    /// Path on the node to the ONNX file.
+    #[arg(long)]
+    path: String,
+    /// Catalog id (e.g. `timesfm-2.5-200m`, `tirex-35m`). Supplies
+    /// context length, horizon, output tensor name and batch width from the
+    /// catalog entry, and enforces its license tier.
+    #[arg(long = "catalog-id")]
+    catalog_id: Option<String>,
+    /// Input context window length. Required without `--catalog-id`.
+    #[arg(long = "context-length")]
+    context_length: Option<u32>,
+    /// Maximum single-pass forecast horizon. Required without `--catalog-id`.
+    #[arg(long = "max-horizon")]
+    max_horizon: Option<u32>,
+    /// Prediction output tensor name, for multi-output graphs whose first
+    /// output is not the forecast.
+    #[arg(long = "output-name")]
+    output_name: Option<String>,
+    /// Fixed leading batch dimension the graph requires.
+    #[arg(long = "batch-size")]
+    batch_size: Option<u32>,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl ForecastLoadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        if self.catalog_id.is_none() && (self.context_length.is_none() || self.max_horizon.is_none())
+        {
+            return Err(anyhow!(
+                "pass --catalog-id, or both --context-length and --max-horizon"
+            ));
+        }
+        let mut payload = json!({
+            "model_id": self.model,
+            "path": self.path,
+        });
+        if let Some(c) = &self.catalog_id {
+            payload["catalog_id"] = json!(c);
+        }
+        if let Some(c) = self.context_length {
+            payload["context_length"] = json!(c);
+        }
+        if let Some(h) = self.max_horizon {
+            payload["max_horizon"] = json!(h);
+        }
+        if let Some(o) = &self.output_name {
+            payload["output_name"] = json!(o);
+        }
+        if let Some(b) = self.batch_size {
+            payload["batch_size"] = json!(b);
+        }
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_loadForecastModel", payload).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct ForecastUnloadCmd {
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl ForecastUnloadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_unloadForecastModel",
+                json!({ "model_id": self.model }),
+            )
+            .await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct ForecastRunCmd {
+    /// Model id of a loaded forecaster.
+    #[arg(long)]
+    model: String,
+    /// Context series, most-recent-last. Comma-separated or repeated.
+    #[arg(long = "context", value_delimiter = ',', num_args = 1..)]
+    context: Vec<f64>,
+    /// JSON file holding the context series as an array of numbers. Use this
+    /// instead of `--context` for series too long for a command line.
+    #[arg(long = "context-file", conflicts_with = "context")]
+    context_file: Option<String>,
+    /// Steps ahead to predict. Must not exceed the model's max horizon.
+    #[arg(long)]
+    horizon: u32,
+    /// Quantile levels to return, e.g. `--quantile 0.1,0.5,0.9`.
+    #[arg(long = "quantile", value_delimiter = ',', num_args = 1..)]
+    quantiles: Vec<f64>,
+    /// Sampling interval of the context series, in seconds.
+    #[arg(long = "frequency-seconds")]
+    frequency_seconds: Option<u64>,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl ForecastRunCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let history: Vec<f64> = match &self.context_file {
+            Some(p) => {
+                let raw = std::fs::read_to_string(p)
+                    .with_context(|| format!("failed to read context file {}", p))?;
+                serde_json::from_str(&raw)
+                    .with_context(|| "context file must be a JSON array of numbers")?
+            }
+            None => self.context.clone(),
+        };
+        if history.is_empty() {
+            return Err(anyhow!("pass --context or --context-file"));
+        }
+        let mut payload = json!({
+            "model_id": self.model,
+            "history": history,
+            "horizon": self.horizon,
+            "quantiles": self.quantiles,
+        });
+        if let Some(f) = self.frequency_seconds {
+            payload["frequency_seconds"] = json!(f);
+        }
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_forecast", payload).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+// ============================================================================
+// embed-image
+// ============================================================================
+
+#[derive(Debug, Subcommand)]
+pub enum EmbedImageCommand {
+    /// List the curated vision-encoder catalog (CLIP, SigLIP2, DINOv3).
+    Catalog(EmbedImageCatalogCmd),
+    /// List currently-loaded image encoders on this node.
+    List(EmbedImageListCmd),
+    /// Register a vision-encoder ONNX already present on the node's filesystem.
+    Load(EmbedImageLoadCmd),
+    /// Unregister a previously-loaded image encoder.
+    Unload(EmbedImageUnloadCmd),
+    /// Embed a single image.
+    Run(EmbedImageRunCmd),
+    /// Cosine similarity between an image embedding and a text embedding.
+    Similarity(EmbedImageSimilarityCmd),
+}
+
+impl EmbedImageCommand {
+    pub async fn execute(&self) -> Result<()> {
+        match self {
+            Self::Catalog(c) => c.execute().await,
+            Self::List(c) => c.execute().await,
+            Self::Load(c) => c.execute().await,
+            Self::Unload(c) => c.execute().await,
+            Self::Run(c) => c.execute().await,
+            Self::Similarity(c) => c.execute().await,
+        }
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbedImageCatalogCmd {
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedImageCatalogCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_listVisionCatalog", json!({})).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbedImageListCmd {
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedImageListCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_listVisionModels", json!({})).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbedImageLoadCmd {
+    /// Model id to register the encoder under.
+    #[arg(long)]
+    model: String,
+    /// Path on the node to the ONNX file.
+    #[arg(long)]
+    path: String,
+    /// Catalog id (e.g. `clip-vit-b32`, `dinov3-vitb16`). Supplies input size,
+    /// embedding dimension and normalization, and enforces the license tier.
+    #[arg(long = "catalog-id")]
+    catalog_id: Option<String>,
+    /// Square input edge in pixels. Required without `--catalog-id`.
+    #[arg(long = "input-size")]
+    input_size: Option<u32>,
+    /// Output embedding dimension. Required without `--catalog-id`.
+    #[arg(long = "embedding-dim")]
+    embedding_dim: Option<u32>,
+    /// Pixel normalization: `clip`, `imagenet` or `siglip`.
+    #[arg(long)]
+    normalization: Option<String>,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedImageLoadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        if self.catalog_id.is_none() && (self.input_size.is_none() || self.embedding_dim.is_none()) {
+            return Err(anyhow!(
+                "pass --catalog-id, or both --input-size and --embedding-dim"
+            ));
+        }
+        let mut payload = json!({
+            "model_id": self.model,
+            "path": self.path,
+        });
+        if let Some(c) = &self.catalog_id {
+            payload["catalog_id"] = json!(c);
+        }
+        if let Some(s) = self.input_size {
+            payload["input_size"] = json!(s);
+        }
+        if let Some(d) = self.embedding_dim {
+            payload["embedding_dim"] = json!(d);
+        }
+        if let Some(n) = &self.normalization {
+            payload["normalization"] = json!(n);
+        }
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc.call("tenzro_loadVisionModel", payload).await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbedImageUnloadCmd {
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedImageUnloadCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call("tenzro_unloadVisionModel", json!({ "model_id": self.model }))
+            .await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbedImageRunCmd {
+    /// Model id of a loaded image encoder.
+    #[arg(long)]
+    model: String,
+    /// Path to the input image (PNG/JPEG/WebP).
+    #[arg(long)]
+    image: String,
+    /// L2-normalize the output (most retrieval pipelines want this).
+    #[arg(long, default_value_t = false)]
+    normalize: bool,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedImageRunCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let image_b64 = read_b64(&self.image)?;
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_imageEmbed",
+                json!({
+                    "model_id": self.model,
+                    "image_base64": image_b64,
+                    "normalize": self.normalize,
+                }),
+            )
+            .await?;
+        output::print_json(&res)?;
+        Ok(())
+    }
+}
+
+/// Pure cosine similarity — the node loads no model for this. Both vectors
+/// come from the caller: the image side from `embed-image run`, the text side
+/// from whichever text tower matches the encoder family.
+#[derive(Debug, Parser)]
+pub struct EmbedImageSimilarityCmd {
+    /// JSON file holding the image embedding as an array of numbers.
+    #[arg(long = "image-embedding")]
+    image_embedding: String,
+    /// JSON file holding the text embedding as an array of numbers.
+    #[arg(long = "text-embedding")]
+    text_embedding: String,
+    #[arg(long, default_value = DEFAULT_RPC)]
+    rpc: String,
+}
+
+impl EmbedImageSimilarityCmd {
+    pub async fn execute(&self) -> Result<()> {
+        let read_vec = |p: &str| -> Result<Vec<f64>> {
+            let raw = std::fs::read_to_string(p)
+                .with_context(|| format!("failed to read embedding file {}", p))?;
+            serde_json::from_str(&raw)
+                .with_context(|| format!("{} must be a JSON array of numbers", p))
+        };
+        let img = read_vec(&self.image_embedding)?;
+        let txt = read_vec(&self.text_embedding)?;
+        let rpc = RpcClient::new(&self.rpc);
+        let res: serde_json::Value = rpc
+            .call(
+                "tenzro_imageTextSimilarity",
+                json!({
+                    "image_embedding": img,
+                    "text_embedding": txt,
+                }),
+            )
+            .await?;
+        output::print_json(&res)?;
         Ok(())
     }
 }

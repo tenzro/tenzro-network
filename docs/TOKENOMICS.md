@@ -73,11 +73,11 @@ Supply is fixed. There is no protocol-level mint authority beyond the genesis di
 | Running a validator | Bond TNZO and run a node that meets the resource profile (hardware, bandwidth, uptime, optional TEE attestation) to finalize blocks in HotStuff-2. Voting power is stake-weighted; earn priority fees, leader-election rewards, and governance weight. Optional TEE attestation adds a 1.5× leader-selection multiplier. Consensus is staked-only; serving capacity is a separate open role (next row) that does not require stake (section 7) |
 | Serving compute or hardware | Run a model provider, TEE provider, storage provider, distributed-training participant, or any other resource-serving role; earn per-call / per-token / per-service / per-attestation / per-byte fees, plus the provider class reward multiplier on staking rewards |
 | Operating an RPC provider | Run a public or gated RPC endpoint that brokers access to network resources (Canton, regulated bridge routes, KYC-tier-gated services, admin-gated cross-chain mint/burn). Mint scoped API keys for tenants, manage per-tenant party allocation and identity-provider provisioning, expose per-tenant analytics; earn from tenant access fees, per-call fees, and commission on the underlying flow routed through your endpoint |
-| Building and running apps on Tenzro | Ship an application that drives transactions through the network — settlements, payments, inference billing, marketplace flows; earn from the underlying activity (provider fees, marketplace commissions, agent template invocations, AP2 / MPP / x402 settlement flow your app routes) |
+| Building and running apps on Tenzro | Run an application that drives transactions through the network — settlements, payments, inference billing, marketplace flows; earn from the underlying activity (provider fees, marketplace commissions, agent template invocations, AP2 / MPP / x402 settlement flow your app routes) |
 | Running agents that do useful work | Deploy autonomous or delegated agents that fulfill inference requests, payment routing, cross-chain settlement, capital intent, or any other paid service; earn per fulfilled task plus reputation-driven routing share |
-| Building tools, skills, and integrations | Ship MCP tools, A2A skills, agent templates, libraries, SDKs, bridges, oracle integrations, payment-rail adapters, and other ecosystem components; earn template invocation commissions, tool / skill usage fees, and ecosystem grants |
+| Building tools, skills, and integrations | Publish MCP tools, A2A skills, agent templates, libraries, SDKs, bridges, oracle integrations, payment-rail adapters, and other ecosystem components; earn template invocation commissions, tool / skill usage fees, and ecosystem grants |
 | Data and content contributions | Contribute to skills, tools, model catalogs, training datasets, knowledge bases, reference data, or any other public resource the network consumes; earn through usage fees and governance-approved contribution rewards |
-| Protocol and infrastructure work | Build the protocol itself, audit code, ship core integrations, write documentation, run security research, operate public infrastructure; receive grants from the public treasury through the Tenzro Foundation's governance-approved allocation process |
+| Protocol and infrastructure work | Build the protocol itself, audit code, write core integrations, write documentation, run security research, operate public infrastructure; receive grants from the public treasury through the Tenzro Foundation's governance-approved allocation process |
 | Community participation | Participate in governance votes, contribute to community channels and learning resources, file useful bug reports, refer new participants; receive community incentive allocations, faucet allocations, marketplace rewards, and governance-approved incentives |
 
 Beyond the above, the Tenzro Foundation runs a public, governance-controlled grant program. Grants fund work the community proposes and the network rewards — research, ecosystem development, public-good infrastructure, regional onboarding, education, security audits, integrations, and anything else governance approves as serving the network. The grant pool sits in the public treasury (section 12); allocation is on-chain and auditable.
@@ -94,7 +94,7 @@ The treasury (40% of all network commission) accumulates a public, on-chain bala
 
 Because there is no team allocation and no investor allocation:
 
-- There is no investor unlock cliff. There are no quarterly vesting events that release a wave of supply onto the market.
+- There is no investor unlock cliff. There are no quarterly vesting events that release a large block of supply onto the market.
 - There is no team unlock schedule. Contributors who build the protocol receive grants in the same way ecosystem builders do — through governance-approved disbursements from the public treasury, on terms the community can see.
 - There is no early-backer carry. Anyone holding TNZO at any point in time is holding it because they earned it from the network or bought it from another participant who did.
 
@@ -215,6 +215,8 @@ Net supply change per epoch =
 ### Base-fee burn
 
 Every block burns `base_fee × gas_used`. The default burn fraction is 100% — under EIP-1559, the entire base fee is removed from circulation. The base fee tracks network congestion: more activity, more burn.
+
+The movement is settled at block finalization, on every node that finalizes the block rather than only on validators, so all replicas converge on the same balances. The executor has already debited `gas_price × gas_used` from each sender by that point; settlement decrements total supply by the burn share and credits the remainder — non-zero only when governance has moved `base_fee_burn_bps` below 10,000 — to the treasury balance. The split comes from the adaptive burn dial (section 6), and the resulting treasury and burn amounts are recorded verbatim in the fee statistics, so the accounting cannot drift from the ledger.
 
 ### Commission burn
 
@@ -738,15 +740,17 @@ Reward vesting is opened automatically at claim time (section 7) and needs no op
 
 The agentic economy has a few specific economic surfaces that do not exist in human-only systems.
 
-### Triple-ceiling enforcement on agent payments
+### Nested-ceiling enforcement on agent payments
 
-Every agent payment passes through three independent ceiling checks:
+An agent payment passes through up to five independent ceiling checks, outermost first:
 
-1. **AP2 mandate constraints** — the mandate itself (signed by the user) declares an item set and a max amount; the payment cannot exceed either.
+1. **AP2 checkout mandate** — the mandate itself (signed by the principal) declares an item set, a max amount, and optional merchant / category / chain allow-lists; the payment cannot exceed or fall outside any of them.
 2. **Delegation scope (protocol layer)** — the agent's TDIP delegation scope declares per-transaction value cap, daily spend cap, allowed operations, allowed chains, allowed payment protocols, time bound. Enforced by `IdentityRegistry::enforce_operation`.
 3. **Runtime spending policy** — the runtime `SpendingPolicy` tracks rolling daily spend per machine DID; per-transaction and daily-window caps enforced by `SpendingPolicySnapshot::check`.
+4. **On-chain escrow** — when the mandate pair carries an `escrow_id`, the pre-locked escrow balance bounds the payment. An `escrow_id` that fails to resolve is a hard refusal, never a skip.
+5. **Stripe SPT usage limits** — when the mandate pair carries a `spt_grant_id`, the granted token's `usage_limits.max_amount` and currency bound the payment. An unresolvable `spt_grant_id` is likewise a hard refusal.
 
-All three must pass. The agent payment is refused if any single ceiling fails. The user retains the right to override via signing a new mandate or via the controller's revocation surface.
+Ceilings 1–3 apply to every agent payment; 4 and 5 apply when the mandate pair commits to an escrow or an SPT. Every applicable ceiling must pass — the payment is refused if any single one fails. The principal retains the right to override by signing a new mandate or through the controller's revocation surface.
 
 ### ERC-7579 on-chain custody enforcement
 
@@ -754,7 +758,7 @@ The on-chain twin of the delegation scope is the spending limit validator module
 
 ### Mandate-receipt binding
 
-Every settlement receipt can be bound to the off-chain mandate that authorized it. The `MandateRef` carries the mandate protocol (`ap2-cart`, `ap2-intent`, `ap2-payment`, `x402`, `mpp`, `stripe-spt`, `visa-tap`, `mastercard-agent-pay`, `capital-intent`, `workflow-step`), the mandate hash, the issuer DID, the optional mandate URI, and the expiration. The audit loop intent → settlement is closed: every settlement reveals which mandate authorized it.
+Every settlement receipt can be bound to the off-chain mandate that authorized it. The `MandateRef` carries the mandate protocol (`ap2-checkout`, `ap2-payment`, `x402`, `mpp`, `stripe-spt`, `visa-tap`, `mastercard-agent-pay`, `capital-intent`, `workflow-step`), the mandate hash, the issuer DID, the optional mandate URI, and the expiration. The audit loop authorization → settlement is closed: every settlement reveals which mandate authorized it.
 
 ### Capital intent fee model
 
@@ -1095,7 +1099,7 @@ The model above is designed for where the AI and agentic economy is going, not w
 
 **Regulation requires legibility.** EU AI Act Article 50 binds AI disclosure. MiCA binds stablecoin and crypto-asset service providers. Travel rule enforcement extends to virtual asset service providers. Protocols that move into 2027 without auditable identity, mandate-bound authorization, KYC-tier-bound delegation, on-chain receipts, and operator-grade analytics will not be usable by institutional counterparties. Tenzro's TDIP credential system, AP2 validation, ERC-7579 enforcement, settlement receipts with mandate binding, and per-tenant analytics are built for this regulatory shape.
 
-**Post-quantum becomes table stakes.** NIST standardized ML-DSA in 2024; CNSA 2.0 mandates PQ-hybrid signatures across federal infrastructure by the late 2020s; major TLS deployments shipped X25519MLKEM768 in 2024–2025. Protocols that store value or sign attestations for the long term need PQ-hybrid throughout. Tenzro's Ed25519 + ML-DSA-65 hybrid signatures on every safety-critical message, X25519 + ML-KEM-768 key exchange, and PQ-hybrid wallet primitives are built for this.
+**Post-quantum becomes table stakes.** NIST standardized ML-DSA in 2024; CNSA 2.0 mandates PQ-hybrid signatures across federal infrastructure by the late 2020s; major TLS deployments enabled X25519MLKEM768 in 2024–2025. Protocols that store value or sign attestations for the long term need PQ-hybrid throughout. Tenzro's Ed25519 + ML-DSA-65 hybrid signatures on every safety-critical message, X25519 + ML-KEM-768 key exchange, and PQ-hybrid wallet primitives are built for this.
 
 The TNZO economic model is built around these forward trajectories. Demand sources scale with the agentic economy. Burn channels scale with real usage. Bonds align providers with the value they secure. Governance dials let the protocol respond to where the world is going.
 

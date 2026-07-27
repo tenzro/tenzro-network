@@ -15,7 +15,7 @@ pub enum IrohError {
     Uri(#[from] TenzroUriError),
 
     /// The URI parsed correctly but the resolver does not implement that
-    /// variant yet (e.g. `Manifest` before Phase B2 lands).
+    /// variant yet (e.g. `Manifest` before Phase B2 is implemented).
     #[error("URI variant `{0}` is not supported by this resolver yet")]
     UnsupportedVariant(&'static str),
 

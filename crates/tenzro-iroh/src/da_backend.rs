@@ -20,7 +20,7 @@
 //! - `locator`: raw 32-byte BLAKE3 hash. We store the **raw bytes**, not the
 //!   hex string, so the on-chain footprint is 32 bytes per pointer regardless
 //!   of envelope encoding.
-//! - `commitment_kzg`: `None`. iroh-blobs verifies BLAKE3 end-to-end on
+//! - `commitment_kzg`: `None`. iroh-blobs verifies BLAKE3 over the whole
 //!   transfer, and the chain-of-custody commitment in
 //!   `ReceiptEnvelope::commitment` (SHA-256 over the canonical payload) is the
 //!   authoritative integrity check. We do not double-attest with KZG.
@@ -149,7 +149,7 @@ impl DaBackend for IrohBlobsDaBackend {
         DaBackendStatus {
             backend: DaBackendId::IrohBlobs,
             // Endpoint health is implicit — if the resolver is alive, the
-            // ALPN is registered. Phase B1 wires a real readiness probe
+            // ALPN is registered. Phase B1 wires a readiness probe
             // against the downloader once cross-node fetch is exercised.
             healthy: true,
             last_submission_ms: *self.last_submission_ms.lock(),
@@ -206,7 +206,7 @@ impl DaBackend for IrohBlobsDaBackend {
 
     async fn verify_availability(&self, pointer: &DaPointer) -> StorageResult<()> {
         // Local-store probe: try the fetch path but discard the bytes. Once
-        // Phase B1's downloader lands, this becomes a cheaper provider-list
+        // Phase B1's downloader exists, this becomes a cheaper provider-list
         // probe that does not transfer the payload.
         let uri = Self::pointer_to_blob_uri(pointer)?;
         self.resolver
@@ -377,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn receipt_envelope_round_trips_via_da_pointer() {
-        // End-to-end: build an OffloadedDA ReceiptEnvelope referencing a
+        // Full path: build an OffloadedDA ReceiptEnvelope referencing a
         // payload submitted through the iroh-blobs backend. Fetch the
         // payload back via the pointer and validate it matches the
         // envelope's SHA-256 commitment.

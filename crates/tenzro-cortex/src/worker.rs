@@ -120,7 +120,8 @@ impl CortexWorker {
         )
     }
 
-    /// Execute a reasoning request end-to-end.
+    /// Execute a reasoning request: validate budget, run inference, price,
+    /// attest, and re-sign the receipt.
     pub async fn execute(&self, request: &CortexRequest) -> Result<CortexResponse> {
         let started = Instant::now();
         let tier = request.budget.tier;

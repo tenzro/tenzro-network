@@ -12,6 +12,7 @@ use tenzro_storage::{
     compute_commitment, InlineFallbackBackend, ReceiptEnvelope, ReceiptKind, ReceiptStorageMode,
     ReceiptSummary,
 };
+use tenzro_types::model::BillableUnits;
 use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{debug, info, warn};
 
@@ -32,24 +33,90 @@ const PROVIDER_STATS_PREFIX: &[u8] = b"provider_stats:";
 /// Global stats key in storage
 const GLOBAL_STATS_KEY: &[u8] = b"global_stats";
 
+/// Lifetime totals of every billable dimension.
+///
+/// The per-call counters on [`BillableUnits`] are sized for one request; summed
+/// over a provider's lifetime they would wrap. This is the widened mirror used
+/// by the three aggregate tiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BillableTotals {
+    /// Prompt tokens read
+    pub input_tokens: u64,
+    /// Completion tokens generated
+    pub output_tokens: u64,
+    /// Prompt tokens served from a warm prefix cache
+    pub cached_read_tokens: u64,
+    /// Prompt tokens written into a prefix cache
+    pub cached_write_tokens: u64,
+    /// Reasoning loops executed
+    pub reasoning_loops: u64,
+    /// Tokens derived from image geometry
+    pub image_tokens: u64,
+    /// Audio duration processed, in milliseconds
+    pub audio_ms: u64,
+    /// Video duration processed, in milliseconds
+    pub video_ms: u64,
+    /// Denoising work: width × height × steps × frames
+    pub pixel_steps: u128,
+    /// Frames produced or consumed
+    pub frames: u64,
+}
+
+impl BillableTotals {
+    /// Folds one call's units into the running totals.
+    pub fn add(&mut self, units: &BillableUnits) {
+        self.input_tokens = self.input_tokens.saturating_add(units.input_tokens as u64);
+        self.output_tokens = self.output_tokens.saturating_add(units.output_tokens as u64);
+        self.cached_read_tokens = self
+            .cached_read_tokens
+            .saturating_add(units.cached_read_tokens as u64);
+        self.cached_write_tokens = self
+            .cached_write_tokens
+            .saturating_add(units.cached_write_tokens as u64);
+        self.reasoning_loops = self
+            .reasoning_loops
+            .saturating_add(units.reasoning_loops as u64);
+        self.image_tokens = self.image_tokens.saturating_add(units.image_tokens as u64);
+        self.audio_ms = self.audio_ms.saturating_add(units.audio_ms);
+        self.video_ms = self.video_ms.saturating_add(units.video_ms);
+        self.pixel_steps = self.pixel_steps.saturating_add(units.pixel_steps);
+        self.frames = self.frames.saturating_add(units.frames as u64);
+    }
+
+    /// Every token-denominated dimension summed: prompt, completion, both cache
+    /// legs, and image tokens.
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cached_read_tokens)
+            .saturating_add(self.cached_write_tokens)
+            .saturating_add(self.image_tokens)
+    }
+}
+
 /// Individual usage record for a single inference request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
-    /// Unique record ID (timestamp + counter for uniqueness)
+    /// Lookup key for the record. Defaults to a timestamp-plus-UUID string;
+    /// producers that mint a client-visible id for the generation pass it
+    /// through [`UsageRecord::with_record_id`] instead, so a consumer holding
+    /// only that id can read the record back.
     pub record_id: String,
     /// Model identifier
     pub model_id: String,
     /// Provider that served the inference
     pub provider_id: Address,
-    /// Number of input tokens
-    pub input_tokens: u32,
-    /// Number of output tokens
-    pub output_tokens: u32,
-    /// Bytes received from the consumer (request body size at the HTTP boundary).
-    /// Used for marketplace bandwidth accounting alongside token counts.
+    /// Billable work the call consumed, across every modality. A chat call
+    /// fills the token legs; a transcription fills `audio_ms`; an image
+    /// generation fills `pixel_steps` and `frames`.
+    pub units: BillableUnits,
+    /// Bytes received from the consumer, for marketplace bandwidth accounting
+    /// alongside token counts. Measured at whichever boundary the generation
+    /// crossed: the HTTP request body for a routed inference, the prompt text
+    /// for one served from local weights.
     pub bytes_in: u64,
-    /// Bytes sent back to the consumer (response body size at the HTTP boundary).
-    /// Used for marketplace bandwidth accounting alongside token counts.
+    /// Bytes sent back to the consumer, measured at the same boundary as
+    /// [`UsageRecord::bytes_in`].
     pub bytes_out: u64,
     /// Cost in smallest TNZO unit
     pub cost: u64,
@@ -64,8 +131,7 @@ impl UsageRecord {
     pub fn new(
         model_id: String,
         provider_id: Address,
-        input_tokens: u32,
-        output_tokens: u32,
+        units: BillableUnits,
         bytes_in: u64,
         bytes_out: u64,
         cost: u64,
@@ -78,8 +144,7 @@ impl UsageRecord {
             record_id,
             model_id,
             provider_id,
-            input_tokens,
-            output_tokens,
+            units,
             bytes_in,
             bytes_out,
             cost,
@@ -88,9 +153,22 @@ impl UsageRecord {
         }
     }
 
-    /// Total tokens (input + output)
+    /// Replaces the generated record id with a caller-supplied one.
+    ///
+    /// Callers that already mint a client-visible id for the generation — the
+    /// `chatcmpl-…` completion id on the chat routes, the `request_id` on a
+    /// routed inference — pass it here so a consumer holding only that id can
+    /// read the recorded token counts and cost back through
+    /// [`UsageTracker::get_record`]. Without it the record is keyed on a
+    /// timestamp-plus-UUID string the consumer never sees.
+    pub fn with_record_id(mut self, record_id: String) -> Self {
+        self.record_id = record_id;
+        self
+    }
+
+    /// Every token-denominated dimension summed
     pub fn total_tokens(&self) -> u32 {
-        self.input_tokens.saturating_add(self.output_tokens)
+        self.units.total_tokens()
     }
 
     /// Total bytes (in + out) at the HTTP boundary
@@ -106,10 +184,8 @@ pub struct ModelUsageStats {
     pub model_id: String,
     /// Total number of inference requests
     pub inference_count: u64,
-    /// Total input tokens
-    pub total_input_tokens: u64,
-    /// Total output tokens
-    pub total_output_tokens: u64,
+    /// Lifetime totals of every billable dimension
+    pub total_units: BillableTotals,
     /// Total cost in smallest TNZO unit
     pub total_cost: u64,
     /// Sum of all latencies for calculating average
@@ -133,9 +209,9 @@ impl ModelUsageStats {
         }
     }
 
-    /// Total tokens (input + output)
+    /// Every token-denominated dimension summed
     pub fn total_tokens(&self) -> u64 {
-        self.total_input_tokens.saturating_add(self.total_output_tokens)
+        self.total_units.total_tokens()
     }
 
     /// Average latency in milliseconds
@@ -158,12 +234,7 @@ impl ModelUsageStats {
     /// Updates stats with a new usage record
     fn update(&mut self, record: &UsageRecord) {
         self.inference_count = self.inference_count.saturating_add(1);
-        self.total_input_tokens = self
-            .total_input_tokens
-            .saturating_add(record.input_tokens as u64);
-        self.total_output_tokens = self
-            .total_output_tokens
-            .saturating_add(record.output_tokens as u64);
+        self.total_units.add(&record.units);
         self.total_cost = self.total_cost.saturating_add(record.cost);
         self.total_latency_ms = self.total_latency_ms.saturating_add(record.latency_ms);
         self.total_bytes_in = self.total_bytes_in.saturating_add(record.bytes_in);
@@ -183,10 +254,8 @@ pub struct ProviderUsageStats {
     pub provider_id: Address,
     /// Total number of inference requests served
     pub inference_count: u64,
-    /// Total input tokens processed
-    pub total_input_tokens: u64,
-    /// Total output tokens generated
-    pub total_output_tokens: u64,
+    /// Lifetime totals of every billable dimension served
+    pub total_units: BillableTotals,
     /// Total revenue earned in smallest TNZO unit
     pub total_revenue: u64,
     /// Sum of all latencies
@@ -210,9 +279,9 @@ impl ProviderUsageStats {
         }
     }
 
-    /// Total tokens (input + output)
+    /// Every token-denominated dimension summed
     pub fn total_tokens(&self) -> u64 {
-        self.total_input_tokens.saturating_add(self.total_output_tokens)
+        self.total_units.total_tokens()
     }
 
     /// Average latency in milliseconds
@@ -253,18 +322,13 @@ impl ProviderUsageStats {
         if window_ms <= 0 {
             return None;
         }
-        Some(self.total_output_tokens as f64 * 1000.0 / window_ms as f64)
+        Some(self.total_units.output_tokens as f64 * 1000.0 / window_ms as f64)
     }
 
     /// Updates stats with a new usage record
     fn update(&mut self, record: &UsageRecord) {
         self.inference_count = self.inference_count.saturating_add(1);
-        self.total_input_tokens = self
-            .total_input_tokens
-            .saturating_add(record.input_tokens as u64);
-        self.total_output_tokens = self
-            .total_output_tokens
-            .saturating_add(record.output_tokens as u64);
+        self.total_units.add(&record.units);
         self.total_revenue = self.total_revenue.saturating_add(record.cost);
         self.total_latency_ms = self.total_latency_ms.saturating_add(record.latency_ms);
         self.total_bytes_in = self.total_bytes_in.saturating_add(record.bytes_in);
@@ -282,10 +346,8 @@ impl ProviderUsageStats {
 pub struct GlobalUsageStats {
     /// Total number of inference requests across all models
     pub total_inference_count: u64,
-    /// Total input tokens across all models
-    pub total_input_tokens: u64,
-    /// Total output tokens across all models
-    pub total_output_tokens: u64,
+    /// Lifetime totals of every billable dimension network-wide
+    pub total_units: BillableTotals,
     /// Total cost/revenue across all models
     pub total_cost: u64,
     /// Sum of all latencies across all requests
@@ -305,9 +367,9 @@ pub struct GlobalUsageStats {
 }
 
 impl GlobalUsageStats {
-    /// Total tokens (input + output)
+    /// Every token-denominated dimension summed
     pub fn total_tokens(&self) -> u64 {
-        self.total_input_tokens.saturating_add(self.total_output_tokens)
+        self.total_units.total_tokens()
     }
 
     /// Average latency in milliseconds
@@ -332,12 +394,7 @@ impl GlobalUsageStats {
     /// Updates global stats with a new usage record
     fn update(&mut self, record: &UsageRecord) {
         self.total_inference_count = self.total_inference_count.saturating_add(1);
-        self.total_input_tokens = self
-            .total_input_tokens
-            .saturating_add(record.input_tokens as u64);
-        self.total_output_tokens = self
-            .total_output_tokens
-            .saturating_add(record.output_tokens as u64);
+        self.total_units.add(&record.units);
         self.total_cost = self.total_cost.saturating_add(record.cost);
         self.total_latency_ms = self.total_latency_ms.saturating_add(record.latency_ms);
         self.total_bytes_in = self.total_bytes_in.saturating_add(record.bytes_in);
@@ -430,6 +487,15 @@ impl UsageTracker {
     /// Sets the maximum number of recent records to keep in memory
     pub fn with_max_recent_records(mut self, max: usize) -> Self {
         self.max_recent_records = max;
+        // Shrinking below what the ring already holds (after hydration, or after
+        // an earlier larger bound) drops the oldest records immediately rather
+        // than waiting for enough new calls to evict them.
+        let mut recent = self.recent_records.write();
+        if recent.len() > max {
+            let excess = recent.len() - max;
+            recent.drain(0..excess);
+        }
+        drop(recent);
         self
     }
 
@@ -439,11 +505,10 @@ impl UsageTracker {
     /// to storage if configured.
     pub fn record_usage(&self, record: UsageRecord) -> Result<()> {
         debug!(
-            "Recording usage: model={}, provider={}, tokens={}/{}, bytes={}/{}, cost={}, latency={}ms",
+            "Recording usage: model={}, provider={}, units={:?}, bytes={}/{}, cost={}, latency={}ms",
             record.model_id,
             record.provider_id,
-            record.input_tokens,
-            record.output_tokens,
+            record.units,
             record.bytes_in,
             record.bytes_out,
             record.cost,
@@ -529,6 +594,103 @@ impl UsageTracker {
             0
         };
         recent[start..].iter().rev().cloned().collect()
+    }
+
+    /// Looks up a single usage record by its id.
+    ///
+    /// Consumers reconcile a generation after the response is already consumed
+    /// — the streamed case, where token counts arrive in the terminal chunk and
+    /// are easy to miss. The id is whatever the producer keyed the record on
+    /// via [`UsageRecord::with_record_id`].
+    ///
+    /// Reads the in-memory ring first, then falls back to storage. The ring is
+    /// bounded by `max_recent_records` and is refilled from storage on boot with
+    /// the newest records, so the storage path is what serves a lookup for a
+    /// record older than the ring holds.
+    ///
+    /// Returns `None` when no record exists for the id rather than a zeroed
+    /// record, so a caller can distinguish "not measured" from "measured zero".
+    pub fn get_record(&self, record_id: &str) -> Option<UsageRecord> {
+        {
+            let recent = self.recent_records.read();
+            if let Some(found) = recent.iter().rev().find(|r| r.record_id == record_id) {
+                return Some(found.clone());
+            }
+        }
+        self.load_record(record_id)
+    }
+
+    /// Reads a usage record out of storage, inverting [`Self::persist_record`]:
+    /// envelope at `model_usage:<record_id>` → DA pointer → payload → record.
+    /// The recomputed SHA-256 is checked against the envelope commitment so a
+    /// payload swapped underneath the pointer is refused rather than reported.
+    fn load_record(&self, record_id: &str) -> Option<UsageRecord> {
+        let storage = self.storage.as_ref()?;
+        let key = [USAGE_RECORD_PREFIX, record_id.as_bytes()].concat();
+
+        let value = match storage.get(CF_MODELS, &key) {
+            Ok(Some(value)) => value,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!("Failed to read usage record {}: {}", record_id, e);
+                return None;
+            }
+        };
+
+        self.decode_record(record_id, &value)
+    }
+
+    /// Resolves one persisted receipt envelope back to its record: envelope →
+    /// DA pointer → payload → commitment check → record.
+    fn decode_record(&self, record_id: &str, value: &[u8]) -> Option<UsageRecord> {
+        let envelope = match bincode::deserialize::<ReceiptEnvelope>(value) {
+            Ok(envelope) => envelope,
+            Err(e) => {
+                warn!(
+                    "Failed to deserialize inference receipt envelope for {}: {}",
+                    record_id, e
+                );
+                return None;
+            }
+        };
+
+        let pointer = match envelope.da_pointer.as_ref() {
+            Some(pointer) => pointer,
+            None => {
+                warn!(
+                    "Inference receipt {} carries no DA pointer; cannot resolve payload",
+                    record_id
+                );
+                return None;
+            }
+        };
+
+        let payload = match self.da_backend.fetch_sync(pointer) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!(
+                    "Failed to fetch offloaded inference payload for {}: {}",
+                    record_id, e
+                );
+                return None;
+            }
+        };
+
+        if compute_commitment(&payload) != envelope.commitment {
+            warn!(
+                "Inference payload for {} does not match its receipt commitment",
+                record_id
+            );
+            return None;
+        }
+
+        match bincode::deserialize::<UsageRecord>(&payload) {
+            Ok(record) => Some(record),
+            Err(e) => {
+                warn!("Failed to deserialize usage record {}: {}", record_id, e);
+                None
+            }
+        }
     }
 
     /// Lists all models with usage statistics
@@ -725,6 +887,62 @@ impl UsageTracker {
             self.provider_stats.len()
         );
 
+        self.load_recent_records(storage)?;
+
+        Ok(())
+    }
+
+    /// Refills the recent-records ring from storage with the newest
+    /// `max_recent_records` records.
+    ///
+    /// Record ids are not ordered — a caller-supplied `chatcmpl-…` id sorts
+    /// nowhere near the timestamp-prefixed default — so ordering comes from the
+    /// record's own timestamp. The working set is pruned once it reaches twice
+    /// the ring size so a node with a long history does not hold every record in
+    /// memory to fill a bounded ring.
+    fn load_recent_records(&self, storage: &Arc<dyn KvStore>) -> Result<()> {
+        if self.max_recent_records == 0 {
+            return Ok(());
+        }
+
+        let keys = storage
+            .get_keys_with_prefix(CF_MODELS, USAGE_RECORD_PREFIX)
+            .map_err(|e| ModelError::StorageError(e.to_string()))?;
+
+        let prune_at = self.max_recent_records.saturating_mul(2);
+        let mut newest: Vec<UsageRecord> = Vec::new();
+
+        for key in keys {
+            let record_id = match std::str::from_utf8(&key[USAGE_RECORD_PREFIX.len()..]) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            let value = match storage.get(CF_MODELS, &key) {
+                Ok(Some(value)) => value,
+                Ok(None) => continue,
+                Err(e) => {
+                    warn!("Failed to read usage record {}: {}", record_id, e);
+                    continue;
+                }
+            };
+            if let Some(record) = self.decode_record(record_id, &value) {
+                newest.push(record);
+            }
+            if newest.len() >= prune_at {
+                newest.sort_by_key(|r| std::cmp::Reverse(r.timestamp.as_millis()));
+                newest.truncate(self.max_recent_records);
+            }
+        }
+
+        newest.sort_by_key(|r| std::cmp::Reverse(r.timestamp.as_millis()));
+        newest.truncate(self.max_recent_records);
+        // The ring is oldest-first; `get_recent_usage` reads the tail and reverses.
+        newest.reverse();
+
+        let loaded = newest.len();
+        *self.recent_records.write() = newest;
+        info!("Loaded {} recent usage records from storage", loaded);
+
         Ok(())
     }
 
@@ -807,8 +1025,7 @@ mod tests {
         let record = UsageRecord::new(
             "gemma4-9b".to_string(),
             Address::zero(),
-            100,
-            50,
+            BillableUnits::tokens(100, 50),
             512,
             2048,
             1000,
@@ -816,8 +1033,8 @@ mod tests {
         );
 
         assert_eq!(record.model_id, "gemma4-9b");
-        assert_eq!(record.input_tokens, 100);
-        assert_eq!(record.output_tokens, 50);
+        assert_eq!(record.units.input_tokens, 100);
+        assert_eq!(record.units.output_tokens, 50);
         assert_eq!(record.total_tokens(), 150);
         assert_eq!(record.bytes_in, 512);
         assert_eq!(record.bytes_out, 2048);
@@ -827,14 +1044,56 @@ mod tests {
     }
 
     #[test]
+    fn test_non_token_units_survive_the_receipt_round_trip() {
+        let storage = Arc::new(MemoryStore::new());
+        let tracker = UsageTracker::with_storage(storage.clone())
+            .unwrap()
+            .with_max_recent_records(0);
+
+        let units = BillableUnits::default()
+            .with_audio_ms(4_500)
+            .with_video_ms(12_000)
+            .with_pixel_steps(1_048_576, 24)
+            .with_image_tokens(729)
+            .with_reasoning_loops(3)
+            .with_cache(2_000, 500);
+
+        let record = UsageRecord::new(
+            "sam3".to_string(),
+            Address::zero(),
+            units.clone(),
+            0,
+            0,
+            9_000,
+            600,
+        )
+        .with_record_id("media-1".to_string());
+        tracker.record_usage(record).unwrap();
+
+        let found = tracker.get_record("media-1").unwrap();
+        assert_eq!(found.units, units);
+        // Partial seconds round up: a 4.5s clip bills as 5s.
+        assert_eq!(found.units.audio_seconds(), 5);
+        assert_eq!(found.units.video_seconds(), 12);
+
+        let stats = tracker.get_model_stats("sam3").unwrap();
+        assert_eq!(stats.total_units.audio_ms, 4_500);
+        assert_eq!(stats.total_units.video_ms, 12_000);
+        assert_eq!(stats.total_units.pixel_steps, 1_048_576);
+        assert_eq!(stats.total_units.frames, 24);
+        assert_eq!(stats.total_units.reasoning_loops, 3);
+        // Image tokens and both cache legs are token-denominated.
+        assert_eq!(stats.total_tokens(), 729 + 2_000 + 500);
+    }
+
+    #[test]
     fn test_model_stats_update() {
         let mut stats = ModelUsageStats::new("test-model".to_string());
 
         let record1 = UsageRecord::new(
             "test-model".to_string(),
             Address::zero(),
-            100,
-            50,
+            BillableUnits::tokens(100, 50),
             500,
             1500,
             1000,
@@ -843,8 +1102,8 @@ mod tests {
         stats.update(&record1);
 
         assert_eq!(stats.inference_count, 1);
-        assert_eq!(stats.total_input_tokens, 100);
-        assert_eq!(stats.total_output_tokens, 50);
+        assert_eq!(stats.total_units.input_tokens, 100);
+        assert_eq!(stats.total_units.output_tokens, 50);
         assert_eq!(stats.total_cost, 1000);
         assert_eq!(stats.total_bytes_in, 500);
         assert_eq!(stats.total_bytes_out, 1500);
@@ -853,8 +1112,7 @@ mod tests {
         let record2 = UsageRecord::new(
             "test-model".to_string(),
             Address::zero(),
-            200,
-            100,
+            BillableUnits::tokens(200, 100),
             1000,
             3000,
             2000,
@@ -863,8 +1121,8 @@ mod tests {
         stats.update(&record2);
 
         assert_eq!(stats.inference_count, 2);
-        assert_eq!(stats.total_input_tokens, 300);
-        assert_eq!(stats.total_output_tokens, 150);
+        assert_eq!(stats.total_units.input_tokens, 300);
+        assert_eq!(stats.total_units.output_tokens, 150);
         assert_eq!(stats.total_cost, 3000);
         assert_eq!(stats.total_bytes_in, 1500);
         assert_eq!(stats.total_bytes_out, 4500);
@@ -881,8 +1139,7 @@ mod tests {
         let record = UsageRecord::new(
             "test-model".to_string(),
             provider,
-            100,
-            50,
+            BillableUnits::tokens(100, 50),
             512,
             2048,
             1000,
@@ -905,8 +1162,7 @@ mod tests {
         let record1 = UsageRecord::new(
             "model-a".to_string(),
             Address::zero(),
-            100,
-            50,
+            BillableUnits::tokens(100, 50),
             512,
             2048,
             1000,
@@ -917,8 +1173,7 @@ mod tests {
         let record2 = UsageRecord::new(
             "model-b".to_string(),
             Address::zero(),
-            200,
-            100,
+            BillableUnits::tokens(200, 100),
             1024,
             4096,
             2000,
@@ -954,8 +1209,7 @@ mod tests {
         let record = UsageRecord::new(
             "model-a".to_string(),
             Address::zero(),
-            100,
-            50,
+            BillableUnits::tokens(100, 50),
             512,
             2048,
             1000,
@@ -976,6 +1230,47 @@ mod tests {
         assert_eq!(model_stats.inference_count, 1);
         assert_eq!(model_stats.total_bytes_in, 512);
         assert_eq!(model_stats.total_bytes_out, 2048);
+
+        // The ring is refilled too, so the record is servable without a
+        // storage read.
+        let recent = tracker2.get_recent_usage(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].model_id, "model-a");
+        assert_eq!(recent[0].units.input_tokens, 100);
+    }
+
+    #[test]
+    fn test_recent_records_hydrate_newest_first() {
+        let storage = Arc::new(MemoryStore::new());
+        let tracker = UsageTracker::with_storage(storage.clone()).unwrap();
+
+        // Timestamps are explicit so ordering is not at the mercy of clock
+        // resolution — record ids sort nowhere near their timestamps.
+        for i in 0..6u64 {
+            let mut record = UsageRecord::new(
+                format!("model-{}", i),
+                Address::zero(),
+                BillableUnits::tokens(100, 50),
+                512,
+                2048,
+                1000,
+                200,
+            )
+            .with_record_id(format!("call-{}", i));
+            record.timestamp = Timestamp::new(1_000 + (i as i64) * 1_000);
+            tracker.record_usage(record).unwrap();
+        }
+
+        let rehydrated = UsageTracker::with_storage(storage)
+            .unwrap()
+            .with_max_recent_records(3);
+
+        // Newest first, and only the newest three of six.
+        let recent = rehydrated.get_recent_usage(10);
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].record_id, "call-5");
+        assert_eq!(recent[1].record_id, "call-4");
+        assert_eq!(recent[2].record_id, "call-3");
     }
 
     #[test]
@@ -986,8 +1281,7 @@ mod tests {
             let record = UsageRecord::new(
                 format!("model-{}", i),
                 Address::zero(),
-                100,
-                50,
+                BillableUnits::tokens(100, 50),
                 512,
                 2048,
                 1000,
@@ -1008,8 +1302,7 @@ mod tests {
         let record = UsageRecord::new(
             "model-a".to_string(),
             Address::zero(),
-            100,
-            50,
+            BillableUnits::tokens(100, 50),
             512,
             2048,
             1000,
@@ -1032,8 +1325,7 @@ mod tests {
         let record1 = UsageRecord::new(
             "model-a".to_string(),
             Address::zero(),
-            100,
-            50,
+            BillableUnits::tokens(100, 50),
             512,
             2048,
             1000,
@@ -1044,8 +1336,7 @@ mod tests {
         let record2 = UsageRecord::new(
             "model-b".to_string(),
             Address::zero(),
-            200,
-            100,
+            BillableUnits::tokens(200, 100),
             1024,
             4096,
             2000,
@@ -1058,13 +1349,73 @@ mod tests {
     }
 
     #[test]
+    fn test_get_record_by_caller_supplied_id() {
+        let tracker = UsageTracker::new();
+
+        let record = UsageRecord::new(
+            "model-a".to_string(),
+            Address::zero(),
+            BillableUnits::tokens(100, 50),
+            512,
+            2048,
+            1000,
+            250,
+        )
+        .with_record_id("chatcmpl-abc".to_string());
+        tracker.record_usage(record).unwrap();
+
+        let found = tracker.get_record("chatcmpl-abc").unwrap();
+        assert_eq!(found.model_id, "model-a");
+        assert_eq!(found.units.input_tokens, 100);
+        assert_eq!(found.units.output_tokens, 50);
+        assert_eq!(found.cost, 1000);
+        assert_eq!(found.latency_ms, 250);
+
+        assert!(tracker.get_record("chatcmpl-missing").is_none());
+    }
+
+    #[test]
+    fn test_get_record_falls_back_to_storage() {
+        let storage = Arc::new(MemoryStore::new());
+        // A zero-length ring forces every lookup down the storage path:
+        // envelope → DA pointer → payload → record.
+        let tracker = UsageTracker::with_storage(storage)
+            .unwrap()
+            .with_max_recent_records(0);
+
+        let record = UsageRecord::new(
+            "model-a".to_string(),
+            Address::zero(),
+            BillableUnits::tokens(200, 100),
+            1024,
+            4096,
+            2000,
+            300,
+        )
+        .with_record_id("chatcmpl-def".to_string());
+        tracker.record_usage(record).unwrap();
+
+        assert!(tracker.get_recent_usage(10).is_empty());
+
+        let found = tracker.get_record("chatcmpl-def").unwrap();
+        assert_eq!(found.record_id, "chatcmpl-def");
+        assert_eq!(found.units.input_tokens, 200);
+        assert_eq!(found.units.output_tokens, 100);
+        assert_eq!(found.bytes_in, 1024);
+        assert_eq!(found.bytes_out, 4096);
+        assert_eq!(found.cost, 2000);
+        assert_eq!(found.latency_ms, 300);
+    }
+
+    #[test]
     fn test_saturating_arithmetic() {
         let mut stats = ModelUsageStats::new("test".to_string());
 
         // Set to max values
         stats.inference_count = u64::MAX - 1;
-        stats.total_input_tokens = u64::MAX - 100;
-        stats.total_output_tokens = u64::MAX - 50;
+        stats.total_units.input_tokens = u64::MAX - 100;
+        stats.total_units.output_tokens = u64::MAX - 50;
+        stats.total_units.pixel_steps = u128::MAX - 4;
         stats.total_cost = u64::MAX - 1000;
         stats.total_latency_ms = u64::MAX - 200;
         stats.total_bytes_in = u64::MAX - 512;
@@ -1073,20 +1424,20 @@ mod tests {
         let record = UsageRecord::new(
             "test".to_string(),
             Address::zero(),
-            100,
-            50,
+            BillableUnits::tokens(100, 50).with_pixel_steps(64, 1),
             1024,
             4096,
             1000,
             200,
         );
 
-        // Should saturate at u64::MAX, not panic
+        // Should saturate at the type maximum, not panic
         stats.update(&record);
 
         assert_eq!(stats.inference_count, u64::MAX);
-        assert_eq!(stats.total_input_tokens, u64::MAX);
-        assert_eq!(stats.total_output_tokens, u64::MAX);
+        assert_eq!(stats.total_units.input_tokens, u64::MAX);
+        assert_eq!(stats.total_units.output_tokens, u64::MAX);
+        assert_eq!(stats.total_units.pixel_steps, u128::MAX);
         assert_eq!(stats.total_cost, u64::MAX);
         assert_eq!(stats.total_latency_ms, u64::MAX);
         assert_eq!(stats.total_bytes_in, u64::MAX);

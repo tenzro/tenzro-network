@@ -1825,7 +1825,7 @@ mod tests {
         assert_ne!(buf_a, buf_b);
     }
 
-    /// End-to-end: run a full FROST(Ed25519) round entirely
+    /// Full round: run a FROST(Ed25519) round entirely
     /// in-process, simulating both the device and the node sides via
     /// the same testnet stub derivation. Verifies that the produced
     /// signature passes Ed25519 verification against the joint public

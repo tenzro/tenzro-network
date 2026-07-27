@@ -78,7 +78,7 @@ fn compose_key(prefix: &[u8], did: &str) -> Vec<u8> {
 
 /// Operator-supplied Solana transport. Implementors typically wrap a
 /// `solana-client::nonblocking::rpc_client::RpcClient` + a Solana
-/// `Keypair`. Today this trait is forward-looking: no impl ships in the
+/// `Keypair`. Today this trait is forward-looking: no impl exists in the
 /// monorepo because the workspace deliberately does not depend on
 /// `solana-sdk`.
 #[async_trait::async_trait]

@@ -2,7 +2,7 @@
 //!
 //! Cortex is the reasoning-worker tier on Tenzro Network. It treats
 //! *loop depth* of recurrent-depth transformers (e.g. OpenMythos-style RDT
-//! models) as a first-class, schedulable, billable primitive.
+//! models) as a schedulable, billable primitive in its own right.
 //!
 //! These types live in `tenzro-types` so that every crate — RPC, MCP tools,
 //! agents, settlement, CLI — can talk about reasoning budgets and signed

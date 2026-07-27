@@ -614,6 +614,26 @@ pub struct EventLoop {
     /// self-reported capacity.
     usage_tracker: Option<Arc<tenzro_model::UsageTracker>>,
 
+    /// Fee accounting for the gas the executor debits from transaction
+    /// senders. The native VM subtracts `gas_price * gas_used` and credits
+    /// nobody, so this is what records where that TNZO went.
+    fee_processor: Option<Arc<tenzro_token::FeeProcessor>>,
+    /// Whether the fee anchors below hold a real reference point yet. The
+    /// counters they track are cumulative over the chain's whole history and
+    /// the balances behind them are already durable, so the first observation
+    /// after boot anchors instead of settling — otherwise every restart would
+    /// credit the treasury the full history a second time. A separate flag
+    /// rather than a zero test, so a fresh chain's first fee-bearing block is
+    /// still settled.
+    fee_anchor_set: bool,
+    /// Cumulative `FeeMarket::total_to_treasury()` already settled onto the
+    /// ledger.
+    last_settled_fee_treasury: u128,
+    /// Cumulative `FeeMarket::total_burned()` already settled onto the
+    /// ledger. Distinct from `last_observed_base_fee_burn`, which anchors
+    /// the epoch-boundary adaptive-burn metrics rather than ledger movement.
+    last_settled_fee_burn: u128,
+
     /// Circulating supply at the most recent epoch boundary, captured
     /// after a successful `record_metrics` call. Used to compute the
     /// `epoch_supply_delta` field of the *next* snapshot. Reset to the
@@ -760,6 +780,10 @@ impl EventLoop {
             reward_engine: None,
             sponsorship_manager: None,
             usage_tracker: None,
+            fee_processor: None,
+            fee_anchor_set: false,
+            last_settled_fee_treasury: 0,
+            last_settled_fee_burn: 0,
             last_observed_epoch_supply: 0,
             last_observed_base_fee_burn: 0,
             last_observed_slash_burn: 0,
@@ -1182,6 +1206,24 @@ impl EventLoop {
         self
     }
 
+    /// Wires the fee processor that accounts for the gas debited by the
+    /// executor. Without it, gas fees leave payer balances and are recorded
+    /// nowhere.
+    ///
+    /// Takes the canonical token alongside it because settlement credits the
+    /// treasury balance directly; the token is otherwise only wired by
+    /// [`Self::with_burn_rate_manager`], and fee settlement must not depend
+    /// on the adaptive-burn dial being configured.
+    pub fn with_fee_processor(
+        mut self,
+        processor: Arc<tenzro_token::FeeProcessor>,
+        token: Arc<tenzro_token::TnzoToken>,
+    ) -> Self {
+        self.fee_processor = Some(processor);
+        self.token = Some(token);
+        self
+    }
+
     /// Returns a reference to the state adapter for wiring into other subsystems.
     ///
     /// This allows `init_event_loop()` in `node.rs` to access the event loop's state
@@ -1467,7 +1509,7 @@ impl EventLoop {
             //
             // `connected_validator_count` counts admitted validator PEERS —
             // it excludes the local peer. A single-node validator set (solo
-            // bootstrap: `--role validator` with no genesis file) therefore
+            // bootstrap: `--roles validator` with no genesis file) therefore
             // has no peer that could ever satisfy the gate; the local
             // validator IS the quorum, so the gate is skipped entirely.
             let validator_set_len = self
@@ -3028,7 +3070,7 @@ impl EventLoop {
                                                     // Fork: a peer witness committed a
                                                     // different state_root for the same
                                                     // round. Log loudly — fraud-proof
-                                                    // path lives one wave out.
+                                                    // path is not implemented yet.
                                                     warn!(
                                                         %task_id,
                                                         round,
@@ -3968,6 +4010,85 @@ impl EventLoop {
         }
     }
 
+    /// Moves this block's gas fees onto the ledger.
+    ///
+    /// `FeeMarket` accumulates gross base-fee revenue into two monotonic
+    /// counters — `total_to_treasury` and `total_burned` — split by the
+    /// adaptive burn dial. This reads both, takes the delta against what has
+    /// already been settled, credits the treasury balance, decrements
+    /// `total_supply` by the burned share, and records the movement in the
+    /// fee processor's statistics.
+    ///
+    /// The first observation after boot anchors rather than settles: the
+    /// counters are cumulative over the chain's whole history, and the
+    /// balances they correspond to are already durable in RocksDB, so
+    /// treating the full cumulative value as a delta would credit the
+    /// treasury a second time on every restart.
+    async fn settle_block_fees(&mut self) {
+        let Some(token) = self.token.clone() else {
+            return;
+        };
+        let Some(treasury) = token.treasury_address_ref() else {
+            return;
+        };
+        let Some(fee_market) = self.vm_runtime.gas_oracle().fee_market_snapshot().await else {
+            return;
+        };
+
+        let cumulative_treasury = fee_market.total_to_treasury();
+        let cumulative_burn = fee_market.total_burned();
+
+        if !self.fee_anchor_set {
+            self.fee_anchor_set = true;
+            self.last_settled_fee_treasury = cumulative_treasury;
+            self.last_settled_fee_burn = cumulative_burn;
+            return;
+        }
+
+        let to_treasury = cumulative_treasury.saturating_sub(self.last_settled_fee_treasury);
+        let burned = cumulative_burn.saturating_sub(self.last_settled_fee_burn);
+        if to_treasury == 0 && burned == 0 {
+            return;
+        }
+
+        if let Err(e) = token.settle_collected_fees(&treasury, to_treasury, burned) {
+            // Leave the anchors untouched so the next block retries the same
+            // delta rather than silently dropping it.
+            warn!(
+                error = %e,
+                to_treasury = %to_treasury,
+                burned = %burned,
+                "Gas fee settlement failed"
+            );
+            return;
+        }
+
+        self.last_settled_fee_treasury = cumulative_treasury;
+        self.last_settled_fee_burn = cumulative_burn;
+
+        // Recorded with the split the ledger actually applied. Gas carries no
+        // staker share: the fee market divides base-fee revenue between the
+        // treasury and the burn only.
+        if let Some(processor) = self.fee_processor.as_ref()
+            && let Err(e) = processor.process_fee(
+                tenzro_types::asset::AssetId::tnzo(),
+                tenzro_token::FeeSource::Transaction,
+                to_treasury,
+                burned,
+                0,
+            )
+        {
+            // Accounting only — the ledger movement above already succeeded.
+            warn!(error = %e, "Fee processor accounting failed");
+        }
+
+        debug!(
+            to_treasury = %to_treasury,
+            burned = %burned,
+            "Settled block gas fees"
+        );
+    }
+
     async fn handle_block_finalized_inner(
         &mut self,
         block: Block,
@@ -4414,6 +4535,21 @@ impl EventLoop {
             .on_block_finalized(gas_used_total)
             .await;
 
+        // Settle the gas the executor debited this block.
+        //
+        // The native VM subtracts `gas_price * gas_used` from each sender and
+        // credits nobody, so the TNZO leaves circulation without leaving
+        // `total_supply`. `FeeMarket` splits the gross revenue into a burn
+        // share and a treasury share as accounting counters; this is where
+        // that split becomes ledger movement.
+        //
+        // Placement is deliberate. This hook runs on every node that
+        // finalizes a block, including gossip-received ones, so all replicas
+        // converge on the same treasury balance. The epoch-boundary
+        // adaptive-burn block below is gated on the consensus engine and
+        // would only run on validators.
+        self.settle_block_fees().await;
+
         // Spec 6: roll the hot-state contention window forward by exactly one
         // block. The window is per-account, length-bounded at
         // `HOT_STATE_WINDOW_BLOCKS`; eviction happens inside the market.
@@ -4595,12 +4731,12 @@ impl EventLoop {
                 // Annualize the current epoch delta to bps of circulating
                 // supply, using the configured rolling-window length as the
                 // averaging horizon. We use the targets snapshot rather than
-                // accumulating a real ring buffer for now — the transfer
+                // accumulating a persisted ring buffer for now — the transfer
                 // function's `compute_recommendation` only consumes the
                 // already-annualized bps, so a per-epoch annualization is
-                // numerically equivalent on a steady-state network. A real
-                // rolling-window aggregator can replace this when the
-                // historical-snapshot ring buffer ships.
+                // numerically equivalent on a steady-state network. A true
+                // rolling-window aggregator can replace this once the
+                // historical-snapshot ring buffer exists.
                 let rolling_bps: i32 = if circulating == 0 {
                     0
                 } else {

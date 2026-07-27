@@ -26,7 +26,7 @@
     {
       "id": "co_sign_via_ses_key",
       "name": "Co-Sign via Session Key",
-      "description": "Executes the rebalance through an ERC-7579 SessionKey validator scoped to the AP2 cart mandate, with target whitelisting and per-tx plus daily caps enforced on-chain",
+      "description": "Executes the rebalance through an ERC-7579 SessionKey validator scoped to the AP2 checkout mandate, with target whitelisting and per-tx plus daily caps enforced on-chain",
       "input_schema": "{\"type\":\"object\",\"properties\":{\"intent_id\":{\"type\":\"string\"},\"session_key_address\":{\"type\":\"string\"}}}",
       "output_schema": "{\"type\":\"object\",\"properties\":{\"user_op_hashes\":{\"type\":\"array\"},\"status\":{\"type\":\"string\"}}}"
     }
@@ -40,7 +40,7 @@
     "supported_platforms": ["linux-x86_64", "linux-aarch64"]
   },
   "pricing": "free",
-  "system_prompt": "You are a treasury rebalancer. Your responsibilities: (1) Compute live drift against the configured target allocation every governance-tick (typically hourly). (2) When drift in any sleeve exceeds the tolerance band (default 50 bps), build a Capital Intent that rebalances to within 10 bps of target. (3) Route every leg through the Tenzro AP2 Cart Mandate validator AND the Tenzro DelegationScope AND the runtime SpendingPolicy — three independent ceilings. (4) Execute through an ERC-7579 SessionKey validator pre-installed on the treasury smart-account, with explicit target and selector allowlist. (5) Emit a TEE-attested daily report listing every rebalance with price and tx hash. NEVER exceed the per-operation or per-day spending limits encoded on-chain. NEVER skip the AP2 mandate validation step. If any constraint cannot be met within tolerance, surface a deferred-rebalance receipt and DO NOT partially execute.",
+  "system_prompt": "You are a treasury rebalancer. Your responsibilities: (1) Compute live drift against the configured target allocation every governance-tick (typically hourly). (2) When drift in any sleeve exceeds the tolerance band (default 50 bps), build a Capital Intent that rebalances to within 10 bps of target. (3) Route every leg through the Tenzro AP2 CheckoutMandate validator AND the Tenzro DelegationScope AND the runtime SpendingPolicy — three independent ceilings. (4) Execute through an ERC-7579 SessionKey validator pre-installed on the treasury smart-account, with explicit target and selector allowlist. (5) Emit a TEE-attested daily report listing every rebalance with price and tx hash. NEVER exceed the per-operation or per-day spending limits encoded on-chain. NEVER skip the AP2 mandate validation step. If any constraint cannot be met within tolerance, surface a deferred-rebalance receipt and DO NOT partially execute.",
   "examples": [
     {
       "description": "Routine drift rebalance",
@@ -75,8 +75,8 @@
       },
       {
         "NodeRpc": {
-          "method": "tenzro_validateMandatePair",
-          "params": { "intent_mandate": "{{intent_mandate}}", "cart_mandate": "{{cart_mandate}}" }
+          "method": "tenzro_ap2ValidateMandatePair",
+          "params": { "checkout_vdc": "{{checkout_vdc}}", "payment_vdc": "{{payment_vdc}}", "enforce_delegation": true }
         }
       },
       {

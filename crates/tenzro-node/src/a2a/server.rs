@@ -322,7 +322,7 @@ async fn agent_card_handler(
     if params.get("signed").map(|v| v == "1" || v == "true").unwrap_or(false) {
         let card = state.agent_card.clone();
         let canonical_hash = SignedAgentCard::canonical_card_hash(&card);
-        // Production-grade signing: the JWS leg is added once the
+        // Signing: the JWS leg is added once the
         // node-level domain signing key is wired. Until then we expose
         // the canonical hash as the `signature` placeholder so callers
         // can compute the hash themselves and verify it matches what

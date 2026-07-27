@@ -195,7 +195,7 @@ pub fn verify_manifest(manifest: &ProvenanceManifest) -> Result<(), ProvenanceEr
         .map_err(|_| ProvenanceError::VerificationFailed)
 }
 
-/// Verify a provider-attached response manifest end-to-end: the content
+/// Verify every field of a provider-attached response manifest: the content
 /// hash must match the actual output bytes, the model id must match the
 /// routed request, the signature must verify against the embedded public
 /// key, and — when the provider has a registered signing key — the

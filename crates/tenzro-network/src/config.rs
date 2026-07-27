@@ -73,7 +73,7 @@ impl Default for NetworkConfig {
                 "/ip4/0.0.0.0/udp/9000/quic-v1".parse().unwrap(),
             ],
             boot_nodes: Vec::new(),
-            // A+++ production-grade capacity: matches libp2p ConnectionLimits (200/200 max)
+            // Matches the libp2p ConnectionLimits ceiling (200 in / 200 out).
             max_inbound_peers: 200,
             max_outbound_peers: 200,
             gossip_topics: vec![

@@ -1081,7 +1081,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// End-to-end SPL Transfer dispatch via the native short-circuit:
+    /// Full SPL Transfer dispatch via the native short-circuit:
     /// `tx.to = SPL_TOKEN_PROGRAM_ID`, data prefixed with [n=3][source][dest]
     /// [authority] then SPL Transfer opcode 3 + LE u64 amount. Verifies that
     /// source → dest balance moves and authority signing parity is enforced.

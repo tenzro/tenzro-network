@@ -12,7 +12,7 @@ and the node's `--help` output.
 ## What you're deploying
 
 A Tenzro validator is a single `tenzro-node` binary running with
-`--role validator`, pulled as a container image, persisting state to a local
+`--roles validator`, pulled as a container image, persisting state to a local
 disk, and exposing one network port to peers.
 
 A **fleet** is N validators (typically 4 or more, often 10+) running this
@@ -152,7 +152,7 @@ exec docker run --rm \
   -e TENZRO_SIMULATE_NSM=0 \
   "$IMAGE" \
   tenzro-node \
-    --role validator \
+    --roles validator \
     --data-dir /var/lib/tenzro/data \
     --config /var/lib/tenzro/config.toml \
     --boot-nodes "/ip4/$BOOT_PEER_IP/tcp/9000/p2p/$BOOT_PEER_ID,/ip4/$BOOT_PEER_IP/udp/9000/quic-v1/p2p/$BOOT_PEER_ID"
@@ -292,18 +292,43 @@ Let's Encrypt). The Caddy container runs alongside the validator container.
 
 ## Optional: Canton bridge + admin gate on the RPC node
 
-The Canton bridge is opt-in and lives on the public RPC node only. Two extra
-env vars enable it:
+The Canton bridge is opt-in and lives on the public RPC node only. It is
+configured per Canton network — `devnet` and `mainnet` each read their own
+variable group, and a network counts as served only when its
+`LEDGER_API_HOST` is set:
 
 | Variable | Purpose |
 |---|---|
-| `CANTON_DEVNET=true` + `CANTON_DEVNET_CLIENT_SECRET=<auth0-secret>` | Enables `CantonConfig::from_env()` devnet profile. Tenzro's `CantonTokenProvider` mints `daml_ledger_api` JWTs against `https://canton.network.global` using this secret. For self-hosted Canton, see the OAuth2 / static-JWT profiles in `crates/tenzro-node/src/config.rs`. |
+| `CANTON_ENABLED=true` | Master switch. Unset or `false` and the whole Canton surface stays off. |
+| `CANTON_DEFAULT_NETWORK=devnet` | Which network a request resolves to when the caller names none. `devnet` or `mainnet`. |
+| `CANTON_<NET>_LEDGER_API_HOST` | JSON Ledger API hostname for that network. Its presence is what declares the operator serves the network. |
+| `CANTON_<NET>_LEDGER_API_PORT` | Defaults to `5001`. Use `443` for a TLS-fronted participant. |
+| `CANTON_<NET>_TLS` | `true` to dial over TLS. Defaults to `false`. |
+| `CANTON_<NET>_OAUTH_TOKEN_URL` | OAuth2 client-credentials token endpoint. |
+| `CANTON_<NET>_OAUTH_CLIENT_ID` | OAuth2 client id. |
+| `CANTON_<NET>_OAUTH_CLIENT_SECRET` | OAuth2 client secret. Keep this in your KMS. |
+| `CANTON_<NET>_OAUTH_AUDIENCE` | OAuth2 audience the participant expects. |
+| `CANTON_<NET>_OAUTH_SCOPE` | Defaults to `daml_ledger_api`. |
+| `CANTON_<NET>_JWT_TOKEN` | Static bearer token. Honoured only when the OAuth group is absent. |
 | `TENZRO_ADMIN_TOKEN=<random-32-byte-secret>` | Gates admin RPCs (`tenzro_createApiKey`, `tenzro_revokeApiKey`, `tenzro_listApiKeys`, `tenzro_resetCircuitBreaker`). Unset = fail-closed. |
 
+`<NET>` is `DEVNET` or `MAINNET`. The four `OAUTH_*` values are all-or-nothing:
+if any one is missing the grant is dropped and the node talks to the
+participant unauthenticated.
+
 External callers reach Canton through Tenzro's API-key gate
-(`X-Tenzro-Api-Key` header with the `canton` scope). The operator mints
-keys via `tenzro_createApiKey` (admin-token-gated) and hands them to devs
-out-of-band — no self-service portal.
+(`X-Tenzro-Api-Key` header with the `canton` scope), and pick a network with
+either the `canton_network` request parameter or the `X-Canton-Network`
+header. Missing key returns `-32004`; exceeding the key's tier rate limit
+returns `-32005` with `retry_after_ms`, `requests_per_minute`, and `tier`.
+The operator mints keys via `tenzro_createApiKey` (admin-token-gated) and
+hands them to developers out-of-band — no self-service portal.
+
+API keys gate operator-brokered resources like Canton, where the operator
+supplies its own upstream credentials. They do not gate the marketplace
+registry: publishing an agent, skill, workflow, or MCP server is
+permissionless, priced by the provider in TNZO or offered free, and needs no
+operator approval.
 
 **Validators 1..N-1 must NOT carry any of these env vars** — they should
 return `-32004` on `tenzro_*Canton*` calls (scope gate) and `-32001` on

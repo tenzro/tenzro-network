@@ -168,6 +168,13 @@ pub struct ApprovalRecord {
     /// Set once the approver acts (or on expiry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_at_ms: Option<u64>,
+
+    /// Approver's explanation when they denied the request. Fed back to
+    /// the requesting agent as part of the refusal so it can adapt —
+    /// "wrong counterparty, use the escrow address" is actionable in a
+    /// way that a bare denial is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_reason: Option<String>,
 }
 
 /// Lifecycle of a [`ApprovalRecord`].

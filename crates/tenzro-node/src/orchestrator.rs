@@ -12,7 +12,7 @@
 //!
 //! Planning is separated from execution behind the [`OrchestrationPlanner`]
 //! trait, a pure function `intent + catalog snapshot -> OrchestrationPlan`. Two
-//! implementations ship:
+//! implementations exist:
 //!
 //! - [`DeterministicPlanner`] — rule-based, always available, never calls a
 //!   model. It maps a use case onto a small ordered plan (optionally a skill or

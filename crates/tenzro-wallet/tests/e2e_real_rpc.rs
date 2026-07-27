@@ -1,5 +1,5 @@
-//! End-to-end test: real `tenzro-node` binary + real wallet kernel against
-//! the live JSON-RPC surface.
+//! Full-stack test: a spawned `tenzro-node` binary plus the wallet kernel,
+//! driven against the live JSON-RPC surface.
 //!
 //! This test is feature-gated on `e2e` because it spawns the actual
 //! `tenzro-node` binary, binds ephemeral local ports, waits for the RPC
@@ -121,7 +121,7 @@ impl TenzroNode {
         let child = Command::new(bin_path)
             .arg("--data-dir")
             .arg(data_dir.path())
-            .arg("--role")
+            .arg("--roles")
             .arg("validator")
             .arg("--listen-addr")
             .arg("/ip4/127.0.0.1/tcp/0")

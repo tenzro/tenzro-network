@@ -861,8 +861,8 @@ mod tests {
     /// Stub [`ThresholdSigner`] used to verify the [`SignerBackend::ThresholdKey`]
     /// wiring without standing up a full DKLS23 session. Returns a fixed
     /// dummy signature shaped like a valid k256 output so the surrounding
-    /// RLP encode + signature-decode round-trip can be exercised
-    /// end-to-end.
+    /// RLP encode + signature-decode round-trip can be exercised in
+    /// full.
     struct StubThresholdSigner {
         address: [u8; 20],
     }

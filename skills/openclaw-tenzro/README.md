@@ -65,6 +65,10 @@ export TENZRO_RPC_URL=https://rpc.tenzro.xyz
 export TENZRO_API_URL=https://api.tenzro.xyz
 export TENZRO_RPC_TIMEOUT=120
 
+# Operator-brokered resources (Canton). Not needed for protocol resources.
+export TENZRO_API_KEY=tnz_...
+export TENZRO_CANTON_NETWORK=devnet
+
 # Ecosystem MCP endpoints (optional — defaults to live testnet)
 export SOLANA_MCP_URL=https://solana-mcp.tenzro.xyz/mcp
 export ETHEREUM_MCP_URL=https://ethereum-mcp.tenzro.xyz/mcp
@@ -84,7 +88,7 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.xyz/mcp
 
 **Identity (TDIP):** `register_identity`, `resolve_did`, `set_username`, `resolve_username`, `import_identity`, `list_identities`
 
-**AI Models & Inference:** `list_models`, `chat`, `inference_request`, `serve_model`, `stop_model`, `download_model`, `get_model_hash`, `list_model_hashes`, `record_model_hash`, `list_model_endpoints`, `get_provenance`. `serve_model` auto-clusters a model that exceeds one host — it reads the GGUF header for shape, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline; pass `force_cluster` to split even when it fits one host, `force_single` to pin it to one host, or `visibility="private"` to keep it local/LAN-only instead of gossiping it to the network. Model weights are content-addressed: `download_model` is peer-first over iroh blobs (BLAKE3-verified end-to-end on transfer), falling back to HuggingFace, and the weights are checked against the canonical hash record before load; `get_model_hash` reads that record (BLAKE3 root + SHA-256 + per-file manifest hash) by `model_id`, `list_model_hashes` returns every recorded hash, and `record_model_hash` writes a first-recorder-wins record. `list_model_endpoints` returns each service's `iroh_endpoint_id` (the serving node's iroh `EndpointId`, empty for local-only); cross-node inference routes to it over the `tenzro/infer` ALPN. `get_provenance` resolves the cached synthetic-content manifest (EU AI Act Art. 50(2)) for generated output by its `content_hash`.
+**AI Models & Inference:** `list_models`, `chat`, `inference_request`, `route_intent`, `chat_by_intent`, `record_route_outcome`, `route_difficulty_stats`, `serve_model`, `stop_model`, `download_model`, `get_model_hash`, `list_model_hashes`, `record_model_hash`, `list_model_endpoints`, `get_provenance`. Intent routing replaces naming a model with stating a use case plus a budget, a quality floor and a cost-quality knob: `route_intent` returns the selection and its reasoning without dispatching, `chat_by_intent` selects and runs in one call with dispatch pinned to the offer that was scored, so the price quoted is the price settled and the provider share goes to the address that offer named. Selection also accounts for how hard the prompt is — the decision carries the difficulty cluster it landed in and the chosen model's observed error rate there. `record_route_outcome` reports an escalation back so those rates reflect what happened; `route_difficulty_stats` reads the cluster map as an operator diagnostic. `serve_model` auto-clusters a model that exceeds one host — it reads the GGUF header for shape, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline; pass `force_cluster` to split even when it fits one host, `force_single` to pin it to one host, or `visibility="private"` to keep it local/LAN-only instead of gossiping it to the network. Model weights are content-addressed: `download_model` is peer-first over iroh blobs (BLAKE3-verified on transfer), falling back to HuggingFace, and the weights are checked against the canonical hash record before load; `get_model_hash` reads that record (BLAKE3 root + SHA-256 + per-file manifest hash) by `model_id`, `list_model_hashes` returns every recorded hash, and `record_model_hash` writes a first-recorder-wins record. `list_model_endpoints` returns each service's `iroh_endpoint_id` (the serving node's iroh `EndpointId`, empty for local-only); cross-node inference routes to it over the `tenzro/infer` ALPN. `get_provenance` resolves the cached synthetic-content manifest (EU AI Act Art. 50(2)) for generated output by its `content_hash`.
 
 **Multi-Modal Inference (17 wrappers across 7 modalities):**
 - **Forecast** — `list_forecast_catalog`, `list_forecast_models`, `load_forecast_model`, `forecast` (TimesFM 2.5)
@@ -151,6 +155,26 @@ export LIFI_MCP_URL=https://lifi-mcp.tenzro.xyz/mcp
 
 **Canton (Canton 3.5+ JSON Ledger API)** — MCP-routed: `canton_submit_command`, `canton_list_contracts`, `canton_get_events`, `canton_get_transaction`, `canton_allocate_party`, `canton_list_parties`, `canton_grant_user_rights`, `canton_list_user_rights`, `canton_get_my_analytics`, `canton_list_api_key_analytics`, `canton_list_domains_ext`, `canton_get_health`, `canton_get_balance_ext`, `canton_transfer`, `canton_create_asset`, `canton_dvp_settle`, `canton_upload_dar`, `canton_get_fee_schedule`, `canton_reconnect_synchronizer`. **JSON-RPC wrappers** (route through `rpc.tenzro.xyz`, require a `canton`-scoped API key): `canton_health`, `canton_version`, `canton_list_packages`, `canton_get_my_user`, `canton_coin_balance`, `canton_connected_synchronizers`, `canton_upload_dar_rpc`, `canton_fee_schedule_rpc`, `canton_get_transaction_rpc`, `canton_allocate_party_rpc`, `canton_grant_user_rights`, `canton_list_user_rights`, `canton_get_my_analytics`, `canton_list_api_key_analytics`.
 
+Canton is an operator-brokered resource: the ledger sits outside Tenzro
+and the node reaches it with credentials the operator supplies. Both
+routes need `TENZRO_API_KEY` set to a key with the `canton` scope. A node
+serves each Canton network independently and a key is authorized for a
+subset of them, so set `TENZRO_CANTON_NETWORK` when a key authorizes more
+than one — the JSON-RPC wrappers merge it into the params as
+`canton_network`, and the MCP-routed tools send it as the
+`X-Canton-Network` header, because that gate sits above the MCP envelope
+and cannot read tool arguments. A key authorizing exactly one network
+needs no setting; a key authorizing more and given none returns `-32004`
+naming the authorized set. Exceeding the key's tier budget returns
+`-32005` with `retry_after_ms`, `requests_per_minute`, and `tier` —
+`free` allows 60 requests/min and refuses writes, `standard` 600,
+`priority` 6,000, each over a sliding 60-second window.
+
+Keys gate operator-brokered resources only. Publishing to the marketplace
+registry — agents, skills, workflows, MCP servers — is permissionless,
+priced by the provider in TNZO or offered free, and needs no operator
+approval.
+
 **Li.Fi (9 tools):** `lifi_get_quote`, `lifi_get_routes`, `lifi_get_status`, `lifi_get_chains`, `lifi_get_tokens`, `lifi_get_connections`, `lifi_get_tools`, `lifi_get_token_balance`, `lifi_execute_route`
 
 See [SKILL.md](SKILL.md) for the complete reference with all commands and curl examples.
@@ -175,7 +199,7 @@ python3 -m unittest tools/test_tenzro_rpc.py -v
 
 ## Worked Examples
 
-End-to-end runnable scripts against the live testnet:
+Runnable scripts that walk a full flow against the live testnet:
 
 ```bash
 # Task marketplace settlement cycle: post → quote → assign → complete,

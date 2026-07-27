@@ -180,6 +180,8 @@ pub fn rar_is_subset(parent: &AuthorizationDetails, child: &AuthorizationDetails
 /// - **`Contract.allow_deploy`:** child may deploy only if parent may.
 /// - **`RegisterIdentity.max_children`:** same `<=` semantics as
 ///   amount fields.
+/// - **`ResourceInvocation.class`:** parent `None` covers any class;
+///   otherwise child must name the same class.
 pub fn detail_covers(parent: &AuthorizationDetail, child: &AuthorizationDetail) -> bool {
     use AuthorizationDetail as D;
     match (parent, child) {
@@ -281,6 +283,26 @@ pub fn detail_covers(parent: &AuthorizationDetail, child: &AuthorizationDetail) 
             (Some(_), None) => false,      // child unbounded but parent bounded → fail
             (Some(p), Some(c)) => c <= p,
         },
+        (
+            D::ResourceInvocation {
+                max_amount_per_call: pmc,
+                class: pclass,
+                allowed_resource_ids: pids,
+            },
+            D::ResourceInvocation {
+                max_amount_per_call: cmc,
+                class: cclass,
+                allowed_resource_ids: cids,
+            },
+        ) => {
+            cmc <= pmc
+                && match (pclass, cclass) {
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                    (Some(p), Some(c)) => p == c,
+                }
+                && covers_optional_allowlist_str(pids, cids)
+        }
         // Variants don't match.
         _ => false,
     }

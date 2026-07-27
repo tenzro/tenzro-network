@@ -18,6 +18,29 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::primitives::Address;
+
+/// Domain tag for the derived network treasury address.
+const TREASURY_DOMAIN: &[u8] = b"tenzro/treasury";
+
+/// The account network commissions accumulate at.
+///
+/// Derived rather than configured: `SHA-256("tenzro/treasury")`. Every replica
+/// computes the same 32 bytes, so a commission credited on one node lands at
+/// the same account as one credited on another — no genesis field, no
+/// per-operator setting, nothing an operator can point at their own wallet.
+///
+/// No private key exists for these bytes, so the balance moves only through
+/// the treasury's authorized-withdrawer path, which governance controls.
+pub fn network_treasury_address() -> Address {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(TREASURY_DOMAIN);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hasher.finalize());
+    Address::new(out)
+}
+
 /// Upper bound on the per-app developer margin (basis points, 100 = 1%)
 ///
 /// Applications registered in the on-chain app registry declare a `margin_bps`

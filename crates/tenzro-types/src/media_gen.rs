@@ -14,7 +14,7 @@
 //! text models (e.g. Diffusion Gemma) exist and are served on Tenzro's
 //! existing text/LLM catalog and chat inference path like any other language
 //! model, not through this module. The initial concrete [`MediaGenKind`]
-//! variants cover image and video; new kinds land as additional enum
+//! variants cover image and video; new kinds are added as additional enum
 //! variants plus a matching Python pipeline rather than a redesign of this
 //! module.
 //!
@@ -73,7 +73,7 @@ pub const MAX_MEDIA_GEN_PROMPT_BYTES: usize = 8192;
 ///
 /// The serde labels are pinned per variant so the JSON label, the [`Display`]
 /// label, and the [`MediaGenKind::from_str_lossy`] canonical spelling are the
-/// same string on every surface.
+/// same string wherever the kind is written or parsed.
 ///
 /// [`Display`]: fmt::Display
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -320,7 +320,7 @@ pub struct MediaGenTaskSpec {
 
 /// Which half of a two-expert denoising schedule a worker serves.
 ///
-/// Some pipelines ship two full transformers instead of one and switch between
+/// Some pipelines carry two full transformers instead of one and switch between
 /// them partway down the noise schedule — the high-noise expert denoises the
 /// coarse early steps, the low-noise expert finishes. Because the switch
 /// happens once, the whole handoff between them is a single latent tensor, so

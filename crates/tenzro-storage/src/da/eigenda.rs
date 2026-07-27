@@ -43,8 +43,9 @@
 //!
 //! `attestation_root` is left `None`; the EigenDA disperser does produce a
 //! quorum attestation, but it is fetched via a separate `eigenda-proxy`
-//! endpoint and verifying it requires the BN254 aggregation libraries — a
-//! follow-up wave alongside the Tenzro fraud-proof path.
+//! endpoint and verifying it requires the BN254 aggregation libraries, which
+//! this module does not pull in. That verification belongs with the Tenzro
+//! fraud-proof path.
 
 use async_trait::async_trait;
 use std::time::Duration;

@@ -99,7 +99,10 @@ impl FromStr for NetworkRole {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
+        // Hyphen and underscore spellings are interchangeable, so
+        // `model-provider` and `model_provider` both resolve.
+        let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
             "validator" => Ok(Self::Validator),
             "fullnode" | "full" | "full_node" => Ok(Self::FullNode),
             "light" | "lightclient" | "light_client" => Ok(Self::LightClient),

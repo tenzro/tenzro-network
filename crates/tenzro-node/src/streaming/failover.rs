@@ -20,15 +20,17 @@
 //! prefix from the emitted text, which is the same trade the local
 //! [`crate::streaming::cursor`] resume path makes for client reconnects.
 
+use crate::chat_content::MessageContent;
 use serde::{Deserialize, Serialize};
 
-/// A single chat turn in the OpenAI `{role, content}` shape. Self-contained so
-/// the failover module does not depend on the RPC handler's request types; the
-/// handler converts its own message vector into this on capture.
+/// A single chat turn in the OpenAI `{role, content}` shape. `content` keeps the
+/// string-or-parts shape the client sent, so a continuation re-sends a
+/// multimodal turn with its image and audio parts intact — a continuation that
+/// dropped them would re-prefill a different context and break determinism.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatTurn {
     pub role: String,
-    pub content: String,
+    pub content: MessageContent,
 }
 
 /// Captured sampling state for a proxied streaming completion, sufficient for
@@ -121,7 +123,7 @@ impl SamplingState {
         let mut messages = self.messages.clone();
         messages.push(ChatTurn {
             role: "assistant".to_string(),
-            content: self.emitted_text.clone(),
+            content: MessageContent::Text(self.emitted_text.clone()),
         });
         let remaining_max = self
             .max_tokens
@@ -142,6 +144,50 @@ impl SamplingState {
             "continue_final_message": true,
         })
     }
+}
+
+/// Parse the billable units out of an OpenAI-shaped response body or streaming
+/// chunk. Returns `None` when the value carries no usage block, which is every
+/// delta frame of a stream.
+///
+/// A gateway settling for a peer needs the served counts to price what it owes,
+/// and the counts have to come from the provider that generated them rather than
+/// from a word-count of the forwarded text.
+///
+/// `usage.prompt_tokens_details.cached_tokens` is a subset of `prompt_tokens`,
+/// so it is subtracted out and carried as a cached read: the two legs are priced
+/// at different rates, and summing them would bill a cache hit twice.
+pub fn usage_units(value: &serde_json::Value) -> Option<tenzro_types::model::BillableUnits> {
+    let usage = value.get("usage").filter(|u| !u.is_null())?;
+    let count = |v: Option<&serde_json::Value>| -> u32 {
+        v.and_then(|v| v.as_u64()).unwrap_or(0).min(u32::MAX as u64) as u32
+    };
+
+    let prompt = count(usage.get("prompt_tokens"));
+    let completion = count(usage.get("completion_tokens"));
+    let cached_read = count(
+        usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens")),
+    )
+    .min(prompt);
+
+    // `completion_tokens_details.reasoning_tokens` is deliberately not read:
+    // those tokens are already inside `completion_tokens` and so are already
+    // billed as output. `reasoning_loops` counts recurrent passes, not tokens.
+    Some(
+        tenzro_types::model::BillableUnits::tokens(prompt - cached_read, completion)
+            .with_cache(cached_read, 0),
+    )
+}
+
+/// [`usage_units`] against one raw SSE chunk payload.
+pub fn extract_usage_units(payload: &str) -> Option<tenzro_types::model::BillableUnits> {
+    let trimmed = payload.trim();
+    if trimmed.is_empty() || trimmed == "[DONE]" {
+        return None;
+    }
+    usage_units(&serde_json::from_str::<serde_json::Value>(trimmed).ok()?)
 }
 
 /// Parse the assistant content delta out of one OpenAI streaming chunk

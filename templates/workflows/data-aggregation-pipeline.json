@@ -1,39 +1,50 @@
 {
   "name": "data-aggregation-pipeline",
   "version": "1.0.0",
-  "description": "Query 5 knowledge sources, embed each via a text embedding model, archive the aggregated vector to DA storage.",
+  "description": "Query two knowledge sources on a topic, embed each with a text embedding model, archive the aggregated vectors to DA storage.",
   "category": "data",
   "capabilities": ["aggregation", "embedding", "storage"],
   "required_inputs": {
     "type": "object",
     "properties": {
       "topic": { "type": "string" },
-      "source_ids": {
-        "type": "array",
-        "items": { "type": "string" },
-        "minItems": 1,
-        "maxItems": 5
+      "news_source_id": {
+        "type": "string",
+        "description": "Registry id of a news knowledge base. Discover one with tenzro_listKnowledge."
+      },
+      "research_source_id": {
+        "type": "string",
+        "description": "Registry id of a research knowledge base. Discover one with tenzro_listKnowledge."
       }
     },
-    "required": ["topic", "source_ids"]
+    "required": ["topic", "news_source_id", "research_source_id"]
   },
   "expected_outputs": {
     "type": "object",
     "properties": {
-      "blob_hash": { "type": "string" },
-      "embedding_count": { "type": "integer" }
+      "news": { "type": "object" },
+      "research": { "type": "object" },
+      "news_embedding": { "type": "object" },
+      "research_embedding": { "type": "object" },
+      "da_pointer": {
+        "type": "object",
+        "properties": {
+          "tenzro_uri": { "type": "string" },
+          "size_bytes": { "type": "integer" }
+        }
+      }
     }
   },
   "steps": [
     {
       "kind": "use_knowledge",
-      "knowledge_id": "kb-news-default",
+      "knowledge_id": "{{ inputs.news_source_id }}",
       "params": { "topic": "{{ inputs.topic }}" },
       "output_as": "news"
     },
     {
       "kind": "use_knowledge",
-      "knowledge_id": "kb-research-default",
+      "knowledge_id": "{{ inputs.research_source_id }}",
       "params": { "topic": "{{ inputs.topic }}" },
       "output_as": "research"
     },

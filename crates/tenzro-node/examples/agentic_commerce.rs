@@ -1,7 +1,7 @@
 //! Agentic commerce walkthrough
 //!
-//! Exercises the identity / payment / settlement layers end-to-end against
-//! the real subsystem implementations (no mocks, no node startup):
+//! Exercises the identity / payment / settlement layers in one pass against
+//! the concrete subsystem implementations (no mocks, no node startup):
 //!
 //!   1. Identity provisioning + wallet binding via TDIP
 //!   2. MPP payment challenge → credential → settle (real Ed25519 signing)

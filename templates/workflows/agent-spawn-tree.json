@@ -9,16 +9,16 @@
     "properties": {
       "research_budget": { "type": "string" },
       "trading_budget": { "type": "string" },
-      "monitoring_budget": { "type": "string" }
+      "analytics_budget": { "type": "string" }
     },
-    "required": ["research_budget", "trading_budget", "monitoring_budget"]
+    "required": ["research_budget", "trading_budget", "analytics_budget"]
   },
   "expected_outputs": {
     "type": "object",
     "properties": {
       "research_agent": { "type": "object" },
       "trading_agent": { "type": "object" },
-      "monitoring_agent": { "type": "object" }
+      "analytics_agent": { "type": "object" }
     }
   },
   "steps": [
@@ -46,14 +46,14 @@
     },
     {
       "kind": "spawn_agent",
-      "agent_template_id": "agent-template-monitoring",
+      "agent_template_id": "agent-template-data-analyst",
       "tnzo_budget": 0,
       "scope_overrides": {
-        "display_name": "Monitoring subagent",
-        "max_per_transaction": "{{ inputs.monitoring_budget }}",
-        "max_daily_spend": "{{ inputs.monitoring_budget }}"
+        "display_name": "Analytics subagent",
+        "max_per_transaction": "{{ inputs.analytics_budget }}",
+        "max_daily_spend": "{{ inputs.analytics_budget }}"
       },
-      "output_as": "monitoring_agent"
+      "output_as": "analytics_agent"
     }
   ]
 }

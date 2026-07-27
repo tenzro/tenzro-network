@@ -1,6 +1,6 @@
 # Tenzro Network Protocol Buffers - Index
 
-Protocol definitions for Tenzro Network (the verification and settlement protocol) and Tenzro Ledger (the L1 settlement layer with TNZO governance token).
+Protocol definitions for Tenzro Network (the verification and settlement protocol) and Tenzro Ledger (the settlement layer with TNZO governance token).
 
 ## Quick Navigation
 

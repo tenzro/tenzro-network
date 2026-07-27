@@ -206,6 +206,24 @@ pub enum AuthorizationDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_children: Option<u32>,
     },
+
+    /// Permission to pay for marketplace resource invocations — skills,
+    /// tools, workflow templates, knowledge bases, agent templates.
+    #[serde(rename = "resource_invocation")]
+    ResourceInvocation {
+        /// Maximum spend per single invocation (in TNZO base units).
+        #[serde(serialize_with = "ser_u128_str", deserialize_with = "de_u128_str")]
+        max_amount_per_call: u128,
+        /// Optional restriction to a single resource class, as spelled by
+        /// `tenzro_types::ResourceClass::as_str` (`"skill"`, `"tool"`, …).
+        /// `None` permits any class.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        /// Optional whitelist of resource ids the bearer may invoke, bare
+        /// (unqualified by class). `None` permits any id in the class.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allowed_resource_ids: Option<Vec<String>>,
+    },
 }
 
 /// Free-standing constraint envelope — used internally by the engine
@@ -230,7 +248,9 @@ pub struct ResourceConstraint {
     pub counterparty: Option<Address>,
     /// Free-form discriminator for typed actions where the grant has
     /// allow-lists (e.g., model_id for `Inference`, escrow_id for
-    /// `DischargeEscrow`, proposal_id for `Vote`).
+    /// `DischargeEscrow`, proposal_id for `Vote`). For `InvokeResource`
+    /// it is qualified by class as `"<class>:<id>"` (e.g.
+    /// `"skill:web-search"`) because the grant restricts on both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<String>,
 }

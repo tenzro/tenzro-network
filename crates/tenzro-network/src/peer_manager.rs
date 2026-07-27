@@ -467,7 +467,7 @@ impl PeerManager {
 
         // Promote to protected so cluster validators can never mutually ban
         // each other via reputation decay / rate-limit penalties. This is
-        // the load-bearing fix for the "all blocks empty; peers perpetually
+        // the fix for the "all blocks empty; peers perpetually
         // banned" class of outage on the live testnet — now gated on a
         // verified validator-identity binding instead of a spoofable
         // Identify string.

@@ -101,9 +101,43 @@ All RPC calls use `POST` with `Content-Type: application/json`. The request body
 }
 ```
 
-### Create a Wallet
+### Create an Account
 
-Generate a new Tenzro 2-of-3 threshold MPC wallet. No seed phrase, no
+Generate a plain keypair and derive its address. The private key is
+returned once, in the response, and the node keeps no copy — store it
+yourself. `key_type` accepts `ed25519` (default) or `secp256k1`.
+
+```bash
+curl -X POST https://rpc.tenzro.xyz \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tenzro_createAccount",
+    "params": {"key_type": "ed25519"},
+    "id": 1
+  }'
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "address": "0x<40 hex chars — 20-byte address>",
+    "public_key": "0x<hex>",
+    "private_key": "0x<hex>",
+    "key_type": "Ed25519"
+  },
+  "id": 1
+}
+```
+
+Use this when you want to hold the key. For custody split across shares,
+use the MPC wallet below.
+
+### Create an MPC Wallet
+
+Generate a Tenzro 2-of-3 threshold MPC wallet. No seed phrase, no
 private key in user custody — the keystore holds shares, the node never
 sees a full key.
 
@@ -127,7 +161,7 @@ curl -X POST https://rpc.tenzro.xyz \
     "address": "0x<64 hex chars — 32-byte Tenzro address>",
     "display_address": "<base58 display form>",
     "public_key": "<hex>",
-    "key_type": "ed25519",
+    "key_type": "Ed25519",
     "threshold": 2,
     "total_shares": 3
   },
@@ -1783,6 +1817,129 @@ curl -X POST https://rpc.tenzro.xyz \
 
 ---
 
+## Multi-Party Workflows on Canton
+
+Multi-party workflows let an agent originate a structured, multi-stakeholder process: a typed lifecycle, an obligations table per counterparty, an approvals graph governed by a small policy DSL, an optional fee route, and an optional privacy domain — all hash-chained into auditable receipts and (optionally) mirrored into Canton's Daml runtime.
+
+State changes are written exclusively through privileged-VM selectors (`0x01000040`–`0x0100004B`) dispatched as signed transactions. The endpoints below are read-only — they query workflow state, receipts, fee routes, privacy domains, and operational metrics. Every one of them takes named params.
+
+### Get a Workflow
+
+```bash
+curl -X POST https://rpc.tenzro.xyz -H "Content-Type: application/json" -d '{
+  "jsonrpc":"2.0","id":1,"method":"tenzro_getWorkflow",
+  "params":{"workflow_id":"0x<workflow_id_hex>"}
+}'
+```
+
+Returns `null` when the id is unknown.
+
+### List Workflows by Participant
+
+```bash
+curl -X POST https://rpc.tenzro.xyz -H "Content-Type: application/json" -d '{
+  "jsonrpc":"2.0","id":1,"method":"tenzro_listWorkflowsByParticipant",
+  "params":{"did":"did:tenzro:human:abc..."}
+}'
+```
+
+**Response:**
+```json
+{
+  "result": {
+    "did": "did:tenzro:human:abc...",
+    "count": 3,
+    "truncated": false,
+    "workflow_ids": ["0x<hex>", "0x<hex>", "0x<hex>"]
+  }
+}
+```
+
+Sibling lookups take a different key each: `tenzro_listWorkflowsByCreator` takes `creator_did`, `tenzro_listWorkflowsByStatus` takes `status`. Both return the same shape.
+
+### Get Workflow Receipt
+
+```bash
+curl -X POST https://rpc.tenzro.xyz -H "Content-Type: application/json" -d '{
+  "jsonrpc":"2.0","id":1,"method":"tenzro_getWorkflowReceipt",
+  "params":{"receipt_id":"0x<receipt_id_hex>"}
+}'
+```
+
+### Walk Receipt Hash-Chain
+
+Receipts form a per-workflow hash chain, walked backwards from the head via `prev_receipt`. `max` bounds the walk and defaults to 256:
+
+```bash
+curl -X POST https://rpc.tenzro.xyz -H "Content-Type: application/json" -d '{
+  "jsonrpc":"2.0","id":1,"method":"tenzro_listWorkflowReceipts",
+  "params":{"workflow_id":"0x<workflow_id_hex>", "max":100}
+}'
+```
+
+### Get Fee Route
+
+```bash
+curl -X POST https://rpc.tenzro.xyz -H "Content-Type: application/json" -d '{
+  "jsonrpc":"2.0","id":1,"method":"tenzro_getFeeRoute",
+  "params":{"fee_route_id":"0x<fee_route_id_hex>"}
+}'
+```
+
+`tenzro_listFeeRoutes` takes no params and returns every registered route.
+
+### Preview Fee-Route Payouts
+
+Computes per-recipient payouts for a gross amount in wei using basis-point splits (truncation; remainder added to the last recipient). `gross_wei` is a decimal string:
+
+```bash
+curl -X POST https://rpc.tenzro.xyz -H "Content-Type: application/json" -d '{
+  "jsonrpc":"2.0","id":1,"method":"tenzro_computeFeeRoutePayouts",
+  "params":{"fee_route_id":"0x<fee_route_id_hex>", "gross_wei":"1000000000000000000"}
+}'
+```
+
+**Response:**
+```json
+{
+  "result": {
+    "fee_route_id": "0x<hex>",
+    "gross_wei": "1000000000000000000",
+    "payouts": [
+      {"recipient_did": "did:tenzro:...", "label": "originator", "amount_wei": "..."}
+    ]
+  }
+}
+```
+
+This is a preview only; settlement payouts move through the consensus-mediated escrow primitive, not this RPC.
+
+### Get Privacy Domain
+
+```bash
+curl -X POST https://rpc.tenzro.xyz -H "Content-Type: application/json" -d '{
+  "jsonrpc":"2.0","id":1,"method":"tenzro_getPrivacyDomain",
+  "params":{"domain_id":"0x<domain_id_hex>"}
+}'
+```
+
+`tenzro_listPrivacyDomainsForDid` takes a `did` and lists the domains it belongs to.
+
+### Operational Metrics
+
+Returns a snapshot of workflow / obligation / approval counts by status, signatures collected, Canton mirrors, fee-route count, and privacy-domain count. Takes no params:
+
+```bash
+curl -X POST https://rpc.tenzro.xyz -H "Content-Type: application/json" -d '{
+  "jsonrpc":"2.0","id":1,"method":"tenzro_getWorkflowOperationalMetrics",
+  "params":[]
+}'
+```
+
+The same metrics are exposed in Prometheus text format at `https://api.tenzro.xyz/metrics` and graphed by `deploy/monitoring/grafana-workflow-dashboard.json` (UID `tenzro-workflow`).
+
+---
+
 ## Common Workflows
 
 ### 0. Join as MicroNode (one-step setup)
@@ -1960,11 +2117,15 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `list_models` — List available AI models, filter by category or name
 - `chat_completion` — Send chat completion to a served model
 - `inference_request` — Send an inference request to a model
+- `route_intent` — Select a model from a use case plus budget, quality floor and cost-quality knob instead of naming one. Returns the model, tier, estimated cost, fallback chain, the difficulty cluster the prompt landed in, that model's observed error rate there, and the winning provider's address and endpoint when the offer came from another operator. Discovery only, though the per-DID budget gate and the wallet-balance ceiling still apply
+- `chat_by_intent` — Select and run in one call. Dispatch is pinned to the offer that was scored, so the price quoted is the price settled and the provider share goes to the address that offer named; the decision comes back under `route`
+- `record_route_outcome` — Report how a routed call turned out (`resolved` / `escalated` / `failed`) so per-cluster error rates reflect what happened. In practice this carries `escalated`; the other two are recorded from the dispatch itself
+- `route_difficulty_stats` — Read the cluster map and a model's per-cluster outcome counters. An operator diagnostic; `enabled` false means the node routes on declared metadata alone
 - `list_model_endpoints` — List running model service endpoints with URLs and status
 - `register_model_endpoint` — Register a model service endpoint
 - `get_model_endpoint` — Get details of a specific model endpoint
 - `unregister_model_endpoint` — Unregister a model service endpoint
-- `download_model` — Download a model's weights: peer-first over iroh blobs (BLAKE3-verified end-to-end), falling back to HuggingFace, checked against the canonical hash record before load
+- `download_model` — Download a model's weights: peer-first over iroh blobs (BLAKE3-verified on transfer), falling back to HuggingFace, checked against the canonical hash record before load
 - `get_download_progress` — Get download progress for a model
 - `get_model_hash` — Get a model's content-addressed hash record (BLAKE3 root + SHA-256 + per-file manifest hash) by `model_id`
 - `list_model_hashes` — List every recorded model hash

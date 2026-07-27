@@ -13,7 +13,7 @@ Template/bootstrap/resolver/spawner kit for the Tenzro Network agent marketplace
 
 ## Paid Agent Marketplace
 
-The agent marketplace is end-to-end paid-capable. Creators can publish templates that other users pay to invoke; the network collects a commission on every paid call.
+The agent marketplace supports paid templates from publication through settlement. Creators can publish templates that other users pay to invoke; the network collects a commission on every paid call.
 
 ### Creator identity (optional) and payout wallet (required for paid)
 
@@ -83,7 +83,7 @@ Located under `reference_templates/`. They are loaded at node startup by `tenzro
 | `language_trainer.json` | autonomous | free | Coordinates language-model training runs over the Tenzro Train protocol |
 | `vision_trainer.json` | autonomous | free | Coordinates vision-model training runs over the Tenzro Train protocol |
 | `timeseries_trainer.json` | autonomous | free | Coordinates timeseries-model training runs over the Tenzro Train protocol |
-| **`premium_alpha_advisor.json`** | **specialist** | **`per_execution: 5 TNZO`** | **Paid reference template demonstrating the full end-to-end paid flow: `creator_did` binding, `creator_wallet` payout, 5%/95% fee split, read-only delegation with zero transaction caps** |
+| **`premium_alpha_advisor.json`** | **specialist** | **`per_execution: 5 TNZO`** | **Paid reference template demonstrating the full paid flow: `creator_did` binding, `creator_wallet` payout, 5%/95% fee split, read-only delegation with zero transaction caps** |
 
 ### Adding a new paid template
 

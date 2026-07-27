@@ -130,6 +130,13 @@ pub struct ApprovalDecideCmd {
     #[arg(long)]
     approver_did: Option<String>,
 
+    /// Why the request was refused. Recorded on a `denied` decision and
+    /// returned to the requesting agent when it retries, so the agent can
+    /// act on the reason rather than just the refusal. Ignored for
+    /// `approved`.
+    #[arg(long)]
+    deny_reason: Option<String>,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -151,6 +158,12 @@ impl ApprovalDecideCmd {
             params.insert(
                 "approver_did".to_string(),
                 serde_json::Value::String(did.clone()),
+            );
+        }
+        if let Some(reason) = &self.deny_reason {
+            params.insert(
+                "deny_reason".to_string(),
+                serde_json::Value::String(reason.clone()),
             );
         }
 

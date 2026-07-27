@@ -1203,7 +1203,7 @@ mod tests {
 
         registry
             .attest_capability_with_signer("agent1".to_string(), cap.clone(), true, &signer)
-            .expect("end-to-end signer wrapper should succeed");
+            .expect("signer wrapper should succeed");
 
         let attestations = registry.get_attestations(&cap);
         assert_eq!(attestations.len(), 1);

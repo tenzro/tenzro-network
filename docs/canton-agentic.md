@@ -1,12 +1,13 @@
-# Canton agentic feature
+# Canton for autonomous agents
 
-Tenzro Network exposes Canton (DAML) as a first-class destination for
-autonomous agents. This guide covers the three RPCs that make Canton
-agentic: mandate-bound DAML write, scoped-read snapshots, and
-operator-only analytics rollup. It complements the operator-side
+Tenzro Network exposes Canton (DAML) as a destination an autonomous
+agent can write to under a controller's authority. This guide covers the
+three RPCs that carry that path — mandate-bound DAML write, scoped-read
+snapshots, and operator-only analytics rollup — and how a request selects
+its Canton network. It complements the operator-side
 [CANTON_MULTITENANT.md](operators/CANTON_MULTITENANT.md).
 
-## What's new
+## The three RPCs
 
 - **`tenzro_canton_submitWithMandate`** — submit a DAML command bound
   to an AP2 mandate pair. The handler validates the cart against AP2
@@ -21,10 +22,10 @@ operator-only analytics rollup. It complements the operator-side
   rolled-up per-key Canton call counters, grouped by `subject` or
   `key_id`. Useful for billing + capacity planning.
 
-These compose with the existing Canton surface (`tenzro_submitDamlCommand`,
-`tenzro_listDamlContracts`, `tenzro_canton_*`) and with the agent
-delegation fields shipped on `tenzro_createApiKey`
-([API keys](api-keys.md)).
+These compose with the rest of the Canton surface
+(`tenzro_submitDamlCommand`, `tenzro_listDamlContracts`,
+`tenzro_canton_*`) and with the agent delegation fields on
+`tenzro_createApiKey` ([API keys](api-keys.md)).
 
 ## Mandate-bound write flow
 
@@ -34,9 +35,10 @@ The autonomous agent presents two things on every Canton write:
    parties this agent is allowed to bind. The operator provisioned this
    key with `tenzro_createApiKey`, and the corresponding Canton-side
    `CanActAs` rights were granted atomically.
-2. **An AP2 cart mandate pair** — `checkout_vdc` (the principal's
-   intent) + `payment_vdc` (the agent's payment authorization). Both
-   are W3C Verifiable Credentials signed by the controlling DID.
+2. **An AP2 mandate pair** — `checkout_vdc` (the principal's
+   pre-authorization) + `payment_vdc` (the agent's payment
+   authorization). Both are W3C Verifiable Credentials signed by the
+   controlling DID.
 
 Example request body for `tenzro_canton_submitWithMandate`:
 
@@ -96,6 +98,35 @@ matching delegation field, the handler returns `-32004 Unauthorized`.
 The response is the canonical active-contracts shape — same row format
 as `tenzro_listDamlContracts`, scoped to the specified party.
 
+## Choosing the Canton network
+
+A Canton network is a distinct ledger with distinct parties and assets,
+so every canton-scoped request resolves to exactly one. Resolution
+order:
+
+1. An explicit `canton_network` param on the request (`"devnet"` or
+   `"mainnet"`). An unrecognized value returns `-32602`.
+2. The presenting API key's sole authorized network, when it authorizes
+   exactly one.
+3. The operator's configured default — the admin-token path, which
+   skips the API-key gate.
+
+A key that authorizes no network authorizes nothing: `-32004`, and the
+operator has to reissue it naming `canton_networks`. A key that
+authorizes more than one and names none returns `-32602` listing the
+authorized set. Naming a network the key does not authorize returns
+`-32004`, also listing the set.
+
+On the MCP surface the same selection arrives as the
+`X-Canton-Network` header rather than a param, because MCP tool
+arguments belong to the tool's own schema.
+
+The CLI reads `--canton-network`, falling back to the
+`TENZRO_CANTON_NETWORK` environment variable. Both SDKs pin a network
+per client with `on_network("mainnet")` (Rust) /
+`onNetwork('mainnet')` (TypeScript), which injects the param on every
+call the returned client makes.
+
 ## Operator analytics
 
 `tenzro_canton_aggregateAnalytics` rolls up the per-key counters
@@ -118,11 +149,17 @@ tenants can't read across each other.
 
 ## Workflow templates that hit Canton
 
-The reference workflow templates ship a Canton-settlement example at
-[`templates/workflows/canton-settlement.json`](../templates/workflows/canton-settlement.json).
-It's a single-step workflow that wraps `submitWithMandate` so tenants
-can instantiate it via `tenzro_useResource` and let the workflow
-executor handle the dispatch.
+[`templates/workflows/canton-settlement.json`](../templates/workflows/canton-settlement.json)
+is a single-step reference template over `submitWithMandate`. The step is
+a `use_tool` against the node's `tool-canton-submit-mandate` builtin, so
+a tenant instantiates the template via `tenzro_useResource` and the
+workflow executor dispatches the call.
+
+A template cannot carry a signature, so the mandate pair is not embedded:
+`checkout_vdc` and `payment_vdc` are `required_inputs`, supplied at
+instantiation from the controller's wallet. The node registers
+`tool-canton-submit-mandate` only when it has Canton configured — check
+`tenzro_listTools` on the node you are talking to.
 
 See [Resources](resources-and-mcp-host.md) for the full workflow
 runtime model and [Workflow](workflow.md) for the multi-party
@@ -130,50 +167,86 @@ obligation-saga layer.
 
 ## SDK access
 
+Both SDKs carry these three RPCs on their Canton client, alongside the
+rest of the Canton surface.
+
 ### Rust
 
 ```rust
 use tenzro_sdk::{TenzroClient, config::SdkConfig};
-use tenzro_sdk::canton_agent::{SubmitWithMandateParams, Mandate};
+use tenzro_sdk::canton::CantonMandate;
 
 let client = TenzroClient::connect(SdkConfig::testnet()).await?;
-let canton = client.canton_agent();
+let canton = client.canton().on_network("mainnet");
 
-let receipt = canton.submit_with_mandate(SubmitWithMandateParams {
-    mandate: Mandate {
-        checkout: checkout_vdc_json,
-        payment: payment_vdc_json,
-    },
-    command_type: "create".to_string(),
-    template_id: "#Splice.AmuletRules:AmuletRules:Transfer".to_string(),
-    create_arguments: Some(serde_json::json!({ "to": "...", "amount": "1000000" })),
-    contract_id: None,
-    choice: None,
-    choice_argument: None,
-    act_as: None,
-}).await?;
+let mandate = CantonMandate {
+    checkout: checkout_vdc_json,
+    payment: payment_vdc_json,
+};
+
+let receipt = canton
+    .create_contract_with_mandate(
+        &mandate,
+        "#Splice.AmuletRules:AmuletRules:Transfer",
+        serde_json::json!({ "to": "...", "amount": "1000000" }),
+        None, // `act_as` override
+    )
+    .await?;
+
+let snapshot = canton
+    .watch_party(
+        "TenzroLabs::abc123...",
+        vec!["#Splice.AmuletRules:AmuletRules:Holding".to_string()],
+    )
+    .await?;
 ```
+
+`exercise_choice_with_mandate` is the same call for an `exercise`
+command, taking a contract id, choice name and choice argument.
 
 ### TypeScript
 
 ```ts
-import { TenzroClient, CantonAgentClient } from '@tenzro/sdk';
+import { TenzroClient } from '@tenzro/sdk';
 
 const client = new TenzroClient({ rpcUrl: 'https://rpc.tenzro.xyz' });
-const canton = new CantonAgentClient(client.rpc);
+const canton = client.canton.onNetwork('mainnet');
 
-const receipt = await canton.submitWithMandate({
-  mandate: { checkout: checkoutVdc, payment: paymentVdc },
-  command_type: 'create',
-  template_id: '#Splice.AmuletRules:AmuletRules:Transfer',
-  create_arguments: { to: '...', amount: '1000000' },
-});
+const receipt = await canton.submitWithMandate(
+  { checkout: checkoutVdc, payment: paymentVdc },
+  {
+    command_type: 'create',
+    template_id: '#Splice.AmuletRules:AmuletRules:Transfer',
+    create_arguments: { to: '...', amount: '1000000' },
+  },
+);
+
+const snapshot = await canton.watchParty('TenzroLabs::abc123...', [
+  '#Splice.AmuletRules:AmuletRules:Holding',
+]);
 ```
 
 ## CLI access
 
-The `tenzro canton` command tree carries the existing surface; the new
-agentic RPCs can be invoked directly via any JSON-RPC client. A
-dedicated `tenzro canton-agent` command tree lands in a follow-up CLI
-update; today, use `tenzro resources use` against a workflow template
-that wraps the agentic flow.
+```bash
+tenzro canton submit-with-mandate \
+  --checkout-vdc ./checkout.json \
+  --payment-vdc ./payment.json \
+  --command-type create \
+  --template '#Splice.AmuletRules:AmuletRules:Transfer' \
+  --create-arguments '{"to":"...","amount":"1000000"}' \
+  --canton-network mainnet
+
+tenzro canton watch-party \
+  --party 'TenzroLabs::abc123...' \
+  --template-id '#Splice.AmuletRules:AmuletRules:Holding'
+
+# Operator admin-read.
+tenzro canton aggregate-analytics --group-by subject
+```
+
+Both mandate files hold a signed verifiable credential. `--api-key`
+reads `TENZRO_API_KEY` and `--canton-network` reads
+`TENZRO_CANTON_NETWORK`, so a shell that exports both can omit them.
+`aggregate-analytics` takes an admin token (`--admin-token`, or
+`TENZRO_ADMIN_TOKEN`) instead of an API key.

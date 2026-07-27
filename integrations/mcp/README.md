@@ -124,6 +124,8 @@ The Tenzro Agent Access Protocol (AAP) layers seven `aap_*` claims on top of OAu
 
 Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind the issued token — every subsequent privileged call must then carry a fresh DPoP proof signed by the same key.
 
+The RAR types the authorization server accepts are `transfer`, `create_escrow`, `discharge_escrow`, `inference`, `stake`, `vote`, `contract`, `register_identity`, and `resource_invocation`. The last of these is how a controller caps what its agent may spend on a marketplace resource: it takes a `max_amount_per_call` ceiling and optionally narrows to one resource `class` and a list of `allowed_resource_ids`. A controller that instead lists `resource.invoke` in the AAP oversight claim's `requires_human_approval_for` parks every paid invocation for review.
+
 ### Wallet & Balance (6 tools)
 
 - `get_balance` — Get TNZO balance in wei
@@ -176,8 +178,8 @@ A discovery catalog over the x402 payment surface: sellers register paid resourc
 ### AP2 v0.2 (Agent Payments Protocol)
 
 - `ap2_sign_mandate` — Sign a `checkout` or `payment` mandate. The wallet bound to `signer_did` signs the canonical preimage with its Ed25519 key. Only AP2 v0.2 `"ed25519"` alg is supported.
-- `ap2_verify_mandate` — Verify a single Verifiable Digital Credential (VDC) envelope (intent or cart mandate)
-- `ap2_validate_mandate_pair` — Three-axis validation of an intent → cart mandate pair: AP2 mandate-level constraints + TDIP `DelegationScope` (`enforce_operation`) + runtime `SpendingPolicy` (`SpendingPolicySnapshot::check`)
+- `ap2_verify_mandate` — Verify a single Verifiable Digital Credential (VDC) envelope (checkout or payment mandate)
+- `ap2_validate_mandate_pair` — Nested-ceiling validation of a checkout → payment mandate pair: AP2 CheckoutMandate constraints + TDIP `DelegationScope` (`enforce_operation`) + runtime `SpendingPolicy` (`SpendingPolicySnapshot::check`) + on-chain escrow balance when the pair carries an `escrow_id` + Stripe SPT `usage_limits` when it carries an `spt_grant_id`. An identifier that fails to resolve is a refusal, not a skip.
 - `ap2_protocol_info` — AP2 protocol metadata and supported features
 
 ### Stripe SPT (SharedPaymentToken)
@@ -206,11 +208,17 @@ The same registration semantics are mirrored to two non-EVM backends from a sing
 
 - `forget_identity` — GDPR Article 17 right-to-erasure. Hard-deletes a `Revoked` DID from the registry and persistent storage. The DID must already be in `Revoked` status; call `revoke_identity` first and allow the cascading broadcaster to propagate.
 
-### AI Models (10 tools)
+### AI Models (16 tools)
 
 - `list_models` — List available AI models
-- `chat_completion` — Send chat completion request
+- `chat_completion` — Send chat completion request to a named model
+- `route_by_intent` — Select a model from a use case plus budget, quality floor and cost-quality knob instead of naming one. Returns the model, tier, estimated cost, fallback chain, the difficulty cluster the prompt landed in, that model's observed error rate there, and the winning provider's address and endpoint when the offer came from another operator. Discovery only, though the per-DID budget gate and the wallet-balance ceiling still apply.
+- `chat_by_intent` — Select and run in one call. Dispatch is pinned to the offer that was scored, so the price quoted is the price settled and the provider share goes to the address that offer named. The decision is attached under `route`.
+- `record_route_outcome` — Report how a routed call turned out (`resolved` / `escalated` / `failed`) so per-cluster error rates reflect what happened. In practice this carries `escalated`; the other two are recorded from the dispatch itself. `retained: false` means the node has no difficulty index and the report was discarded.
+- `route_difficulty_stats` — Read the cluster map and a model's per-cluster outcome counters. An operator diagnostic; `enabled: false` means the node routes on declared metadata alone.
 - `list_model_endpoints` — List model service endpoints. Each endpoint carries `iroh_endpoint_id`, the hex iroh `EndpointId` of the serving node (empty for local-only services); cross-node inference routes to it over the `tenzro/infer` ALPN.
+- `get_provenance` — Read the cached provenance manifest for generated content by content hash (the synthetic-content marker per EU AI Act Art. 50(2))
+- `get_trainer_daemon_status` — Report the trainer auto-provisioning daemon status
 - `discover_models` — Discover models on network
 - `download_model` — Download model from registry
 - `serve_model` — Start serving a model. Auto-clusters when one host cannot hold the model: reads the GGUF header for layer count and hidden dimension, discovers LAN members from gossiped `ClusterProfile` announcements, and runs a layer-wise pipeline across them. Pass `force_single` to keep it on one host, or `cluster_members` to override discovery.
@@ -219,17 +227,20 @@ The same registration semantics are mirrored to two non-EVM backends from a sing
 - `get_download_progress` — Check model download progress
 - `list_providers` — List registered providers
 
-### Multi-Modal AI (24 tools)
+### Multi-Modal AI (41 tools)
 
-Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`, plus the modality verb. Catalogs draw from `OnnxForecastEntry`, `OnnxVisionEntry`, `OnnxTextEmbeddingEntry`, `OnnxSegmentationEntry`, `OnnxDetectionEntry`, `OnnxAudioEntry`, and `OnnxVideoEntry` in `tenzro-model`. License-tier gating (Permissive / Attribution / CommercialCustom / NonCommercial) is enforced at load time.
+Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`, plus the modality verb. Catalogs draw from `OnnxForecastEntry`, `OnnxVisionEntry`, `OnnxTextEmbeddingEntry`, `OnnxSegmentationEntry`, `OnnxTextSegmentationEntry`, `OnnxDetectionEntry`, `OnnxAudioEntry`, and `OnnxVideoEntry` in `tenzro-model`.
 
-- **Forecast** — `list_forecast_catalog`, `list_forecast_models`, `load_forecast_model`, `unload_forecast_model`, `forecast` (TimesFM 2.5 200M)
-- **Vision** — `list_vision_catalog`, `list_vision_models`, `load_vision_model`, `unload_vision_model`, `vision_embed`, `vision_similarity` (CLIP ViT-B/32 + L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16, DINOv2)
-- **Text Embedding** — `list_text_embedding_catalog`, `list_text_embedding_models`, `load_text_embedding_model`, `unload_text_embedding_model`, `text_embed` (Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M Matryoshka, BGE-M3, Snowflake Arctic Embed L v2.0)
-- **Segmentation** — `list_segmentation_catalog`, `list_segmentation_models`, `load_segmentation_model`, `unload_segmentation_model`, `segment` (SAM 3 / 3.1, SAM 2 base/large, EdgeSAM, MobileSAM)
+Passing `catalog_id` to a loader inherits the structural parameters from the catalog entry and runs the license-tier check (Permissive / Attribution / CommercialCustom / NonCommercial) — a CommercialCustom entry such as DINOv3 or SAM is refused with JSON-RPC `-32010` unless the node operator started `tenzro-node` accepting that license. Supplying the structural parameters explicitly skips the check. `model_id` on a loader is the id you register under; `model_id` on an inference call is that registered id, never the catalog id.
+
+- **Forecast** — `list_forecast_catalog`, `list_forecast_models`, `load_forecast_model`, `unload_forecast_model`, `forecast` (TimesFM 2.5 200M, TiRex 35M)
+- **Vision** — `list_vision_catalog`, `list_vision_models`, `load_vision_model`, `unload_vision_model`, `vision_embed`, `vision_similarity` (CLIP ViT-B/32 + L/14, SigLIP base/224, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16)
+- **Text Embedding** — `list_text_embedding_catalog`, `list_text_embedding_models`, `load_text_embedding_model`, `unload_text_embedding_model`, `text_embed` (Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M Matryoshka, BGE-M3, ModernBERT-embed base/large)
+- **Segmentation** — `list_segmentation_catalog`, `list_segmentation_models`, `load_segmentation_model`, `unload_segmentation_model`, `segment` (SAM 2 base/large, EdgeSAM, MobileSAM — point and box prompts)
+- **Text-Promptable Segmentation** — `list_text_segmentation_catalog`, `list_text_segmentation_models`, `load_text_segmentation_model`, `unload_text_segmentation_model`, `text_segment` (SAM 3 ViT-H — open-vocabulary noun phrases, its own runtime and decoder ABI)
 - **Detection** — `list_detection_catalog`, `list_detection_models`, `load_detection_model`, `unload_detection_model`, `detect` (RF-DETR n/s/m/b/l/2xl, D-FINE n/s/m/l/x)
-- **Audio (ASR)** — `list_audio_catalog`, `list_audio_models`, `load_audio_model`, `unload_audio_model`, `transcribe` (Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, Canary-1B-Flash)
-- **Video** — `list_video_catalog`, `list_video_models`, `load_video_model`, `unload_video_model`, `video_embed` (native catalog empty; pooled-vision fallback via DINOv3 / SigLIP2 / CLIP through `VisionFallbackVideoEncoder`)
+- **Audio (ASR)** — `list_audio_catalog`, `list_audio_models`, `load_audio_model`, `unload_audio_model`, `transcribe` (Moonshine tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, Canary-1B-Flash)
+- **Video** — `list_video_catalog`, `list_video_models`, `load_video_model`, `unload_video_model`, `video_embed` (V-JEPA 2 ViT-L/H/g in the catalog; `load_video_model` registers a `VisionFallbackVideoEncoder` over an already-loaded image encoder, so it takes `vision_model_id` + `num_frames` rather than a path)
 
 ### Staking & Governance (7 tools)
 
@@ -281,6 +292,13 @@ Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`
 - `get_agent_info` — Get agent details
 - `deregister_agent` — Deregister an agent
 
+### Capability Registry (4 tools)
+
+- `list_capabilities` — List every capability registered on this node
+- `get_capability_attestations` — Fetch attestations backing a capability claim
+- `get_agent_capability_attestations` — Fetch every attestation issued for one agent
+- `find_best_agent_for_capability` — Pick the best agent for a capability
+
 ### Agent Templates (7 tools)
 
 - `register_agent_template` — Register reusable template
@@ -307,6 +325,25 @@ Per-modality `list_*_catalog`, `list_*_models`, `load_*_model`, `unload_*_model`
 - `freeze_address` — Freeze address for compliance
 
 ### Canton / DAML (Canton 3.5+ JSON Ledger API)
+
+Canton is an operator-brokered resource: the ledger sits outside Tenzro and
+the node reaches it with credentials the operator supplies. Every tool here
+needs an API key with the `canton` scope, set as `TENZRO_API_KEY`. A node
+serves each Canton network independently and a key is authorized for a
+subset of them — set `TENZRO_CANTON_NETWORK` to `devnet` or `mainnet` and
+the client merges it into each call as `canton_network`. A key authorizing
+exactly one network needs no selector; a key authorizing more than one and
+given none returns `-32004` naming the authorized set.
+
+Each key carries a tier bounding its budget over a sliding 60-second
+window: `free` at 60 requests/min with writes refused, `standard` at 600,
+`priority` at 6,000. Over-budget returns `-32005` with `retry_after_ms`,
+`requests_per_minute`, and `tier`.
+
+Keys gate operator-brokered resources only. Publishing to the marketplace
+registry — agents, skills, workflows, MCP servers — is permissionless,
+priced by the provider in TNZO or offered free, and needs no operator
+approval.
 
 Reads:
 - `canton_list_domains` — List Canton synchronization domains the node is configured against

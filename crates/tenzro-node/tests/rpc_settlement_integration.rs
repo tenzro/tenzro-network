@@ -815,7 +815,7 @@ async fn test_rpc_settle_then_get_settlement() {
 }
 
 // ---------------------------------------------------------------------------
-// JSON-RPC params normalization end-to-end
+// JSON-RPC params normalization
 //
 // JSON-RPC 2.0 §4.2 explicitly allows EITHER a positional (array) or named
 // (object) `params` value. Most SDKs that wrap a single object argument send

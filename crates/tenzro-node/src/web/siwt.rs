@@ -5,7 +5,7 @@
 //! services without revealing private keys. SIWT applies the same
 //! structure to Tenzro identities: the message contains the requesting
 //! domain, the Tenzro address, a nonce, the chain id (1337 for testnet,
-//! `tenzro_mainnet` once mainnet ships), and an issued-at timestamp; the
+//! `tenzro_mainnet` once mainnet is live), and an issued-at timestamp; the
 //! user signs it with their wallet's hybrid Ed25519+ML-DSA-65 key; and
 //! the verifier checks the signature against the registered identity.
 //!

@@ -17,6 +17,121 @@ This guide covers the resource registries, the MCP plugin host, the unified disc
 
 The **unified discovery surface** collapses all six into one query — see [Unified resource discovery](#unified-resource-discovery) below.
 
+## Built-in resources
+
+Every node registers a set of skills and tools under the creator DID `did:tenzro:system:tenzro-network`, priced at zero. Some point at a remote MCP endpoint; the rest use the `builtin://` scheme and run inside the node that serves them, with no outbound hop. Boot-time reconciliation owns their lifecycle: matching rows are refreshed in place (preserving id, creation time, and usage counters), missing rows inserted, and rows from a prior configuration deleted.
+
+### Built-in skills on `builtin://`
+
+| Skill | What it dispatches to | Input |
+|---|---|---|
+| `web-search` | The operator's SearXNG-compatible JSON endpoint | `query`, optional `limit` (1–50, default 10), `categories`, `language`, `time_range`, `page`, `safesearch` |
+| `code-review` | Intent-based model routing, `use_case: code` | `text` |
+| `data-analysis` | Intent-based model routing, `use_case: reasoning` | `text` |
+| `text-summarization` | Intent-based model routing, `use_case: summarize` | `text` |
+| `blockchain-query` | The node's own ledger reads | `operation`: `balance` \| `nonce` \| `block` \| `transaction` \| `block_number` \| `status`, plus that operation's params |
+| `oneinch-aggregator` | 1inch classic swap, with the operator's key | `operation`: `quote` \| `swap` \| `tokens` \| `liquidity_sources` \| `approve_spender` \| `approve_transaction` \| `approve_allowance` |
+| `tenzro-trainer` | The node's Tenzro Train handlers | `operation`: `post_task` \| `list_runs` \| `get_run` \| `get_receipt` \| `enroll_trainer` \| `submit_gradient` \| `finalize_round` \| `decide_round` \| `challenge_commitment` \| `install_sealed_manifest` \| `get_sealed_manifest` |
+
+The three model-routed skills pin no model — the router selects one from what the node can reach. They forward `budget`, `optimize`, `quality_floor`, `est_input_tokens`, `est_output_tokens`, `max_tokens` and `temperature` when the caller sets them, so a skill invocation has the same reach as a direct `tenzro_chatByIntent` call.
+
+### Built-in tools on `builtin://`
+
+| Tool | `tool_name` | Params |
+|---|---|---|
+| `web-search-mcp` | `web_search` | Same as the `web-search` skill |
+| | `url_fetch` | `url` (http/https), optional `max_bytes` (1–4194304, default 262144) |
+| `code-executor` | `execute_component` | `component_b64`, optional `function` (default `invoke`), optional `input`, optional `deadline_ms`, optional `fuel_limit` |
+| `file-manager` | `read` \| `write` \| `list` \| `delete` | `path`, relative, plus `content` on `write` |
+
+`code-executor` runs a WASI 0.2 component under the sandbox's fuel and deadline budget. The bytes are re-hashed on registration, so the `component_id` reported back is the content address of exactly what executed, and the registration is dropped when the call returns. `function` names an export inside the `tenzro:skill/skill@1.0.0` interface. The languages the tool advertises are the languages a component is compiled from, not source text the node interprets.
+
+`file-manager` roots every path at `<data_dir>/agent_workspace`. Absolute paths and any `..` component are rejected.
+
+### Operator upstreams
+
+Two built-in skills and one built-in tool call something the operator supplies. Configure them under `[builtins]` in the node config TOML:
+
+```toml
+[builtins]
+# SearXNG-compatible JSON search endpoint. Backs the `web-search` skill
+# and the `web_search` call on the `web-search-mcp` tool.
+search_url = "https://search.example.org"
+search_api_key = "..."          # optional bearer token
+
+# 1inch Developer Portal key. Backs the `oneinch-aggregator` skill.
+oneinch_api_key = "..."
+```
+
+A node that has not configured an upstream does not register the corresponding built-in, so discovery lists only what that node can serve. Remove a key and the row disappears at the next start. `code-executor` follows the same rule against the component sandbox: a node built without it does not register the tool.
+
+## Published skills
+
+Anyone can publish to `CF_SKILLS` through `tenzro_registerSkill`. A published skill takes one of two forms, and the form decides where the code runs.
+
+| Form | Field | Who runs the code |
+|---|---|---|
+| Endpoint | `endpoint` — an HTTP, MCP, or A2A URL, or `builtin://<name>` | The publisher's host, or the node itself for `builtin://` |
+| Bundle | `bundle` — a content-addressed WASI 0.2 component | The node serving the invocation, inside the component sandbox |
+
+A row that names neither is refused at invocation with `-32603` before settlement, so it costs the caller nothing.
+
+### Bundle form
+
+```json
+{
+  "bundle": {
+    "uri": "tenzro://blob/<blake3-hex>",
+    "sha256": "<sha256-hex>",
+    "size_bytes": 481232
+  }
+}
+```
+
+The two digests serve different parties. The `tenzro://blob/` locator is BLAKE3, which the transport verifies on read. `sha256` is the digest the publisher declares and the one a caller pins through `expected_sha256`; the node re-hashes the fetched bytes against it before anything executes. A mismatch returns `-32006` carrying both the declared and the actual digest.
+
+Registry admission is permissionless, so a published bundle is untrusted code from an unknown author. The sandbox is the boundary a caller relies on: the component runs with no filesystem, no network, no environment and no host methods, under a 50,000,000-fuel budget and a ten-second deadline. `required_capabilities` on the skill row is a discovery tag the publisher writes, not a grant — an operator who wants a skill to reach anything beyond its own JSON hosts it behind an endpoint they control instead.
+
+The guest contract is one `invoke` export inside the `tenzro:skill/skill@1.0.0` interface, taking a JSON request string and returning a JSON response string. `tenzro_useSkill` returns the guest's JSON under `output` and the execution record under `sandbox`:
+
+```json
+{
+  "output": {},
+  "sandbox": {
+    "content_hash": "<sha256-hex>",
+    "bundle_uri": "tenzro://blob/<blake3-hex>",
+    "receipt": {
+      "component_id": "skill:<skill_id>:<invocation_id>",
+      "content_hash_hex": "<sha256-hex>",
+      "function": "invoke",
+      "input_hash_hex": "<sha256-hex>",
+      "output_hash_hex": "<sha256-hex>",
+      "outcome": "success",
+      "fuel": {
+        "budget": 50000000,
+        "consumed": 182344,
+        "remaining": 49817656,
+        "elapsed": { "secs": 0, "nanos": 41230000 }
+      },
+      "completed_at_ms": 1769472000000
+    }
+  }
+}
+```
+
+`outcome` is one of `success`, `trapped`, `fuel-exhausted`, `deadline-exceeded`, `host-contract-violation`. Each invocation registers under its own id so concurrent calls against one skill never contend, while the content hash stays the identity the receipt binds.
+
+### Pinning an invocation
+
+Because a publisher can update their own row, a caller that needs certainty names what it expects. `expected_version` and `expected_sha256` are checked against the row ahead of settlement; a mismatch is refused rather than silently substituted.
+
+```bash
+tenzro skill use <skill_id> \
+  --expected-version 1.4.0 \
+  --expected-sha256 <sha256-hex> \
+  --input '{"query":"..."}'
+```
+
 ## MCP Plugin Host
 
 The plugin host lets operators run custom and third-party MCPs (Stripe MCP, Plaid MCP, GitHub MCP, Linear MCP, Notion MCP, payment-rail MCPs, custody MCPs, data-feed MCPs, or operator-built ones) on their node without forking the codebase.
@@ -237,7 +352,7 @@ When `backing_tool_id` is set on a knowledge resource, invocations dispatch thro
 
 ## Workflow template catalog
 
-Operator-curated reusable workflow blueprints. Tenants discover via `tenzro_listWorkflowTemplates` and instantiate via `tenzro_instantiateWorkflow`.
+Reusable workflow blueprints. Anyone with a Tenzro DID publishes one via `tenzro_registerWorkflowTemplate` — there is no operator approval step. Callers discover via `tenzro_listWorkflowTemplates` and instantiate via `tenzro_instantiateWorkflow`.
 
 ### Step types
 
@@ -408,7 +523,51 @@ The full set of allow-list fields on `tenzro_createApiKey`:
 - `allowed_models` — model_ids
 - `max_per_resource_tnzo` — `{ "<resource_id>": "<atto_tnzo>" }` per-resource cap
 
-All optional. Empty fields preserve legacy unrestricted access. See [api-keys.md](api-keys.md) for the full API key issuance reference.
+All optional. An empty field leaves that class unrestricted for the key. See [api-keys.md](api-keys.md) for the full API key issuance reference.
+
+## Controller oversight of agent spend
+
+Per-tenant scoping is the operator's leash: it bounds what any holder of a
+given API key may invoke. Controller oversight is the other leash, and it
+belongs to the agent's identity rather than to the key the agent happens to
+hold — so it travels with the agent across every operator's registry.
+
+A controller expresses it two ways, both carried on the agent's DPoP-bound
+JWT:
+
+- A `resource_invocation` grant in `authorization_details` (RFC 9396) caps
+  what the agent may spend per invocation, and optionally narrows it to one
+  resource class and a set of resource ids:
+
+  ```json
+  {
+    "type": "resource_invocation",
+    "max_amount_per_call": "1000000000000000",
+    "class": "skill",
+    "allowed_resource_ids": ["web-search"]
+  }
+  ```
+
+  Omitting `class` permits any class; omitting `allowed_resource_ids`
+  permits any id within the class. An invocation the grant does not cover
+  returns `-32001` with the denial reason.
+
+- Listing `resource.invoke` in the AAP oversight claim's
+  `requires_human_approval_for` parks every paid invocation for a human. The
+  call returns `-32002` with the new record under `data.approval_id`; the
+  controller rules on it, and the agent retries the same call with
+  `approval_id` in its params.
+
+The gate runs immediately before settlement on `tenzro_useSkill`,
+`tenzro_useTool`, `tenzro_useKnowledge`, `tenzro_useResource`, and on the
+skill and tool steps a `tenzro_orchestrate` plan runs — a plan spends on the
+caller's behalf, so the caller's authority travels into its steps.
+
+Two invocations bypass the gate by design. A free invocation
+(`price_per_call` of zero) has no spend to authorize. A request carrying no
+authorization headers has no bearer identity, so there is no controller to
+consult — which is what keeps the registry permissionless. Such a request is
+still bound by the API key's own allow-lists and ceilings.
 
 ## Child agent spawn
 
@@ -458,7 +617,7 @@ Response:
 }
 ```
 
-Failure semantics: identity registration is the load-bearing step. If it fails, no funds move. If funding fails after registration, the identity remains (operator can fund later) and the error surfaces explicitly. Spending policy is best-effort.
+Failure semantics: identity registration comes first. If it fails, no funds move. If funding fails after registration, the identity remains (operator can fund later) and the error surfaces explicitly. Spending policy is best-effort.
 
 ## TNZO economics
 

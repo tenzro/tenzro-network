@@ -3,7 +3,7 @@
 //! Registry-driven autonomous agent runtime for Tenzro Network.
 //!
 //! This crate is the **glue layer** that lets a user spawn and run an
-//! autonomous agent end-to-end without ever touching Rust source code.
+//! autonomous agent without ever touching Rust source code.
 //! Every agent is a JSON template manifest published to the existing
 //! `CF_AGENT_TEMPLATES` registry. At spawn time the kit:
 //!
@@ -23,7 +23,7 @@
 //!
 //! The crate has **zero hardcoded agent / tool / skill names**.
 //! Everything is loaded from the registry at runtime. The 5 reference
-//! agents shipped in `reference_templates/*.json` are auto-published to
+//! agents bundled in `reference_templates/*.json` are auto-published to
 //! the registry on first node startup via [`bootstrap`], and from then
 //! on are indistinguishable from any other template that a third party
 //! publishes via `tenzro_registerAgentTemplate`.

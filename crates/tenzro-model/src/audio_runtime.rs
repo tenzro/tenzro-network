@@ -71,6 +71,11 @@ pub struct TranscribeResult {
     /// Detected language (when auto-detection runs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Duration of audio actually transcribed, in milliseconds. ASR is billed
+    /// per second of audio, and a clip longer than the model's window is
+    /// truncated before inference — so this measures the decoded PCM the
+    /// encoder consumed, not the length of the bytes the caller uploaded.
+    pub audio_ms: u64,
     pub generation_time_ms: u64,
 }
 
@@ -135,6 +140,13 @@ mod preprocessing {
     pub const N_SAMPLES: usize = 30 * SAMPLE_RATE as usize;
     /// Number of mel frames covering N_SAMPLES at HOP_LENGTH.
     pub const N_FRAMES: usize = N_SAMPLES / HOP_LENGTH;
+
+    /// Milliseconds of audio a mono 16 kHz sample count represents. Rounds up so
+    /// a clip shorter than a millisecond still bills as audio rather than as
+    /// nothing.
+    pub fn samples_to_ms(n_samples: usize) -> u64 {
+        (n_samples as u64 * 1000).div_ceil(SAMPLE_RATE as u64)
+    }
 
     /// Decode arbitrary audio bytes (WAV/MP3/FLAC/OGG) into mono 16 kHz f32 PCM.
     ///
@@ -742,6 +754,7 @@ mod onnx_backend {
                 text,
                 segments: Vec::new(),
                 language: Some("en".into()),
+                audio_ms: samples_to_ms(n_samples),
                 generation_time_ms: start.elapsed().as_millis() as u64,
             })
         }
@@ -936,6 +949,10 @@ mod onnx_backend {
                 text,
                 segments: Vec::new(),
                 language: config.language.clone(),
+                // The mel window is padded up to 30s, so a shorter clip bills
+                // for its own length and a longer one bills for the window the
+                // encoder actually saw.
+                audio_ms: samples_to_ms(pcm.len().min(N_SAMPLES)),
                 generation_time_ms: start.elapsed().as_millis() as u64,
             })
         }
@@ -1500,6 +1517,7 @@ mod onnx_backend {
                 text,
                 segments: Vec::new(),
                 language: None,
+                audio_ms: samples_to_ms(n_samples),
                 generation_time_ms: start.elapsed().as_millis() as u64,
             })
         }
@@ -2078,6 +2096,7 @@ mod onnx_backend {
                 text,
                 segments: Vec::new(),
                 language: Some(self.default_target_lang.clone()),
+                audio_ms: samples_to_ms(n_samples),
                 generation_time_ms: start.elapsed().as_millis() as u64,
             })
         }

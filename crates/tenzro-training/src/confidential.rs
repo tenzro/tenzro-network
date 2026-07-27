@@ -1,8 +1,9 @@
 //! Confidential-tier sealed-shard manifest handling.
 //!
-//! The Confidential tier protects sponsor data end-to-end: the dataset is
-//! sharded and encrypted under per-shard AES-256-GCM keys, those data keys
-//! are wrapped one-per-trainer to the trainer's attested enclave public key,
+//! The Confidential tier protects sponsor data from ingestion through
+//! training: the dataset is sharded and encrypted under per-shard
+//! AES-256-GCM keys, those data keys are wrapped one-per-trainer to the
+//! trainer's attested enclave public key,
 //! and the wrapped envelopes are gathered into a [`SealedDatasetManifest`]
 //! that the sponsor publishes alongside the task spec.
 //!
@@ -268,8 +269,8 @@ pub fn compute_shard_ciphertext_hash(bytes: &[u8]) -> Hash {
 /// (cheap, catches truncation early), then the SHA-256 compare.
 ///
 /// Belt-and-braces on top of the transport's own integrity check (iroh-blobs
-/// verifies BLAKE3 end-to-end; this catches a wiring bug between the
-/// transport-layer hash and the protocol-layer hash).
+/// verifies BLAKE3 over every transferred chunk; this catches a wiring bug
+/// between the transport-layer hash and the protocol-layer hash).
 pub fn verify_shard_ciphertext(envelope: &SealedShardEnvelope, bytes: &[u8]) -> Result<()> {
     if bytes.len() as u64 != envelope.shard_ciphertext_bytes {
         return Err(TrainingError::SealedShardSizeMismatch {

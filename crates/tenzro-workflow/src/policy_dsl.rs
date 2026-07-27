@@ -3,7 +3,7 @@
 //! `DelegationScope` is a structural ceiling (max value, allowed ops). The DSL
 //! lets a controller express richer predicates: amount-tier × counterparty ×
 //! time-window × asset-class × risk-tier, with `RequiresApprovalFrom(...)`
-//! escalation as a first-class verdict.
+//! escalation available as a verdict in its own right.
 //!
 //! The evaluator is **pure**: no async, no I/O beyond the `IdentityLookup`
 //! trait. Same context → same verdict, every time. This is what makes it safe

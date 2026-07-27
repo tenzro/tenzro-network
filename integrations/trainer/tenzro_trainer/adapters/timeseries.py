@@ -2,12 +2,12 @@
 
 Targets TimesFM-class 200M-parameter decoder-only forecasters.
 
-Phase 1 ships a *minimal in-process* adapter: a small Transformer decoder
+Phase 1 provides a *minimal in-process* adapter: a small Transformer decoder
 that operates on patch embeddings of a univariate series, plus a parquet shard
-loader. This is enough to exercise the full decoupled outer-aggregation loop end-to-end
+loader. This is enough to exercise the whole decoupled outer-aggregation loop
 in CI without needing 100 GB of pretraining data; production deployments
-would override ``build_adapter`` with the real TimesFM (or Chronos / Moirai)
-implementation while keeping the same :class:`TrainerAdapter` surface.
+would override ``build_adapter`` with the upstream TimesFM (or Chronos /
+Moirai) implementation while keeping the same :class:`TrainerAdapter` surface.
 """
 
 from __future__ import annotations

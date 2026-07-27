@@ -33,7 +33,7 @@ class LoadTargetsTests(unittest.TestCase):
 
     def test_timesfm_fields(self) -> None:
         t = export.load_targets()["timesfm-2.5-200m"]
-        self.assertEqual(t.hf_repo, "google/timesfm-2.5-200m-pytorch")
+        self.assertEqual(t.hf_repo, "google/timesfm-2.5-200m-transformers")
         self.assertEqual(t.arch, "timesfm")
         self.assertEqual(t.license, "Apache-2.0")
         self.assertEqual(t.context_length, 2048)

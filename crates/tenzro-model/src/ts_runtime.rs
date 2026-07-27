@@ -7,7 +7,7 @@
 //!
 //! # Scope
 //!
-//! This module ships a common `ForecastModel` trait plus a
+//! This module provides a common `ForecastModel` trait plus a
 //! `GenericForecast` implementation for ONNX foundation forecasters that
 //! fit a single-tensor input contract:
 //!

@@ -620,7 +620,7 @@ pub struct ProposalEquivocationEvidence {
 }
 
 impl ProposalEquivocationEvidence {
-    /// Verifies the evidence end-to-end: distinct block hashes plus BOTH
+    /// Verifies the evidence in full: distinct block hashes plus BOTH
     /// hybrid signatures valid over their canonical payloads under the
     /// embedded public key.
     pub fn is_valid(&self) -> bool {

@@ -4,12 +4,18 @@
 //! `Vec<WorkflowStepSpec>` to completion against the node's RPC
 //! handlers. Owns:
 //!
-//! - **Per-step dispatch** to `tenzro_useTool` / `tenzro_chat` /
-//!   `tenzro_useKnowledge` / `tenzro_spawnChildAgent` / `tenzro_canton_submitWithMandate`
-//!   plus internal `Wait` semantics.
+//! - **Per-step dispatch** to `tenzro_useTool` / `tenzro_useKnowledge` /
+//!   `tenzro_spawnChildAgent`, and for a model step to either
+//!   `tenzro_chat` or `tenzro_textEmbed` depending on whether the step
+//!   carries a prompt or text to embed, plus internal `Wait` semantics.
+//!   A Canton write with an AP2 mandate pair is a `use_tool` step
+//!   against the `canton-submit-mandate` builtin, so it needs no step
+//!   kind of its own.
 //! - **Variable interpolation** via `{{ inputs.X }}` and
 //!   `{{ steps.<name>.output.<path> }}` tokens. Resolved against a per-
-//!   run context before dispatch.
+//!   run context before dispatch. Step params and the resource id are
+//!   both resolved, so a template can leave the choice of provider to
+//!   whoever instantiates it.
 //! - **Durable saga state** in `CF_SETTLEMENTS` under `workflow_run:`
 //!   prefix. Every step transition writes through; hydrate-on-boot
 //!   resumes mid-step on operator restart.
@@ -579,9 +585,10 @@ impl WorkflowExecutor {
             } => {
                 let resolved =
                     interpolate(params, &run.inputs, &run.step_outputs)?;
+                let tool_id = interpolate_id(tool_id, &run.inputs, &run.step_outputs)?;
                 let out = self
                     .dispatcher
-                    .dispatch_tool(tool_id, tool_name, resolved.clone(), api_key, payer_wallet)
+                    .dispatch_tool(&tool_id, tool_name, resolved.clone(), api_key, payer_wallet)
                     .await?;
                 Ok((resolved, out))
             }
@@ -592,10 +599,12 @@ impl WorkflowExecutor {
             } => {
                 let resolved =
                     interpolate(params, &run.inputs, &run.step_outputs)?;
+                let knowledge_id =
+                    interpolate_id(knowledge_id, &run.inputs, &run.step_outputs)?;
                 let out = self
                     .dispatcher
                     .dispatch_knowledge(
-                        knowledge_id,
+                        &knowledge_id,
                         resolved.clone(),
                         api_key,
                         payer_wallet,
@@ -608,9 +617,10 @@ impl WorkflowExecutor {
             } => {
                 let resolved =
                     interpolate(params, &run.inputs, &run.step_outputs)?;
+                let model_id = interpolate_id(model_id, &run.inputs, &run.step_outputs)?;
                 let out = self
                     .dispatcher
-                    .dispatch_model(model_id, resolved.clone(), api_key, payer_wallet)
+                    .dispatch_model(&model_id, resolved.clone(), api_key, payer_wallet)
                     .await?;
                 Ok((resolved, out))
             }
@@ -628,11 +638,13 @@ impl WorkflowExecutor {
                 })?;
                 let resolved_scope =
                     interpolate(scope_overrides, &run.inputs, &run.step_outputs)?;
+                let agent_template_id =
+                    interpolate_id(agent_template_id, &run.inputs, &run.step_outputs)?;
                 let out = self
                     .dispatcher
                     .dispatch_spawn_agent(
                         parent_did,
-                        agent_template_id,
+                        &agent_template_id,
                         *tnzo_budget,
                         *valid_until,
                         resolved_scope.clone(),
@@ -859,6 +871,31 @@ fn interpolate(
     }
 }
 
+/// Resolve a resource id that may itself be a `{{ inputs.X }}` token.
+///
+/// A reference template distributed with the node cannot name a
+/// third-party provider's tool, knowledge base, or model — whose
+/// registry id differs per provider — so those ids are parameterized
+/// the same way step params are. An id with no token resolves to
+/// itself.
+fn interpolate_id(
+    id: &str,
+    inputs: &serde_json::Value,
+    step_outputs: &BTreeMap<String, serde_json::Value>,
+) -> Result<String, ExecutorError> {
+    let resolved = interpolate(
+        &serde_json::Value::String(id.to_string()),
+        inputs,
+        step_outputs,
+    )?;
+    match resolved {
+        serde_json::Value::String(s) => Ok(s),
+        other => Err(ExecutorError::UnknownReference(format!(
+            "resource id '{id}' resolved to a non-string value: {other}"
+        ))),
+    }
+}
+
 fn extract_full_token(s: &str) -> Option<String> {
     let s = s.trim();
     let inner = s.strip_prefix("{{").and_then(|x| x.strip_suffix("}}"))?;
@@ -981,5 +1018,29 @@ mod tests {
         let params = json!(["{{ inputs.a }}", "{{ inputs.b }}"]);
         let resolved = interpolate(&params, &inputs, &outputs).unwrap();
         assert_eq!(resolved, json!([1, 2]));
+    }
+
+    #[test]
+    fn interpolate_id_passes_literal_through() {
+        let inputs = json!({});
+        let outputs: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        let id = interpolate_id("tool-identity-register", &inputs, &outputs).unwrap();
+        assert_eq!(id, "tool-identity-register");
+    }
+
+    #[test]
+    fn interpolate_id_resolves_input_reference() {
+        let inputs = json!({ "custody_tool_id": "tool-acme-custody" });
+        let outputs: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        let id = interpolate_id("{{ inputs.custody_tool_id }}", &inputs, &outputs).unwrap();
+        assert_eq!(id, "tool-acme-custody");
+    }
+
+    #[test]
+    fn interpolate_id_rejects_non_string_resolution() {
+        let inputs = json!({ "tool": { "id": "x" } });
+        let outputs: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        let err = interpolate_id("{{ inputs.tool }}", &inputs, &outputs).unwrap_err();
+        assert!(matches!(err, ExecutorError::UnknownReference(_)));
     }
 }

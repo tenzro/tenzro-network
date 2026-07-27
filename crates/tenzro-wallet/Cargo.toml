@@ -52,8 +52,8 @@ libc = "0.2"
 
 [features]
 default = []
-# Gates the end-to-end integration test (`tests/e2e_real_rpc.rs`) against a
-# real spawned `tenzro-node` binary. Requires the node binary be built first
+# Gates the integration test (`tests/e2e_real_rpc.rs`) that runs against a
+# locally spawned `tenzro-node` binary. Requires the node binary be built first
 # (via `cargo build -p tenzro-node`); enabled with
 # `cargo test -p tenzro-wallet --features e2e`.
 e2e = []

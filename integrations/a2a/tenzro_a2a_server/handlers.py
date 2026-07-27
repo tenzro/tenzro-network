@@ -375,7 +375,16 @@ async def handle_identity(text: str, metadata: dict = None) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_route_intent_params(text: str, metadata: dict = None) -> dict:
-    """Assembles tenzro_routeIntent params from metadata, defaulting use_case."""
+    """Assembles tenzro_routeIntent params from metadata, defaulting use_case.
+
+    metadata["payer_did"] enables the per-DID rolling-window budget gate;
+    metadata["payer_address"] makes the payer's on-chain TNZO balance a hard
+    ceiling. metadata["prompt"] is the text the model would answer, used only
+    to place the request in a difficulty cluster so selection accounts for how
+    hard the prompt is — it is not sent to any provider. tenzro_chatByIntent
+    derives it from the chat turns, so it only matters when routing without
+    dispatching.
+    """
     metadata = metadata or {}
     params: dict = {}
     use_case = metadata.get("use_case")
@@ -387,7 +396,8 @@ def _build_route_intent_params(text: str, metadata: dict = None) -> dict:
                 break
     params["use_case"] = use_case or "chat"
     for key in ("budget", "optimize", "quality_floor",
-                "est_input_tokens", "est_output_tokens", "payer_did"):
+                "est_input_tokens", "est_output_tokens", "payer_did",
+                "payer_address", "prompt"):
         if metadata.get(key) is not None:
             params[key] = metadata[key]
     return params
@@ -421,6 +431,39 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
         for m in result:
             lines.append(f"  - {m.get('name', 'unknown')} ({m.get('id', '')})")
         return "\n".join(lines)
+
+    # Route feedback: report how a routed call turned out so per-cluster error
+    # rates reflect what happened rather than only what the catalog declares.
+    # In practice this carries "escalated" — the outcome only the caller knows,
+    # because it means the caller took the answer to a stronger model.
+    # "resolved" and "failed" are already recorded by tenzro_chatByIntent from
+    # the dispatch itself. retained=false in the response means the node has no
+    # difficulty index, so the report was accepted and discarded.
+    if "outcome" in t:
+        md = metadata or {}
+        missing = [k for k in ("model_id", "cluster", "outcome") if md.get(k) is None]
+        if missing:
+            return ("Reporting a route outcome needs metadata: "
+                    + ", ".join(missing))
+        result = await rpc_call("tenzro_recordRouteOutcome", {
+            "model_id": md["model_id"],
+            "cluster": md["cluster"],
+            "outcome": md["outcome"],
+        })
+        return json.dumps(result, indent=2)
+
+    # Difficulty index: how many prompt clusters the node has discovered and
+    # how many prompts landed in each, plus a model's per-cluster outcome
+    # counters when metadata names one. An operator diagnostic — routing does
+    # not depend on it. enabled=false means the node has no embedding model
+    # loaded and routes on declared metadata alone.
+    if "difficulty" in t or ("cluster" in t and "stat" in t):
+        params: dict = {}
+        model_id = (metadata or {}).get("model_id")
+        if model_id:
+            params["model_id"] = model_id
+        result = await rpc_call("tenzro_routeDifficultyStats", params)
+        return json.dumps(result, indent=2)
 
     # Intent routing: discover the best model for a use case + budget without
     # naming one. "route"/"intent"/"best model", or a use_case in metadata,
@@ -476,7 +519,7 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
         return json.dumps(result, indent=2)
 
     # Peer-first model download: weights are pulled from Tenzro peers over
-    # iroh blobs (BLAKE3-verified end-to-end), falling back to HuggingFace,
+    # iroh blobs (BLAKE3-verified on transfer), falling back to HuggingFace,
     # then checked against the canonical hash record before load.
     if "download" in t and "model" in t:
         model_id = (metadata or {}).get("model_id")
@@ -1634,6 +1677,137 @@ async def handle_agent_spawning(text: str, metadata: dict = None) -> str:
         "  - 'Spawn an agent named researcher with web-search capability'\n"
         "  - 'List my child agents'\n"
         "  - 'Run an autonomous agent task'"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Capability Registry
+# ---------------------------------------------------------------------------
+
+# Short forms the node maps onto concrete capability variants. Anything else
+# is registered as a custom capability under its own name.
+_CAPABILITY_SHORT_FORMS = (
+    "nlp",
+    "vision",
+    "code",
+    "data",
+    "blockchain",
+    "smart_contract",
+    "api_integration",
+    "coordination",
+)
+
+
+def _extract_capability(text: str) -> str | None:
+    """Pull a capability name out of a request.
+
+    Quoted names win outright. Otherwise a bare short form anywhere in the
+    text is accepted, then whatever follows 'for'.
+    """
+    m = re.search(r"['\"]([\w-]+)['\"]", text)
+    if m:
+        return m.group(1)
+
+    t = text.lower()
+    for short in _CAPABILITY_SHORT_FORMS:
+        if re.search(rf"\b{re.escape(short)}\b", t):
+            return short
+
+    m = re.search(r"\bfor\s+([\w-]+)", text, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _extract_capability_agent_id(text: str) -> str | None:
+    """Pull an agent identifier out of a request.
+
+    Agent ids on the capability registry are free-form strings rather than
+    UUIDs, so ``_extract_id`` does not apply.
+    """
+    m = re.search(r"\bagent\s+([\w:.-]+)", text, re.IGNORECASE)
+    if not m:
+        return None
+    candidate = m.group(1).rstrip("?.!,;")
+    # 'attestations for agent foo' matches; 'best agent for vision' does not.
+    return None if candidate.lower() in ("for", "id") else candidate
+
+
+async def handle_capability_registry(text: str, metadata: dict = None) -> str:
+    t = text.lower()
+
+    if "best" in t or "pick" in t or "tee-backed agent" in t:
+        capability = _extract_capability(text)
+        if not capability:
+            return (
+                "Name the capability to select for, e.g. "
+                "\"Pick the best agent for 'code'\"."
+            )
+        result = await rpc_call(
+            "tenzro_findBestAgentForCapability", {"capability": capability}
+        )
+        best = result.get("best_agent")
+        if not best:
+            return (
+                f"No agent on this node claims '{capability}' "
+                f"({result.get('total_candidates', 0)} candidates)."
+            )
+        return (
+            f"Best agent for '{capability}':\n"
+            f"  Agent: {best}\n"
+            f"  Candidates considered: {result.get('total_candidates', 0)}\n"
+            f"\n"
+            f"Selection prefers TEE-backed attestations, most recent first."
+        )
+
+    agent_id = _extract_capability_agent_id(text)
+    if agent_id and "attestation" in t:
+        result = await rpc_call(
+            "tenzro_getAgentCapabilityAttestations", {"agent_id": agent_id}
+        )
+        return f"Attestations for agent {agent_id}:\n{json.dumps(result, indent=2)}"
+
+    if "attestation" in t:
+        capability = _extract_capability(text)
+        if not capability:
+            return (
+                "Name the capability to inspect, e.g. "
+                "\"Show attestations for the 'nlp' capability\"."
+            )
+        result = await rpc_call(
+            "tenzro_getCapabilityAttestations",
+            {"capability": capability, "verified_only": "verif" in t},
+        )
+        return (
+            f"Attestations for '{capability}' "
+            f"(verified_only={result.get('verified_only', False)}):\n"
+            f"{json.dumps(result.get('attestations', []), indent=2)}"
+        )
+
+    if "list" in t or "capabilit" in t or "discover" in t:
+        result = await rpc_call("tenzro_listCapabilities", {})
+        lines = [
+            f"  {entry.get('capability')}: "
+            f"{entry.get('agent_count', 0)} agents, "
+            f"{entry.get('attestation_count', 0)} attestations"
+            for entry in result.get("capabilities", [])
+        ]
+        body = "\n".join(lines) if lines else "  (none registered)"
+        out = f"Registered capabilities ({result.get('total', 0)}):\n{body}"
+        if result.get("truncated"):
+            out += "\n  … list truncated by the node's response cap."
+        rejected = result.get("rejected_attestation_count", 0)
+        if rejected:
+            out += (
+                f"\n\n{rejected} attestation(s) rejected since boot — signature "
+                f"mismatch or malformed payload. Worth investigating."
+            )
+        return out
+
+    return (
+        "Capability registry operations:\n"
+        "  - 'List all registered capabilities on this node'\n"
+        "  - \"Show attestations for the 'nlp' capability\"\n"
+        "  - 'Show attestations issued for agent agent-id-123'\n"
+        "  - \"Pick the best agent for 'code'\""
     )
 
 
@@ -2862,6 +3036,75 @@ async def handle_auth(text: str, metadata: dict = None) -> str:
     )
 
 
+async def handle_approval(text: str, metadata: dict = None) -> str:
+    """Out-of-band approval loop for actions the controller put on the
+    always-ask list.
+
+    The agent's first attempt at such an action returns JSON-RPC -32002
+    carrying `data.approval_id`. The approver then lists pending records,
+    inspects one, and decides. On `approved` the agent retries the *same*
+    action with that `approval_id` and it executes -- the approval is
+    single-use and is checked for action parity, so an approval for one
+    amount cannot be redeemed against another. On `denied` the retry
+    returns -32001 carrying the approver's `deny_reason`, so the agent
+    learns why and can adapt rather than only learning it was refused.
+    """
+    t = text.lower()
+    md = metadata or {}
+    approval_id = md.get("approval_id")
+
+    if "decide" in t or "approve" in t or "deny" in t or "reject" in t:
+        if not approval_id:
+            return (
+                "To decide an approval, supply metadata.approval_id (returned "
+                "as data.approval_id on the -32002 error from the original "
+                "attempt) and metadata.approver_did.\n"
+                "Optional: metadata.deny_reason -- recorded on a denial and "
+                "returned to the requesting agent when it retries, so the "
+                "agent can act on the reason. Ignored for an approval."
+            )
+        decision = md.get("decision")
+        if not decision:
+            decision = "denied" if ("deny" in t or "reject" in t) else "approved"
+        params = {"approval_id": approval_id, "decision": decision}
+        if md.get("approver_did"):
+            params["approver_did"] = md["approver_did"]
+        if md.get("deny_reason"):
+            params["deny_reason"] = md["deny_reason"]
+        result = await rpc_call("tenzro_decideApproval", params)
+        return json.dumps(result, indent=2)
+
+    if "pending" in t or "list" in t:
+        approver_did = md.get("approver_did")
+        if not approver_did:
+            return (
+                "To list pending approvals, supply metadata.approver_did -- "
+                "the DID the requests were routed to for signoff."
+            )
+        result = await rpc_call(
+            "tenzro_listPendingApprovals", {"approver_did": approver_did}
+        )
+        return json.dumps(result, indent=2)
+
+    if approval_id:
+        result = await rpc_call("tenzro_getApproval", {"approval_id": approval_id})
+        return json.dumps(result, indent=2)
+
+    return (
+        "Approval operations:\n"
+        "  - 'List pending approvals'   (metadata.approver_did)              -- tenzro_listPendingApprovals\n"
+        "  - 'Get approval'             (metadata.approval_id)               -- tenzro_getApproval\n"
+        "  - 'Approve request'          (metadata.approval_id, approver_did) -- tenzro_decideApproval\n"
+        "  - 'Deny request'             (metadata.approval_id, approver_did, deny_reason)\n"
+        "\n"
+        "The loop: the agent's first attempt at an always-ask action returns\n"
+        "-32002 with data.approval_id. Once approved, the agent retries the\n"
+        "same action passing approval_id and it executes -- approvals are\n"
+        "single-use and must match the action they were granted for. A denial\n"
+        "returns -32001 carrying deny_reason so the agent can adapt."
+    )
+
+
 async def handle_help(text: str, metadata: dict = None) -> str:
     return (
         "Tenzro Network Agent -- 70 skills available. Highlights:\n"
@@ -2881,6 +3124,7 @@ async def handle_help(text: str, metadata: dict = None) -> str:
         "    task_marketplace - Post/browse AI tasks with escrow\n"
         "    agent_marketplace - Discover/spawn agent templates\n"
         "    agent_spawning - Spawn autonomous sub-agents\n"
+        "    capability_registry - Discover capabilities and their attestations\n"
         "    swarm       - Orchestrate agent swarms\n"
         "\n"
         "  Payments & Settlement:\n"
@@ -4202,6 +4446,1188 @@ async def handle_oracle(text: str, metadata: dict = None) -> str:
     return f"Asset prices:\n{json.dumps(result, indent=2)}"
 
 
+async def handle_cortex(text: str, metadata: dict = None) -> str:
+    """Run Cortex reasoning loops and inspect the Cortex worker pool.
+
+    `tenzro_cortexReason` runs an iterative reasoning loop against a served
+    model under a tier-derived budget. Workers are the sidecars that execute
+    the loops; local and remote pools are listed separately.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "worker" in t and ("register" in t or "add" in t):
+        if not md.get("model_id"):
+            return (
+                "Registering a Cortex worker requires metadata.model_id. "
+                "Optional: sidecar_url, bearer_token, arch, max_loops, "
+                "moe_experts, experts_per_token, attn_type, pricing, "
+                "worker_did, timeout_secs."
+            )
+        params = {"model_id": md["model_id"]}
+        for key in (
+            "sidecar_url", "bearer_token", "arch", "max_loops", "moe_experts",
+            "experts_per_token", "attn_type", "pricing", "worker_did",
+            "timeout_secs",
+        ):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        result = await rpc_call("tenzro_registerCortexWorker", params)
+        return f"Cortex worker registered:\n{json.dumps(result, indent=2)}"
+
+    if "worker" in t and "remote" in t:
+        result = await rpc_call("tenzro_listRemoteCortexWorkers", [])
+        return f"Remote Cortex workers:\n{json.dumps(result, indent=2)}"
+
+    if "worker" in t:
+        result = await rpc_call("tenzro_listCortexWorkers", [])
+        return f"Cortex workers:\n{json.dumps(result, indent=2)}"
+
+    model_id = md.get("model_id")
+    reason_input = md.get("input") or (text if model_id else None)
+    if model_id and reason_input:
+        params = {
+            "model_id": model_id,
+            "input": reason_input,
+            "tier": md.get("tier", "standard"),
+        }
+        for key in ("min_loops", "max_loops", "max_cost_wei", "deadline_ms",
+                    "attestation", "requester", "request_id"):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        result = await rpc_call("tenzro_cortexReason", params)
+        return f"Cortex reasoning:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Cortex reasoning operations:\n"
+        "  - 'List cortex workers'\n"
+        "  - 'List remote cortex workers'\n"
+        "  - 'Register cortex worker' (metadata: model_id, sidecar_url?, "
+        "bearer_token?, arch?, max_loops?, moe_experts?, experts_per_token?, "
+        "attn_type?, pricing?, worker_did?, timeout_secs?)\n"
+        "  - 'Reason' (metadata: model_id, input, tier ∈ fast|standard|deep|"
+        "institutional, min_loops?, max_loops?, max_cost_wei?, deadline_ms?, "
+        "attestation?, requester?, request_id?)"
+    )
+
+
+async def handle_settlement(text: str, metadata: dict = None) -> str:
+    """Settle service payments, read receipts, and drive payment channels.
+
+    Covers immediate settlement (`tenzro_settle`), receipt reads, escrow
+    reads, micropayment channels, and the prepaid ledger that streaming
+    storage / compute rentals bill against.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "channel" in t:
+        channel_id = md.get("channel_id")
+        if "open" in t:
+            required = ("sender", "counterparty", "deposit")
+            if not all(md.get(k) for k in required):
+                return (
+                    "Opening a payment channel requires metadata: sender "
+                    "(hex address), counterparty (hex address), deposit "
+                    "(decimal string)."
+                )
+            result = await rpc_call("tenzro_openPaymentChannel", {
+                "sender": md["sender"],
+                "counterparty": md["counterparty"],
+                "deposit": str(md["deposit"]),
+            })
+            return f"Payment channel opened:\n{json.dumps(result, indent=2)}"
+        if "update" in t or "pay" in t:
+            if not channel_id or md.get("payment_amount") is None or not md.get("signature"):
+                return (
+                    "Updating a payment channel requires metadata: "
+                    "channel_id, payment_amount (decimal string), signature "
+                    "(hex Ed25519 over nonce || payer_balance || "
+                    "payee_balance of the next state, little-endian)."
+                )
+            result = await rpc_call("tenzro_updatePaymentChannel", {
+                "channel_id": channel_id,
+                "payment_amount": str(md["payment_amount"]),
+                "signature": md["signature"],
+            })
+            return f"Payment channel updated:\n{json.dumps(result, indent=2)}"
+        if "close" in t and channel_id:
+            result = await rpc_call("tenzro_closePaymentChannel", {
+                "channel_id": channel_id,
+            })
+            return f"Payment channel closed:\n{json.dumps(result, indent=2)}"
+        return (
+            "Payment channel operations:\n"
+            "  - 'Open payment channel' (metadata: sender, counterparty, deposit)\n"
+            "  - 'Update payment channel' (metadata: channel_id, payment_amount, signature)\n"
+            "  - 'Close payment channel' (metadata: channel_id)"
+        )
+
+    if "prepaid" in t:
+        renter = md.get("renter") or _extract_address(text)
+        if not renter:
+            return (
+                "Prepaid ledger operations need metadata.renter (hex "
+                "address). Deposit and withdraw also need metadata.amount "
+                "(decimal string). Optional metadata.asset defaults to TNZO."
+            )
+        params = {"renter": renter}
+        if md.get("asset"):
+            params["asset"] = md["asset"]
+        if "deposit" in t or "lock" in t:
+            if md.get("amount") is None:
+                return "Prepaid deposit requires metadata.amount (decimal string)."
+            params["amount"] = str(md["amount"])
+            result = await rpc_call("tenzro_prepaidDeposit", params)
+            return f"Prepaid deposit:\n{json.dumps(result, indent=2)}"
+        if "withdraw" in t:
+            if md.get("amount") is None:
+                return "Prepaid withdraw requires metadata.amount (decimal string)."
+            params["amount"] = str(md["amount"])
+            result = await rpc_call("tenzro_prepaidWithdraw", params)
+            return f"Prepaid withdrawal:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_prepaidBalance", params)
+        return f"Prepaid balance:\n{json.dumps(result, indent=2)}"
+
+    if "escrow" in t:
+        if md.get("escrow_id"):
+            result = await rpc_call("tenzro_getEscrow", {"escrow_id": md["escrow_id"]})
+            return f"Escrow:\n{json.dumps(result, indent=2)}"
+        if md.get("payer"):
+            result = await rpc_call("tenzro_listEscrowsByPayer", {"payer": md["payer"]})
+            return f"Escrows by payer:\n{json.dumps(result, indent=2)}"
+        if md.get("payee"):
+            result = await rpc_call("tenzro_listEscrowsByPayee", {"payee": md["payee"]})
+            return f"Escrows by payee:\n{json.dumps(result, indent=2)}"
+        return (
+            "Escrow reads: metadata.escrow_id, metadata.payer, or "
+            "metadata.payee. Escrow writes go through signed "
+            "CreateEscrow / ReleaseEscrow / RefundEscrow transactions, not "
+            "this skill."
+        )
+
+    receipt_id = md.get("receipt_id") or _extract_id(text)
+    if ("receipt" in t or "get" in t) and receipt_id:
+        result = await rpc_call("tenzro_getSettlement", {"receipt_id": receipt_id})
+        return f"Settlement receipt:\n{json.dumps(result, indent=2)}"
+
+    if "unpaid" in t:
+        result = await rpc_call("tenzro_listUnpaidSettlements", {})
+        return f"Unpaid settlements:\n{json.dumps(result, indent=2)}"
+
+    required = ("provider", "customer", "amount", "service_type")
+    if all(md.get(k) is not None for k in required):
+        params = {
+            "provider": md["provider"],
+            "customer": md["customer"],
+            "amount": str(md["amount"]),
+            "service_type": md["service_type"],
+        }
+        for key in ("model_id", "tokens", "computation_id", "compute_units",
+                    "agent_id", "task_id", "proof"):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        result = await rpc_call("tenzro_settle", params)
+        return f"Settlement:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Settlement operations:\n"
+        "  - 'Settle' (metadata: provider, customer, amount, service_type, "
+        "plus the service-specific fields: model_id + tokens, "
+        "computation_id + compute_units, or agent_id + task_id; optional proof)\n"
+        "  - 'Get settlement receipt' (metadata: receipt_id)\n"
+        "  - 'List unpaid settlements'\n"
+        "  - 'Get escrow' (metadata: escrow_id | payer | payee)\n"
+        "  - 'Open/update/close payment channel'\n"
+        "  - 'Prepaid balance/deposit/withdraw' (metadata: renter, amount?, asset?)"
+    )
+
+
+async def handle_dvp_netting(text: str, metadata: dict = None) -> str:
+    """Run delivery-versus-payment sagas and multilateral netting batches.
+
+    A DvP saga binds N legs so they settle atomically or not at all. Netting
+    compresses a set of bilateral obligations into the minimum set of
+    transfers. Saga open/execute/finalize and netting compute/settle are
+    admin-gated on the node; the reads are open.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "netting" in t or "obligation" in t or "batch" in t:
+        batch_id = md.get("batch_id")
+        if "compute" in t and md.get("obligations"):
+            result = await rpc_call("tenzro_nettingCompute", {
+                "obligations": md["obligations"],
+            })
+            return f"Netting batch computed:\n{json.dumps(result, indent=2)}"
+        if "settle" in t and batch_id:
+            result = await rpc_call("tenzro_nettingSettle", {"batch_id": batch_id})
+            return f"Netting batch settled:\n{json.dumps(result, indent=2)}"
+        if batch_id:
+            result = await rpc_call("tenzro_nettingGetBatch", {"batch_id": batch_id})
+            return f"Netting batch:\n{json.dumps(result, indent=2)}"
+        if "list" in t:
+            result = await rpc_call("tenzro_nettingListBatches", {})
+            return f"Netting batches:\n{json.dumps(result, indent=2)}"
+        return (
+            "Netting operations:\n"
+            "  - 'Compute netting batch' (metadata.obligations: list of "
+            "{debtor, creditor, asset, amount} — amount is a decimal string; "
+            "admin-gated)\n"
+            "  - 'Settle netting batch' (metadata: batch_id; admin-gated)\n"
+            "  - 'Get netting batch' (metadata: batch_id)\n"
+            "  - 'List netting batches'"
+        )
+
+    saga_id = md.get("saga_id")
+    if "open" in t and md.get("legs"):
+        required = ("creator", "nonce", "expires_at_ms")
+        if not all(md.get(k) is not None for k in required):
+            return (
+                "Opening a DvP saga requires metadata: creator (hex "
+                "address), nonce (integer), legs, expires_at_ms (ms epoch)."
+            )
+        result = await rpc_call("tenzro_dvpOpenSaga", {
+            "creator": md["creator"],
+            "nonce": md["nonce"],
+            "legs": md["legs"],
+            "expires_at_ms": md["expires_at_ms"],
+        })
+        return f"DvP saga opened:\n{json.dumps(result, indent=2)}"
+
+    if "execute" in t and saga_id:
+        params = {"saga_id": saga_id}
+        for key in ("proofs", "proof_type", "proof_data_hex"):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        result = await rpc_call("tenzro_dvpExecuteSaga", params)
+        return f"DvP saga executed:\n{json.dumps(result, indent=2)}"
+
+    if "finalize" in t and saga_id:
+        result = await rpc_call("tenzro_dvpFinalizeSaga", {"saga_id": saga_id})
+        return f"DvP saga finalized:\n{json.dumps(result, indent=2)}"
+
+    if saga_id:
+        result = await rpc_call("tenzro_dvpGetSaga", {"saga_id": saga_id})
+        return f"DvP saga:\n{json.dumps(result, indent=2)}"
+
+    creator = md.get("creator") or _extract_address(text)
+    if "list" in t and creator:
+        result = await rpc_call("tenzro_dvpListSagasByCreator", {"creator": creator})
+        return f"DvP sagas by creator:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Delivery-versus-payment and netting operations:\n"
+        "  - 'Open DvP saga' (metadata: creator, nonce, expires_at_ms, legs — "
+        "each leg is {leg_id, payer, payee, asset, amount, venue} where venue "
+        "is 'native' or {escrow:{escrow_id}} | {channel:{channel_id}} | "
+        "{external:{reference}}; admin-gated)\n"
+        "  - 'Execute DvP saga' (metadata: saga_id, proofs? | proof_type + "
+        "proof_data_hex; admin-gated)\n"
+        "  - 'Finalize DvP saga' (metadata: saga_id; admin-gated)\n"
+        "  - 'Get DvP saga' (metadata: saga_id)\n"
+        "  - 'List DvP sagas' (metadata: creator)\n"
+        "  - 'Compute/settle/get/list netting batch'"
+    )
+
+
+async def handle_bond_insurance(text: str, metadata: dict = None) -> str:
+    """Read agent bonds and file or inspect insurance claims.
+
+    An agent bond is TNZO an agent's controller posts as recourse for
+    counterparties. Claims draw against the shared insurance pool when a
+    bonded agent causes loss. Posting, increasing, and withdrawing a bond
+    move funds, so they go through signed transactions rather than this skill.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "claim" in t:
+        claim_id = md.get("claim_id") or _extract_id(text)
+        if claim_id:
+            result = await rpc_call("tenzro_getInsuranceClaim", {"claim_id": claim_id})
+            return f"Insurance claim:\n{json.dumps(result, indent=2)}"
+        if "file" in t or "submit" in t:
+            required = (
+                "claimant_did", "claimant_address", "against_agent_did",
+                "amount_requested", "narrative", "nonce",
+            )
+            missing = [k for k in required if md.get(k) is None]
+            if missing:
+                return (
+                    "Filing an insurance claim requires metadata: "
+                    f"{', '.join(required)} (missing: {', '.join(missing)}). "
+                    "amount_requested is a decimal string; receipt_refs is an "
+                    "optional list of settlement receipt ids backing the claim."
+                )
+            params = {
+                "claimant_did": md["claimant_did"],
+                "claimant_address": md["claimant_address"],
+                "against_agent_did": md["against_agent_did"],
+                "amount_requested": str(md["amount_requested"]),
+                "narrative": md["narrative"],
+                "nonce": md["nonce"],
+            }
+            if md.get("receipt_refs") is not None:
+                params["receipt_refs"] = md["receipt_refs"]
+            result = await rpc_call("tenzro_fileInsuranceClaim", params)
+            return f"Insurance claim filed:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_listInsuranceClaims", [])
+        return f"Insurance claims:\n{json.dumps(result, indent=2)}"
+
+    if "pool" in t:
+        result = await rpc_call("tenzro_getInsurancePoolBalance", [])
+        return f"Insurance pool balance:\n{json.dumps(result, indent=2)}"
+
+    controller_did = md.get("controller_did")
+    if controller_did:
+        result = await rpc_call("tenzro_listAgentBondsByController", {
+            "controller_did": controller_did,
+        })
+        return f"Agent bonds by controller:\n{json.dumps(result, indent=2)}"
+
+    agent_did = md.get("agent_did") or _extract_did(text)
+    if agent_did:
+        result = await rpc_call("tenzro_getAgentBond", {"agent_did": agent_did})
+        return f"Agent bond:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Agent bond and insurance operations:\n"
+        "  - 'Get agent bond' (metadata: agent_did)\n"
+        "  - 'List agent bonds' (metadata: controller_did)\n"
+        "  - 'File insurance claim' (metadata: claimant_did, "
+        "claimant_address, against_agent_did, amount_requested, narrative, "
+        "nonce, receipt_refs?)\n"
+        "  - 'List insurance claims'\n"
+        "  - 'Get insurance claim' (metadata: claim_id)\n"
+        "  - 'Get insurance pool balance'\n"
+        "Posting, increasing, or withdrawing a bond moves funds and is "
+        "submitted as a signed transaction, not through this skill."
+    )
+
+
+async def handle_ccip(text: str, metadata: dict = None) -> str:
+    """Quote, send, and track Chainlink CCIP messages from the node.
+
+    Fees are quoted live from `Router.getFee()`; `tenzro_ccipSend` returns the
+    `Router.ccipSend()` envelope (calldata plus msg.value) for the caller to
+    sign. Track reads `OffRamp.getExecutionState()` on the destination.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    def _send_params() -> dict | None:
+        required = ("source_chain", "dest_chain", "receiver")
+        if not all(md.get(k) for k in required):
+            return None
+        params = {
+            "source_chain": md["source_chain"],
+            "dest_chain": md["dest_chain"],
+            "receiver": md["receiver"],
+        }
+        for key in ("data_hex", "fee_token", "gas_limit", "token_amounts"):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        return params
+
+    if "rate limit" in t or "ratelimit" in t:
+        if not md.get("chain") or not md.get("pool_address"):
+            return (
+                "CCIP rate limits need metadata: chain, pool_address, "
+                "remote_chain?."
+            )
+        params = {"chain": md["chain"], "pool_address": md["pool_address"]}
+        if md.get("remote_chain"):
+            params["remote_chain"] = md["remote_chain"]
+        result = await rpc_call("tenzro_ccipRateLimits", params)
+        return f"CCIP rate limits:\n{json.dumps(result, indent=2)}"
+
+    if "pool" in t:
+        if not md.get("chain") or not md.get("pool_address"):
+            return "CCIP token pool inspection needs metadata: chain, pool_address."
+        result = await rpc_call("tenzro_ccipTokenPool", {
+            "chain": md["chain"],
+            "pool_address": md["pool_address"],
+        })
+        return f"CCIP token pool:\n{json.dumps(result, indent=2)}"
+
+    if "lane" in t:
+        params = {}
+        for key in ("source_chain_selector", "dest_chain_selector", "environment"):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        result = await rpc_call("tenzro_ccipLanes", params)
+        return f"CCIP lanes:\n{json.dumps(result, indent=2)}"
+
+    if "token" in t and ("support" in t or "list" in t):
+        params = {"environment": md["environment"]} if md.get("environment") else {}
+        result = await rpc_call("tenzro_ccipSupportedTokens", params)
+        return f"CCIP supported tokens:\n{json.dumps(result, indent=2)}"
+
+    if "chain" in t and ("support" in t or "list" in t):
+        params = {"environment": md["environment"]} if md.get("environment") else {}
+        result = await rpc_call("tenzro_ccipSupportedChains", params)
+        return f"CCIP supported chains:\n{json.dumps(result, indent=2)}"
+
+    if "track" in t or "status" in t or md.get("message_id"):
+        if not md.get("message_id") or not md.get("dest_chain"):
+            return (
+                "Tracking a CCIP message needs metadata: message_id, "
+                "dest_chain, offramp_address?."
+            )
+        params = {
+            "message_id": md["message_id"],
+            "dest_chain": md["dest_chain"],
+        }
+        if md.get("offramp_address"):
+            params["offramp_address"] = md["offramp_address"]
+        result = await rpc_call("tenzro_ccipTrack", params)
+        return f"CCIP message status:\n{json.dumps(result, indent=2)}"
+
+    if "bridge" in t or "transfer" in t:
+        required = ("source_chain", "dest_chain", "sender", "recipient", "asset", "amount")
+        missing = [k for k in required if md.get(k) is None]
+        if missing:
+            return (
+                "Bridging over CCIP needs metadata: "
+                f"{', '.join(required)} (missing: {', '.join(missing)})."
+            )
+        result = await rpc_call("tenzro_ccipBridge", {
+            "source_chain": md["source_chain"],
+            "dest_chain": md["dest_chain"],
+            "sender": md["sender"],
+            "recipient": md["recipient"],
+            "asset": md["asset"],
+            "amount": str(md["amount"]),
+        })
+        return f"CCIP bridge:\n{json.dumps(result, indent=2)}"
+
+    if "send" in t:
+        params = _send_params()
+        if params is None:
+            return (
+                "Sending a CCIP message needs metadata: source_chain, "
+                "dest_chain, receiver, plus optional data_hex, fee_token, "
+                "gas_limit, token_amounts."
+            )
+        result = await rpc_call("tenzro_ccipSend", params)
+        return f"CCIP send envelope:\n{json.dumps(result, indent=2)}"
+
+    params = _send_params()
+    if params is not None:
+        result = await rpc_call("tenzro_ccipGetFee", params)
+        return f"CCIP fee quote:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Chainlink CCIP operations:\n"
+        "  - 'Quote CCIP fee' (metadata: source_chain, dest_chain, receiver, "
+        "data_hex?, fee_token?, gas_limit?, token_amounts? — each entry is "
+        "{token, amount} with amount as a decimal string)\n"
+        "  - 'Send CCIP message' (same metadata; returns unsigned calldata "
+        "plus msg.value)\n"
+        "  - 'Track CCIP message' (metadata: message_id, dest_chain, "
+        "offramp_address?)\n"
+        "  - 'List CCIP supported chains' / 'List CCIP supported tokens' "
+        "(metadata: environment?)\n"
+        "  - 'List CCIP lanes' (metadata: source_chain_selector?, "
+        "dest_chain_selector?, environment?)\n"
+        "  - 'Get CCIP token pool' (metadata: chain, pool_address)\n"
+        "  - 'Get CCIP rate limits' (metadata: chain, pool_address, remote_chain?)\n"
+        "  - 'Bridge over CCIP' (metadata: source_chain, dest_chain, sender, "
+        "recipient, asset, amount)"
+    )
+
+
+def _modality_catalog_help(modality: str, run_hint: str) -> str:
+    """Shared fallback text for the multi-modal skills."""
+    return (
+        f"{modality} operations:\n"
+        f"  - 'List {modality.lower()} catalog' — models the node can serve\n"
+        f"  - 'List {modality.lower()} models' — models currently loaded\n"
+        f"  - {run_hint}\n"
+        "Loading a model is an operator action: the artifact paths differ per "
+        "model family, so it is driven from the node's own RPC or CLI rather "
+        "than over A2A."
+    )
+
+
+async def handle_forecast(text: str, metadata: dict = None) -> str:
+    """Run timeseries forecasts against a loaded forecast model.
+
+    `history` is the observed series; `horizon` is how many steps ahead to
+    predict. Supplying `quantiles` returns a quantile fan instead of a point
+    forecast.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "catalog" in t:
+        result = await rpc_call("tenzro_listForecastCatalog", [])
+        return f"Forecast catalog:\n{json.dumps(result, indent=2)}"
+
+    if md.get("model_id") and md.get("history") and md.get("horizon") is not None:
+        params = {
+            "model_id": md["model_id"],
+            "history": md["history"],
+            "horizon": md["horizon"],
+        }
+        if md.get("quantiles") is not None:
+            params["quantiles"] = md["quantiles"]
+        if md.get("frequency_seconds") is not None:
+            params["frequency_seconds"] = md["frequency_seconds"]
+        result = await rpc_call("tenzro_forecast", params)
+        return f"Forecast:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t or "model" in t:
+        result = await rpc_call("tenzro_listForecastModels", [])
+        return f"Loaded forecast models:\n{json.dumps(result, indent=2)}"
+
+    return _modality_catalog_help(
+        "Forecast",
+        "'Forecast' (metadata: model_id, history — array of numbers, horizon "
+        "— integer, quantiles? — array of floats in (0,1), frequency_seconds?)",
+    )
+
+
+async def handle_vision_embed(text: str, metadata: dict = None) -> str:
+    """Embed images and compare image embeddings against text embeddings.
+
+    `image_base64` is the raw image (PNG / JPEG / WebP) base64-encoded.
+    Similarity takes two already-computed embeddings and returns their
+    cosine similarity.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "catalog" in t:
+        result = await rpc_call("tenzro_listVisionCatalog", [])
+        return f"Vision catalog:\n{json.dumps(result, indent=2)}"
+
+    if md.get("image_embedding") and md.get("text_embedding"):
+        result = await rpc_call("tenzro_imageTextSimilarity", {
+            "image_embedding": md["image_embedding"],
+            "text_embedding": md["text_embedding"],
+        })
+        return f"Image-text similarity:\n{json.dumps(result, indent=2)}"
+
+    if md.get("model_id") and md.get("image_base64"):
+        params = {
+            "model_id": md["model_id"],
+            "image_base64": md["image_base64"],
+        }
+        if md.get("normalize") is not None:
+            params["normalize"] = md["normalize"]
+        result = await rpc_call("tenzro_imageEmbed", params)
+        return f"Image embedding:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t or "model" in t:
+        result = await rpc_call("tenzro_listVisionModels", [])
+        return f"Loaded vision models:\n{json.dumps(result, indent=2)}"
+
+    return _modality_catalog_help(
+        "Vision embedding",
+        "'Embed image' (metadata: model_id, image_base64, normalize?) or "
+        "'Image-text similarity' (metadata: image_embedding, text_embedding "
+        "— both arrays of floats)",
+    )
+
+
+async def handle_text_embed(text: str, metadata: dict = None) -> str:
+    """Embed text with a loaded text-embedding model.
+
+    `inputs` is a non-empty list of strings. Matryoshka models accept
+    `requested_dim` to truncate and re-normalize the output vector.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "catalog" in t:
+        result = await rpc_call("tenzro_listTextEmbeddingCatalog", [])
+        return f"Text-embedding catalog:\n{json.dumps(result, indent=2)}"
+
+    inputs = md.get("inputs")
+    if md.get("model_id") and inputs:
+        params = {"model_id": md["model_id"], "inputs": inputs}
+        if md.get("requested_dim") is not None:
+            params["requested_dim"] = md["requested_dim"]
+        if md.get("normalize") is not None:
+            params["normalize"] = md["normalize"]
+        result = await rpc_call("tenzro_textEmbed", params)
+        return f"Text embeddings:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t or "model" in t:
+        result = await rpc_call("tenzro_listTextEmbeddingModels", [])
+        return f"Loaded text-embedding models:\n{json.dumps(result, indent=2)}"
+
+    return _modality_catalog_help(
+        "Text embedding",
+        "'Embed text' (metadata: model_id, inputs — non-empty array of "
+        "strings, requested_dim? — Matryoshka truncation, normalize?)",
+    )
+
+
+async def handle_segmentation(text: str, metadata: dict = None) -> str:
+    """Segment an image from point and box prompts (SAM 2, EdgeSAM, MobileSAM).
+
+    Prompts anchor the mask: a point marks a pixel as foreground or
+    background, a box bounds the target. Text-promptable segmentation is a
+    separate skill.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "catalog" in t:
+        result = await rpc_call("tenzro_listSegmentationCatalog", [])
+        return f"Segmentation catalog:\n{json.dumps(result, indent=2)}"
+
+    if md.get("model_id") and md.get("image_base64") and md.get("prompts"):
+        result = await rpc_call("tenzro_segment", {
+            "model_id": md["model_id"],
+            "image_base64": md["image_base64"],
+            "prompts": md["prompts"],
+        })
+        return f"Segmentation:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t or "model" in t:
+        result = await rpc_call("tenzro_listSegmentationModels", [])
+        return f"Loaded segmentation models:\n{json.dumps(result, indent=2)}"
+
+    return _modality_catalog_help(
+        "Segmentation",
+        "'Segment image' (metadata: model_id, image_base64, prompts — each "
+        'prompt is {"type":"point","x":..,"y":..,"is_foreground":true} or '
+        '{"type":"box","x0":..,"y0":..,"x1":..,"y1":..}; pass several point '
+        "prompts to anchor a mask with both foreground and background hints)",
+    )
+
+
+async def handle_text_segmentation(text: str, metadata: dict = None) -> str:
+    """Segment an image from a natural-language prompt (SAM 3 / SAM 3.1).
+
+    Open-vocabulary: `text_prompt` names what to segment. An optional
+    `box_prompt` narrows the search region and `score_threshold` filters
+    low-confidence masks.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "catalog" in t:
+        result = await rpc_call("tenzro_listTextSegmentationCatalog", [])
+        return f"Text-segmentation catalog:\n{json.dumps(result, indent=2)}"
+
+    if md.get("model_id") and md.get("image_base64") and md.get("text_prompt"):
+        params = {
+            "model_id": md["model_id"],
+            "image_base64": md["image_base64"],
+            "text_prompt": md["text_prompt"],
+        }
+        if md.get("box_prompt") is not None:
+            params["box_prompt"] = md["box_prompt"]
+        if md.get("score_threshold") is not None:
+            params["score_threshold"] = md["score_threshold"]
+        result = await rpc_call("tenzro_textSegment", params)
+        return f"Text segmentation:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t or "model" in t:
+        result = await rpc_call("tenzro_listTextSegmentationModels", [])
+        return f"Loaded text-segmentation models:\n{json.dumps(result, indent=2)}"
+
+    return _modality_catalog_help(
+        "Text segmentation",
+        "'Segment by text' (metadata: model_id, image_base64, text_prompt, "
+        "box_prompt? — {x0,y0,x1,y1}, score_threshold?)",
+    )
+
+
+async def handle_detection(text: str, metadata: dict = None) -> str:
+    """Detect objects in an image (RF-DETR, D-FINE).
+
+    Both families are NMS-free. `score_threshold` filters weak detections;
+    each result carries a bounding box, a label id, and a score.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "catalog" in t:
+        result = await rpc_call("tenzro_listDetectionCatalog", [])
+        return f"Detection catalog:\n{json.dumps(result, indent=2)}"
+
+    if md.get("model_id") and md.get("image_base64"):
+        params = {
+            "model_id": md["model_id"],
+            "image_base64": md["image_base64"],
+        }
+        if md.get("score_threshold") is not None:
+            params["score_threshold"] = md["score_threshold"]
+        result = await rpc_call("tenzro_detect", params)
+        return f"Detections:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t or "model" in t:
+        result = await rpc_call("tenzro_listDetectionModels", [])
+        return f"Loaded detection models:\n{json.dumps(result, indent=2)}"
+
+    return _modality_catalog_help(
+        "Detection",
+        "'Detect objects' (metadata: model_id, image_base64, "
+        "score_threshold?). RF-DETR uses 90-class COCO indexing, D-FINE 80.",
+    )
+
+
+async def handle_audio_transcribe(text: str, metadata: dict = None) -> str:
+    """Transcribe speech to text (Moonshine, Distil-Whisper, Parakeet, Canary).
+
+    `audio_base64` is the raw audio file base64-encoded. `language` pins the
+    source language for multilingual models; `timestamps` requests
+    per-segment timing.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "catalog" in t:
+        result = await rpc_call("tenzro_listAudioCatalog", [])
+        return f"Audio catalog:\n{json.dumps(result, indent=2)}"
+
+    if md.get("model_id") and md.get("audio_base64"):
+        params = {
+            "model_id": md["model_id"],
+            "audio_base64": md["audio_base64"],
+        }
+        for key in ("language", "timestamps", "temperature"):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        result = await rpc_call("tenzro_transcribe", params)
+        return f"Transcription:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t or "model" in t:
+        result = await rpc_call("tenzro_listAudioModels", [])
+        return f"Loaded audio models:\n{json.dumps(result, indent=2)}"
+
+    return _modality_catalog_help(
+        "Audio transcription",
+        "'Transcribe' (metadata: model_id, audio_base64, language?, "
+        "timestamps?, temperature?)",
+    )
+
+
+async def handle_video_embed(text: str, metadata: dict = None) -> str:
+    """Embed a video by mean-pooling frame embeddings.
+
+    Frames are extracted evenly across the clip — or at fixed `frame_stride`
+    intervals when given — pushed through the image encoder the clip encoder
+    was registered over, then mean-pooled into a single vector.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "catalog" in t:
+        result = await rpc_call("tenzro_listVideoCatalog", [])
+        return f"Video catalog:\n{json.dumps(result, indent=2)}"
+
+    if md.get("model_id") and md.get("video_base64"):
+        params = {
+            "model_id": md["model_id"],
+            "video_base64": md["video_base64"],
+        }
+        for key in ("frame_stride", "normalize"):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        result = await rpc_call("tenzro_videoEmbed", params)
+        return f"Video embedding:\n{json.dumps(result, indent=2)}"
+
+    if "list" in t or "model" in t:
+        result = await rpc_call("tenzro_listVideoModels", [])
+        return f"Loaded video models:\n{json.dumps(result, indent=2)}"
+
+    return _modality_catalog_help(
+        "Video embedding",
+        "'Embed video' (metadata: model_id, video_base64, frame_stride?, "
+        "normalize?)",
+    )
+
+
+async def handle_agent_memory(text: str, metadata: dict = None) -> str:
+    """Grant, recall, archive and list persistent agent memory records.
+
+    Recall runs over a Lance vector index and a Tantivy BM25 index; `mode` is
+    `vector`, `text` or `hybrid` (hybrid merges both with reciprocal rank
+    fusion). Archiving moves a record off-tier into the data-availability
+    layer and leaves an `Archived` stub carrying the pointer.
+    """
+    t = text.lower()
+    md = metadata or {}
+    agent_did = md.get("agent_did")
+
+    if "grant" in t or "remember" in t or "store" in t:
+        if not agent_did or not md.get("text"):
+            return (
+                "Granting a memory needs metadata: agent_did, text "
+                "(optional: kind, source, metadata)."
+            )
+        params = {"agent_did": agent_did, "text": md["text"]}
+        for key in ("kind", "source", "metadata"):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        result = await rpc_call("tenzro_memoryGrant", params)
+        return f"Memory granted:\n{json.dumps(result, indent=2)}"
+
+    if "recall" in t or "search" in t or "query" in t:
+        query = md.get("query") or text
+        if not agent_did:
+            return "Recall needs metadata: agent_did, query (optional: mode, k)."
+        params = {
+            "agent_did": agent_did,
+            "query": query,
+            "mode": md.get("mode", "hybrid"),
+            "k": md.get("k", 10),
+        }
+        result = await rpc_call("tenzro_memoryRecall", params)
+        return f"Recalled memories:\n{json.dumps(result, indent=2)}"
+
+    if "archive" in t:
+        if not agent_did or not md.get("record_id"):
+            return "Archiving needs metadata: agent_did, record_id."
+        result = await rpc_call(
+            "tenzro_memoryArchive",
+            {"agent_did": agent_did, "record_id": md["record_id"]},
+        )
+        return f"Memory archived:\n{json.dumps(result, indent=2)}"
+
+    if agent_did:
+        params = {"agent_did": agent_did}
+        if md.get("limit") is not None:
+            params["limit"] = md["limit"]
+        result = await rpc_call("tenzro_listMemoryRecords", params)
+        return f"Memory records:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Agent memory. Say:\n"
+        "- 'Grant memory' (metadata: agent_did, text, kind?, source?, metadata?)\n"
+        "- 'Recall' (metadata: agent_did, query, mode ∈ vector|text|hybrid, k?)\n"
+        "- 'Archive memory' (metadata: agent_did, record_id)\n"
+        "- 'List memories' (metadata: agent_did, limit?)"
+    )
+
+
+async def handle_adaptive_burn(text: str, metadata: dict = None) -> str:
+    """Read the adaptive burn dial: config, supply metrics, recommendation.
+
+    The dial compares the rolling supply delta against the governance-set
+    targets and returns a bounded recommendation. Changing the rate is a
+    governance action, not an RPC write — the recommendation feeds a proposal.
+    """
+    t = text.lower()
+
+    if "metric" in t or "supply" in t:
+        result = await rpc_call("tenzro_getSupplyMetrics", [])
+        return f"Supply metrics:\n{json.dumps(result, indent=2)}"
+
+    if "recommend" in t:
+        result = await rpc_call("tenzro_getBurnRateRecommendation", [])
+        return f"Burn rate recommendation:\n{json.dumps(result, indent=2)}"
+
+    if "proposal" in t or "list" in t:
+        result = await rpc_call("tenzro_listAdaptiveBurnProposals", [])
+        return f"Adaptive burn proposals:\n{json.dumps(result, indent=2)}"
+
+    result = await rpc_call("tenzro_getBurnRateConfig", [])
+    return f"Burn rate config:\n{json.dumps(result, indent=2)}"
+
+
+async def handle_seed_agent(text: str, metadata: dict = None) -> str:
+    """Read the SeedAgent treasury earmark, charters, registry and activity.
+
+    The earmark funds protocol-owned bootstrap agents on a decaying schedule.
+    `tenzro_getNetworkActivity` separates organic traffic from seed traffic so
+    the two can be compared during the earmark window.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "earmark" in t or "treasury" in t:
+        params = {}
+        if md.get("name"):
+            params["name"] = md["name"]
+        result = await rpc_call("tenzro_getTreasuryEarmark", params)
+        return f"Treasury earmark:\n{json.dumps(result, indent=2)}"
+
+    if "charter" in t:
+        if md.get("charter_id"):
+            result = await rpc_call(
+                "tenzro_getSeedAgentCharter", {"charter_id": md["charter_id"]}
+            )
+            return f"Charter:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_listSeedAgentCharters", [])
+        return f"Charters:\n{json.dumps(result, indent=2)}"
+
+    if "activity" in t:
+        params = {}
+        for key in ("window", "exclude_seed"):
+            if md.get(key) is not None:
+                params[key] = md[key]
+        result = await rpc_call("tenzro_getNetworkActivity", params)
+        return f"Network activity:\n{json.dumps(result, indent=2)}"
+
+    params = {}
+    if md.get("charter_id"):
+        params["charter_id"] = md["charter_id"]
+    result = await rpc_call("tenzro_listSeedAgents", params)
+    return f"Seed agents:\n{json.dumps(result, indent=2)}"
+
+
+async def handle_erc7683(text: str, metadata: dict = None) -> str:
+    """Read ERC-7683 cross-chain orders and record destination-side fills.
+
+    Orders are opened by the swapper through a signed origin-settler
+    transaction. This surface reads the resulting envelopes and records the
+    fill once a filler has executed on the destination chain.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "fill" in t and ("record" in t or "submit" in t):
+        required = (
+            "order_id",
+            "origin_chain_id",
+            "origin_settler",
+            "filler",
+            "recipient",
+            "fill_tx_hash",
+            "filled_at_ms",
+            "proof_route",
+            "outputs",
+        )
+        missing = [k for k in required if md.get(k) is None]
+        if missing:
+            return (
+                "Recording a fill needs metadata: "
+                + ", ".join(required)
+                + ". Missing: "
+                + ", ".join(missing)
+                + ". proof_route ∈ layerzero|wormhole|debridge|hyperlane; "
+                'each output is {"token": 20-byte hex, "amount": 32-byte hex, '
+                '"recipient": 32-byte hex, "chain_id": u32}.'
+            )
+        result = await rpc_call("tenzro_recordFill7683", {k: md[k] for k in required})
+        return f"Fill recorded:\n{json.dumps(result, indent=2)}"
+
+    if "fill" in t:
+        if md.get("order_id"):
+            result = await rpc_call("tenzro_getFill7683", {"order_id": md["order_id"]})
+            return f"Fill:\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_listFills7683", [])
+        return f"Fills:\n{json.dumps(result, indent=2)}"
+
+    if md.get("order_id"):
+        result = await rpc_call("tenzro_get7683Order", {"order_id": md["order_id"]})
+        return f"Order:\n{json.dumps(result, indent=2)}"
+
+    params = {}
+    for key in ("state", "dest_chain", "limit"):
+        if md.get(key) is not None:
+            params[key] = md[key]
+    result = await rpc_call("tenzro_list7683Orders", params)
+    return f"Orders:\n{json.dumps(result, indent=2)}"
+
+
+async def handle_urwa(text: str, metadata: dict = None) -> str:
+    """ERC-7943 regulated-asset controls: frozen amounts and kill switch.
+
+    `token_id_hex` is 32 bytes, `account_hex` is 20 bytes, both with or
+    without the `0x` prefix. Freezing and the kill switch are admin-gated —
+    a call without the operator admin token is refused by the node.
+    """
+    t = text.lower()
+    md = metadata or {}
+    token_id = md.get("token_id_hex")
+
+    if "kill" in t or "switch" in t:
+        if not token_id:
+            return "Kill-switch operations need metadata: token_id_hex (32 bytes)."
+        if "trigger" in t or "activate" in t:
+            params = {"token_id_hex": token_id}
+            for key in ("triggered_by_did", "reason"):
+                if md.get(key) is not None:
+                    params[key] = md[key]
+            result = await rpc_call("tenzro_urwaTriggerKillSwitch", params)
+            return f"Kill switch triggered (admin-gated):\n{json.dumps(result, indent=2)}"
+        if "clear" in t or "release" in t or "lift" in t:
+            result = await rpc_call(
+                "tenzro_urwaClearKillSwitch", {"token_id_hex": token_id}
+            )
+            return f"Kill switch cleared (admin-gated):\n{json.dumps(result, indent=2)}"
+        result = await rpc_call("tenzro_urwaIsKillSwitched", {"token_id_hex": token_id})
+        return f"Kill switch state:\n{json.dumps(result, indent=2)}"
+
+    if "freeze" in t or "frozen" in t:
+        if not token_id or not md.get("account_hex"):
+            return (
+                "Frozen-amount operations need metadata: token_id_hex "
+                "(32 bytes), account_hex (20 bytes). Setting also needs amount."
+            )
+        if md.get("amount") is not None and ("set" in t or "freeze" in t):
+            params = {
+                "token_id_hex": token_id,
+                "account_hex": md["account_hex"],
+                "amount": str(md["amount"]),
+            }
+            if md.get("reason") is not None:
+                params["reason"] = md["reason"]
+            result = await rpc_call("tenzro_urwaSetFrozenTokens", params)
+            return f"Frozen amount set (admin-gated):\n{json.dumps(result, indent=2)}"
+        result = await rpc_call(
+            "tenzro_urwaGetFrozenTokens",
+            {"token_id_hex": token_id, "account_hex": md["account_hex"]},
+        )
+        return f"Frozen amount:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Regulated-asset controls (ERC-7943). Say:\n"
+        "- 'Is kill switch active' (metadata: token_id_hex)\n"
+        "- 'Trigger kill switch' (metadata: token_id_hex, triggered_by_did?, "
+        "reason?) — admin-gated\n"
+        "- 'Clear kill switch' (metadata: token_id_hex) — admin-gated\n"
+        "- 'Get frozen tokens' (metadata: token_id_hex, account_hex)\n"
+        "- 'Set frozen tokens' (metadata: token_id_hex, account_hex, amount, "
+        "reason?) — admin-gated"
+    )
+
+
+async def handle_ivms101(text: str, metadata: dict = None) -> str:
+    """Compute the canonical hash of an IVMS101 travel-rule envelope.
+
+    Pass the envelope as `metadata.envelope`, or put the envelope fields at
+    the top level of `metadata`. Originator and beneficiary VASPs bind the
+    returned hash to their settlement receipt so a verifier can re-derive it.
+    """
+    md = metadata or {}
+    envelope = md.get("envelope", md)
+    if not envelope:
+        return (
+            "IVMS101 hashing needs the envelope in metadata "
+            "(either metadata.envelope or the envelope fields directly)."
+        )
+    result = await rpc_call("tenzro_ivms101Hash", envelope)
+    return f"IVMS101 envelope hash:\n{json.dumps(result, indent=2)}"
+
+
+async def handle_attested_clock(text: str, metadata: dict = None) -> str:
+    """Read the node's attested-clock envelope.
+
+    Returns wall-clock milliseconds plus a monotonic reading. `tee_vendor`
+    identifies the enclave that signed the envelope; when it is null the
+    envelope is unsigned and must not be used to decide mandate expiry.
+    """
+    result = await rpc_call("tenzro_attestedClockNow", [])
+    return f"Attested clock:\n{json.dumps(result, indent=2)}"
+
+
+async def handle_signed_agent_card(text: str, metadata: dict = None) -> str:
+    """Compute the canonical hash of an A2A Signed Agent Card.
+
+    Pass the card as `metadata.card`, or put the card fields at the top level
+    of `metadata`. A domain owner signs this hash with their JWS key; a
+    verifier re-hashes the served card and compares.
+    """
+    md = metadata or {}
+    card = md.get("card", md)
+    if not card:
+        return (
+            "Signed Agent Card hashing needs the card in metadata "
+            "(either metadata.card or the card fields directly)."
+        )
+    result = await rpc_call("tenzro_signedAgentCardCanonicalHash", card)
+    return f"Canonical agent card hash:\n{json.dumps(result, indent=2)}"
+
+
+async def handle_stripe_spt(text: str, metadata: dict = None) -> str:
+    """Read the Stripe SharedPaymentToken surface, or dispatch a webhook event.
+
+    With no metadata this returns the protocol description: the four ceilings
+    a confirm must clear, the `SptStatus` lifecycle, and how a settled token
+    reaches the ERC-8004 ReputationRegistry.
+
+    Pass `machine_did` + `granted_token_id` to dispatch an event. `event_type`
+    selects the settlement cross-write (`payment_intent.succeeded`,
+    `payment_intent.payment_failed`, `charge.dispute.created`,
+    `charge.dispute.closed` — the closed event also needs `dispute_status` of
+    `won` or `lost`). Omit `event_type` to run the deactivation cascade, which
+    revokes the DID's credential across the mesh. Both dispatches need a
+    validator's signer, so they are refused on a non-validator node.
+    """
+    md = metadata or {}
+    machine_did = md.get("machine_did")
+    granted_token_id = md.get("granted_token_id")
+
+    if not machine_did or not granted_token_id:
+        result = await rpc_call("tenzro_stripeSptProtocolInfo", [])
+        return f"Stripe SPT:\n{json.dumps(result, indent=2)}"
+
+    event_type = md.get("event_type")
+    if not event_type:
+        params = {
+            "machine_did": machine_did,
+            "granted_token_id": granted_token_id,
+        }
+        if md.get("revoker_did"):
+            params["revoker_did"] = md["revoker_did"]
+        result = await rpc_call("tenzro_processSptGrantedTokenDeactivated", params)
+        return f"SPT granted token deactivated:\n{json.dumps(result, indent=2)}"
+
+    params = {
+        "machine_did": machine_did,
+        "granted_token_id": granted_token_id,
+        "event_type": event_type,
+    }
+    if md.get("payment_intent_id"):
+        params["payment_intent_id"] = md["payment_intent_id"]
+    if md.get("dispute_status"):
+        params["dispute_status"] = md["dispute_status"]
+    result = await rpc_call("tenzro_processSptSettlementOutcome", params)
+    return f"SPT settlement outcome:\n{json.dumps(result, indent=2)}"
+
+
+async def handle_wormhole_ntt(text: str, metadata: dict = None) -> str:
+    """List the Wormhole chain IDs carrying NTT manager metadata."""
+    result = await rpc_call("tenzro_wormholeNttListChains", [])
+    return f"Wormhole NTT chains:\n{json.dumps(result, indent=2)}"
+
+
+async def handle_bridge_fee(text: str, metadata: dict = None) -> str:
+    """Quote a destination-native bridge fee in TNZO, and list sponsorship pools.
+
+    A quote converts the destination chain's native fee into TNZO at the
+    governance-set or oracle-fed rate. Sponsorship pools hold the TNZO that
+    covers native gas on the destination side.
+    """
+    t = text.lower()
+    md = metadata or {}
+
+    if "pool" in t or "sponsor" in t:
+        result = await rpc_call("tenzro_listBridgeSponsorshipPools", [])
+        return f"Bridge sponsorship pools:\n{json.dumps(result, indent=2)}"
+
+    required = ("adapter", "dest_chain", "native_fee_smallest_unit")
+    if all(md.get(k) is not None for k in required):
+        result = await rpc_call(
+            "tenzro_quoteBridgeFeeInTnzo",
+            {
+                "adapter": md["adapter"],
+                "dest_chain": md["dest_chain"],
+                "native_fee_smallest_unit": str(md["native_fee_smallest_unit"]),
+            },
+        )
+        return f"Bridge fee quote:\n{json.dumps(result, indent=2)}"
+
+    return (
+        "Bridge fees in TNZO. Say:\n"
+        "- 'Quote bridge fee' (metadata: adapter ∈ layerzero|ccip|wormhole|"
+        "debridge|hyperlane|axelar|lifi|canton, dest_chain, "
+        "native_fee_smallest_unit)\n"
+        "- 'List sponsorship pools'"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Handler dispatch table
 # ---------------------------------------------------------------------------
@@ -4214,6 +5640,10 @@ HANDLERS: dict[str, callable] = {
     "faucet": handle_faucet,
     "identity": handle_identity,
     "inference": handle_inference,
+    "cortex": handle_cortex,
+    "settlement": handle_settlement,
+    "dvp-netting": handle_dvp_netting,
+    "bond-insurance": handle_bond_insurance,
     "staking": handle_staking,
     "validator-lifecycle": handle_validator_lifecycle,
     "provider": handle_provider,
@@ -4221,7 +5651,7 @@ HANDLERS: dict[str, callable] = {
     "verification": handle_verification,
     "bridge": handle_bridge,
     "join": handle_join,
-    "list_tokens": handle_list_tokens,
+    "token": handle_list_tokens,
     "create_token": handle_create_token,
     "token_info": handle_token_info,
     "token_balance": handle_token_balance,
@@ -4237,6 +5667,7 @@ HANDLERS: dict[str, callable] = {
     "task_marketplace": handle_task_marketplace,
     "agent_marketplace": handle_agent_marketplace,
     "agent_spawning": handle_agent_spawning,
+    "capability_registry": handle_capability_registry,
     "swarm_orchestration": handle_swarm,
     "lifecycle": handle_lifecycle,
     "debridge": handle_debridge,
@@ -4245,11 +5676,15 @@ HANDLERS: dict[str, callable] = {
     "custody": handle_custody,
     "passkey-wallet": handle_passkey,
     "zk": handle_zk,
-    "ap2": handle_ap2,
+    "ap2-payments": handle_ap2,
+    "stripe-spt": handle_stripe_spt,
     "erc8004": handle_erc8004,
+    "ccip": handle_ccip,
     "wormhole": handle_wormhole,
+    "wormhole-ntt": handle_wormhole_ntt,
     "cct": handle_cct,
     "auth": handle_auth,
+    "approval": handle_approval,
     "capital": handle_capital,
     "workflow": handle_workflow,
     "eip7702": handle_eip7702,
@@ -4262,6 +5697,23 @@ HANDLERS: dict[str, callable] = {
     "babylon": handle_babylon,
     "caip": handle_caip,
     "oracle": handle_oracle,
+    "erc7683": handle_erc7683,
+    "urwa": handle_urwa,
+    "ivms101": handle_ivms101,
+    "attested-clock": handle_attested_clock,
+    "signed-agent-card": handle_signed_agent_card,
+    "bridge-fee-in-tnzo": handle_bridge_fee,
+    "agent-memory": handle_agent_memory,
+    "adaptive-burn": handle_adaptive_burn,
+    "seed-agent": handle_seed_agent,
+    "forecast": handle_forecast,
+    "vision-embed": handle_vision_embed,
+    "text-embed": handle_text_embed,
+    "segmentation": handle_segmentation,
+    "text-segmentation": handle_text_segmentation,
+    "detection": handle_detection,
+    "audio-transcribe": handle_audio_transcribe,
+    "video-embed": handle_video_embed,
     "storage": handle_storage,
     "database": handle_database,
     "compute": handle_compute,

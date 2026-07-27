@@ -264,7 +264,7 @@ impl IdentityPaymentBinder {
     /// Attaches a [`SptCeilingResolver`](crate::mpp::stripe_spt::SptCeilingResolver)
     /// so payment validation enforces Stripe SPT `usage_limits` as a
     /// fourth ceiling alongside `DelegationScope`, runtime
-    /// `SpendingPolicy`, and the AP2 cart-mandate cart_total.
+    /// `SpendingPolicy`, and the AP2 payment mandate's `total_amount`.
     ///
     /// The resolver is consulted by `validate_payer_with_spt` when the
     /// caller has extracted a granted-token reference from the credential.

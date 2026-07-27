@@ -24,6 +24,7 @@ use tenzro_types::agent::SwarmConfig;
 use tenzro_types::primitives::Address;
 
 use crate::node::TenzroNode;
+use crate::rpc::AuthContext;
 use crate::orchestrator::{
     CapabilityCard, CatalogSnapshot, DeterministicPlanner, LlmPlanner, Orchestrator,
     OrchestratorError, PlanCompletion, Result as OrchResult, StepExecutor, SwarmMemberSpec,
@@ -43,12 +44,17 @@ const ORCHESTRATOR_COORDINATOR_ID: &str = "swarm-coordinator";
 /// directly.
 pub struct NodeStepExecutor {
     node: Arc<TenzroNode>,
+    /// The orchestrating caller's own auth context, carried down into
+    /// skill and tool steps. A plan spends on the caller's behalf, so the
+    /// caller's controller keeps the same leash it would have on a direct
+    /// `tenzro_useSkill` / `tenzro_useTool` call.
+    auth_ctx: AuthContext,
 }
 
 impl NodeStepExecutor {
-    /// Wraps a node handle.
-    pub fn new(node: Arc<TenzroNode>) -> Self {
-        Self { node }
+    /// Wraps a node handle plus the caller's auth context.
+    pub fn new(node: Arc<TenzroNode>, auth_ctx: AuthContext) -> Self {
+        Self { node, auth_ctx }
     }
 
     /// Extracts the assistant text from a `tenzro_chat` rich-shape response,
@@ -107,7 +113,11 @@ impl StepExecutor for NodeStepExecutor {
                     .node
                     .meta_router()
                     .ok_or_else(|| OrchestratorError::Unavailable("meta-router".into()))?;
-                meta.route(intent)
+                // The step's input is the text the model will answer, so it is
+                // what places this call in a difficulty cluster.
+                let step_intent = intent.clone().with_prompt(input);
+                meta.route_intent(&step_intent)
+                    .await
                     .map_err(|e| OrchestratorError::NoCapability(e.to_string()))?
                     .model_id
             }
@@ -131,7 +141,7 @@ impl StepExecutor for NodeStepExecutor {
 
     async fn run_skill(&self, skill_id: &str, input: &Value) -> OrchResult<(String, Value)> {
         let params = json!({ "skill_id": skill_id, "input": input });
-        let response = crate::rpc::handle_use_skill(self.node.clone(), params)
+        let response = crate::rpc::handle_use_skill(self.node.clone(), params, &self.auth_ctx)
             .await
             .map_err(|e| OrchestratorError::NoCapability(e.message))?;
         let output = Self::registry_output(&response);
@@ -140,7 +150,7 @@ impl StepExecutor for NodeStepExecutor {
 
     async fn run_tool(&self, tool_id: &str, input: &Value) -> OrchResult<(String, Value)> {
         let params = json!({ "tool_id": tool_id, "input": input });
-        let response = crate::rpc::handle_use_tool(self.node.clone(), params, None)
+        let response = crate::rpc::handle_use_tool(self.node.clone(), params, None, &self.auth_ctx)
             .await
             .map_err(|e| OrchestratorError::NoCapability(e.message))?;
         let output = Self::registry_output(&response);
@@ -287,8 +297,8 @@ pub fn build_catalog_snapshot(node: &Arc<TenzroNode>) -> CatalogSnapshot {
 /// failure — see the orchestrator module docs). With no meta-router the
 /// deterministic planner is used directly, so an inference-less node still
 /// orchestrates skills/tools.
-pub fn build_orchestrator(node: Arc<TenzroNode>) -> Orchestrator {
-    let executor = Arc::new(NodeStepExecutor::new(node.clone()));
+pub fn build_orchestrator(node: Arc<TenzroNode>, auth_ctx: AuthContext) -> Orchestrator {
+    let executor = Arc::new(NodeStepExecutor::new(node.clone(), auth_ctx));
 
     match node.meta_router() {
         Some(meta) => {

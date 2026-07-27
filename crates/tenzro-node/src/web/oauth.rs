@@ -473,6 +473,7 @@ pub async fn as_metadata_handler(
             "vote",
             "contract",
             "register_identity",
+            "resource_invocation",
         ],
         aap_claims_supported: vec![
             "aap_agent",

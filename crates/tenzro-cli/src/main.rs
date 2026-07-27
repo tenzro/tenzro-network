@@ -23,8 +23,8 @@ use commands::{
     CortexCommand, Ap2Command, Erc8004Command, WormholeCommand, CcipCommand, CctCommand,
     TrainCommand,
     MediaGenCommand,
-    DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TextSegmentCommand,
-    TranscribeCommand,
+    DetectCommand, EmbedImageCommand, EmbedTextCommand, EmbedVideoCommand, ForecastCommand,
+    SegmentCommand, TextSegmentCommand, TranscribeCommand,
     AuthCommand,
     X402Command, ReputationCommand, ApprovalCommand, DisputeCommand, InteropCommand, CapitalCommand, ProvenanceCommand,
     BondCommand, InsuranceCommand, CapabilityCommand,
@@ -257,9 +257,17 @@ enum Command {
     #[command(subcommand, name = "media-gen")]
     MediaGen(MediaGenCommand),
 
+    /// Timeseries forecasting (TimesFM 2.5, TiRex)
+    #[command(subcommand)]
+    Forecast(ForecastCommand),
+
     /// Text embeddings (Qwen3-Embedding, EmbeddingGemma, BGE-M3)
     #[command(subcommand, name = "embed-text")]
     EmbedText(EmbedTextCommand),
+
+    /// Image embeddings (CLIP, SigLIP2, DINOv3)
+    #[command(subcommand, name = "embed-image")]
+    EmbedImage(EmbedImageCommand),
 
     /// Image segmentation (SAM 2, EdgeSAM, MobileSAM)
     #[command(subcommand)]
@@ -679,7 +687,9 @@ async fn main() -> Result<()> {
         Command::Cct(cmd) => cmd.execute().await?,
         Command::Train(cmd) => cmd.execute().await?,
         Command::MediaGen(cmd) => cmd.execute().await?,
+        Command::Forecast(cmd) => cmd.execute().await?,
         Command::EmbedText(cmd) => cmd.execute().await?,
+        Command::EmbedImage(cmd) => cmd.execute().await?,
         Command::Segment(cmd) => cmd.execute().await?,
         Command::TextSegment(cmd) => cmd.execute().await?,
         Command::Detect(cmd) => cmd.execute().await?,

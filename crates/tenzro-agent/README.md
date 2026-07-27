@@ -6,7 +6,7 @@ AI agent infrastructure with self-sovereign identity and inter-agent communicati
 
 **tenzro-agent** provides the foundational infrastructure for AI agents to operate autonomously on the Tenzro Network. Each agent receives a self-sovereign identity with an auto-provisioned FROST-Ed25519 threshold wallet, can communicate with other agents using the A2A (Agent-to-Agent) protocol, and integrates with Anthropic's Model Context Protocol (MCP).
 
-Agents are first-class citizens on the network, with identity anchored in the Tenzro Decentralized Identity Protocol (TDIP) and support for fine-grained delegation from human controllers.
+Agents hold accounts and act on the network in their own right, with identity anchored in the Tenzro Decentralized Identity Protocol (TDIP) and support for fine-grained delegation from human controllers.
 
 ## Key Features
 

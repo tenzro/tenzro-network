@@ -154,7 +154,7 @@ fn restart_hydrates_to_latest_persisted_epoch() {
 
 /// Cross-epoch validator-set lookup: after multiple transitions, the
 /// manager must answer `get_epoch_for_height` for blocks that fall in past
-/// epochs — including across a simulated restart. This is the load-bearing
+/// epochs — including across a simulated restart. This is the underlying
 /// query for `HotStuff2Engine::validator_set_for_height` which the
 /// block-sync engine consults to verify historical commit-QCs.
 #[test]

@@ -23,7 +23,7 @@ the in-process tests cannot exercise.
 The node binary path is taken from ``TENZRO_NODE_BIN``. When it is unset the
 test skips (a plain ``pytest`` run on a machine with no compiled binary is a
 skip, not a failure); the Cloud Build config builds the binary and sets the
-env var so CI runs it for real.
+env var so CI runs it against a live node.
 """
 
 from __future__ import annotations

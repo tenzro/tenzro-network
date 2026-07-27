@@ -325,7 +325,7 @@ pub fn assign_layers(total_layers: u32, members: &[ClusterMember]) -> HashMap<Ad
 pub use tenzro_cluster::LinkProbe;
 
 /// Network gate result: the data-plane-eligible members ordered to minimize
-/// end-to-end pipeline latency, plus the members excluded with a reason.
+/// total pipeline latency across all stages, plus the members excluded with a reason.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetworkGate {
     /// Members in pipeline order (stage 0 first). The head connects to the

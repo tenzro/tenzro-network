@@ -1107,7 +1107,7 @@ impl TeeProvider for NvidiaGpuProvider {
         // When remote attestation is configured, additionally verify via NRAS.
         // NRAS validates against NVIDIA's golden RIMs and the GPU's manufacturing
         // device certificate chain — local verification cannot do either, so
-        // remote attestation is required for production-grade trust.
+        // remote attestation is required before the result can be trusted.
         #[allow(unused_mut, unused_assignments)]
         let mut nras_token: Option<String> = None;
         #[allow(unused_mut, unused_assignments)]

@@ -761,7 +761,7 @@ mod tests {
     }
 
     /// `/wallet/mldsa/sign` must reject any request lacking the
-    /// `Authorization: DPoP <jwt>` header. This is the load-bearing
+    /// `Authorization: DPoP <jwt>` header. This is the central
     /// invariant of the wallet auth surface — a missing header must
     /// produce a 401, not a key-derivation attempt against an
     /// attacker-supplied DID/surface_key.

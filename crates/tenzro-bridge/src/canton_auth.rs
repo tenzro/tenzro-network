@@ -1,9 +1,9 @@
 //! Canton OAuth2 client-credentials token provider.
 //!
 //! Canton 3.x Ledger API (both gRPC and JSON) authenticates via JWT bearer
-//! tokens issued by an external IdP. The Tenzro-operated Canton devnet
-//! (`https://json.canton.example-operator.invalid`) issues tokens via Auth0 using
-//! the OAuth2 `client_credentials` grant.
+//! tokens issued by an external IdP, using the OAuth2 `client_credentials`
+//! grant. The operator supplies the token endpoint, client credentials, and
+//! audience for whichever participant it serves.
 //!
 //! This module owns the token lifecycle: it exchanges a client_id /
 //! client_secret pair for a short-lived JWT, caches it in-memory, and
@@ -28,7 +28,7 @@ use crate::error::{BridgeError, Result};
 /// Configuration for the Canton OAuth2 token provider.
 #[derive(Clone)]
 pub struct CantonAuthConfig {
-    /// Token endpoint (e.g. `https://auth.example-operator.invalid/oauth/token`).
+    /// Token endpoint, from `CANTON_<NET>_OAUTH_TOKEN_URL`.
     pub token_url: String,
     /// OAuth2 client ID.
     pub client_id: String,
@@ -52,21 +52,6 @@ impl std::fmt::Debug for CantonAuthConfig {
     }
 }
 
-impl CantonAuthConfig {
-    /// Returns the verified devnet configuration. The `client_secret` must
-    /// be supplied by the caller — typically read from the
-    /// `CANTON_DEVNET_CLIENT_SECRET` env var.
-    pub fn devnet(client_secret: impl Into<String>) -> Self {
-        Self {
-            token_url: "https://auth.example-operator.invalid/oauth/token".to_string(),
-            client_id: "OAUTH_CLIENT_ID".to_string(),
-            client_secret: client_secret.into(),
-            audience: "https://canton.network.global".to_string(),
-            scope: "daml_ledger_api".to_string(),
-        }
-    }
-}
-
 #[derive(Serialize)]
 struct ClientCredentialsRequest<'a> {
     client_id: &'a str,
@@ -79,7 +64,7 @@ struct ClientCredentialsRequest<'a> {
 #[derive(Deserialize)]
 struct ClientCredentialsResponse {
     access_token: String,
-    /// Lifetime in seconds (Auth0 returns this).
+    /// Lifetime in seconds, per RFC 6749 §5.1.
     expires_in: u64,
 }
 
@@ -140,8 +125,8 @@ impl CantonTokenProvider {
             return Ok(t.token.clone());
         }
 
-        // Slow path: refresh. Multiple concurrent refreshes are fine —
-        // Auth0 will issue independent tokens; whichever writes last wins.
+        // Slow path: refresh. Multiple concurrent refreshes are fine — the
+        // IdP issues independent tokens; whichever writes last wins.
         let body = ClientCredentialsRequest {
             client_id: &self.config.client_id,
             client_secret: &self.config.client_secret,

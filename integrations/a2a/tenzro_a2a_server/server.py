@@ -41,7 +41,7 @@ app.add_middleware(
 
 task_manager = TaskManager()
 
-# x402 payment verifier — slice (a) ships the structural verifier that
+# x402 payment verifier — slice (a) is the structural verifier that
 # rejects every payload with `payment-rejected`. Slice (c) replaces this
 # with a registry of concrete scheme backends (exact-eip3009, exact-permit2,
 # exact-erc7710).

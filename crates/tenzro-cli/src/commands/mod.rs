@@ -153,8 +153,8 @@ pub use cct::CctCommand;
 pub use train::TrainCommand;
 pub use media_gen::MediaGenCommand;
 pub use multimodal::{
-    DetectCommand, EmbedTextCommand, EmbedVideoCommand, SegmentCommand, TextSegmentCommand,
-    TranscribeCommand,
+    DetectCommand, EmbedImageCommand, EmbedTextCommand, EmbedVideoCommand, ForecastCommand,
+    SegmentCommand, TextSegmentCommand, TranscribeCommand,
 };
 pub use auth::AuthCommand;
 pub use x402::X402Command;

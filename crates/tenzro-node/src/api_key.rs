@@ -166,6 +166,189 @@ fn default_key_class() -> KeyClass {
     KeyClass::Subject
 }
 
+/// Service tier of an issued key.
+///
+/// Orthogonal to [`KeyClass`] (which decides *who may revoke*) and to
+/// [`ApiKeyScope`] (which decides *which surfaces* are reachable). The tier
+/// decides *how much* of a reachable surface a caller gets: a per-minute
+/// request budget, and whether state-mutating methods are permitted at all.
+///
+/// Both knobs are enforced on the api-key-gated path in `rpc.rs` — see
+/// [`is_gated_write_method`] and [`ApiKeyManager::check_rate_limit`]. A tier
+/// that is stored but not enforced would be dead config.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyTier {
+    /// Read-only evaluation access. Mutating methods are refused.
+    #[default]
+    Free,
+    /// Read and write at a moderate request budget.
+    Standard,
+    /// Read and write at the highest request budget the operator offers.
+    Priority,
+}
+
+impl ApiKeyTier {
+    /// Canonical wire-format string used in JSON-RPC params and records.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApiKeyTier::Free => "free",
+            ApiKeyTier::Standard => "standard",
+            ApiKeyTier::Priority => "priority",
+        }
+    }
+
+    /// Parses the wire-format string. Returns `None` for unknown values so
+    /// callers can produce a structured `-32602` error.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "free" => Some(ApiKeyTier::Free),
+            "standard" => Some(ApiKeyTier::Standard),
+            "priority" => Some(ApiKeyTier::Priority),
+            _ => None,
+        }
+    }
+
+    /// Requests permitted per sliding 60-second window, per key.
+    pub fn requests_per_minute(&self) -> u32 {
+        match self {
+            ApiKeyTier::Free => 60,
+            ApiKeyTier::Standard => 600,
+            ApiKeyTier::Priority => 6_000,
+        }
+    }
+
+    /// Whether the tier may call state-mutating gated methods.
+    pub fn allows_write(&self) -> bool {
+        !matches!(self, ApiKeyTier::Free)
+    }
+}
+
+/// Default tier for a record. Fail-closed: an unspecified tier gets the
+/// read-only budget, so a key never silently acquires write access.
+fn default_key_tier() -> ApiKeyTier {
+    ApiKeyTier::Free
+}
+
+/// The authorization facts of the key presenting the current request.
+///
+/// Deliberately narrower than [`ApiKeyRecord`]: that also carries the tenant's
+/// OAuth client secret, which must not be readable from a tool handler. Only
+/// the identity, the budget and the party delegation travel.
+#[derive(Debug, Clone)]
+pub struct RequestKeyContext {
+    /// Non-secret handle of the presenting key. Lets a self-read resolve the
+    /// caller's own row without accepting a caller-supplied id.
+    pub key_id: String,
+    pub tier: ApiKeyTier,
+    pub class: KeyClass,
+    pub can_act_as_parties: Vec<String>,
+    pub can_read_as_parties: Vec<String>,
+}
+
+impl RequestKeyContext {
+    pub fn from_record(record: &ApiKeyRecord) -> Self {
+        Self {
+            key_id: record.key_id.clone(),
+            tier: record.tier,
+            class: record.class,
+            can_act_as_parties: record.can_act_as_parties.clone(),
+            can_read_as_parties: record.can_read_as_parties.clone(),
+        }
+    }
+
+    /// Whether the key belongs to the operator running this node.
+    pub fn is_operator(&self) -> bool {
+        matches!(
+            self.class,
+            KeyClass::OperatorProtected | KeyClass::OperatorInternal
+        )
+    }
+
+    /// Whether the caller may submit as `party_fq`.
+    ///
+    /// Unlike [`ApiKeyRecord::can_act_as`], an empty list authorizes nothing.
+    /// That helper is permissive-on-empty because the JSON-RPC path pairs it
+    /// with a `primaryParty` resolution that is the real gate; a surface with
+    /// no such resolution must not inherit the permissive half alone.
+    pub fn allows_act_as(&self, party_fq: &str) -> bool {
+        self.can_act_as_parties.iter().any(|p| p == party_fq)
+    }
+
+    /// Whether the caller may read contracts for `party_fq`. Act-as implies
+    /// read-as.
+    pub fn allows_read_as(&self, party_fq: &str) -> bool {
+        self.can_read_as_parties.iter().any(|p| p == party_fq) || self.allows_act_as(party_fq)
+    }
+}
+
+tokio::task_local! {
+    static REQUEST_KEY_CONTEXT: Option<RequestKeyContext>;
+}
+
+/// Runs `fut` with the presenting key's context installed in the task-local
+/// slot. Scoped by the MCP Canton gate in `mcp::canton`.
+///
+/// That gate cannot apply the per-method rules the JSON-RPC gate applies —
+/// neither the write classification of `is_gated_write_method` nor the
+/// operator/tenant split of `requires_admin_token` — because it sits above
+/// MCP's own JSON-RPC envelope and never learns which tool the body names.
+/// Scoping the context lets each tool apply the rule that fits it. The
+/// JSON-RPC path holds the record inline and does not need the task-local.
+///
+/// A task-local rather than a thread-local: dispatch futures are full of await
+/// points, so a thread-local would leak one tenant's authorization into
+/// another's request on a multi-threaded runtime.
+pub async fn scope_key_context<F>(ctx: Option<RequestKeyContext>, fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    REQUEST_KEY_CONTEXT.scope(ctx, fut).await
+}
+
+/// Context of the key presenting the current request, if any. Returns `None`
+/// outside a [`scope_key_context`] — internal call paths that no key
+/// initiated.
+///
+/// Callers gating operator-only surfaces must treat `None` as a refusal, not
+/// as an operator: on a key-gated surface the absence of a context means the
+/// scope was never installed, which is a wiring defect rather than a grant.
+pub fn current_key_context() -> Option<RequestKeyContext> {
+    REQUEST_KEY_CONTEXT.try_with(|v| v.clone()).ok().flatten()
+}
+
+/// Whether an api-key-gated method mutates state.
+///
+/// Only methods on the gated surfaces (canton / chainlink-sponsorship /
+/// stable-asset issuance) need to be classified — the tier gate runs after
+/// [`required_scope_for_method`] has already established that the method is
+/// key-gated, so an unlisted method is by definition a read.
+pub fn is_gated_write_method(method: &str) -> bool {
+    matches!(
+        method,
+        // Canton ledger writes
+        "tenzro_submitDamlCommand"
+            | "tenzro_canton_submitCommand"
+            | "tenzro_canton_submitWithMandate"
+            | "tenzro_allocateParty"
+            | "tenzro_canton_uploadDar"
+            | "tenzro_canton_grantUserRights"
+            | "tenzro_canton_createIdp"
+            | "tenzro_canton_deleteIdp"
+            | "tenzro_canton_watchParty"
+            | "tenzro_consumeDamlEvents"
+            | "tenzro_canton_mirrorReceipt"
+            | "tenzro_mirrorWorkflowToCanton"
+            | "tenzro_mirrorObligationToCanton"
+            // Bridge-fee sponsorship
+            | "tenzro_sponsorBridgeFee"
+            // Stable-asset issuance
+            | "tenzro_registerStableAsset"
+            | "tenzro_mintStableAsset"
+            | "tenzro_redeemStableAsset"
+    )
+}
+
 /// Outcome of an admin-issued revoke attempt against a specific record.
 /// Surfaced by [`ApiKeyManager::revoke_by_id_admin`] so callers (the RPC
 /// handler) can map the four states to distinct JSON-RPC errors.
@@ -206,12 +389,14 @@ pub enum SubjectRevokeOutcome {
 /// The raw key is hashed with SHA-256 and never stored. The key id
 /// (first 8 bytes of the hash, hex-encoded) is a non-secret handle
 /// used for revocation and audit.
-/// Agent-delegation parameters passed at key-issuance time.
+/// Per-key policy parameters passed at key-issuance time.
 ///
-/// All fields are optional and individually opt-in. The empty default
-/// produces a legacy-shaped key with no per-party / per-template /
-/// per-command authorization. Setting any field activates the
-/// corresponding enforcement check on the RPC path.
+/// Most fields are individually opt-in: the empty default produces a
+/// key with no per-party / per-template / per-command authorization,
+/// and setting a field activates the corresponding enforcement check
+/// on the RPC path. The two exceptions are `canton_networks` (empty =
+/// no Canton access) and `tier` (defaults to the read-only budget),
+/// both of which are fail-closed.
 ///
 /// Wire format on the `tenzro_createApiKey` JSON-RPC params mirrors
 /// the field names exactly (snake_case).
@@ -229,7 +414,7 @@ pub struct AgentDelegation {
     pub max_per_command_amulet: Option<u128>,
     /// Rolling-day cumulative value ceiling in amulet smallest units.
     pub max_per_day_amulet: Option<u128>,
-    /// Command shapes that require an AP2 cart mandate.
+    /// Command shapes that require an AP2 checkout mandate.
     pub requires_mandate_for: Vec<String>,
     /// Unix timestamp (seconds) after which the key is rejected.
     pub valid_until: Option<i64>,
@@ -237,10 +422,9 @@ pub struct AgentDelegation {
     // ── Per-resource-class allow-lists ────────────────────────────
     //
     // Each list is empty-by-default. Empty means "no per-resource
-    // restriction in this class" (legacy unrestricted behavior). Non-
-    // empty means the RPC layer refuses invocations against
-    // resources outside the set. The seven resource classes mirror
-    // the operator-brokerage model.
+    // restriction in this class". Non-empty means the RPC layer
+    // refuses invocations against resources outside the set. The seven
+    // resource classes mirror the operator-brokerage model.
 
     /// Tool / MCP resource_ids the key is allowed to invoke. Gated at
     /// `tenzro_useTool` / `tenzro_invokeMcpTool`. Includes stdio
@@ -275,6 +459,12 @@ pub struct AgentDelegation {
     /// resource_id. Empty = no per-resource cap (only the resource's
     /// own price applies).
     pub max_per_resource_tnzo: std::collections::BTreeMap<String, u128>,
+
+    /// Canton networks the key may reach. Empty = no Canton access.
+    pub canton_networks: Vec<crate::config::CantonNetwork>,
+
+    /// Service tier: per-minute request budget + write permission.
+    pub tier: ApiKeyTier,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,8 +516,8 @@ pub struct ApiKeyRecord {
     pub tenant_oauth_client_secret: Option<String>,
 
     /// Agent delegation: fully-qualified party ids the key is allowed
-    /// to act for. Empty = no per-party restriction (legacy keys before
-    /// the agentic-Canton feature shipped). Non-empty = the RPC layer
+    /// to act for. Empty = no per-party restriction, so the key acts
+    /// for the operator-default party. Non-empty = the RPC layer
     /// refuses requests targeting parties outside this set, and on
     /// Canton-side the corresponding `CanActAs` rights are provisioned
     /// when the key is issued.
@@ -381,8 +571,8 @@ pub struct ApiKeyRecord {
 
     // ── Per-resource-class allow-lists (cross-class delegation) ────
     //
-    // Empty-by-default means "no restriction in this class" (legacy
-    // unrestricted). Non-empty means the RPC layer refuses invocations
+    // Empty-by-default means "no restriction in this class".
+    // Non-empty means the RPC layer refuses invocations
     // against resources outside the set. The seven classes mirror the
     // operator-brokerage model: tools / skills / knowledge / workflow
     // templates / agent templates / models / per-resource TNZO caps.
@@ -427,6 +617,19 @@ pub struct ApiKeyRecord {
     /// own price applies, plus any wallet-level spending policy).
     #[serde(default)]
     pub max_per_resource_tnzo: std::collections::BTreeMap<String, u128>,
+
+    /// Canton networks this key may reach. Empty means no Canton
+    /// network is authorized: canton-scoped methods are refused and
+    /// the operator must reissue the key. Unlike the allow-lists
+    /// above, empty is fail-closed here — a Canton network is a
+    /// distinct ledger with distinct assets, so "unrestricted" is
+    /// never a safe default.
+    #[serde(default)]
+    pub canton_networks: Vec<crate::config::CantonNetwork>,
+
+    /// Service tier: per-minute request budget + write permission.
+    #[serde(default = "default_key_tier")]
+    pub tier: ApiKeyTier,
 }
 
 impl ApiKeyRecord {
@@ -459,8 +662,8 @@ impl ApiKeyRecord {
     }
 
     /// Returns true if the agent-delegation fields restrict the key to
-    /// specific parties. When false, the key has the legacy unrestricted
-    /// behavior (act for the operator-default party). When true, the
+    /// specific parties. When false, the key acts for the
+    /// operator-default party. When true, the
     /// RPC enforcement layer must check per-party + per-template +
     /// per-command authorization on every Canton call.
     pub fn has_party_delegation(&self) -> bool {
@@ -469,8 +672,8 @@ impl ApiKeyRecord {
 
     /// Returns true if this key is authorized to act as the given
     /// fully-qualified party id. Returns true if the key has no
-    /// `can_act_as_parties` restriction (legacy unrestricted) or if
-    /// the requested party is in the allowed set.
+    /// `can_act_as_parties` restriction, or if the requested party is
+    /// in the allowed set.
     pub fn can_act_as(&self, party_fq: &str) -> bool {
         self.can_act_as_parties.is_empty()
             || self.can_act_as_parties.iter().any(|p| p == party_fq)
@@ -502,15 +705,15 @@ impl ApiKeyRecord {
 
     /// Returns true if the given command shape requires a mandate to
     /// be presented. When true, the RPC handler refuses without an
-    /// AP2 cart mandate signed by the controlling party.
+    /// AP2 checkout mandate signed by the controlling party.
     pub fn requires_mandate(&self, command: &str) -> bool {
         self.requires_mandate_for.iter().any(|c| c == command)
     }
 
     /// Returns true if this key is authorized to invoke the given
-    /// tool / MCP resource_id. Returns true if the key has no
-    /// `allowed_tools` restriction (legacy unrestricted behavior) or
-    /// if the resource_id is in the allow-list.
+    /// tool / MCP resource_id. An empty `allowed_tools` means the key
+    /// is unrestricted for this class; otherwise the resource_id must
+    /// be in the allow-list.
     pub fn allows_tool(&self, tool_id: &str) -> bool {
         self.allowed_tools.is_empty() || self.allowed_tools.iter().any(|t| t == tool_id)
     }
@@ -604,6 +807,24 @@ impl ApiKeyRecord {
         }
         Ok(())
     }
+
+    /// Returns true if this key may reach the given Canton network.
+    /// Fail-closed: a key with no `canton_networks` entries reaches no
+    /// network at all.
+    pub fn authorizes_canton_network(&self, net: crate::config::CantonNetwork) -> bool {
+        self.canton_networks.contains(&net)
+    }
+
+    /// The Canton network to use when the caller does not name one.
+    /// `Some` only when the key authorizes exactly one network — with
+    /// two or more the caller must be explicit, and with none the key
+    /// has no Canton access.
+    pub fn sole_canton_network(&self) -> Option<crate::config::CantonNetwork> {
+        match self.canton_networks.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
+    }
 }
 
 /// Result of issuing a new API key.
@@ -624,6 +845,16 @@ pub struct IssuedApiKey {
 pub struct ApiKeyManager {
     storage: Arc<dyn KvStore>,
     cache: RwLock<std::collections::HashMap<String, ApiKeyRecord>>,
+    /// Sliding-window request timestamps (ms) per `key_id`, for the
+    /// per-tier rate limit.
+    ///
+    /// Deliberately in-memory only. A rate-limit counter is not state
+    /// of record — it describes a 60-second window, so persisting it
+    /// would cost a write per request to protect information that is
+    /// worthless one minute later. A node restart hands the caller a
+    /// fresh window, which is the correct trade for a budget knob
+    /// whose purpose is shedding sustained load.
+    rate: RwLock<std::collections::HashMap<String, Vec<i64>>>,
 }
 
 impl std::fmt::Debug for ApiKeyManager {
@@ -641,9 +872,43 @@ impl ApiKeyManager {
         let mgr = Self {
             storage,
             cache: RwLock::new(std::collections::HashMap::new()),
+            rate: RwLock::new(std::collections::HashMap::new()),
         };
         mgr.hydrate()?;
         Ok(Arc::new(mgr))
+    }
+
+    /// Records one request against `record`'s sliding 60-second window
+    /// and reports whether it fits inside the tier's budget.
+    ///
+    /// Returns `Ok(())` when the request is admitted, or `Err((limit,
+    /// retry_after_ms))` when the budget is exhausted, so the RPC layer
+    /// can tell the caller both the ceiling it hit and when the oldest
+    /// timestamp in the window falls out of it.
+    pub fn check_rate_limit(&self, record: &ApiKeyRecord) -> std::result::Result<(), (u32, i64)> {
+        const WINDOW_MS: i64 = 60_000;
+        let limit = record.tier.requests_per_minute();
+        let now = chrono::Utc::now().timestamp_millis();
+        let cutoff = now - WINDOW_MS;
+
+        let mut rate = self.rate.write();
+        let hits = rate.entry(record.key_id.clone()).or_default();
+        hits.retain(|t| *t > cutoff);
+
+        if hits.len() as u32 >= limit {
+            // `hits` is append-ordered, so the first entry is the oldest
+            // and is the one whose expiry frees a slot.
+            let retry_after_ms = hits.first().map(|t| (*t + WINDOW_MS) - now).unwrap_or(0);
+            return Err((limit, retry_after_ms.max(0)));
+        }
+        hits.push(now);
+        Ok(())
+    }
+
+    /// Drops rate-limit state for a key. Called on revoke so a revoked
+    /// key's window does not linger in memory.
+    pub fn forget_rate_limit(&self, key_id: &str) {
+        self.rate.write().remove(key_id);
     }
 
     /// Loads all existing records from `CF_API_KEYS` into the cache.
@@ -702,7 +967,7 @@ impl ApiKeyManager {
 
     /// Issue a key with the optional agent-delegation parameters set.
     /// When [`AgentDelegation::default`] is used, the resulting key has
-    /// the same shape and behavior as a legacy key issued via
+    /// the same shape and behavior as one issued via
     /// [`Self::issue`]. When any delegation field is non-default, the
     /// RPC enforcement layer applies per-party / per-template /
     /// per-command authorization on every Canton call presenting the
@@ -763,6 +1028,8 @@ impl ApiKeyManager {
             allowed_agent_templates: delegation.allowed_agent_templates,
             allowed_models: delegation.allowed_models,
             max_per_resource_tnzo: delegation.max_per_resource_tnzo,
+            canton_networks: delegation.canton_networks,
+            tier: delegation.tier,
         };
 
         let storage_key = format!("apikey:{}", hash_hex);
@@ -813,6 +1080,7 @@ impl ApiKeyManager {
             .put(CF_API_KEYS, storage_key.as_bytes(), &value)
             .map_err(|e| NodeError::Internal(format!("api_key put: {}", e)))?;
         cache.insert(hash_hex, record);
+        self.forget_rate_limit(key_id);
         Ok(AdminRevokeOutcome::Revoked)
     }
 
@@ -855,6 +1123,7 @@ impl ApiKeyManager {
             .put(CF_API_KEYS, storage_key.as_bytes(), &value)
             .map_err(|e| NodeError::Internal(format!("api_key put: {}", e)))?;
         cache.insert(hash_hex, record);
+        self.forget_rate_limit(target_key_id);
         Ok(SubjectRevokeOutcome::Revoked)
     }
 
@@ -972,8 +1241,8 @@ pub fn required_scope_for_method(method: &str) -> Option<ApiKeyScope> {
     // caller must hold a key with the `canton` scope. Both `*Canton*`
     // and `*Daml*` method names route to the same upstream — the gate
     // must catch both substrings.
-    // Match both the legacy CamelCase form (`tenzro_listCantonDomains`,
-    // `tenzro_submitDamlCommand`) and the modern snake-case form
+    // Match both the CamelCase form (`tenzro_listCantonDomains`,
+    // `tenzro_submitDamlCommand`) and the snake-case form
     // (`tenzro_canton_uploadDar`, `tenzro_canton_health`, etc.).
     if method.starts_with("tenzro_")
         && (method.contains("Canton")

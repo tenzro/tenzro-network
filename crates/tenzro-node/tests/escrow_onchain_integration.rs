@@ -140,7 +140,7 @@ fn build_signed_eth_send_params(
     assert_eq!(pq_sig.len(), 3309);
 
     // Re-emit `tx_type` as JSON so the handler's `serde_json::from_value::<
-    // TransactionType>` path is exercised end-to-end.
+    // TransactionType>` path is exercised.
     let tx_type_json = serde_json::to_value(&tx.tx_type).expect("serialize tx_type");
 
     json!({

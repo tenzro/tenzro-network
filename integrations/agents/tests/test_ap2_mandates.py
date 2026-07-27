@@ -4,46 +4,53 @@ from __future__ import annotations
 
 from tenzro_agents.core import (
     cart_item,
-    cart_mandate,
     checkout_hash,
     checkout_mandate,
-    intent_mandate,
     payment_mandate,
 )
 
 
-def test_intent_mandate_vct_variants():
-    closed = intent_mandate(
+def test_checkout_mandate_vct_variants():
+    closed = checkout_mandate(
         principal_did="did:tenzro:human:cfo",
         agent_did="did:tenzro:machine:bot",
         description="buy widgets",
         max_amount=1000,
     )
-    assert closed["vct"] == "mandate.intent.1"
-    open_m = intent_mandate(
+    assert closed["vct"] == "mandate.checkout.1"
+    assert closed["presence"] == "HumanPresent"
+    open_m = checkout_mandate(
         principal_did="did:tenzro:human:cfo",
         agent_did="did:tenzro:machine:bot",
         description="buy widgets",
         max_amount=1000,
-        open_mandate=True,
+        human_present=False,
         cnf={"jwk": {"kty": "OKP"}},
     )
-    assert open_m["vct"] == "mandate.intent.open.1"
+    assert open_m["vct"] == "mandate.checkout.open.1"
     assert "cnf" in open_m
 
 
-def test_cart_totals_sum_line_items():
+def test_payment_totals_sum_line_items():
+    checkout = checkout_mandate(
+        principal_did="did:tenzro:human:cfo",
+        agent_did="did:tenzro:machine:bot",
+        description="buy widgets",
+        max_amount=1000,
+    )
     items = [
         cart_item(sku="A", description="a", quantity=2, unit_price=150),
         cart_item(sku="B", description="b", quantity=1, unit_price=400),
     ]
-    cart = cart_mandate(
+    payment = payment_mandate(
+        checkout=checkout,
         agent_did="did:tenzro:machine:bot",
         merchant_did="did:tenzro:machine:vendor",
         items=items,
+        chain="tenzro",
     )
-    assert cart["total_amount"] == 2 * 150 + 400
-    assert cart["items"][0]["total"] == 300
+    assert payment["total_amount"] == 2 * 150 + 400
+    assert payment["items"][0]["total"] == 300
 
 
 def test_payment_mandate_binds_checkout_hash_and_id():

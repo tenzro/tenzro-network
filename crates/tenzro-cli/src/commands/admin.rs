@@ -18,7 +18,7 @@
 //! `operator_protected`). Developers who need a key request one out
 //! of band from whichever operator runs the node they want to use.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
 use crate::output;
@@ -96,12 +96,27 @@ pub struct ApiKeyCreateCmd {
     #[arg(long)]
     confirm_operator_protected: bool,
 
+    /// Canton network this key may reach — `devnet` or `mainnet`.
+    /// Repeat for multiple. Fail-closed: a key naming no network
+    /// reaches no Canton ledger, and every canton-scoped call through
+    /// it is refused. The node refuses a network it does not serve.
+    /// Canton user provisioning requires exactly one network.
+    #[arg(long = "canton-network")]
+    canton_networks: Vec<String>,
+
+    /// Service tier — `free` (default, read-only), `standard`, or
+    /// `priority`. Governs the per-minute request budget and whether
+    /// the key may call write methods.
+    #[arg(long)]
+    tier: Option<String>,
+
     /// Optional Canton User Management Service user id this key acts
     /// as (e.g. `manexus@clients`). Binds the key to a Canton user so
     /// the node forwards canton-scoped calls with that user's primary
     /// party as `actAs`. Canton's AuthService enforces per-user
-    /// CanActAs rights — keys without this binding fall back to the
-    /// operator's primary party.
+    /// CanActAs rights. Canton write calls through a key without this
+    /// binding are refused — the operator's own party is not reachable
+    /// through a tenant key.
     #[arg(long)]
     canton_user_id: Option<String>,
 
@@ -160,6 +175,20 @@ impl ApiKeyCreateCmd {
                 serde_json::Value::Bool(true),
             );
         }
+        if !self.canton_networks.is_empty() {
+            params.insert(
+                "canton_networks".to_string(),
+                serde_json::Value::Array(
+                    self.canton_networks
+                        .iter()
+                        .map(|n| serde_json::Value::String(n.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(tier) = &self.tier {
+            params.insert("tier".to_string(), serde_json::Value::String(tier.clone()));
+        }
         if let Some(canton_user_id) = &self.canton_user_id {
             params.insert(
                 "canton_user_id".to_string(),
@@ -177,10 +206,7 @@ impl ApiKeyCreateCmd {
             .get("key")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("response missing `key` field"))?;
-        let key_id = result
-            .get("key_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
+        let key_id = result.get("key_id").and_then(|v| v.as_str()).unwrap_or("?");
         let created_at = result
             .get("created_at")
             .and_then(|v| v.as_i64())
@@ -194,6 +220,31 @@ impl ApiKeyCreateCmd {
         }
         output::print_field("Scopes", &scopes.join(","));
         output::print_field("Class", &self.class);
+        output::print_field(
+            "Tier",
+            result
+                .get("tier")
+                .and_then(|v| v.as_str())
+                .unwrap_or("free"),
+        );
+        let canton_networks = result
+            .get("canton_networks")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        output::print_field(
+            "Canton Networks",
+            if canton_networks.is_empty() {
+                "none (no Canton access)"
+            } else {
+                &canton_networks
+            },
+        );
         if let Some(cuid) = result.get("canton_user_id").and_then(|v| v.as_str()) {
             output::print_field("Canton User", cuid);
         }
@@ -244,11 +295,24 @@ impl ApiKeyListCmd {
             return Ok(());
         }
 
-        let headers = vec!["Key ID", "Label", "Subject", "Scopes", "Class", "Active", "Created"];
+        let headers = vec![
+            "Key ID", "Label", "Subject", "Scopes", "Class", "Tier", "Networks", "Active",
+            "Created",
+        ];
         let mut rows = Vec::new();
         for key in keys {
             let scopes = key
                 .get("scopes")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let networks = key
+                .get("canton_networks")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -275,6 +339,15 @@ impl ApiKeyListCmd {
                     .and_then(|v| v.as_str())
                     .unwrap_or("subject")
                     .to_string(),
+                key.get("tier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("free")
+                    .to_string(),
+                if networks.is_empty() {
+                    "-".to_string()
+                } else {
+                    networks
+                },
                 key.get("active")
                     .and_then(|v| v.as_bool())
                     .map(|b| if b { "yes" } else { "no" })
@@ -406,7 +479,9 @@ fn parse_peer_binding(s: &str) -> Result<(String, String), String> {
         .split_once('=')
         .ok_or_else(|| format!("expected DID=PeerId, got '{s}'"))?;
     if did.is_empty() || peer.is_empty() {
-        return Err(format!("both sides of DID=PeerId must be non-empty, got '{s}'"));
+        return Err(format!(
+            "both sides of DID=PeerId must be non-empty, got '{s}'"
+        ));
     }
     Ok((did.to_string(), peer.to_string()))
 }
@@ -477,8 +552,7 @@ impl MpcKeygenStatusCmd {
         };
 
         let spinner = output::create_spinner("Querying...");
-        let result: serde_json::Value =
-            rpc.call("tenzro_mpcKeygenStatus", params).await?;
+        let result: serde_json::Value = rpc.call("tenzro_mpcKeygenStatus", params).await?;
         spinner.finish_and_clear();
 
         if let Some(sessions) = result.get("sessions").and_then(|v| v.as_array()) {

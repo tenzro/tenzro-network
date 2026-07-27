@@ -27,7 +27,7 @@ Real-time event streaming, subscriptions, and webhook delivery for the Tenzro Ne
 
 ## Status
 
-Pre-1.0. The event taxonomy and the `EventBus` API are stable for the testnet release; cross-node replay over gossipsub is shipped, and the durable persistence layer lands alongside the snapshot subsystem in `tenzro-storage`.
+Pre-1.0. The event taxonomy and the `EventBus` API are stable for the testnet release. Cross-node replay runs over gossipsub. Durable persistence is provided by the snapshot subsystem in `tenzro-storage`.
 
 ## License
 

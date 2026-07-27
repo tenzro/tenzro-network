@@ -36,6 +36,48 @@ fn extract_output(result: serde_json::Value) -> serde_json::Value {
     result
 }
 
+/// Strip a Markdown code fence, which models commonly wrap a JSON reply in
+/// even when asked for bare JSON.
+fn unfence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    // Drop the language tag that may follow the opening fence.
+    let rest = match rest.find('\n') {
+        Some(i) => &rest[i + 1..],
+        None => rest,
+    };
+    rest.strip_suffix("```").unwrap_or(rest).trim()
+}
+
+/// Reduce a chat response to the step output later steps reference.
+///
+/// A step's output is the assistant's text. When a step prompt asks for
+/// JSON so a later step can read individual fields, the parsed object is
+/// surfaced instead, making `{{ steps.NAME.output.FIELD }}` resolvable.
+/// Text that is not JSON is surfaced as-is.
+fn model_step_output(result: serde_json::Value) -> serde_json::Value {
+    let text = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    if text.trim().is_empty() {
+        return result;
+    }
+    match serde_json::from_str::<serde_json::Value>(unfence(&text)) {
+        Ok(parsed) if parsed.is_object() || parsed.is_array() => parsed,
+        _ => serde_json::Value::String(text),
+    }
+}
+
 #[async_trait::async_trait]
 impl StepDispatcher for NodeStepDispatcher {
     async fn dispatch_tool(
@@ -91,6 +133,33 @@ impl StepDispatcher for NodeStepDispatcher {
         _api_key: Option<&str>,
         _payer_wallet: Option<&str>,
     ) -> Result<serde_json::Value, ExecutorError> {
+        // Text embedding takes text and returns vectors rather than
+        // turns, and serves from its own runtime. A step carrying
+        // `input` / `inputs` without a `prompt` is that request.
+        if params.get("prompt").is_none()
+            && let Some(text) = params.get("input").or_else(|| params.get("inputs"))
+        {
+            let inputs = match text {
+                serde_json::Value::Array(items) => items.clone(),
+                other => vec![serde_json::Value::String(match other.as_str() {
+                    Some(s) => s.to_string(),
+                    None => serde_json::to_string(other).unwrap_or_default(),
+                })],
+            };
+            let mut p = json!({ "model_id": model_id, "inputs": inputs });
+            if let serde_json::Value::Object(obj) = &mut p {
+                for key in ["requested_dim", "normalize"] {
+                    if let Some(v) = params.get(key) {
+                        obj.insert(key.to_string(), v.clone());
+                    }
+                }
+            }
+            let result = crate::rpc::handle_text_embed(&self.node, Some(p))
+                .await
+                .map_err(|e| ExecutorError::Dispatch(format!("text_embed: {}", e.message)))?;
+            return Ok(result);
+        }
+
         // Models route through `tenzro_chat`. Build a chat envelope
         // around the step's free-form params: when params carry a
         // `prompt` field, use it directly; otherwise serialize the
@@ -109,7 +178,7 @@ impl StepDispatcher for NodeStepDispatcher {
         let result = crate::rpc::handle_chat_external(&self.node, chat_params)
             .await
             .map_err(|e| ExecutorError::Dispatch(format!("chat: {}", e)))?;
-        Ok(result)
+        Ok(model_step_output(result))
     }
 
     async fn dispatch_spawn_agent(
@@ -161,10 +230,12 @@ impl StepDispatcher for NodeStepDispatcher {
     ) -> Result<(), ExecutorError> {
         // Real Canton mirror: when the node has a Canton adapter and
         // it's enabled in config, submit a `Tenzro.Workflow:Receipt`
-        // create command marking the saga's completion on Canton. The
-        // DAML template id is read from `canton.workflow_receipt_template`
-        // when the operator has registered one, else the canonical
-        // default.
+        // create command marking the saga's completion on Canton.
+        //
+        // Sagas are not canton-scoped RPCs — there is no presenting API
+        // key to read a target network from — so the mirror always
+        // anchors to the operator's default network, and reads that
+        // network's `workflow_receipt_template` override.
         //
         // When Canton is not enabled on this node, mirror is a no-op
         // (the operator chose not to anchor to Canton). The execution
@@ -177,11 +248,13 @@ impl StepDispatcher for NodeStepDispatcher {
             );
             return Ok(());
         }
-        let adapter = match self.node.canton_adapter() {
+        let mirror_net = self.node.config().canton.default_network;
+        let adapter = match self.node.canton_adapter(mirror_net) {
             Some(a) => a,
             None => {
                 tracing::debug!(
                     workflow_id = %workflow_id,
+                    canton_network = %mirror_net,
                     "Canton mirror skipped — adapter not initialized"
                 );
                 return Ok(());
@@ -199,16 +272,17 @@ impl StepDispatcher for NodeStepDispatcher {
             "mirroredAt": mirrored_at,
         });
 
-        // The receipt template id can be operator-configured; default
-        // to the canonical Tenzro workflow receipt template. Format is
-        // `#<package-name>:<Module>:<Template>` so the participant
-        // resolves the latest installed version of the package.
+        // The receipt template id can be operator-configured per network;
+        // default to the canonical Tenzro workflow receipt template.
+        // Format is `#<package-name>:<Module>:<Template>` so the
+        // participant resolves the latest installed version of the
+        // package.
         let template_id_canton = self
             .node
             .config()
             .canton
-            .workflow_receipt_template
-            .as_deref()
+            .network(mirror_net)
+            .and_then(|n| n.workflow_receipt_template.as_deref())
             .unwrap_or("#tenzro-workflow:Tenzro.Workflow:Receipt");
 
         match adapter
@@ -237,5 +311,48 @@ impl StepDispatcher for NodeStepDispatcher {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn chat_reply(text: &str) -> serde_json::Value {
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "model": "qwen3-8b"
+        })
+    }
+
+    #[test]
+    fn unfence_strips_fence_and_language_tag() {
+        assert_eq!(unfence("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(unfence("```\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(unfence("  {\"a\":1}  "), "{\"a\":1}");
+    }
+
+    #[test]
+    fn model_step_output_parses_fenced_json_object() {
+        let out = model_step_output(chat_reply(
+            "```json\n{\"recommendation\":\"buy\",\"size\":\"10\"}\n```",
+        ));
+        assert_eq!(
+            out,
+            json!({ "recommendation": "buy", "size": "10" })
+        );
+    }
+
+    #[test]
+    fn model_step_output_surfaces_plain_text_as_string() {
+        let out = model_step_output(chat_reply("hold, the spread is too wide"));
+        assert_eq!(out, json!("hold, the spread is too wide"));
+    }
+
+    #[test]
+    fn model_step_output_falls_back_to_whole_envelope() {
+        let envelope = json!({ "embedding": [0.1, 0.2], "model": "qwen3-embedding-0.6b" });
+        assert_eq!(model_step_output(envelope.clone()), envelope);
     }
 }

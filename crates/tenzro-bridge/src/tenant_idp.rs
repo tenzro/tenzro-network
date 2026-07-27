@@ -316,9 +316,8 @@ impl TenantIdpProvisioner for Auth0ManagementClient {
         // surface treats AlreadyExists as success and reuses the
         // existing client. Production callers should add a
         // `list_clients(name=...)` pre-check if strict idempotency is
-        // required across retries; for the M14 wave we accept the
-        // duplicate-on-retry risk and rely on `tenant_label` being
-        // unique per-issuance.
+        // required across retries. This path accepts the duplicate-on-retry
+        // risk and relies on `tenant_label` being unique per-issuance.
         let create_body = serde_json::json!({
             "name": format!("tenzro-tenant-{}", req.tenant_label),
             "description": format!(

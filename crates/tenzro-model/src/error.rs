@@ -117,7 +117,7 @@ pub enum ModelError {
     /// yet expose llama.cpp's speculative-decoding API (`--spec-type
     /// draft-mtp`). Operators can still serve MTP GGUFs through a raw
     /// `llama-cli` / `llama-server` invocation outside the in-process
-    /// runtime until the binding lands.
+    /// runtime until the binding exposes it.
     #[error("Multi-Token Prediction unavailable: {reason}")]
     MtpUnavailable { reason: String },
 

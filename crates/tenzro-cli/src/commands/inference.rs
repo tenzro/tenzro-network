@@ -37,6 +37,13 @@ pub enum InferenceCommand {
     /// cost-quality knob) without naming one. Discovery only — dispatches
     /// nothing. With `--message`, discovers and runs in one call.
     Route(RouteCmd),
+    /// Report how a routed call turned out, so the router's per-cluster
+    /// error rates reflect what happened rather than only what the catalog
+    /// declares.
+    RecordOutcome(RecordOutcomeCmd),
+    /// Read the node's difficulty index: cluster sizes, and per-cluster
+    /// outcome counters for a model when one is named.
+    DifficultyStats(DifficultyStatsCmd),
 }
 
 impl InferenceCommand {
@@ -54,6 +61,8 @@ impl InferenceCommand {
             Self::RevealVote(cmd) => cmd.execute().await,
             Self::FinalizeChallenge(cmd) => cmd.execute().await,
             Self::Route(cmd) => cmd.execute().await,
+            Self::RecordOutcome(cmd) => cmd.execute().await,
+            Self::DifficultyStats(cmd) => cmd.execute().await,
         }
     }
 }
@@ -94,6 +103,18 @@ pub struct RouteCmd {
     /// Payer DID — enables the per-DID rolling-window budget gate.
     #[arg(long)]
     payer_did: Option<String>,
+
+    /// Payer wallet address (hex) — the payer's on-chain TNZO balance
+    /// becomes a hard ceiling, so unaffordable models are dropped.
+    #[arg(long)]
+    payer_address: Option<String>,
+
+    /// Text the model would answer. Used only to place the request in a
+    /// difficulty cluster, so selection accounts for how hard the prompt is;
+    /// it is not sent to any provider. Redundant with --message, which the
+    /// node reads for the same purpose.
+    #[arg(long)]
+    prompt: Option<String>,
 
     /// When set, discover a model and run this prompt in one call.
     #[arg(long)]
@@ -159,6 +180,15 @@ impl RouteCmd {
                 "payer_did".to_string(),
                 serde_json::Value::String(did.clone()),
             );
+        }
+        if let Some(addr) = &self.payer_address {
+            params.insert(
+                "payer_address".to_string(),
+                serde_json::Value::String(addr.clone()),
+            );
+        }
+        if let Some(p) = &self.prompt {
+            params.insert("prompt".to_string(), serde_json::Value::String(p.clone()));
         }
 
         let rpc = RpcClient::new(&self.rpc);
@@ -233,7 +263,16 @@ impl RouteCmd {
 }
 
 fn print_route(route: &serde_json::Value) {
-    for key in ["model_id", "tier", "estimated_cost", "reason"] {
+    for key in [
+        "model_id",
+        "tier",
+        "estimated_cost",
+        "cluster",
+        "expected_error",
+        "provider",
+        "endpoint",
+        "reason",
+    ] {
         if let Some(v) = route.get(key)
             && !v.is_null()
         {
@@ -252,6 +291,183 @@ fn print_route(route: &serde_json::Value) {
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
         output::print_field("fallback_chain", &joined.join(" → "));
+    }
+}
+
+/// `tenzro inference record-outcome --model-id <m> --cluster <c> --outcome <o>`
+///
+/// Reports how a routed call turned out. In practice this carries
+/// `escalated` — the outcome only the caller knows, because it means the
+/// caller took the answer to a stronger model. `resolved` and `failed` are
+/// already recorded by `tenzro_chatByIntent` from the dispatch itself.
+///
+/// `retained: false` means the node has no difficulty index wired, so the
+/// feedback was accepted and discarded. Reporting is advisory.
+#[derive(Debug, Parser)]
+pub struct RecordOutcomeCmd {
+    /// The model that served the call — the routing decision's model_id.
+    #[arg(long)]
+    model_id: String,
+
+    /// The difficulty cluster the request landed in — the routing decision's
+    /// `cluster`.
+    #[arg(long)]
+    cluster: u32,
+
+    /// How the call turned out: resolved, escalated, or failed.
+    #[arg(long)]
+    outcome: String,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl RecordOutcomeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_recordRouteOutcome",
+                serde_json::json!({
+                    "model_id": self.model_id,
+                    "cluster": self.cluster,
+                    "outcome": self.outcome,
+                }),
+            )
+            .await
+            .context("calling tenzro_recordRouteOutcome")?;
+
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        output::print_header("Route Outcome Recorded");
+        for key in ["model_id", "cluster", "outcome", "retained"] {
+            if let Some(v) = result.get(key)
+                && !v.is_null()
+            {
+                let rendered = match v.as_str() {
+                    Some(s) => s.to_string(),
+                    None => v.to_string(),
+                };
+                output::print_field(key, &rendered);
+            }
+        }
+        if result.get("retained").and_then(|v| v.as_bool()) == Some(false) {
+            println!();
+            println!("This node has no difficulty index, so the report was discarded.");
+        }
+        Ok(())
+    }
+}
+
+/// `tenzro inference difficulty-stats [--model-id <m>]`
+///
+/// Reads the node's difficulty index: how many prompt clusters it has
+/// discovered and how many prompts landed in each. With `--model-id`, also
+/// prints that model's per-cluster outcome counters and error rate.
+#[derive(Debug, Parser)]
+pub struct DifficultyStatsCmd {
+    /// Report per-cluster outcome counters and error rate for this model.
+    #[arg(long)]
+    model_id: Option<String>,
+
+    /// Output format (text, json)
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl DifficultyStatsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        let mut params = serde_json::Map::new();
+        if let Some(id) = &self.model_id {
+            params.insert("model_id".to_string(), serde_json::Value::String(id.clone()));
+        }
+
+        let rpc = RpcClient::new(&self.rpc);
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_routeDifficultyStats",
+                serde_json::Value::Object(params),
+            )
+            .await
+            .context("calling tenzro_routeDifficultyStats")?;
+
+        if self.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        output::print_header("Difficulty Index");
+        if result.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
+            println!("No embedding model is loaded — this node routes on declared metadata alone.");
+            return Ok(());
+        }
+        for key in [
+            "cluster_count",
+            "capacity",
+            "embedding_dim",
+            "split_threshold",
+        ] {
+            if let Some(v) = result.get(key)
+                && !v.is_null()
+            {
+                output::print_field(key, &v.to_string());
+            }
+        }
+        if let Some(clusters) = result.get("clusters").and_then(|v| v.as_array())
+            && !clusters.is_empty()
+        {
+            println!();
+            output::print_header("Prompts per Cluster");
+            for c in clusters {
+                let id = c.get("cluster").map(|v| v.to_string()).unwrap_or_default();
+                let n = c.get("prompts").map(|v| v.to_string()).unwrap_or_default();
+                output::print_field(&format!("cluster {id}"), &n);
+            }
+        }
+        if let Some(per_model) = result.get("model_clusters").and_then(|v| v.as_array()) {
+            println!();
+            let model = result
+                .get("model_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("model");
+            output::print_header(&format!("Outcomes for {model}"));
+            if per_model.is_empty() {
+                println!("No observations yet — selection rests on declared metadata.");
+            }
+            for c in per_model {
+                let id = c.get("cluster").map(|v| v.to_string()).unwrap_or_default();
+                let resolved = c.get("resolved").map(|v| v.to_string()).unwrap_or_default();
+                let escalated = c.get("escalated").map(|v| v.to_string()).unwrap_or_default();
+                let failed = c.get("failed").map(|v| v.to_string()).unwrap_or_default();
+                let rate = c
+                    .get("error_rate")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                output::print_field(
+                    &format!("cluster {id}"),
+                    &format!(
+                        "resolved {resolved}, escalated {escalated}, failed {failed}, error rate {rate}"
+                    ),
+                );
+            }
+        }
+        Ok(())
     }
 }
 

@@ -68,12 +68,19 @@ pub struct BoxPrompt {
 }
 
 /// A unified segmentation prompt.
+///
+/// Coordinates are in original-image pixel space; the runtime scales them into
+/// encoder space itself.
+///
+/// `Points` is a struct variant rather than a newtype over the vector because
+/// serde's internally-tagged representation cannot carry a bare sequence — the
+/// wire form is `{"type":"points","points":[…]}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SegmentPrompt {
     Point(PointPrompt),
     Box(BoxPrompt),
-    Points(Vec<PointPrompt>),
+    Points { points: Vec<PointPrompt> },
 }
 
 /// A single output mask from a segmentation call.
@@ -292,8 +299,8 @@ mod onnx_backend {
                         pts.push([pt.x * scale_x, pt.y * scale_y]);
                         labels.push(if pt.is_foreground { 1.0 } else { 0.0 });
                     }
-                    SegmentPrompt::Points(list) => {
-                        for pt in list {
+                    SegmentPrompt::Points { points } => {
+                        for pt in points {
                             pts.push([pt.x * scale_x, pt.y * scale_y]);
                             labels.push(if pt.is_foreground { 1.0 } else { 0.0 });
                         }

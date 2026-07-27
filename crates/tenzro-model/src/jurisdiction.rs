@@ -177,7 +177,7 @@ pub fn verify_receipt(receipt: &JurisdictionReceipt) -> Result<(), JurisdictionE
         .map_err(|_| JurisdictionError::VerificationFailed)
 }
 
-/// Verify a provider-attached response receipt end-to-end: the request and
+/// Verify every field of a provider-attached response receipt: the request and
 /// response hashes must match the actual bytes, the model id must match the
 /// routed request, the signature must verify against the embedded public
 /// key, and — when the provider has a registered signing key — the embedded

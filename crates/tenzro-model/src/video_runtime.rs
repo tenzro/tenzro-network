@@ -2,17 +2,19 @@
 //!
 //! The video catalog (`get_video_catalog`) advertises the V-JEPA 2
 //! family (Meta AI, 2025): ViT-L and ViT-H are MIT, ViT-g is
-//! Apache-2.0 — all three are `LicenseTier::Permissive`. The
-//! `load_video_model` RPC rejects until per-model ONNX exports land:
-//! the upstream `facebook/vjepa2-*` repos ship `safetensors` only.
+//! Apache-2.0 — all three are `LicenseTier::Permissive`. They describe
+//! reference clip encoders rather than loadable graphs, because the
+//! upstream `facebook/vjepa2-*` repos ship `safetensors` only.
 //! VideoMAE v1/v2 stay off the catalog (CC-BY-NC); V-JEPA 2.1 stays
 //! off (CC-BY-NC-ND).
 //!
-//! The `VisionFallbackVideoEncoder` provided here turns any registered
+//! What `load_video_model` registers instead is the
+//! `VisionFallbackVideoEncoder` below, which turns any already-loaded
 //! `ImageEncoder` (CLIP / SigLIP2 / DINOv3 / ViT) into a video encoder by:
 //!
-//! 1. Extracting `num_frames` evenly-spaced frames from the input video
-//!    via the system `ffmpeg` binary (PNG output to a tempdir).
+//! 1. Extracting `num_frames` frames from the input video via the system
+//!    `ffmpeg` binary (PNG output to a tempdir) — evenly spaced across the
+//!    clip, or at a fixed stride when the request carries `frame_stride`.
 //! 2. Embedding each frame through the underlying image encoder.
 //! 3. Mean-pooling the per-frame embeddings.
 //! 4. Optionally L2-normalizing the resulting vector.
@@ -42,7 +44,10 @@ pub struct VideoEmbedConfig {
     /// L2-normalize the output embedding.
     #[serde(default)]
     pub normalize: bool,
-    /// Optional frame stride override (default: model's native fps).
+    /// Keep every `frame_stride`-th decoded frame instead of spreading the
+    /// samples evenly across the clip. Still capped at the encoder's
+    /// `num_frames`, so a stride tight enough to outrun the cap yields a
+    /// window from the start of the clip rather than a survey of all of it.
     #[serde(default)]
     pub frame_stride: Option<u32>,
 }
@@ -54,6 +59,11 @@ pub struct VideoEmbedResult {
     pub dim: usize,
     /// Number of frames actually consumed (after sampling).
     pub frames_consumed: u32,
+    /// Duration of the source clip in milliseconds, or 0 when the container
+    /// carries no recoverable duration. Video is billed per second of source
+    /// as well as per frame embedded, so a caller who uploads an hour-long clip
+    /// and samples eight frames from it still pays for the hour of decode.
+    pub video_ms: u64,
     pub generation_time_ms: u64,
 }
 
@@ -138,16 +148,90 @@ impl VisionFallbackVideoEncoder {
         s.trim().parse::<f64>().ok()
     }
 
-    /// Extract `num_frames` evenly-spaced PNG frames into `out_dir`.
-    /// Frames are written as `frame_001.png`, `frame_002.png`, etc.
-    /// Returns the actual file paths in extraction order.
+    /// Collect frames from every `stride`-th decoded frame, capped at `n`.
+    /// `-fps_mode passthrough` keeps ffmpeg from resampling around the
+    /// `select` filter's gaps, which would otherwise reintroduce the frames
+    /// the stride just skipped.
+    fn extract_strided(
+        &self,
+        video_path: &Path,
+        out_dir: &Path,
+        stride: u32,
+        n: usize,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        let pattern = out_dir.join("frame_%03d.png");
+        let filter = format!("select=not(mod(n\\,{}))", stride);
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-i"])
+            .arg(video_path)
+            .arg("-vf")
+            .arg(&filter)
+            .args(["-fps_mode", "passthrough"])
+            .args(["-frames:v"])
+            .arg(format!("{}", n))
+            .arg(&pattern)
+            .status()
+            .map_err(|e| {
+                ModelError::ProviderNotAvailable(format!(
+                    "ffmpeg invocation failed: {} (is ffmpeg installed?)",
+                    e
+                ))
+            })?;
+        if !status.success() {
+            return Err(ModelError::InferenceError(format!(
+                "ffmpeg exited with status {} extracting every {}th frame",
+                status, stride
+            )));
+        }
+        Ok(Self::collect_sequence(out_dir, n))
+    }
+
+    /// Gather `frame_001.png`..`frame_{n:03}.png` from `out_dir`, stopping at
+    /// the first gap — ffmpeg writes the sequence contiguously, so a gap means
+    /// it ran out of frames to write.
+    fn collect_sequence(out_dir: &Path, n: usize) -> Vec<std::path::PathBuf> {
+        let mut paths = Vec::new();
+        for i in 1..=n {
+            let p = out_dir.join(format!("frame_{:03}.png", i));
+            if p.exists() {
+                paths.push(p);
+            } else {
+                break;
+            }
+        }
+        paths
+    }
+
+    /// Extract up to `num_frames` PNG frames into `out_dir`, written as
+    /// `frame_001.png`, `frame_002.png`, etc. Returns the file paths in
+    /// extraction order, together with the probed clip duration in seconds
+    /// when the container carries one — the caller bills against it, so the
+    /// probe result has to travel out rather than only steering the
+    /// extraction strategy.
     fn extract_frames(
         &self,
         video_path: &Path,
         out_dir: &Path,
-    ) -> Result<Vec<std::path::PathBuf>> {
+        config: &VideoEmbedConfig,
+    ) -> Result<(Vec<std::path::PathBuf>, Option<f64>)> {
         let n = self.num_frames as usize;
         let pattern = out_dir.join("frame_%03d.png");
+
+        // A caller-supplied stride replaces the even-spacing survey: it asks
+        // for a specific temporal sampling rate rather than a fixed budget
+        // spread over however long the clip happens to be. Duration is still
+        // probed, because billing depends on it either way.
+        if let Some(stride) = config.frame_stride.filter(|s| *s > 0) {
+            let duration = Self::probe_duration(video_path);
+            let paths = self.extract_strided(video_path, out_dir, stride, n)?;
+            if paths.is_empty() {
+                return Err(ModelError::InferenceError(format!(
+                    "ffmpeg produced no frames at stride {}",
+                    stride
+                )));
+            }
+            return Ok((paths, duration));
+        }
 
         // Strategy: probe duration; if known, extract exactly `n` frames at
         // evenly-spaced timestamps using `select='eq(n,...)'` filter would
@@ -200,7 +284,7 @@ impl VisionFallbackVideoEncoder {
                     "ffmpeg produced no frames despite reported success".into(),
                 ));
             }
-            Ok(paths)
+            Ok((paths, Some(duration)))
         } else {
             // Fallback: use ffmpeg's `select` filter to grab N evenly-spaced
             // frames without knowing the duration up front. This decodes
@@ -227,21 +311,13 @@ impl VisionFallbackVideoEncoder {
                 )));
             }
             // Collect whatever ffmpeg actually produced.
-            let mut paths = Vec::new();
-            for i in 1..=n {
-                let p = out_dir.join(format!("frame_{:03}.png", i));
-                if p.exists() {
-                    paths.push(p);
-                } else {
-                    break;
-                }
-            }
+            let paths = Self::collect_sequence(out_dir, n);
             if paths.is_empty() {
                 return Err(ModelError::InferenceError(
                     "ffmpeg fallback produced no frames".into(),
                 ));
             }
-            Ok(paths)
+            Ok((paths, None))
         }
     }
 }
@@ -264,7 +340,8 @@ impl VideoEncoder for VisionFallbackVideoEncoder {
         std::fs::write(&video_path, video_bytes)
             .map_err(|e| ModelError::InferenceError(format!("write video: {}", e)))?;
 
-        let frame_paths = self.extract_frames(&video_path, tmpdir.path())?;
+        let (frame_paths, duration_secs) =
+            self.extract_frames(&video_path, tmpdir.path(), config)?;
 
         // Embed each frame. We accumulate sums in f64 to avoid f32
         // precision loss when many frames are averaged.
@@ -314,6 +391,12 @@ impl VideoEncoder for VisionFallbackVideoEncoder {
             embedding,
             dim,
             frames_consumed: consumed,
+            // A stream ffprobe cannot measure bills on frames alone rather than
+            // guessing at a duration from the sampled frame count.
+            video_ms: duration_secs
+                .filter(|d| *d > 0.0)
+                .map(|d| (d * 1000.0).round() as u64)
+                .unwrap_or(0),
             generation_time_ms: start.elapsed().as_millis() as u64,
         })
     }
@@ -475,6 +558,27 @@ mod tests {
         let v = VisionFallbackVideoEncoder::new(img, 4);
         let r = v.embed(&[], &VideoEmbedConfig::default());
         assert!(matches!(r, Err(ModelError::InvalidModel(_))));
+    }
+
+    /// A stride of zero would make `mod(n,0)` undefined, so it has to fall
+    /// through to even spacing rather than reach the filter.
+    #[test]
+    fn zero_stride_falls_through_to_even_spacing() {
+        let cfg = VideoEmbedConfig {
+            normalize: false,
+            frame_stride: Some(0),
+        };
+        assert!(cfg.frame_stride.filter(|s| *s > 0).is_none());
+    }
+
+    #[test]
+    fn collect_sequence_stops_at_first_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in [1usize, 2, 4] {
+            std::fs::write(dir.path().join(format!("frame_{:03}.png", i)), b"x").unwrap();
+        }
+        let paths = VisionFallbackVideoEncoder::collect_sequence(dir.path(), 8);
+        assert_eq!(paths.len(), 2);
     }
 
     #[test]

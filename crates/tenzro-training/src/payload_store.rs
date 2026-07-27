@@ -31,8 +31,8 @@
 //! and that `bytes.len() == expected.payload_bytes`. The default
 //! [`InMemoryGradientStore`] enforces both directly. Adapters that delegate
 //! integrity to a content-addressed transport (iroh-blobs verifies BLAKE3
-//! end-to-end on transfer) MUST still run the protocol-side check to defend
-//! against an adapter wiring bug; cheap belt-and-braces.
+//! over every transferred chunk) MUST still run the protocol-side check to
+//! defend against an adapter wiring bug; cheap belt-and-braces.
 
 use async_trait::async_trait;
 use bytes::Bytes;

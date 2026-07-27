@@ -26,7 +26,7 @@
 //! [`ArtifactSpec`] carries a `tenzro_uri` peer hint, the downloader tries
 //! the peer fetch *first* and falls back to the HF CDN on any error
 //! (missing blob, BLAKE3 mismatch, transport failure). Optional
-//! `sha256_hex` is checked end-to-end against the fetched bytes as a
+//! `sha256_hex` is checked against the fetched bytes as a
 //! defense-in-depth layer on top of iroh-blobs' own BLAKE3 verification
 //! — same belt-and-braces discipline as
 //! [`crate::payload_store::verify_payload`] in `tenzro-training` and
@@ -96,7 +96,7 @@ impl std::fmt::Display for DownloadState {
 /// that carries a `PeerHint` is fetched from peers via the URI first; the
 /// HF CDN is only contacted if the peer fetch fails (missing blob, hash
 /// mismatch, transport error). The optional `sha256_hex` is verified
-/// end-to-end against the fetched bytes as a defense-in-depth check on
+/// against the fetched bytes as a defense-in-depth check on
 /// top of iroh-blobs' own BLAKE3 transport verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerHint {
@@ -116,7 +116,7 @@ pub struct PeerHint {
 ///
 /// The network offers two source classes: the centralized HuggingFace Hub,
 /// and the set of verified network providers that hold the blob at its
-/// content hash (BLAKE3, checked end-to-end on transfer, plus the canonical
+/// content hash (BLAKE3, checked over the whole transfer, plus the canonical
 /// SHA-256 as defense-in-depth). A caller picks the policy that fits their
 /// trust and reachability constraints — a node in a jurisdiction where the
 /// HF CDN is blocked selects [`Network`], which never contacts HF.

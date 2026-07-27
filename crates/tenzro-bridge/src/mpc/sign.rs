@@ -827,14 +827,14 @@ mod tests {
         assert_eq!(out.v, 1);
     }
 
-    /// End-to-end: drive a 2-of-2 DKG, then drive a 2-of-2 sign on the
+    /// Full round-trip: drive a 2-of-2 DKG, then drive a 2-of-2 sign on the
     /// resulting envelopes. Asserts the returned signature verifies against
     /// the DKG-output group public key.
     ///
     /// 2-of-2 keeps the test fast while still exercising the full signing
     /// pipeline (DKLS23 requires `threshold == quorum_size` parties to
-    /// cooperate; the 2-of-3 case requires quorum subselection which lands
-    /// with committee selection in task #22).
+    /// cooperate; the 2-of-3 case requires quorum subselection, which is
+    /// covered by committee selection in task #22).
     #[tokio::test]
     async fn two_party_sign_roundtrip() {
         let dids = sorted_dids(2);

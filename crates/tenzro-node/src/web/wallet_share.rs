@@ -710,7 +710,7 @@ mod tests {
             .is_err());
     }
 
-    /// End-to-end roundtrip: deterministic credential signing key
+    /// Full roundtrip: deterministic credential signing key
     /// signs a webauthn-shaped payload, the verifier accepts, and the
     /// derived pepper is reproducible.
     #[test]

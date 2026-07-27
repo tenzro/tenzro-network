@@ -4,7 +4,7 @@ Unified identity protocol for humans and machines on the Tenzro Network.
 
 ## Overview
 
-**tenzro-identity** implements the **Tenzro Decentralized Identity Protocol (TDIP)**, providing a comprehensive identity system that treats humans and AI agents as first-class citizens. The crate supports W3C DID Documents, verifiable credentials with recursive trust chain verification, fine-grained delegation scopes, cascading revocation, and automatic FROST-Ed25519 threshold wallet provisioning for every identity.
+**tenzro-identity** implements the **Tenzro Decentralized Identity Protocol (TDIP)**, providing a comprehensive identity system in which humans and AI agents are represented by the same identity type and hold the same rights to act. The crate supports W3C DID Documents, verifiable credentials with recursive trust chain verification, fine-grained delegation scopes, cascading revocation, and automatic FROST-Ed25519 threshold wallet provisioning for every identity.
 
 The protocol recognises **three identity classes** under the `did:tenzro:` namespace:
 

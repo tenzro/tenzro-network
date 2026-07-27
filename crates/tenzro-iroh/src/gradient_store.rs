@@ -25,7 +25,7 @@
 //!
 //! # Integrity contract
 //!
-//! iroh-blobs verifies BLAKE3 end-to-end on transfer. The
+//! iroh-blobs verifies BLAKE3 over the whole transfer. The
 //! [`GradientPayloadStore::fetch`] contract additionally requires the
 //! protocol-side `verify_payload` check (SHA-256 + size) so a wiring bug
 //! between the resolver and the syncer surfaces immediately rather than

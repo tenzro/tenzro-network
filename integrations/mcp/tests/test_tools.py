@@ -314,7 +314,17 @@ async def test_chat_completion_defaults(mock_rpc):
 
 async def test_serve_model(mock_rpc):
     await server.serve_model("m1")
-    mock_rpc.assert_awaited_once_with("tenzro_serveModel", {"model_id": "m1"})
+    mock_rpc.assert_awaited_once_with(
+        "tenzro_serveModel", {"model_id": "m1", "visibility": "network"}
+    )
+
+
+async def test_serve_model_private_forced_single(mock_rpc):
+    await server.serve_model("m1", force_single=True, visibility="private")
+    mock_rpc.assert_awaited_once_with(
+        "tenzro_serveModel",
+        {"model_id": "m1", "visibility": "private", "force_single": True},
+    )
 
 
 async def test_stop_model(mock_rpc):
@@ -560,6 +570,59 @@ async def test_create_swarm(mock_rpc):
 async def test_list_agents(mock_rpc):
     await server.list_agents()
     mock_rpc.assert_awaited_once_with("tenzro_listAgents", [])
+
+
+# ---------------------------------------------------------------------------
+# Capability registry
+# ---------------------------------------------------------------------------
+
+
+async def test_list_capabilities(mock_rpc):
+    mock_rpc.return_value = {
+        "capabilities": [{"capability": "nlp", "agent_count": 2}],
+        "total": 1,
+        "truncated": False,
+        "rejected_attestation_count": 0,
+    }
+    result = await server.list_capabilities()
+    mock_rpc.assert_awaited_once_with("tenzro_listCapabilities", {})
+    assert result["rejected_attestation_count"] == 0
+
+
+async def test_get_capability_attestations(mock_rpc):
+    await server.get_capability_attestations("nlp", verified_only=True)
+    mock_rpc.assert_awaited_once_with(
+        "tenzro_getCapabilityAttestations",
+        {"capability": "nlp", "verified_only": True},
+    )
+
+
+async def test_get_capability_attestations_defaults_unverified(mock_rpc):
+    await server.get_capability_attestations("vision")
+    mock_rpc.assert_awaited_once_with(
+        "tenzro_getCapabilityAttestations",
+        {"capability": "vision", "verified_only": False},
+    )
+
+
+async def test_get_agent_capability_attestations(mock_rpc):
+    await server.get_agent_capability_attestations("agent-1")
+    mock_rpc.assert_awaited_once_with(
+        "tenzro_getAgentCapabilityAttestations", {"agent_id": "agent-1"}
+    )
+
+
+async def test_find_best_agent_for_capability(mock_rpc):
+    mock_rpc.return_value = {
+        "capability": "code",
+        "best_agent": "agent-7",
+        "total_candidates": 3,
+    }
+    result = await server.find_best_agent_for_capability("code")
+    mock_rpc.assert_awaited_once_with(
+        "tenzro_findBestAgentForCapability", {"capability": "code"}
+    )
+    assert result["best_agent"] == "agent-7"
 
 
 # ---------------------------------------------------------------------------

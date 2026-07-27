@@ -49,7 +49,7 @@ Perfect for interacting with the network:
 
 ```bash
 ./target/release/tenzro-node \
-  --role light-client \
+  --roles light-client \
   --data-dir ./data/light \
   --log-level info
 ```
@@ -60,7 +60,7 @@ Participate in consensus:
 
 ```bash
 ./target/release/tenzro-node \
-  --role validator \
+  --roles validator \
   --data-dir ./data/validator \
   --log-level info
 ```
@@ -71,7 +71,7 @@ Serve AI models:
 
 ```bash
 ./target/release/tenzro-node \
-  --role model-provider \
+  --roles model-provider \
   --data-dir ./data/provider \
   --log-level info
 ```
@@ -179,7 +179,7 @@ To connect to the Tenzro testnet:
 
 ```bash
 ./target/release/tenzro-node \
-  --role light-client \
+  --roles light-client \
   --data-dir ./data/testnet \
   --log-level info
 ```
@@ -194,7 +194,7 @@ Logs are output to stdout. To save them:
 
 ```bash
 ./target/release/tenzro-node \
-  --role validator \
+  --roles validator \
   --data-dir ./data/validator 2>&1 | tee node.log
 ```
 

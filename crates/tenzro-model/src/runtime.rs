@@ -180,6 +180,25 @@ pub struct GenerationConfig {
     pub repeat_penalty: f32,
     pub repeat_last_n: usize,
     pub seed: u64,
+    /// Top-k truncation. `None` leaves the candidate set untruncated by rank,
+    /// which is what the nucleus (`top_p`) stage alone does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    /// Minimum-probability floor relative to the most likely token. `None`
+    /// disables the stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+    /// Per-occurrence logit penalty. `0.0` disables it.
+    #[serde(default)]
+    pub frequency_penalty: f32,
+    /// Flat logit penalty for any token already present. `0.0` disables it.
+    #[serde(default)]
+    pub presence_penalty: f32,
+    /// Stop sequences. Generation halts as soon as the decoded text ends with
+    /// one of these, and the matched suffix is trimmed from the returned text
+    /// so the caller never sees the delimiter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop: Vec<String>,
     /// Optional speculative-decoding draft count (1..=6). When `Some(n)`,
     /// the runtime is asked to use the target model's paired drafter
     /// (`HfModelEntry.drafter_id` + `mtp_kind`) and propose `n` tokens
@@ -208,8 +227,168 @@ impl Default for GenerationConfig {
             repeat_penalty: 1.1,
             repeat_last_n: 64,
             seed: 42,
+            top_k: None,
+            min_p: None,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            stop: Vec::new(),
             draft_n: None,
             commitment_k: None,
+        }
+    }
+}
+
+/// Assemble the llama.cpp sampler chain for a request.
+///
+/// Stage order mirrors llama.cpp's own default (penalties before truncation,
+/// truncation before the distribution draw). The optional `top_k` and `min_p`
+/// stages are omitted entirely when unset rather than passed a neutral value,
+/// so a request that does not ask for them samples exactly as it did before
+/// those knobs existed.
+fn build_sampler_chain(config: &GenerationConfig) -> LlamaSampler {
+    let mut stages = vec![LlamaSampler::penalties(
+        config.repeat_last_n as i32,
+        config.repeat_penalty,
+        config.frequency_penalty,
+        config.presence_penalty,
+    )];
+    if let Some(k) = config.top_k {
+        stages.push(LlamaSampler::top_k(k as i32));
+    }
+    stages.push(LlamaSampler::temp(config.temperature as f32));
+    stages.push(LlamaSampler::top_p(config.top_p as f32, 1));
+    if let Some(p) = config.min_p {
+        stages.push(LlamaSampler::min_p(p as f32, 1));
+    }
+    stages.push(LlamaSampler::dist(config.seed as u32));
+    LlamaSampler::chain_simple(stages)
+}
+
+/// Byte length of the longest stop sequence that `text` ends with, or `None`
+/// when no stop sequence matched. The caller truncates by that many bytes so
+/// the delimiter never reaches the client.
+fn matched_stop_len(text: &str, stop: &[String]) -> Option<usize> {
+    stop.iter()
+        .filter(|s| !s.is_empty() && text.ends_with(s.as_str()))
+        .map(|s| s.len())
+        .max()
+}
+
+/// Accumulates decoded token pieces, detects stop sequences, and — when the
+/// caller is streaming — releases bytes only once they can no longer turn out
+/// to be the leading part of a stop sequence.
+///
+/// A stop sequence may span several tokens, so the last `hold` bytes are kept
+/// back until either more text disambiguates them or generation ends. With no
+/// stop sequences configured `hold` is zero and every piece is released the
+/// moment it is decoded.
+pub(crate) struct StopStream {
+    text: String,
+    emitted: usize,
+    hold: usize,
+    stop: Vec<String>,
+    hit: bool,
+}
+
+impl StopStream {
+    pub(crate) fn new(stop: Vec<String>) -> Self {
+        let hold = stop
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0);
+        Self {
+            text: String::new(),
+            emitted: 0,
+            hold,
+            stop,
+            hit: false,
+        }
+    }
+
+    /// Absorb one decoded piece. Returns `false` when the stream receiver has
+    /// been dropped, which the generation loops treat as "stop generating".
+    pub(crate) fn push(
+        &mut self,
+        piece: &str,
+        tx: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> bool {
+        self.text.push_str(piece);
+        if let Some(n) = matched_stop_len(&self.text, &self.stop) {
+            self.text.truncate(self.text.len() - n);
+            self.emitted = self.emitted.min(self.text.len());
+            self.hit = true;
+        }
+        self.release(tx)
+    }
+
+    fn release(&mut self, tx: Option<&tokio::sync::mpsc::Sender<String>>) -> bool {
+        let Some(tx) = tx else { return true };
+        let mut boundary = if self.hit {
+            self.text.len()
+        } else {
+            self.text.len().saturating_sub(self.hold)
+        };
+        while boundary > self.emitted && !self.text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        if boundary <= self.emitted {
+            return true;
+        }
+        let chunk = self.text[self.emitted..boundary].to_string();
+        self.emitted = boundary;
+        tx.blocking_send(chunk).is_ok()
+    }
+
+    pub(crate) fn hit_stop(&self) -> bool {
+        self.hit
+    }
+
+    /// Release anything still held back and hand over the accumulated text.
+    pub(crate) fn finish(mut self, tx: Option<&tokio::sync::mpsc::Sender<String>>) -> String {
+        self.hit = true;
+        self.release(tx);
+        self.text
+    }
+}
+
+/// Why generation stopped, as the engine observed it.
+///
+/// A configured stop sequence is trimmed out of the returned text, so a caller
+/// inspecting only [`InferenceResult::text`] cannot tell `StopSequence` from
+/// `Eos`. This field is how that distinction reaches the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// The model emitted an end-of-generation token.
+    Eos,
+    /// The token budget in [`GenerationConfig::max_tokens`] was exhausted.
+    Length,
+    /// Decoded text ended with one of [`GenerationConfig::stop`].
+    StopSequence,
+}
+
+impl StopReason {
+    /// Termination cause for a loop that ran to completion: a stop sequence
+    /// wins over an exhausted budget, since the sequence is what halted
+    /// decoding.
+    fn from_loop(hit_stop: bool, output_tokens: u32, max_tokens: u32) -> Self {
+        if hit_stop {
+            Self::StopSequence
+        } else if output_tokens >= max_tokens {
+            Self::Length
+        } else {
+            Self::Eos
+        }
+    }
+
+    /// Wire spelling, matching the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Eos => "eos",
+            Self::Length => "length",
+            Self::StopSequence => "stop_sequence",
         }
     }
 }
@@ -222,6 +401,10 @@ pub struct InferenceResult {
     pub output_tokens: u32,
     pub generation_time_ms: u64,
     pub tokens_per_second: f64,
+    /// Engine-observed termination cause, reported beside the token counts
+    /// because the text alone cannot distinguish a trimmed stop sequence from
+    /// an end-of-generation token.
+    pub stop_reason: StopReason,
     /// TOPLOC commitment blob, present when the request set
     /// [`GenerationConfig::commitment_k`] and the single-token
     /// autoregressive path served it.
@@ -1385,7 +1568,6 @@ impl ModelRuntime {
         let mut messages = messages.to_vec();
         let tools = tools.to_vec();
         let config = config.clone();
-        let max_tokens = config.max_tokens;
 
         // Inline tool descriptions into a synthetic system message. If the
         // first message is already a system message, we prepend the tools
@@ -1437,12 +1619,16 @@ impl ModelRuntime {
         // Parse tool-call markers from the raw output.
         let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
 
+        // A tool call outranks the engine's own cause: the turn ends because
+        // control passes to the caller's tool, whatever halted decoding.
         let stop_reason = if !tool_calls.is_empty() {
             "tool_use".to_string()
-        } else if inner.output_tokens >= max_tokens {
-            "max_tokens".to_string()
         } else {
-            "end_turn".to_string()
+            match inner.stop_reason {
+                StopReason::Length => "max_tokens".to_string(),
+                StopReason::StopSequence => "stop_sequence".to_string(),
+                StopReason::Eos => "end_turn".to_string(),
+            }
         };
 
         Ok(ChatWithToolsResult {
@@ -1700,24 +1886,13 @@ impl ModelRuntime {
         ctx.decode(&mut batch)
             .map_err(|e| ModelError::Other(format!("Prompt decode failed: {}", e)))?;
 
-        // Set up sampler chain: penalties -> temp -> top_p -> dist
-        let mut sampler = LlamaSampler::chain_simple([
-            LlamaSampler::penalties(
-                config.repeat_last_n as i32,
-                config.repeat_penalty,
-                0.0, // frequency penalty
-                0.0, // presence penalty
-            ),
-            LlamaSampler::temp(config.temperature as f32),
-            LlamaSampler::top_p(config.top_p as f32, 1),
-            LlamaSampler::dist(config.seed as u32),
-        ]);
+        let mut sampler = build_sampler_chain(config);
 
         // Auto-regressive generation loop
         let mut n_cur = batch.n_tokens();
         let mut output_tokens: u32 = 0;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut output_text = String::new();
+        let mut stream = StopStream::new(config.stop.clone());
 
         // TOPLOC commitment collection: one top-k logit record per
         // generated token, read from the raw logits the sampler chain
@@ -1757,14 +1932,11 @@ impl ModelRuntime {
                 .token_to_piece(token, &mut decoder, true, None)
             {
                 Ok(piece) => {
-                    // Stream the token piece if a sender is provided
-                    if let Some(tx) = token_tx {
-                        // If the receiver is dropped, stop generating
-                        if tx.blocking_send(piece.clone()).is_err() {
-                            break;
-                        }
+                    // If the receiver is dropped, stop generating
+                    if !stream.push(&piece, token_tx) {
+                        output_tokens += 1;
+                        break;
                     }
-                    output_text.push_str(&piece);
                 }
                 Err(e) => {
                     warn!("Failed to decode token {}: {}", token.0, e);
@@ -1772,6 +1944,10 @@ impl ModelRuntime {
             }
 
             output_tokens += 1;
+
+            if stream.hit_stop() {
+                break;
+            }
 
             // Prepare next batch with the sampled token
             batch.clear();
@@ -1785,6 +1961,11 @@ impl ModelRuntime {
 
             n_cur += 1;
         }
+
+        // Read before `finish` consumes the stream — `finish` sets `hit`
+        // unconditionally to release held bytes.
+        let stop_reason = StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
+        let output_text = stream.finish(token_tx);
 
         let elapsed = start.elapsed();
         let generation_time_ms = elapsed.as_millis() as u64;
@@ -1808,6 +1989,7 @@ impl ModelRuntime {
             output_tokens,
             generation_time_ms,
             tokens_per_second,
+            stop_reason,
             commitment,
         })
     }
@@ -1924,26 +2106,14 @@ impl ModelRuntime {
             .decode(&mut batch)
             .map_err(|e| ModelError::Other(format!("Prompt decode failed: {}", e)))?;
 
-        // Sampler chain — identical to the single-token path so
-        // temperature/top_p/repetition penalty behave the same. The
-        // drafter only PROPOSES tokens; the target's sampler decides
-        // which are kept.
-        let mut sampler = LlamaSampler::chain_simple([
-            LlamaSampler::penalties(
-                config.repeat_last_n as i32,
-                config.repeat_penalty,
-                0.0,
-                0.0,
-            ),
-            LlamaSampler::temp(config.temperature as f32),
-            LlamaSampler::top_p(config.top_p as f32, 1),
-            LlamaSampler::dist(config.seed as u32),
-        ]);
+        // Same chain as the single-token path. The drafter only PROPOSES
+        // tokens; the target's sampler decides which are kept.
+        let mut sampler = build_sampler_chain(config);
 
         let mut n_cur = batch.n_tokens();
         let mut output_tokens: u32 = 0;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut output_text = String::new();
+        let mut stream = StopStream::new(config.stop.clone());
         let max_pos = (n_ctx_target.get() as i32)
             .min(input_tokens as i32 + config.max_tokens as i32);
 
@@ -1955,38 +2125,42 @@ impl ModelRuntime {
         // Emit the seed token.
         if loaded.model.is_eog_token(id_last) {
             return Ok(InferenceResult {
-                text: output_text,
+                text: stream.finish(token_tx),
                 input_tokens,
                 output_tokens,
                 generation_time_ms: start.elapsed().as_millis() as u64,
                 tokens_per_second: 0.0,
+                stop_reason: StopReason::Eos,
                 commitment: None,
             });
         }
+        let mut seed_open = true;
         match loaded
             .model
             .token_to_piece(id_last, &mut decoder, true, None)
         {
             Ok(piece) => {
-                if let Some(tx) = token_tx
-                    && tx.blocking_send(piece.clone()).is_err()
-                {
-                    // Receiver dropped — finish what we have.
-                    return Ok(InferenceResult {
-                        text: output_text,
-                        input_tokens,
-                        output_tokens,
-                        generation_time_ms: start.elapsed().as_millis() as u64,
-                        tokens_per_second: 0.0,
-                        commitment: None,
-                    });
-                }
-                output_text.push_str(&piece);
+                // Receiver dropped, or the seed token already completed a stop
+                // sequence — either way there is nothing further to generate.
+                seed_open = stream.push(&piece, token_tx) && !stream.hit_stop();
             }
             Err(e) => warn!("Failed to decode seed token {}: {}", id_last.0, e),
         }
         output_tokens += 1;
         n_cur += 1;
+        if !seed_open {
+            let stop_reason =
+                StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
+            return Ok(InferenceResult {
+                text: stream.finish(token_tx),
+                input_tokens,
+                output_tokens,
+                generation_time_ms: start.elapsed().as_millis() as u64,
+                tokens_per_second: 0.0,
+                stop_reason,
+                commitment: None,
+            });
+        }
 
         // Speculative loop.
         let mut prompt_so_far: Vec<llama_cpp_2::token::LlamaToken> = tokens_list.clone();
@@ -2022,16 +2196,15 @@ impl ModelRuntime {
                 if loaded.model.is_eog_token(next) {
                     break;
                 }
+                let mut open = true;
                 if let Ok(piece) = loaded.model.token_to_piece(next, &mut decoder, true, None) {
-                    if let Some(tx) = token_tx
-                        && tx.blocking_send(piece.clone()).is_err()
-                    {
-                        break;
-                    }
-                    output_text.push_str(&piece);
+                    open = stream.push(&piece, token_tx) && !stream.hit_stop();
                 }
                 output_tokens += 1;
                 n_cur += 1;
+                if !open {
+                    break;
+                }
                 prompt_so_far.push(next);
                 id_last = next;
                 continue;
@@ -2071,29 +2244,34 @@ impl ModelRuntime {
                     if loaded.model.is_eog_token(target_sample) {
                         break;
                     }
+                    let mut open = true;
                     if let Ok(piece) =
                         loaded.model.token_to_piece(target_sample, &mut decoder, true, None)
                     {
-                        if let Some(tx) = token_tx
-                            && tx.blocking_send(piece.clone()).is_err()
-                        {
-                            // Receiver dropped.
-                            spec.accept(n_accepted)
-                                .map_err(|e| ModelError::MtpUnavailable {
-                                    reason: format!("MtpSpeculative accept failed: {}", e),
-                                })?;
-                            return Ok(InferenceResult {
-                                text: output_text,
-                                input_tokens,
-                                output_tokens,
-                                generation_time_ms: start.elapsed().as_millis() as u64,
-                                tokens_per_second: 0.0,
-                                commitment: None,
-                            });
-                        }
-                        output_text.push_str(&piece);
+                        open = stream.push(&piece, token_tx) && !stream.hit_stop();
                     }
                     output_tokens += 1;
+                    if !open {
+                        // Receiver dropped, or a stop sequence completed.
+                        spec.accept(n_accepted)
+                            .map_err(|e| ModelError::MtpUnavailable {
+                                reason: format!("MtpSpeculative accept failed: {}", e),
+                            })?;
+                        let stop_reason = StopReason::from_loop(
+                            stream.hit_stop(),
+                            output_tokens,
+                            config.max_tokens,
+                        );
+                        return Ok(InferenceResult {
+                            text: stream.finish(token_tx),
+                            input_tokens,
+                            output_tokens,
+                            generation_time_ms: start.elapsed().as_millis() as u64,
+                            tokens_per_second: 0.0,
+                            stop_reason,
+                            commitment: None,
+                        });
+                    }
                 } else {
                     // First rejection — keep the target's sample as
                     // the next id_last and stop accepting drafts.
@@ -2102,28 +2280,33 @@ impl ModelRuntime {
                     if loaded.model.is_eog_token(target_sample) {
                         break;
                     }
+                    let mut open = true;
                     if let Ok(piece) =
                         loaded.model.token_to_piece(target_sample, &mut decoder, true, None)
                     {
-                        if let Some(tx) = token_tx
-                            && tx.blocking_send(piece.clone()).is_err()
-                        {
-                            spec.accept(n_accepted)
-                                .map_err(|e| ModelError::MtpUnavailable {
-                                    reason: format!("MtpSpeculative accept failed: {}", e),
-                                })?;
-                            return Ok(InferenceResult {
-                                text: output_text,
-                                input_tokens,
-                                output_tokens,
-                                generation_time_ms: start.elapsed().as_millis() as u64,
-                                tokens_per_second: 0.0,
-                                commitment: None,
-                            });
-                        }
-                        output_text.push_str(&piece);
+                        open = stream.push(&piece, token_tx) && !stream.hit_stop();
                     }
                     output_tokens += 1;
+                    if !open {
+                        spec.accept(n_accepted)
+                            .map_err(|e| ModelError::MtpUnavailable {
+                                reason: format!("MtpSpeculative accept failed: {}", e),
+                            })?;
+                        let stop_reason = StopReason::from_loop(
+                            stream.hit_stop(),
+                            output_tokens,
+                            config.max_tokens,
+                        );
+                        return Ok(InferenceResult {
+                            text: stream.finish(token_tx),
+                            input_tokens,
+                            output_tokens,
+                            generation_time_ms: start.elapsed().as_millis() as u64,
+                            tokens_per_second: 0.0,
+                            stop_reason,
+                            commitment: None,
+                        });
+                    }
                     break;
                 }
             }
@@ -2150,12 +2333,14 @@ impl ModelRuntime {
         } else {
             0.0
         };
+        let stop_reason = StopReason::from_loop(stream.hit_stop(), output_tokens, config.max_tokens);
         Ok(InferenceResult {
-            text: output_text,
+            text: stream.finish(token_tx),
             input_tokens,
             output_tokens,
             generation_time_ms,
             tokens_per_second,
+            stop_reason,
             commitment: None,
         })
     }

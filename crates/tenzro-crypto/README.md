@@ -49,13 +49,13 @@ Cryptographic primitives for the Tenzro Network.
 - `BlsSignature` - Individual BLS signatures
 - `AggregateSignature` - Aggregate multiple signatures into one
 - `AggregatePublicKey` - Aggregate verification keys
-- Uses `blst` library for production-grade BLS12-381 operations
+- Uses the `blst` library for BLS12-381 curve operations
 
 ### Verifiable Random Function (VRF)
 - RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI (suite string `0x04`)
 - `VrfSecretKey` / `VrfPublicKey` - Ed25519-compatible VRF keys (reuses validator keys)
 - `VrfProof` (80 bytes) / `VrfOutput` (64 bytes)
-- `prove()` / `verify()` / `proof_output()` - End-to-end VRF workflow
+- `prove()` / `verify()` / `proof_output()` - full VRF workflow
 - Low-order key rejection and canonical scalar verification
 - Used by EVM precompile 0x1007 and NFT `mintRandom` for provably-fair on-chain randomness
 

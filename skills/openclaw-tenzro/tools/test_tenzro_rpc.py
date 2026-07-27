@@ -319,6 +319,76 @@ class TestInference(unittest.TestCase):
         self.assertIn("output", result)
         self.assertEqual(result["output"], "Hello! I can help with that.")
 
+    @patch("tenzro_rpc.requests.post")
+    def test_route_intent(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "model_id": "qwen3-4b",
+            "tier": "cheap",
+            "estimated_cost": "420000000000000",
+            "fallback_chain": ["qwen3-4b", "gemma4-9b"],
+            "cluster": 3,
+            "expected_error": 0.08,
+            "provider": "0x" + "11" * 20,
+            "endpoint": "https://provider.example/v1",
+            "reason": "cheapest model above the quality floor",
+        })
+        result = tenzro_rpc.route_intent(
+            "reasoning", budget=10**18, optimize=0.7, quality_floor="strong",
+        )
+        self.assertEqual(result["model_id"], "qwen3-4b")
+        self.assertEqual(result["cluster"], 3)
+        self.assertEqual(result["expected_error"], 0.08)
+        self.assertEqual(result["provider"], "0x" + "11" * 20)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_chat_by_intent(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "output": "A trait bound constrains a generic parameter.",
+            "input_tokens": 12,
+            "output_tokens": 9,
+            "route": {
+                "model_id": "qwen3-4b",
+                "tier": "cheap",
+                "estimated_cost": "420000000000000",
+                "cluster": 3,
+            },
+        })
+        result = tenzro_rpc.chat_by_intent("code", "Explain this trait bound")
+        self.assertIn("route", result)
+        self.assertEqual(result["route"]["model_id"], "qwen3-4b")
+        self.assertIn("output", result)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_record_route_outcome(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"retained": True})
+        result = tenzro_rpc.record_route_outcome("qwen3-4b", 3, "escalated")
+        self.assertTrue(result["retained"])
+
+    @patch("tenzro_rpc.requests.post")
+    def test_route_difficulty_stats(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "enabled": True,
+            "cluster_count": 4,
+            "clusters": [
+                {"cluster": 0, "prompts": 120},
+                {"cluster": 3, "prompts": 44},
+            ],
+        })
+        result = tenzro_rpc.route_difficulty_stats("qwen3-4b")
+        self.assertTrue(result["enabled"])
+        self.assertEqual(result["cluster_count"], 4)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_route_difficulty_stats_disabled(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({
+            "enabled": False,
+            "cluster_count": 0,
+            "clusters": [],
+        })
+        result = tenzro_rpc.route_difficulty_stats()
+        self.assertFalse(result["enabled"])
+        self.assertEqual(result["clusters"], [])
+
 
 class TestPayments(unittest.TestCase):
     @patch("tenzro_rpc.requests.post")
@@ -581,6 +651,88 @@ class TestSkillToolUsage(unittest.TestCase):
         result = tenzro_rpc.get_tool_usage("tool-456")
         self.assertEqual(result["total_invocations"], 1200)
         self.assertAlmostEqual(result["error_rate"], 0.02)
+
+class TestSkillBundlePinning(unittest.TestCase):
+    """The registry is permissionless, so pinning is the caller's protection.
+
+    These assert the wire shape, since a dropped pin would silently widen what
+    the caller is willing to pay to run.
+    """
+
+    SHA = "a" * 64
+
+    @staticmethod
+    def _sent_params(mock_post):
+        call_args = mock_post.call_args
+        body = call_args[1]["json"] if "json" in call_args[1] else call_args[0][1]
+        return body["params"]
+
+    @patch("tenzro_rpc.requests.post")
+    def test_use_skill_without_pin_omits_keys(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"output": {}})
+        tenzro_rpc.use_skill("sk-1", {"q": "hi"})
+        params = self._sent_params(mock_post)
+        self.assertNotIn("expected_version", params)
+        self.assertNotIn("expected_sha256", params)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_use_skill_forwards_pin(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"output": {}})
+        tenzro_rpc.use_skill("sk-1", {"q": "hi"}, "1.2.0", self.SHA)
+        params = self._sent_params(mock_post)
+        self.assertEqual(params["expected_version"], "1.2.0")
+        self.assertEqual(params["expected_sha256"], self.SHA)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_register_skill_sends_bundle(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"skill_id": "sk-1"})
+        tenzro_rpc.register_skill(
+            "web-search", "1.0.0", "did:tenzro:machine:a", "Searches", 0,
+            category="retrieval",
+            bundle_uri=f"tenzro://blob/{'b' * 64}",
+            bundle_sha256=self.SHA.upper(),
+            bundle_size=2048,
+        )
+        params = self._sent_params(mock_post)
+        self.assertEqual(params["category"], "retrieval")
+        self.assertEqual(params["bundle"]["size_bytes"], 2048)
+        self.assertEqual(params["bundle"]["sha256"], self.SHA)
+
+    @patch("tenzro_rpc.requests.post")
+    def test_register_skill_without_bundle_omits_key(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"skill_id": "sk-1"})
+        tenzro_rpc.register_skill(
+            "web-search", "1.0.0", "did:tenzro:machine:a", "Searches", 0,
+        )
+        self.assertNotIn("bundle", self._sent_params(mock_post))
+
+    @patch("tenzro_rpc.requests.post")
+    def test_update_skill_withdraw_sends_null_bundle(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"skill_id": "sk-1"})
+        tenzro_rpc.update_skill("sk-1", withdraw_bundle=True)
+        params = self._sent_params(mock_post)[0]
+        self.assertIn("bundle", params)
+        self.assertIsNone(params["bundle"])
+
+    @patch("tenzro_rpc.requests.post")
+    def test_update_skill_leaves_bundle_alone_by_default(self, mock_post):
+        mock_post.return_value = _mock_rpc_response({"skill_id": "sk-1"})
+        tenzro_rpc.update_skill("sk-1", description="new copy")
+        self.assertNotIn("bundle", self._sent_params(mock_post)[0])
+
+    @patch("tenzro_rpc.requests.post")
+    def test_list_and_search_forward_bundled_only(self, mock_post):
+        mock_post.return_value = _mock_rpc_response([])
+        tenzro_rpc.list_skills(bundled_only=True, capability="nlp")
+        params = self._sent_params(mock_post)
+        self.assertTrue(params["bundled_only"])
+        self.assertEqual(params["capability"], "nlp")
+
+        tenzro_rpc.search_skills("summarize", bundled_only=True, category="nlp")
+        params = self._sent_params(mock_post)
+        self.assertTrue(params["bundled_only"])
+        self.assertEqual(params["category"], "nlp")
+
 
 
 class TestAgentTemplatesExtended(unittest.TestCase):
@@ -991,9 +1143,12 @@ class TestComplianceERC3643(unittest.TestCase):
             "topic": "kyc",
         })
         result = tenzro_rpc.add_identity_claim(
-            "0xaddr", "kyc", "did:tenzro:human:issuer-1"
+            "0xaddr", "kyc", "did:tenzro:human:issuer-1", "0x" + "ab" * 32
         )
         self.assertEqual(result["topic"], "kyc")
+        call_args = mock_post.call_args
+        body = call_args[1]["json"] if "json" in call_args[1] else call_args[0][1]
+        self.assertEqual(body["params"]["envelope"], "0x" + "ab" * 32)
 
     @patch("tenzro_rpc.requests.post")
     def test_add_trusted_issuer(self, mock_post):
@@ -1107,6 +1262,8 @@ class TestCLIDispatch(unittest.TestCase):
             "verify_transaction", "verify_settlement", "verify_inference",
             "total_supply", "token_balance", "chat",
             "list_model_endpoints", "list_models",
+            "route_intent", "chat_by_intent",
+            "record_route_outcome", "route_difficulty_stats",
             "create_payment", "verify_payment",
             "post_task", "list_tasks", "get_task", "cancel_task", "quote_task",
             "list_agent_templates", "register_agent_template", "get_agent_template",
@@ -1178,6 +1335,7 @@ class TestCLIDispatch(unittest.TestCase):
             "cct_list_pools", "cct_get_pool",
             # Agent JWKs, daily spend, capability attestations
             "list_agent_jwks", "get_agent_jwk", "get_agent_daily_spend",
+            "list_capabilities",
             "get_capability_attestations",
             "get_agent_capability_attestations",
             "find_best_agent_for_capability",
@@ -1192,28 +1350,36 @@ class TestAp2(unittest.TestCase):
     @patch("tenzro_rpc.requests.post")
     def test_ap2_protocol_info(self, mock_post):
         mock_post.return_value = _mock_rpc_response({
-            "protocol": "ap2",
-            "version": "0.1",
-            "supported_vdc_types": ["intent", "cart", "payment"],
+            "version": "0.2",
+            "signing_alg": "ed25519",
+            "mandate_kinds": ["checkout", "payment"],
+            "presence_modes": ["human_present", "human_not_present"],
         })
         result = tenzro_rpc.ap2_protocol_info()
-        self.assertEqual(result["protocol"], "ap2")
+        self.assertEqual(result["mandate_kinds"], ["checkout", "payment"])
         # Verify JSON-RPC method name
         args, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["method"], "tenzro_ap2ProtocolInfo")
 
     @patch("tenzro_rpc.requests.post")
     def test_ap2_verify_mandate(self, mock_post):
-        mock_post.return_value = _mock_rpc_response({"valid": True})
+        mock_post.return_value = _mock_rpc_response({
+            "valid": True,
+            "mandate_id": "cm-1",
+            "kind": "checkout",
+            "signer_did": "did:tenzro:human:alice",
+            "alg": "ed25519",
+        })
         vdc = {
-            "type": "intent",
-            "issuer": "did:tenzro:human:alice",
-            "subject": "did:tenzro:machine:agent-1",
+            "kind": "checkout",
+            "signer_did": "did:tenzro:human:alice",
+            "alg": "ed25519",
             "payload": {"max_amount": 1000},
             "signature": "0xabcd",
         }
         result = tenzro_rpc.ap2_verify_mandate(vdc)
         self.assertTrue(result["valid"])
+        self.assertEqual(result["kind"], "checkout")
         args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_ap2VerifyMandate"
@@ -1223,17 +1389,22 @@ class TestAp2(unittest.TestCase):
     @patch("tenzro_rpc.requests.post")
     def test_ap2_validate_mandate_pair(self, mock_post):
         mock_post.return_value = _mock_rpc_response({
-            "valid": True, "matched_subject": True,
+            "valid": True,
+            "checkout_mandate_id": "cm-1",
+            "payment_mandate_id": "pm-1",
             "delegation_enforced": False,
         })
-        intent = {"type": "intent"}
-        cart = {"type": "cart"}
-        result = tenzro_rpc.ap2_validate_mandate_pair(intent, cart)
+        checkout = {"kind": "checkout"}
+        payment = {"kind": "payment"}
+        result = tenzro_rpc.ap2_validate_mandate_pair(checkout, payment)
         self.assertTrue(result["valid"])
         args, kwargs = mock_post.call_args
         self.assertEqual(
             kwargs["json"]["method"], "tenzro_ap2ValidateMandatePair"
         )
+        # The node reads checkout_vdc / payment_vdc, not intent / cart.
+        self.assertEqual(kwargs["json"]["params"]["checkout_vdc"], checkout)
+        self.assertEqual(kwargs["json"]["params"]["payment_vdc"], payment)
         # Default: enforce_delegation flag is forwarded as False.
         self.assertEqual(
             kwargs["json"]["params"]["enforce_delegation"], False
@@ -1242,13 +1413,15 @@ class TestAp2(unittest.TestCase):
     @patch("tenzro_rpc.requests.post")
     def test_ap2_validate_mandate_pair_with_delegation(self, mock_post):
         mock_post.return_value = _mock_rpc_response({
-            "valid": True, "matched_subject": True,
+            "valid": True,
+            "checkout_mandate_id": "cm-1",
+            "payment_mandate_id": "pm-1",
             "delegation_enforced": True,
         })
-        intent = {"type": "intent"}
-        cart = {"type": "cart"}
+        checkout = {"kind": "checkout"}
+        payment = {"kind": "payment"}
         result = tenzro_rpc.ap2_validate_mandate_pair(
-            intent, cart, enforce_delegation=True,
+            checkout, payment, enforce_delegation=True,
         )
         self.assertTrue(result["valid"])
         self.assertTrue(result["delegation_enforced"])
@@ -1859,14 +2032,16 @@ class TestManagedDatabases(unittest.TestCase):
         })
         tenzro_rpc.rescale_database(
             "vecmem", "did:tenzro:human:owner", "lan_cluster",
-            partitions=3, replicas=2,
+            partitions=3, min_replication=2, max_replication=4,
         )
         args, kwargs = mock_post.call_args
         params = kwargs["json"]["params"]
         self.assertEqual(kwargs["json"]["method"], "tenzro_rescaleDatabase")
         self.assertEqual(params["placement"], "lan_cluster")
         self.assertEqual(params["partitions"], 3)
-        self.assertEqual(params["replicas"], 2)
+        self.assertEqual(params["replication"], {
+            "min_replication": 2, "max_replication": 4,
+        })
 
     @patch("tenzro_rpc.requests.post")
     def test_drop_database(self, mock_post):

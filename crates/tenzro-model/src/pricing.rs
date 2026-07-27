@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tenzro_types::{
     asset::AssetId,
-    model::{InferenceMetadata, PricingConfig, PricingModel},
+    model::{BillableUnits, InferenceMetadata, PricingConfig, PricingModel},
     primitives::Timestamp,
 };
 use parking_lot::RwLock;
@@ -141,44 +141,137 @@ impl PricingEngine {
         }
     }
 
-    /// Calculates the cost for an inference request
+    /// Meters one call's billable units against a pricing configuration.
+    ///
+    /// Every dimension a modality can consume is charged at its own rate:
+    /// prompt and completion tokens, both cache legs, reasoning loops, image
+    /// tokens derived from geometry, whole seconds of audio and video, denoising
+    /// pixel-steps, and rendered frames. A modality that leaves a dimension at
+    /// zero pays nothing for it, so one function serves chat, transcription and
+    /// image generation alike.
+    ///
+    /// Partial seconds round up — a 4.5-second clip bills as five seconds.
+    pub fn meter_units(pricing: &PricingConfig, units: &BillableUnits) -> u64 {
+        let rates = &pricing.modality_rates;
+
+        let charge = |quantity: u64, rate: u64| -> u64 { quantity.saturating_mul(rate) };
+
+        // Denoising work is u128 because width × height × steps × frames
+        // overflows u64 for high-resolution video; the charge saturates into the
+        // u64 the settlement path speaks.
+        let pixel_step_cost = units
+            .pixel_steps
+            .saturating_mul(rates.price_per_pixel_step as u128)
+            .min(u64::MAX as u128) as u64;
+
+        // Frames are metered only for a call that *consumed* them, as when a
+        // video encoder samples a clip. A generation reports its frame count for
+        // observability, but frames are already a factor of `pixel_steps`, so
+        // charging per frame on top would bill the same work twice.
+        let frame_cost = if units.pixel_steps == 0 {
+            charge(units.frames as u64, rates.price_per_frame)
+        } else {
+            0
+        };
+
+        [
+            charge(units.input_tokens as u64, pricing.price_per_input_token),
+            charge(units.output_tokens as u64, pricing.price_per_output_token),
+            charge(
+                units.cached_read_tokens as u64,
+                rates.price_per_cached_read_token,
+            ),
+            charge(
+                units.cached_write_tokens as u64,
+                rates.price_per_cached_write_token,
+            ),
+            charge(units.reasoning_loops as u64, rates.price_per_reasoning_loop),
+            charge(units.image_tokens as u64, rates.price_per_image_token),
+            charge(units.audio_seconds(), rates.price_per_audio_second),
+            charge(units.video_seconds(), rates.price_per_video_second),
+            pixel_step_cost,
+            frame_cost,
+        ]
+        .into_iter()
+        .fold(0u64, |acc, cost| acc.saturating_add(cost))
+    }
+
+    /// Prices one call under whichever model its pricing configuration
+    /// declares, without needing an engine instance.
+    ///
+    /// A node that settles a call it did not serve has the provider's signed
+    /// pricing configuration but not the provider's market history, so the four
+    /// variants have to be dispatchable statelessly. `market_average` supplies
+    /// the [`PricingModel::Dynamic`] anchor when the caller has one; `None`
+    /// leaves a dynamic quote at its metered cost rather than guessing a scale.
+    ///
+    /// The configured `minimum_price` is the floor under every variant.
+    pub fn price_units(
+        pricing: &PricingConfig,
+        units: &BillableUnits,
+        latency_ms: u64,
+        market_average: Option<u64>,
+    ) -> u64 {
+        let cost = match pricing.pricing_model {
+            PricingModel::PerToken => Self::meter_units(pricing, units),
+            PricingModel::PerRequest => pricing.modality_rates.price_per_request,
+            PricingModel::PerComputeTime => {
+                latency_ms.saturating_mul(pricing.modality_rates.price_per_compute_ms)
+            }
+            PricingModel::Dynamic => {
+                let metered = Self::meter_units(pricing, units);
+                Self::scale_to_market(pricing, metered, market_average)
+            }
+        };
+
+        cost.max(pricing.minimum_price)
+    }
+
+    /// Calculates the cost for an inference request.
     ///
     /// # Arguments
     ///
+    /// * `model_id` - The model the call ran against, used to look up the market
+    ///   average under [`PricingModel::Dynamic`]
     /// * `pricing` - The pricing configuration
-    /// * `metadata` - Inference metadata containing token counts
+    /// * `metadata` - Inference metadata carrying the billable units consumed
     ///
     /// # Returns
     ///
     /// The calculated cost in smallest currency unit
     pub fn calculate_cost(
         &self,
+        model_id: &str,
         pricing: &PricingConfig,
         metadata: &InferenceMetadata,
     ) -> Result<u64> {
-        let cost = match pricing.pricing_model {
-            PricingModel::PerToken => {
-                let input_cost = pricing.price_per_input_token * metadata.input_tokens as u64;
-                let output_cost = pricing.price_per_output_token * metadata.output_tokens as u64;
-                input_cost + output_cost
-            }
-            PricingModel::PerRequest => pricing.minimum_price,
-            PricingModel::PerComputeTime => {
-                // Price per millisecond of compute time
-                // Using minimum_price as the per-ms rate
-                let ms_rate = pricing.minimum_price;
-                ms_rate * metadata.latency_ms
-            }
-            PricingModel::Dynamic => {
-                // Use market average if available, otherwise use configured price
-                
-                pricing.price_per_input_token * metadata.input_tokens as u64
-                    + pricing.price_per_output_token * metadata.output_tokens as u64
-            }
+        Ok(Self::price_units(
+            pricing,
+            &metadata.units,
+            metadata.latency_ms,
+            self.get_market_average(model_id),
+        ))
+    }
+
+    /// Scales a metered cost so the quote tracks the model's recent market
+    /// average.
+    ///
+    /// The ratio is bounded to [0.5, 2.0] of the metered cost: a thin market
+    /// where one outlier trade moved the average must not multiply a caller's
+    /// bill without limit, and a soft market must not drive the price to zero.
+    /// Absent market history the metered cost stands.
+    fn scale_to_market(pricing: &PricingConfig, metered: u64, market_average: Option<u64>) -> u64 {
+        let market_avg = match market_average {
+            Some(avg) if avg > 0 => avg,
+            _ => return metered,
         };
 
-        // Ensure minimum price is met
-        Ok(cost.max(pricing.minimum_price))
+        // The reference point is what this configuration would have charged at
+        // the market average price level; with no better anchor than the
+        // configured floor, the floor is the reference.
+        let reference = pricing.minimum_price.max(1);
+        let ratio = (market_avg as f64 / reference as f64).clamp(0.5, 2.0);
+        (metered as f64 * ratio) as u64
     }
 
     /// Estimates the cost for an inference request
@@ -198,15 +291,32 @@ impl PricingEngine {
         estimated_input_tokens: u32,
         estimated_output_tokens: u32,
     ) -> Result<u64> {
+        self.estimate_cost_for_units(
+            "",
+            pricing,
+            &BillableUnits::tokens(estimated_input_tokens, estimated_output_tokens),
+        )
+    }
+
+    /// Estimates the cost of a call that will consume the given units.
+    ///
+    /// Callers on the non-chat modalities know their billable quantities before
+    /// dispatch — an audio duration, an image geometry — so they quote against
+    /// units rather than a token pair.
+    pub fn estimate_cost_for_units(
+        &self,
+        model_id: &str,
+        pricing: &PricingConfig,
+        units: &BillableUnits,
+    ) -> Result<u64> {
         let metadata = InferenceMetadata {
-            input_tokens: estimated_input_tokens,
-            output_tokens: estimated_output_tokens,
+            units: units.clone(),
             latency_ms: 1000, // Assume 1 second for estimation
             model_version: None,
             finish_reason: None,
         };
 
-        self.calculate_cost(pricing, &metadata)
+        self.calculate_cost(model_id, pricing, &metadata)
     }
 
     /// Validates that a price is acceptable
@@ -482,68 +592,161 @@ impl Default for PricingEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tenzro_types::model::{PricingConfig, PricingModel};
+    use tenzro_types::model::{ModalityRates, PricingConfig, PricingModel};
+
+    fn token_pricing(input: u64, output: u64, minimum: u64, model: PricingModel) -> PricingConfig {
+        PricingConfig {
+            price_per_input_token: input,
+            price_per_output_token: output,
+            minimum_price: minimum,
+            pricing_model: model,
+            modality_rates: ModalityRates::default(),
+        }
+    }
+
+    fn metadata_for(units: BillableUnits, latency_ms: u64) -> InferenceMetadata {
+        InferenceMetadata {
+            units,
+            latency_ms,
+            model_version: None,
+            finish_reason: None,
+        }
+    }
 
     #[test]
     fn test_calculate_cost_per_token() {
         let engine = PricingEngine::new();
-        let pricing = PricingConfig {
-            price_per_input_token: 10,
-            price_per_output_token: 20,
-            minimum_price: 100,
-            pricing_model: PricingModel::PerToken,
-        };
+        let pricing = token_pricing(10, 20, 100, PricingModel::PerToken);
+        let metadata = metadata_for(BillableUnits::tokens(100, 50), 1000);
 
-        let metadata = InferenceMetadata {
-            input_tokens: 100,
-            output_tokens: 50,
-            latency_ms: 1000,
-            model_version: None,
-            finish_reason: None,
-        };
-
-        let cost = engine.calculate_cost(&pricing, &metadata).unwrap();
+        let cost = engine.calculate_cost("model-1", &pricing, &metadata).unwrap();
         assert_eq!(cost, 2000); // 100*10 + 50*20 = 2000
+    }
+
+    #[test]
+    fn test_calculate_cost_meters_every_dimension() {
+        let engine = PricingEngine::new();
+        let mut pricing = token_pricing(10, 20, 0, PricingModel::PerToken);
+        pricing.modality_rates = ModalityRates {
+            price_per_request: 0,
+            price_per_compute_ms: 0,
+            price_per_cached_read_token: 2,
+            price_per_cached_write_token: 5,
+            price_per_reasoning_loop: 1_000,
+            price_per_image_token: 3,
+            price_per_audio_second: 400,
+            price_per_video_second: 900,
+            price_per_pixel_step: 7,
+            price_per_frame: 50,
+        };
+
+        let units = BillableUnits::tokens(100, 50)
+            .with_cache(1_000, 200)
+            .with_reasoning_loops(4)
+            .with_image_tokens(300)
+            // 2.4s rounds up to 3s.
+            .with_audio_ms(2_400)
+            .with_video_ms(6_000)
+            .with_pixel_steps(1_000, 8);
+
+        let cost = engine
+            .calculate_cost("model-1", &pricing, &metadata_for(units, 1_000))
+            .unwrap();
+
+        let expected = 100 * 10      // input tokens
+            + 50 * 20                // output tokens
+            + 1_000 * 2              // cached reads
+            + 200 * 5                // cached writes
+            + 4 * 1_000              // reasoning loops
+            + 300 * 3                // image tokens
+            + 3 * 400                // audio seconds, rounded up
+            + 6 * 900                // video seconds
+            + 1_000 * 7              // pixel steps
+            + 8 * 50; // frames
+        assert_eq!(cost, expected);
+    }
+
+    #[test]
+    fn test_calculate_cost_per_request_is_flat() {
+        let engine = PricingEngine::new();
+        let mut pricing = token_pricing(10, 20, 0, PricingModel::PerRequest);
+        pricing.modality_rates.price_per_request = 5_000;
+
+        let cheap = engine
+            .calculate_cost(
+                "model-1",
+                &pricing,
+                &metadata_for(BillableUnits::tokens(1, 1), 10),
+            )
+            .unwrap();
+        let expensive = engine
+            .calculate_cost(
+                "model-1",
+                &pricing,
+                &metadata_for(BillableUnits::tokens(100_000, 50_000), 90_000),
+            )
+            .unwrap();
+
+        assert_eq!(cheap, 5_000);
+        assert_eq!(expensive, 5_000);
+    }
+
+    #[test]
+    fn test_calculate_cost_per_compute_time() {
+        let engine = PricingEngine::new();
+        let mut pricing = token_pricing(10, 20, 0, PricingModel::PerComputeTime);
+        pricing.modality_rates.price_per_compute_ms = 3;
+
+        let cost = engine
+            .calculate_cost(
+                "model-1",
+                &pricing,
+                &metadata_for(BillableUnits::tokens(100, 50), 2_500),
+            )
+            .unwrap();
+
+        assert_eq!(cost, 7_500);
+    }
+
+    #[test]
+    fn test_calculate_cost_dynamic_tracks_market() {
+        let engine = PricingEngine::new();
+        let pricing = token_pricing(10, 20, 1_000, PricingModel::Dynamic);
+        let metadata = metadata_for(BillableUnits::tokens(100, 50), 1_000);
+
+        // No market history yet: the metered cost stands.
+        let cold = engine.calculate_cost("model-1", &pricing, &metadata).unwrap();
+        assert_eq!(cold, 2_000);
+
+        // A market trading well above the configured floor lifts the quote, but
+        // the ratio is capped at 2x.
+        for _ in 0..3 {
+            engine.update_market_price("model-1".to_string(), 9_000);
+        }
+        let hot = engine.calculate_cost("model-1", &pricing, &metadata).unwrap();
+        assert_eq!(hot, 4_000);
+
+        // A soft market discounts, but not below half.
+        engine.update_market_price("model-2".to_string(), 1);
+        let soft = engine.calculate_cost("model-2", &pricing, &metadata).unwrap();
+        assert_eq!(soft, 1_000);
     }
 
     #[test]
     fn test_calculate_cost_minimum() {
         let engine = PricingEngine::new();
-        let pricing = PricingConfig {
-            price_per_input_token: 1,
-            price_per_output_token: 1,
-            minimum_price: 1000,
-            pricing_model: PricingModel::PerToken,
-        };
+        let pricing = token_pricing(1, 1, 1000, PricingModel::PerToken);
+        let metadata = metadata_for(BillableUnits::tokens(10, 10), 1000);
 
-        let metadata = InferenceMetadata {
-            input_tokens: 10,
-            output_tokens: 10,
-            latency_ms: 1000,
-            model_version: None,
-            finish_reason: None,
-        };
-
-        let cost = engine.calculate_cost(&pricing, &metadata).unwrap();
+        let cost = engine.calculate_cost("model-1", &pricing, &metadata).unwrap();
         assert_eq!(cost, 1000); // Should use minimum price
     }
 
     #[test]
     fn test_estimate_from_providers() {
         let engine = PricingEngine::new();
-        let pricing1 = PricingConfig {
-            price_per_input_token: 10,
-            price_per_output_token: 20,
-            minimum_price: 100,
-            pricing_model: PricingModel::PerToken,
-        };
-
-        let pricing2 = PricingConfig {
-            price_per_input_token: 15,
-            price_per_output_token: 25,
-            minimum_price: 100,
-            pricing_model: PricingModel::PerToken,
-        };
+        let pricing1 = token_pricing(10, 20, 100, PricingModel::PerToken);
+        let pricing2 = token_pricing(15, 25, 100, PricingModel::PerToken);
 
         let estimate = engine
             .estimate_from_providers(vec![pricing1, pricing2], 100, 50)
@@ -577,12 +780,7 @@ mod tests {
     #[test]
     fn test_dynamic_pricing_with_complexity() {
         let engine = PricingEngine::new();
-        let base_pricing = PricingConfig {
-            price_per_input_token: 10,
-            price_per_output_token: 20,
-            minimum_price: 1000,
-            pricing_model: PricingModel::PerToken,
-        };
+        let base_pricing = token_pricing(10, 20, 1000, PricingModel::PerToken);
 
         // Test with small model (7B parameters)
         let price_7b = engine.calculate_price("model-1", "provider-1", &base_pricing, 7.0, 0.5);
@@ -601,12 +799,7 @@ mod tests {
     #[test]
     fn test_dynamic_pricing_with_load() {
         let engine = PricingEngine::new();
-        let base_pricing = PricingConfig {
-            price_per_input_token: 10,
-            price_per_output_token: 20,
-            minimum_price: 1000,
-            pricing_model: PricingModel::PerToken,
-        };
+        let base_pricing = token_pricing(10, 20, 1000, PricingModel::PerToken);
 
         // Low load
         let price_low_load = engine.calculate_price("model-1", "provider-1", &base_pricing, 10.0, 0.2);

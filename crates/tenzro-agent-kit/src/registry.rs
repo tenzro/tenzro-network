@@ -398,6 +398,12 @@ impl RegistryClient {
         if let Some(cap) = filter.capability {
             obj.insert("capability".to_string(), json!(cap));
         }
+        if let Some(cat) = filter.category {
+            obj.insert("category".to_string(), json!(cat));
+        }
+        if let Some(bundled_only) = filter.bundled_only {
+            obj.insert("bundled_only".to_string(), json!(bundled_only));
+        }
         if let Some(max_price) = filter.max_price {
             obj.insert("max_price".to_string(), json!(max_price.to_string()));
         }
@@ -419,16 +425,28 @@ impl RegistryClient {
     }
 
     /// Invokes a registered skill by id with the given input JSON.
+    ///
+    /// `expected_version` and `expected_sha256` pin the registry row the caller
+    /// resolved: the registry is permissionless, so a publisher may republish
+    /// between discovery and invocation. A pin mismatch is refused before
+    /// settlement, so the agent never pays for bytes it did not agree to run.
     pub async fn use_skill(
         &self,
         skill_id: &str,
         input: Value,
+        expected_version: Option<&str>,
+        expected_sha256: Option<&str>,
     ) -> Result<Value, AgentKitError> {
-        self.call(
-            "tenzro_useSkill",
-            json!({ "skill_id": skill_id, "input": input }),
-        )
-        .await
+        let mut obj = serde_json::Map::new();
+        obj.insert("skill_id".to_string(), json!(skill_id));
+        obj.insert("input".to_string(), input);
+        if let Some(v) = expected_version {
+            obj.insert("expected_version".to_string(), json!(v));
+        }
+        if let Some(h) = expected_sha256 {
+            obj.insert("expected_sha256".to_string(), json!(h));
+        }
+        self.call("tenzro_useSkill", Value::Object(obj)).await
     }
 }
 

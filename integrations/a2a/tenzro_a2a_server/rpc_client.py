@@ -8,6 +8,21 @@ TENZRO_API_URL = os.environ.get("TENZRO_API_URL", "https://api.tenzro.xyz")
 _REQUEST_ID = 0
 
 
+def _is_canton_method(method: str) -> bool:
+    """Whether a JSON-RPC method carries a Canton scope.
+
+    Matches how the node decides: any `tenzro_` method naming Canton or
+    DAML, in either the CamelCase (`tenzro_listCantonDomains`) or
+    snake-case (`tenzro_canton_health`) form.
+    """
+    return method.startswith("tenzro_") and (
+        "Canton" in method
+        or "canton" in method
+        or "Daml" in method
+        or "daml" in method
+    )
+
+
 async def rpc_call(method: str, params=None):
     """Send a JSON-RPC 2.0 request to the Tenzro node.
 
@@ -24,6 +39,13 @@ async def rpc_call(method: str, params=None):
 
     Operator-only RPCs (e.g. MPC keygen) require the node admin token. Set
     TENZRO_ADMIN_TOKEN; it is forwarded as the `X-Tenzro-Admin-Token` header.
+
+    Canton-scoped RPCs additionally take a network. Set
+    TENZRO_CANTON_NETWORK to `devnet` or `mainnet` and it is merged into
+    the params as `canton_network` — the node reads the choice from the
+    params rather than a header. A key authorizing exactly one network
+    needs no setting; a key authorizing several does, and the node names
+    the authorized set when the choice is missing.
     """
     global _REQUEST_ID
     _REQUEST_ID += 1
@@ -40,6 +62,15 @@ async def rpc_call(method: str, params=None):
     admin_token = os.environ.get("TENZRO_ADMIN_TOKEN")
     if admin_token:
         headers["X-Tenzro-Admin-Token"] = admin_token
+    call_params = params if params is not None else []
+    canton_network = os.environ.get("TENZRO_CANTON_NETWORK")
+    if (
+        canton_network
+        and _is_canton_method(method)
+        and isinstance(call_params, dict)
+        and "canton_network" not in call_params
+    ):
+        call_params = {**call_params, "canton_network": canton_network}
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             TENZRO_RPC_URL,
@@ -48,7 +79,7 @@ async def rpc_call(method: str, params=None):
                 "jsonrpc": "2.0",
                 "id": _REQUEST_ID,
                 "method": method,
-                "params": params or [],
+                "params": call_params,
             },
         )
         data = r.json()

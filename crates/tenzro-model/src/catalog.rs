@@ -77,7 +77,7 @@ pub struct HfModelEntry {
     /// is actually downloadable from `hf_repo`/`hf_filename` right now.
     /// `false` gates the entry OUT of the user-facing catalog
     /// (`tenzro_listModels` / `GET /v1/models`) while keeping it in source
-    /// so it can be re-enabled the moment the upstream GGUF lands (gated
+    /// so it can be re-enabled the moment the upstream GGUF is published (gated
     /// repos, unreleased quants, etc.). Defaults to `true`; the committed
     /// HF-verification test asserts every `promotable` entry resolves.
     #[serde(default = "default_true")]
@@ -310,6 +310,19 @@ impl ServingProfile {
                 jinja_required: true,
                 reasoning_default: true,
             },
+            // Ornith 1.0: post-trained on Qwen 3.5 / Gemma 4, so the Qwen
+            // chat template applies, but Deep Reinforce publishes its own
+            // sampler row — temp 0.6 / top_p 0.95 / top_k 20 — in the
+            // model-card usage example, distinct from the Qwen 3.5 temp 1.0.
+            // See https://huggingface.co/deepreinforce-ai/Ornith-1.0-35B
+            "ornith" => Self {
+                temperature: 0.6,
+                top_p: 0.95,
+                top_k: 20,
+                min_p: 0.0,
+                jinja_required: true,
+                reasoning_default: true,
+            },
             // gpt-oss Harmony: temp 1.0, top_p 1.0, top_k disabled.
             "gpt-oss" => Self {
                 temperature: 1.0,
@@ -500,6 +513,37 @@ impl ReasoningPolicy {
                 thinking_safe_min_b: 4.0,
                 thinking_min_budget_tokens: 16_384,
             },
+            // Ornith 1.0: agentic-coding family whose RL objective is the
+            // reasoning trajectory itself; vLLM serving uses the
+            // `reasoning_content` key. Smallest member is 9B dense, so the
+            // Qwen 3.5 Small-series carve-out doesn't bite; budget min
+            // matches the family it was post-trained from.
+            "ornith" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 4.0,
+                thinking_min_budget_tokens: 16_384,
+            },
+            // Laguna S 2.1: native interleaved thinking between tool calls,
+            // per-request `enable_thinking`. Poolside's card recommends
+            // thinking-on with preserved reasoning blocks for agentic
+            // coding — the model may stop reasoning in follow-up steps if
+            // prior thinking blocks are dropped. 8B active, single size.
+            "laguna" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 16_384,
+            },
+            // Inkling: thinking is exposed as an explicit toggle by every
+            // published serving path. 41B active, single size — no small
+            // variant to guard against.
+            "inkling" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 32_768,
+            },
             // gpt-oss Harmony: defaults thinking-on; smallest published
             // sizes are well above any concerning threshold.
             "gpt-oss" => Self {
@@ -613,12 +657,12 @@ impl TemplateFix {
 pub fn parse_params_active_b(parameters: &str) -> f32 {
     // Look for "(... XB active)" first — MoE form.
     if let Some(idx) = parameters.find("active") {
-        let prefix = &parameters[..idx];
-        if let Some(num_start) = prefix.rfind(|c: char| !c.is_ascii_digit() && c != '.') {
-            let num_part = prefix[num_start + 1..].trim_end_matches(['B', 'b', ' ']);
-            if let Ok(v) = num_part.trim().parse::<f32>() {
-                return v;
-            }
+        let digits = parameters[..idx].trim_end().trim_end_matches(['B', 'b']);
+        let num_start = digits
+            .rfind(|c: char| !c.is_ascii_digit() && c != '.')
+            .map_or(0, |i| i + 1);
+        if let Ok(v) = digits[num_start..].parse::<f32>() {
+            return v;
         }
     }
     // Look for "<N>B-A<M>B" (e.g. "30B-A3B") — take the A part.
@@ -671,6 +715,8 @@ pub enum ModelArchitecture {
     GptOss,
     Granite,
     GraniteH,
+    Laguna,
+    Inkling,
 }
 
 impl std::fmt::Display for ModelArchitecture {
@@ -698,6 +744,8 @@ impl std::fmt::Display for ModelArchitecture {
             Self::GptOss => write!(f, "gpt-oss"),
             Self::Granite => write!(f, "granite"),
             Self::GraniteH => write!(f, "granite-h"),
+            Self::Laguna => write!(f, "laguna"),
+            Self::Inkling => write!(f, "inkling"),
         }
     }
 }
@@ -932,6 +980,15 @@ pub struct OnnxForecastEntry {
     /// forecast (shape `[1, max_horizon]`); `>0` means a quantile
     /// forecast (shape `[1, max_horizon, n_quantiles]`).
     pub n_quantiles: usize,
+    /// Name of the ONNX output tensor holding the forecast. `None` means
+    /// the graph's first output is the forecast. Multi-output graphs need
+    /// this set, otherwise the runtime reads a hidden-state tensor.
+    pub output_name: Option<String>,
+    /// Fixed leading batch dimension the graph requires. Almost always
+    /// `1`; TimesFM 2.5 needs `2` because its decoder averages across the
+    /// batch axis for flip invariance. The runtime tiles the input to
+    /// this width and reads row 0.
+    pub batch_size: usize,
     /// Approximate parameter count label (e.g. "200M").
     pub parameters: String,
     /// Approximate ONNX file size in bytes.
@@ -949,17 +1006,21 @@ pub struct OnnxForecastEntry {
 
 /// Get the curated ONNX timeseries-forecaster catalog.
 ///
-/// Mirrors the `[[target]]` entries in `tools/ts-export/targets.toml` —
-/// each model in this list has a documented export path that produces
-/// a single-file ONNX artifact compatible with `GenericForecast`.
+/// Every entry resolves to a single-file ONNX artifact compatible with
+/// `GenericForecast`. Entries whose weights are Apache-2.0 or MIT also
+/// carry a re-export path in `tools/ts-export/targets.toml` so we can
+/// rebuild the artifact if the hosted one goes stale; entries under
+/// attribution or revenue-threshold terms are served only from the
+/// upstream ONNX and are gated by `license_tier`.
 pub fn get_forecast_catalog() -> Vec<OnnxForecastEntry> {
     vec![
         // ── TimesFM 2.5 (Apache 2.0, Google) ───────────────────────
         // Decoder-only transformer with patch tokenizer. 10 quantiles.
         // Community ONNX export (pdufour) is the only live-loadable form;
-        // upstream google/timesfm-2.5-200m-pytorch ships PyTorch weights.
-        // Requires batch_size=2 (force_flip_invariance: true in config) —
-        // the runtime tiles input + reads row 0.
+        // upstream google/timesfm-2.5-200m-transformers ships PyTorch
+        // weights. Requires batch_size=2 (force_flip_invariance: true in
+        // config) and an explicit output_name, because the graph's first
+        // output is last_hidden_state rather than the forecast.
         OnnxForecastEntry {
             id: "timesfm-2.5-200m".into(),
             name: "TimesFM 2.5 200M".into(),
@@ -969,6 +1030,8 @@ pub fn get_forecast_catalog() -> Vec<OnnxForecastEntry> {
             context_length: 2048,
             max_horizon: 128,
             n_quantiles: 10,
+            output_name: Some("full_predictions".into()),
+            batch_size: 2,
             parameters: "200M".into(),
             size_bytes: 1_001_713_626,
             min_ram_gb: 2,
@@ -977,6 +1040,33 @@ pub fn get_forecast_catalog() -> Vec<OnnxForecastEntry> {
             description:
                 "Google TimesFM 2.5 — foundation timeseries forecaster, patch-tokenized decoder"
                     .into(),
+        },
+        // ── TiRex 35M (NXAI Community License, NXAI) ────────────────
+        // sLSTM recurrent forecaster, not a transformer. Upstream ships
+        // tirex.onnx in the model repo, so no re-export is involved.
+        // One forward pass emits exactly 32 steps with 9 quantiles;
+        // longer horizons would need an autoregressive roll-forward that
+        // GenericForecast does not do, so max_horizon is the single-pass
+        // figure. Median sits at quantile index 4, which is what
+        // GenericForecast reads (q / 2).
+        OnnxForecastEntry {
+            id: "tirex-35m".into(),
+            name: "TiRex 35M".into(),
+            family: "tirex".into(),
+            hf_repo: "NX-AI/TiRex".into(),
+            hf_filename: "tirex.onnx".into(),
+            context_length: 2048,
+            max_horizon: 32,
+            n_quantiles: 9,
+            output_name: None,
+            batch_size: 1,
+            parameters: "35M".into(),
+            size_bytes: 142_243_285,
+            min_ram_gb: 1,
+            license: "NXAI Community License".into(),
+            license_tier: LicenseTier::CommercialCustom,
+            description: "NXAI TiRex 35M — sLSTM zero-shot forecaster with a 9-quantile head"
+                .into(),
         },
     ]
 }
@@ -1817,8 +1907,8 @@ pub fn get_audio_model_by_id(id: &str) -> Option<OnnxAudioEntry> {
 /// The catalog advertises the V-JEPA 2 family (ViT-L/H MIT, ViT-g
 /// Apache-2.0) so license_tier-gated discovery, CLI listing, and RPC
 /// surfaces show the correct options. The `load_video_model` RPC
-/// rejects until per-model ONNX exports land — facebook/vjepa2-* ships
-/// safetensors only, no native ONNX. VideoMAE v1/v2 stay off the
+/// rejects until per-model ONNX exports are published — facebook/vjepa2-*
+/// carries safetensors only, no native ONNX. VideoMAE v1/v2 stay off the
 /// catalog (CC-BY-NC), V-JEPA 2.1 stays off (CC-BY-NC-ND).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnnxVideoEntry {
@@ -1862,11 +1952,11 @@ pub struct OnnxVideoEntry {
 /// all `LicenseTier::Permissive`.
 ///
 /// Loading currently rejects at `tenzro_loadVideoModel` with
-/// `-32004`: the upstream `facebook/vjepa2-*` repos ship `safetensors`
+/// `-32004`: the upstream `facebook/vjepa2-*` repos carry `safetensors`
 /// only, no native ONNX export. Catalog entries exist so license-tier
 /// gating, discovery RPCs, CLI listing, and MCP enumeration return
 /// the V-JEPA 2 options correctly; the loader will accept them once
-/// the ONNX export step lands.
+/// the ONNX export step is available.
 pub fn get_video_catalog() -> Vec<OnnxVideoEntry> {
     vec![
         // V-JEPA 2 ViT-L — 300M params, 256² spatial, embed dim 1024.
@@ -2485,7 +2575,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         family: "qwen3".into(),
         hf_repo: "unsloth/Qwen3-30B-A3B-GGUF".into(),
         hf_filename: "Qwen3-30B-A3B-Q4_K_M.gguf".into(),
-        parameters: "30B (MoE)".into(),
+        parameters: "30B (MoE, 3B active)".into(),
         architecture: ModelArchitecture::Qwen3Moe,
         context_length: 131072,
         quantization: "Q4_K_M".into(),
@@ -2642,9 +2732,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         family: "qwen3.5".into(),
         hf_repo: "unsloth/Qwen3.5-35B-A3B-GGUF".into(),
         hf_filename: "Qwen3.5-35B-A3B-Q4_K_M.gguf".into(),
-        parameters: "35B (MoE)".into(),
+        parameters: "35B (MoE, 3B active)".into(),
         architecture: ModelArchitecture::Qwen35Moe,
-        context_length: 131072,
+        context_length: 262144,
         quantization: "Q4_K_M".into(),
         size_bytes: 22_016_023_168,
         min_ram_gb: 14,
@@ -2654,10 +2744,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
-            num_experts: 128,
+            num_experts: 256,
             experts_per_token: 8,
-            shared_experts: 0,
-            params_per_expert_x10: Some(2),
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -2674,7 +2764,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         hf_filename: "Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf".into(),
         parameters: "122B (MoE, 10B active)".into(),
         architecture: ModelArchitecture::Qwen35Moe,
-        context_length: 131072,
+        context_length: 262144,
         quantization: "Q4_K_M".into(),
         size_bytes: 75_000_000_000,
         min_ram_gb: 80,
@@ -2684,10 +2774,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
-            num_experts: 128,
+            num_experts: 256,
             experts_per_token: 8,
-            shared_experts: 0,
-            params_per_expert_x10: Some(8),
+            shared_experts: 1,
+            params_per_expert_x10: Some(5),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -2704,7 +2794,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         hf_filename: "Q4_K_M/Qwen3.5-397B-A17B-Q4_K_M-00001-of-00006.gguf".into(),
         parameters: "397B (MoE, 17B active)".into(),
         architecture: ModelArchitecture::Qwen35Moe,
-        context_length: 131072,
+        context_length: 262144,
         quantization: "Q4_K_M".into(),
         size_bytes: 240_000_000_000,
         min_ram_gb: 256,
@@ -2714,10 +2804,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
-            num_experts: 128,
-            experts_per_token: 8,
-            shared_experts: 0,
-            params_per_expert_x10: Some(13),
+            num_experts: 512,
+            experts_per_token: 10,
+            shared_experts: 1,
+            params_per_expert_x10: Some(8),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -3617,7 +3707,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         family: "qwen3".into(),
         hf_repo: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF".into(),
         hf_filename: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf".into(),
-        parameters: "30B (MoE)".into(),
+        parameters: "30B (MoE, 3B active)".into(),
         architecture: ModelArchitecture::Qwen3Moe,
         context_length: 262144,
         quantization: "Q4_K_M".into(),
@@ -3674,7 +3764,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         family: "nemotron".into(),
         hf_repo: "unsloth/Nemotron-3-Nano-30B-A3B-GGUF".into(),
         hf_filename: "Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf".into(),
-        parameters: "30B (MoE)".into(),
+        parameters: "30B (MoE, 3B active)".into(),
         architecture: ModelArchitecture::Llama,
         context_length: 128000,
         quantization: "Q4_K_M".into(),
@@ -3686,10 +3776,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
-            num_experts: 16,
-            experts_per_token: 4,
-            shared_experts: 0,
-            params_per_expert_x10: Some(3),
+            num_experts: 128,
+            experts_per_token: 6,
+            shared_experts: 1,
+            params_per_expert_x10: Some(2),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -3748,7 +3838,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             num_experts: 384,
             experts_per_token: 8,
             shared_experts: 1,
-            params_per_expert_x10: Some(1),
+            params_per_expert_x10: Some(26),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -3763,7 +3853,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         family: "kimi".into(),
         hf_repo: "unsloth/Kimi-K2.6-GGUF".into(),
         hf_filename: "UD-Q4_K_XL/Kimi-K2.6-UD-Q4_K_XL-00001-of-00014.gguf".into(),
-        parameters: "1T (MoE, hybrid thinking)".into(),
+        parameters: "1T (MoE, 32B active)".into(),
         architecture: ModelArchitecture::Kimi,
         context_length: 262144,
         quantization: "UD-Q4_K_XL".into(),
@@ -3778,7 +3868,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             num_experts: 384,
             experts_per_token: 8,
             shared_experts: 1,
-            params_per_expert_x10: Some(1),
+            params_per_expert_x10: Some(26),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -3787,39 +3877,199 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
-    // Kimi K3 — checkpoint publication expected 2026-07-27. The entry
-    // exists so distributed expert extraction (`moe_safetensors_repo`)
-    // can pick the model up the day the safetensors repo goes live; no
-    // GGUF serving artifact exists yet, so hf_filename is empty,
-    // size/RAM are unset, and the entry is not promotable. Fill the
-    // GGUF fields + flip promotable once a proper sharded quant is
-    // published upstream.
+    // Kimi K3 — the safetensors checkpoint is published, so distributed
+    // expert extraction (`moe_safetensors_repo`) resolves. `unsloth/Kimi-K3-GGUF`
+    // exists but carries no .gguf artifact, so hf_filename is empty, size/RAM
+    // are unset, and the entry is not promotable to whole-model serving. Fill
+    // the GGUF fields + flip promotable once a sharded quant lands upstream.
     catalog.push(HfModelEntry {
         id: "kimi-k3".into(),
-        name: "Kimi K3 (MoE)".into(),
+        name: "Kimi K3 (MoE, multimodal)".into(),
         family: "kimi".into(),
         hf_repo: "moonshotai/Kimi-K3".into(),
         hf_filename: String::new(),
-        parameters: "MoE, 896 experts / 16 active per token".into(),
+        parameters: "2.8T total / 104B active (MoE)".into(),
         architecture: ModelArchitecture::Kimi,
-        context_length: 262144,
-        quantization: "FP8".into(),
+        context_length: 1048576,
+        quantization: "MXFP4".into(),
         size_bytes: 0,
         min_ram_gb: 0,
-        license: "MIT".into(),
-        description: "Moonshot AI Kimi K3 MoE — 896 routed experts, 16 active per token, one fused shared expert. Catalog entry serves distributed expert extraction; whole-model GGUF serving pending upstream quant publication.".into(),
+        // Custom terms, not MIT: a Model-as-a-Service operator past 20M USD of
+        // revenue over any 12 consecutive months needs a separate agreement
+        // with Moonshot AI, and a product past 100M monthly active users or
+        // 20M USD monthly revenue must display "Kimi K3" in its interface.
+        // Internal use carries neither obligation.
+        license: "Kimi K3 License".into(),
+        description: "Moonshot AI Kimi K3 — 2.8T total parameters, 104B active, 896 routed experts with 16 selected per token and 2 shared. Kimi Delta Attention plus gated MLA across 93 layers, 1M context, 160K vocabulary, MXFP4 weights and MXFP8 activations from quantization-aware training. Text, image, and video via the MoonViT-V2 encoder. Catalog entry serves distributed expert extraction; whole-model GGUF serving awaits an upstream quant.".into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
             num_experts: 896,
             experts_per_token: 16,
-            shared_experts: 1,
-            params_per_expert_x10: None,
+            shared_experts: 2,
+            params_per_expert_x10: Some(31),
         }),
         promotable: false,
         serving: ServingProfile::default(),
         mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
+    // ── Ornith 1.0 (Deep Reinforce, MIT) ─────────────────────────────
+    // Agentic-coding family post-trained on Gemma 4 and Qwen 3.5. Four
+    // published members; Unsloth quantizes 9B (dense), 35B (MoE) and
+    // 397B (MoE). The 31B dense member has no GGUF upstream.
+    catalog.push(HfModelEntry {
+        id: "ornith-1.0-9b".into(),
+        name: "Ornith 1.0 9B".into(),
+        family: "ornith".into(),
+        hf_repo: "unsloth/Ornith-1.0-9B-GGUF".into(),
+        hf_filename: "Ornith-1.0-9B-UD-Q4_K_XL.gguf".into(),
+        parameters: "9B".into(),
+        architecture: ModelArchitecture::Qwen35,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 5_980_000_000,
+        min_ram_gb: 10,
+        license: "MIT".into(),
+        description: "Deep Reinforce Ornith 1.0 9B — dense agentic-coding model post-trained on Qwen 3.5, 256K context, vision input via the bundled projector. Smallest member of the Ornith family.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: None,
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: Some(MmprojSpec { filename: "mmproj-F16.gguf".into() }),
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+    catalog.push(HfModelEntry {
+        id: "ornith-1.0-35b".into(),
+        name: "Ornith 1.0 35B (MoE)".into(),
+        family: "ornith".into(),
+        hf_repo: "unsloth/Ornith-1.0-35B-GGUF".into(),
+        hf_filename: "Ornith-1.0-35B-UD-Q4_K_XL.gguf".into(),
+        parameters: "35B (MoE, 3B active)".into(),
+        architecture: ModelArchitecture::Qwen35Moe,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 22_320_000_000,
+        min_ram_gb: 26,
+        license: "MIT".into(),
+        description: "Deep Reinforce Ornith 1.0 35B — agentic-coding MoE with 256 routed experts, 8 selected per token and 1 shared, over 40 layers. 256K context, vision input via the bundled projector. Designed for single-GPU deployment.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 256,
+            experts_per_token: 8,
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: Some(MmprojSpec { filename: "mmproj-F16.gguf".into() }),
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+    // 397B ships no projector upstream even though its config declares a
+    // vision tower, so `mmproj` stays None — the downloader would 404.
+    catalog.push(HfModelEntry {
+        id: "ornith-1.0-397b".into(),
+        name: "Ornith 1.0 397B (MoE)".into(),
+        family: "ornith".into(),
+        hf_repo: "unsloth/Ornith-1.0-397B-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/Ornith-1.0-397B-UD-Q4_K_XL-00001-of-00006.gguf".into(),
+        parameters: "397B (MoE, 17B active)".into(),
+        architecture: ModelArchitecture::Qwen35Moe,
+        context_length: 262144,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 245_800_000_000,
+        min_ram_gb: 260,
+        license: "MIT".into(),
+        description: "Deep Reinforce Ornith 1.0 397B — flagship agentic-coding MoE with 512 routed experts, 10 selected per token and 1 shared, over 60 layers. 256K context. Leads open-weight coding benchmarks at its size; MIT licensed with no regional limitation.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 512,
+            experts_per_token: 10,
+            shared_experts: 1,
+            params_per_expert_x10: Some(8),
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
+    // ── Laguna S 2.1 (Poolside, OpenMDW-1.1) ─────────────────────────
+    catalog.push(HfModelEntry {
+        id: "laguna-s-2.1".into(),
+        name: "Laguna S 2.1 (MoE)".into(),
+        family: "laguna".into(),
+        hf_repo: "unsloth/Laguna-S-2.1-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/Laguna-S-2.1-UD-Q4_K_XL-00001-of-00003.gguf".into(),
+        parameters: "118B (MoE, 8B active)".into(),
+        architecture: ModelArchitecture::Laguna,
+        context_length: 1048576,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 73_400_000_000,
+        min_ram_gb: 80,
+        license: "OpenMDW-1.1".into(),
+        description: "Poolside Laguna S 2.1 — 118B-total agentic-coding MoE, 8B active, with a token-choice router using softplus gating over 256 routed experts plus 1 shared. Grouped-query attention with interleaved full and sliding-window layers, 1M context. Native interleaved thinking between tool calls; preserve reasoning blocks across turns. Requires llama.cpp b10087 or newer.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 256,
+            experts_per_token: 10,
+            shared_experts: 1,
+            params_per_expert_x10: Some(5),
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: None,
+        reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
+        template_fix: TemplateFix::None,
+        download_filename: String::new(),
+    });
+
+    // ── Inkling (Thinking Machines, Apache-2.0) ──────────────────────
+    // Only a BF16 projector is published upstream; there is no F16 sibling.
+    catalog.push(HfModelEntry {
+        id: "inkling".into(),
+        name: "Inkling (MoE, multimodal)".into(),
+        family: "inkling".into(),
+        hf_repo: "unsloth/inkling-GGUF".into(),
+        hf_filename: "UD-Q4_K_XL/inkling-UD-Q4_K_XL-00001-of-00014.gguf".into(),
+        parameters: "975B (MoE, 41B active)".into(),
+        architecture: ModelArchitecture::Inkling,
+        context_length: 1048576,
+        quantization: "UD-Q4_K_XL".into(),
+        size_bytes: 587_040_000_000,
+        min_ram_gb: 620,
+        license: "Apache 2.0".into(),
+        description: "Thinking Machines Inkling — 975B-total multimodal MoE, 41B active, routing each token to 6 of 256 experts plus 2 shared across 66 layers. Hybrid local/global attention, 1M context. Accepts text, images and 16kHz WAV audio via a hierarchical patch encoder and discrete audio tokens, all projected into one hidden space; output is text. Apache-2.0.".into(),
+        drafter_id: None,
+        mtp_kind: MtpKind::None,
+        mtp_default_draft_n: None,
+        moe: Some(MoeShape {
+            num_experts: 256,
+            experts_per_token: 6,
+            shared_experts: 2,
+            params_per_expert_x10: Some(36),
+        }),
+        promotable: true,
+        serving: ServingProfile::default(),
+        mmproj: Some(MmprojSpec { filename: "mmproj-BF16.gguf".into() }),
         reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
@@ -3881,7 +4131,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             num_experts: 256,
             experts_per_token: 8,
             shared_experts: 0,
-            params_per_expert_x10: None,
+            params_per_expert_x10: Some(9),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -3913,7 +4163,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             num_experts: 256,
             experts_per_token: 8,
             shared_experts: 1,
-            params_per_expert_x10: Some(1),
+            params_per_expert_x10: Some(27),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -3963,7 +4213,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         hf_filename: "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf".into(),
         parameters: "35B (MoE, 3B active)".into(),
         architecture: ModelArchitecture::Qwen36Moe,
-        context_length: 131072,
+        context_length: 262144,
         quantization: "Q4_K_M".into(),
         size_bytes: 21_400_000_000,
         min_ram_gb: 24,
@@ -3972,15 +4222,15 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         // Intentionally no drafter: `qwen3.5-0.8b` would be vocab-matched, but the
         // 3B-active-path MoE makes the speculative verify cost outweigh the draft
         // savings on consumer GPUs (RTX 3090: net-negative throughput). Re-evaluate
-        // when a smaller MoE-aware drafter or llama.cpp PR #22673 (native MTP) lands.
+        // when a smaller MoE-aware drafter exists or llama.cpp PR #22673 (native MTP) merges.
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
-            num_experts: 128,
+            num_experts: 256,
             experts_per_token: 8,
-            shared_experts: 0,
-            params_per_expert_x10: Some(2),
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -4028,7 +4278,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         hf_filename: "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf".into(),
         parameters: "35B (MoE, 3B active)".into(),
         architecture: ModelArchitecture::Qwen36Moe,
-        context_length: 131072,
+        context_length: 262144,
         quantization: "UD-Q4_K_XL".into(),
         size_bytes: 22_000_000_000,
         min_ram_gb: 28,
@@ -4038,10 +4288,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: Some(MoeShape {
-            num_experts: 128,
+            num_experts: 256,
             experts_per_token: 8,
-            shared_experts: 0,
-            params_per_expert_x10: Some(2),
+            shared_experts: 1,
+            params_per_expert_x10: Some(1),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -4298,22 +4548,22 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         family: "glm".into(),
         hf_repo: "unsloth/GLM-5-GGUF".into(),
         hf_filename: "UD-Q4_K_XL/GLM-5-UD-Q4_K_XL-00001-of-00010.gguf".into(),
-        parameters: "744B (MoE)".into(),
+        parameters: "744B (MoE, 40B active)".into(),
         architecture: ModelArchitecture::Glm,
-        context_length: 131072,
+        context_length: 202752,
         quantization: "UD-Q4_K_XL".into(),
         size_bytes: 400_000_000_000,
         min_ram_gb: 256,
         license: "MIT".into(),
-        description: "Z.ai GLM-5 — 744B total parameter MoE trained on 28.5T tokens; best-in-class open-source performance on reasoning, coding, and agentic tasks (2026-04). Unsloth dynamic UD-Q4_K_XL GGUF (sharded).".into(),
+        description: "Z.ai GLM-5 — 744B total parameter MoE, 40B active, trained on 28.5T tokens. Routes each token to 8 of 256 experts plus 1 shared across 75 MoE layers, with DeepSeek Sparse Attention over a 198K context. Unsloth dynamic UD-Q4_K_XL GGUF (sharded).".into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
-            num_experts: 160,
+            num_experts: 256,
             experts_per_token: 8,
             shared_experts: 1,
-            params_per_expert_x10: None,
+            params_per_expert_x10: Some(28),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -4330,20 +4580,20 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         hf_filename: "UD-Q4_K_M/GLM-5.1-UD-Q4_K_M-00001-of-00011.gguf".into(),
         parameters: "744B (MoE, 40B active)".into(),
         architecture: ModelArchitecture::Glm,
-        context_length: 204800,
+        context_length: 202752,
         quantization: "UD-Q4_K_M".into(),
         size_bytes: 400_000_000_000,
         min_ram_gb: 256,
         license: "MIT".into(),
-        description: "Z.ai GLM-5.1 — next-generation flagship for agentic engineering, class-leading on SWE-Bench Pro; 744B total / 40B active; 200K context. `glm_moe_dsa` architecture with Dynamic Sparse Attention.".into(),
+        description: "Z.ai GLM-5.1 — next-generation flagship for agentic engineering, class-leading on SWE-Bench Pro; 744B total / 40B active, 8 of 256 experts plus 1 shared across 75 MoE layers; 198K context. `glm_moe_dsa` architecture with Dynamic Sparse Attention.".into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
-            num_experts: 160,
+            num_experts: 256,
             experts_per_token: 8,
             shared_experts: 1,
-            params_per_expert_x10: None,
+            params_per_expert_x10: Some(28),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -4358,22 +4608,22 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         family: "glm".into(),
         hf_repo: "unsloth/GLM-5.2-GGUF".into(),
         hf_filename: "UD-Q4_K_XL/GLM-5.2-UD-Q4_K_XL-00001-of-00011.gguf".into(),
-        parameters: "753B (MoE)".into(),
+        parameters: "753B (MoE, 40B active)".into(),
         architecture: ModelArchitecture::Glm,
         context_length: 1048576,
         quantization: "UD-Q4_K_XL".into(),
         size_bytes: 410_000_000_000,
         min_ram_gb: 256,
         license: "MIT".into(),
-        description: "Z.ai GLM-5.2 — 753B total parameter MoE flagship with solid 1M-token context and IndexShare sparse-attention (2.9× per-token FLOP reduction at 1M). Improved Multi-Token-Prediction layer increases speculative-decoding accept rate by ~20% over GLM-5.1.".into(),
+        description: "Z.ai GLM-5.2 — 753B total parameter MoE flagship, 40B active, routing each token to 8 of 256 experts plus 1 shared across 75 MoE layers. Solid 1M-token context with IndexShare sparse-attention (2.9× per-token FLOP reduction at 1M). Improved Multi-Token-Prediction layer increases speculative-decoding accept rate by ~20% over GLM-5.1.".into(),
         drafter_id: None,
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(2),
         moe: Some(MoeShape {
-            num_experts: 160,
+            num_experts: 256,
             experts_per_token: 8,
             shared_experts: 1,
-            params_per_expert_x10: None,
+            params_per_expert_x10: Some(28),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -4402,10 +4652,10 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
         moe: Some(MoeShape {
-            num_experts: 32,
-            experts_per_token: 2,
-            shared_experts: 0,
-            params_per_expert_x10: None,
+            num_experts: 128,
+            experts_per_token: 4,
+            shared_experts: 1,
+            params_per_expert_x10: Some(34),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -4434,15 +4684,15 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 155_000_000_000,
         min_ram_gb: 128,
         license: "MIT".into(),
-        description: "DeepSeek V4 Flash — 284B total / 13B active MoE; 1M context. Hybrid Compressed Sparse Attention (CSA) + Heavily Compressed Attention (HCA). Cost-effective frontier variant. Pre-trained on 32T tokens. MTP head shipped natively.".into(),
+        description: "DeepSeek V4 Flash — 284B total / 13B active MoE; 1M context. Hybrid Compressed Sparse Attention (CSA) + Heavily Compressed Attention (HCA). Cost-effective frontier variant. Pre-trained on 32T tokens. MTP head built into the model file.".into(),
         drafter_id: None,
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(4),
         moe: Some(MoeShape {
             num_experts: 256,
-            experts_per_token: 8,
+            experts_per_token: 6,
             shared_experts: 1,
-            params_per_expert_x10: None,
+            params_per_expert_x10: Some(11),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -4464,15 +4714,15 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         size_bytes: 875_000_000_000,
         min_ram_gb: 600,
         license: "MIT".into(),
-        description: "DeepSeek V4 Pro — 1.6T total / 49B active MoE; 1M context. CSA+HCA hybrid attention reduces single-token inference to 27% of V3.2 FLOPs and 10% of KV cache at 1M. Frontier intelligence variant. MTP head shipped natively.".into(),
+        description: "DeepSeek V4 Pro — 1.6T total / 49B active MoE; 1M context. CSA+HCA hybrid attention reduces single-token inference to 27% of V3.2 FLOPs and 10% of KV cache at 1M. Frontier intelligence variant. MTP head built into the model file.".into(),
         drafter_id: None,
         mtp_kind: MtpKind::DraftMtp,
         mtp_default_draft_n: Some(4),
         moe: Some(MoeShape {
-            num_experts: 512,
-            experts_per_token: 8,
+            num_experts: 384,
+            experts_per_token: 6,
             shared_experts: 1,
-            params_per_expert_x10: None,
+            params_per_expert_x10: Some(40),
         }),
         // Gated out: the only DeepSeek-V4-Pro GGUF (antirez) is a
         // non-standard manual 2-file layer split
@@ -4510,7 +4760,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             num_experts: 384,
             experts_per_token: 8,
             shared_experts: 1,
-            params_per_expert_x10: Some(1),
+            params_per_expert_x10: Some(26),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -4540,7 +4790,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             num_experts: 384,
             experts_per_token: 8,
             shared_experts: 1,
-            params_per_expert_x10: Some(1),
+            params_per_expert_x10: Some(26),
         }),
         promotable: true,
         serving: ServingProfile::default(),
@@ -4551,7 +4801,7 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
     });
 
     // ── Qwen 3.5 MTP variants (Apache 2.0, via unsloth GGUF) ──────────
-    // Unsloth shipped MTP-paired GGUFs for every Qwen 3.5 size in the
+    // Unsloth published MTP-paired GGUFs for every Qwen 3.5 size in the
     // dedicated `Qwen3.5-<size>-MTP-GGUF` repos (the MTP head is baked
     // into the GGUF — the *repo* carries the MTP designation, the
     // filename does NOT). Smaller sizes are single-file UD-Q4_K_XL;
@@ -4747,6 +4997,8 @@ pub fn custom_license_id(license: &str) -> Option<String> {
         Some("gemma".to_string())
     } else if l.contains("nvidia open model") {
         Some("nvidia-open-model".to_string())
+    } else if l.contains("nxai") {
+        Some("nxai-community".to_string())
     } else if l.contains("sam") {
         Some("meta-sam".to_string())
     } else {
@@ -5098,7 +5350,62 @@ mod tests {
             assert!(e.min_ram_gb > 0, "min ram 0 for {}", e.id);
             assert!(!e.parameters.is_empty(), "parameters empty for {}", e.id);
             assert!(!e.license.is_empty(), "license empty for {}", e.id);
+            assert!(
+                e.batch_size > 0,
+                "batch_size 0 for {} — the runtime tiles input to this width",
+                e.id
+            );
+            if let Some(name) = &e.output_name {
+                assert!(!name.is_empty(), "empty output_name for {}", e.id);
+            }
         }
+    }
+
+    #[test]
+    fn test_forecast_custom_licenses_are_acceptable() {
+        // A forecaster under a custom commercial license is admissible only
+        // if its license string maps to an acceptance id, because
+        // `check_model_license` refuses the load until the operator accepted
+        // that id via `--accept-license`.
+        for e in get_forecast_catalog() {
+            if matches!(e.license_tier, LicenseTier::CommercialCustom) {
+                assert!(
+                    custom_license_id(&e.license).is_some(),
+                    "{} is CommercialCustom but its license '{}' maps to no \
+                     acceptance id, so --accept-license could never admit it",
+                    e.id,
+                    e.license
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_tirex_single_pass_quantile_shape() {
+        // TiRex emits exactly 32 steps × 9 quantiles per forward pass, and
+        // GenericForecast reads the median at index q / 2 = 4, which is where
+        // TiRex puts it. Raising max_horizon past 32 would need an
+        // autoregressive roll-forward the runtime does not implement.
+        let tirex = get_forecast_model_by_id("tirex-35m").unwrap();
+        assert_eq!(tirex.max_horizon, 32);
+        assert_eq!(tirex.n_quantiles, 9);
+        assert_eq!(tirex.n_quantiles / 2, 4);
+        assert_eq!(tirex.batch_size, 1);
+        assert!(tirex.output_name.is_none());
+        assert!(matches!(
+            tirex.license_tier,
+            LicenseTier::CommercialCustom
+        ));
+    }
+
+    #[test]
+    fn test_timesfm_graph_quirks_are_recorded() {
+        // Both quirks are properties of the published graph, not caller
+        // choices: the decoder averages across the batch axis for flip
+        // invariance, and the first output is a hidden state.
+        let t = get_forecast_model_by_id("timesfm-2.5-200m").unwrap();
+        assert_eq!(t.batch_size, 2);
+        assert_eq!(t.output_name.as_deref(), Some("full_predictions"));
     }
 
     #[test]
@@ -5539,6 +5846,52 @@ mod tests {
                 "{}: malformed hf_filename `{}`",
                 entry.id,
                 entry.hf_filename
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_params_active_b_prefers_active_over_total() {
+        // MoE forms must yield the active path width, not the total.
+        assert_eq!(parse_params_active_b("1T (MoE, 32B active)"), 32.0);
+        assert_eq!(parse_params_active_b("2.8T total / 104B active (MoE)"), 104.0);
+        assert_eq!(parse_params_active_b("35B (MoE, 3B active)"), 3.0);
+        assert_eq!(parse_params_active_b("397B (MoE, 17B active)"), 17.0);
+        assert_eq!(parse_params_active_b("975B (MoE, 41B active)"), 41.0);
+        assert_eq!(parse_params_active_b("118B (MoE, 8B active)"), 8.0);
+        // Hyphenated MoE form.
+        assert_eq!(parse_params_active_b("30B-A3B"), 3.0);
+        // Dense.
+        assert_eq!(parse_params_active_b("27B"), 27.0);
+        assert_eq!(parse_params_active_b("0.8B"), 0.8);
+    }
+
+    #[test]
+    fn test_moe_entries_report_active_not_total_params() {
+        for entry in get_model_catalog() {
+            let Some(moe) = entry.moe.as_ref() else {
+                continue;
+            };
+            let Some(per_expert_x10) = moe.params_per_expert_x10 else {
+                continue;
+            };
+            let parsed = parse_params_active_b(&entry.parameters);
+            if parsed == 0.0 {
+                continue;
+            }
+            // Routed + shared experts alone are a lower bound on the
+            // active path; attention and embeddings add to it. A parsed
+            // figure below that bound means we read the total by mistake
+            // or the shape is wrong.
+            let expert_active_b =
+                (per_expert_x10 as f32 / 10.0) * (moe.experts_per_token as f32 + moe.shared_experts as f32);
+            assert!(
+                parsed >= expert_active_b * 0.9,
+                "{}: parsed active {}B is below the expert-only floor {}B \
+                 derived from its MoE shape",
+                entry.id,
+                parsed,
+                expert_active_b
             );
         }
     }

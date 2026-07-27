@@ -81,7 +81,7 @@ fn compose_key(prefix: &[u8], did: &str) -> Vec<u8> {
 /// Operator-supplied Canton transport. Implementors typically wrap a
 /// `reqwest::Client` against the participant's JSON Ledger API at
 /// `/v2/commands/submit-and-wait` plus the admin party's auth token.
-/// Today this trait is forward-looking: no impl ships in the monorepo
+/// Today this trait is forward-looking: no impl exists in the monorepo
 /// because the workspace deliberately does not depend on `tonic` or any
 /// Canton client crate.
 #[async_trait::async_trait]
@@ -103,7 +103,7 @@ pub trait DamlMirrorTransport: Send + Sync {
 pub struct DamlMirrorConfig {
     /// Package ids of the compiled `Tenzro.Erc8004.*` DAR. Same package
     /// id covers all three modules (Identity / Reputation / Validation)
-    /// because they ship in a single DAR.
+    /// because they are packaged in a single DAR.
     pub package_ids: DamlPackageIds,
     /// The Tenzro Network admin party id allocated on the target
     /// Canton participant (e.g. `TenzroAdmin::123abc...`).

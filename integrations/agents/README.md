@@ -36,7 +36,7 @@ Each adapter imports its framework lazily and raises a clear `ImportError`
 only when actually invoked, so `import tenzro_agents` works in any
 environment.
 
-### The DID envelope (Layer 1)
+### The DID envelope (base auth layer)
 
 `TenzroDidEnvelope` is the auth lingua franca. The canonical preimage layout
 is **pinned** and matches the authoritative Rust `tenzro-identity` envelope
@@ -103,6 +103,38 @@ payment = payment_mandate(
 )
 client.validate_mandate_pair(checkout, payment)   # tenzro_ap2ValidateMandatePair
 ```
+
+### Reaching an operator-brokered resource
+
+Everything above runs on protocol resources — no credential beyond the
+agent's own DID. Canton is different: the ledger sits outside Tenzro and
+the node reaches it with credentials the operator supplies. Pass
+`api_key=` (or set `TENZRO_API_KEY`) with a key carrying the `canton`
+scope. A node serves each Canton network independently and a key is
+authorized for a subset of them, so name the target with `canton_network=`
+(or `TENZRO_CANTON_NETWORK`); the client merges it into every
+Canton-scoped call. A key authorizing exactly one network needs no
+setting.
+
+```python
+client = TenzroClient(
+    "https://rpc.tenzro.xyz",
+    signing_key=sk,
+    did="did:tenzro:machine:acme-procurement-bot-7a1b",
+    api_key="tnz_...",
+    canton_network="devnet",
+)
+```
+
+A missing or unscoped key returns `-32004`. Exceeding the key's tier
+budget returns `-32005` with `retry_after_ms`, `requests_per_minute`, and
+`tier` — `free` allows 60 requests/min and refuses writes, `standard` 600,
+`priority` 6,000, each over a sliding 60-second window.
+
+Keys gate operator-brokered resources only. Publishing to the marketplace
+registry — agents, skills, workflows, MCP servers — is permissionless,
+priced by the provider in TNZO or offered free, and needs no operator
+approval.
 
 ## Per-framework snippets
 

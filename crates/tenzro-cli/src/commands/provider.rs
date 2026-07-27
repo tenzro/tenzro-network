@@ -611,7 +611,13 @@ impl ProviderModelsCmd {
     }
 }
 
-/// Set provider pricing (wei per token; 1 TNZO = 10^18 wei)
+/// Set provider pricing (wei per unit; 1 TNZO = 10^18 wei)
+///
+/// Token prices are required. The per-unit rates covering cached tokens,
+/// reasoning loops, image tokens, audio and video seconds, denoising pixel-steps
+/// and consumed frames are optional: an omitted rate keeps whatever the node
+/// already serves, because the RPC replaces the whole card and this reads the
+/// current one first to overlay onto.
 #[derive(Debug, Parser)]
 pub struct PricingSetCmd {
     /// Wei per input token (decimal string)
@@ -622,13 +628,45 @@ pub struct PricingSetCmd {
     #[arg(long = "output-price-wei")]
     pub output_price_wei: String,
 
-    /// Network ceiling for input price in wei (decimal string)
-    #[arg(long = "network-max-input-wei", default_value = "1000000000000000")]
-    pub network_max_input_wei: String,
+    /// Wei per request: a floor on a metered quote, and the whole quote under per-request pricing
+    #[arg(long = "price-per-request-wei")]
+    pub price_per_request_wei: Option<u64>,
 
-    /// Network ceiling for output price in wei (decimal string)
-    #[arg(long = "network-max-output-wei", default_value = "2000000000000000")]
-    pub network_max_output_wei: String,
+    /// Wei per millisecond of compute, read under per-compute-time pricing
+    #[arg(long = "price-per-compute-ms-wei")]
+    pub price_per_compute_ms_wei: Option<u64>,
+
+    /// Wei per prompt token served from cache
+    #[arg(long = "price-per-cached-read-token-wei")]
+    pub price_per_cached_read_token_wei: Option<u64>,
+
+    /// Wei per prompt token written into cache, charged on top of the fresh prefill
+    #[arg(long = "price-per-cached-write-token-wei")]
+    pub price_per_cached_write_token_wei: Option<u64>,
+
+    /// Wei per reasoning loop on a recurrent-depth model
+    #[arg(long = "price-per-reasoning-loop-wei")]
+    pub price_per_reasoning_loop_wei: Option<u64>,
+
+    /// Wei per image token derived from image geometry
+    #[arg(long = "price-per-image-token-wei")]
+    pub price_per_image_token_wei: Option<u64>,
+
+    /// Wei per second of audio transcribed or generated
+    #[arg(long = "price-per-audio-second-wei")]
+    pub price_per_audio_second_wei: Option<u64>,
+
+    /// Wei per second of video
+    #[arg(long = "price-per-video-second-wei")]
+    pub price_per_video_second_wei: Option<u64>,
+
+    /// Wei per pixel-step of denoising work (width x height x steps x frames)
+    #[arg(long = "price-per-pixel-step-wei")]
+    pub price_per_pixel_step_wei: Option<u64>,
+
+    /// Wei per frame the provider consumes, as when sampling a clip for embedding
+    #[arg(long = "price-per-frame-wei")]
+    pub price_per_frame_wei: Option<u64>,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -638,17 +676,8 @@ pub struct PricingSetCmd {
 impl PricingSetCmd {
     pub async fn execute(&self) -> Result<()> {
         use crate::rpc::RpcClient;
-        use serde::Serialize;
 
-        #[derive(Serialize)]
-        struct ProviderPricing {
-            input_price_per_token_wei: String,
-            output_price_per_token_wei: String,
-            network_max_input_wei: String,
-            network_max_output_wei: String,
-        }
-
-        // Parse-validate: each field must be a non-negative u128 decimal string.
+        // Parse-validate: each token price must be a non-negative u128 decimal string.
         let input_wei: u128 = self
             .input_price_wei
             .parse()
@@ -657,13 +686,6 @@ impl PricingSetCmd {
             .output_price_wei
             .parse()
             .map_err(|_| anyhow::anyhow!("--output-price-wei must be a non-negative integer"))?;
-        let max_in_wei: u128 = self
-            .network_max_input_wei
-            .parse()
-            .map_err(|_| anyhow::anyhow!("--network-max-input-wei must be a non-negative integer"))?;
-        let max_out_wei: u128 = self.network_max_output_wei.parse().map_err(|_| {
-            anyhow::anyhow!("--network-max-output-wei must be a non-negative integer")
-        })?;
 
         output::print_header("Set Provider Pricing");
         println!();
@@ -672,15 +694,41 @@ impl PricingSetCmd {
         println!();
 
         let spinner = output::create_spinner("Updating pricing...");
-
-        let pricing = ProviderPricing {
-            input_price_per_token_wei: input_wei.to_string(),
-            output_price_per_token_wei: output_wei.to_string(),
-            network_max_input_wei: max_in_wei.to_string(),
-            network_max_output_wei: max_out_wei.to_string(),
-        };
-
         let rpc = RpcClient::new(&self.rpc);
+
+        // Read the card the node currently serves, so the rates this invocation
+        // does not name survive. The ceilings come back on the same read and are
+        // posted verbatim — the node restates them anyway.
+        let mut pricing: serde_json::Value = rpc
+            .call("tenzro_getProviderPricing", serde_json::json!([]))
+            .await?;
+
+        pricing["input_price_per_token_wei"] = serde_json::json!(input_wei.to_string());
+        pricing["output_price_per_token_wei"] = serde_json::json!(output_wei.to_string());
+
+        for (key, supplied) in [
+            ("price_per_request", self.price_per_request_wei),
+            ("price_per_compute_ms", self.price_per_compute_ms_wei),
+            (
+                "price_per_cached_read_token",
+                self.price_per_cached_read_token_wei,
+            ),
+            (
+                "price_per_cached_write_token",
+                self.price_per_cached_write_token_wei,
+            ),
+            ("price_per_reasoning_loop", self.price_per_reasoning_loop_wei),
+            ("price_per_image_token", self.price_per_image_token_wei),
+            ("price_per_audio_second", self.price_per_audio_second_wei),
+            ("price_per_video_second", self.price_per_video_second_wei),
+            ("price_per_pixel_step", self.price_per_pixel_step_wei),
+            ("price_per_frame", self.price_per_frame_wei),
+        ] {
+            if let Some(value) = supplied {
+                pricing["modality_rates"][key] = serde_json::json!(value);
+            }
+        }
+
         let _: serde_json::Value = rpc
             .call("tenzro_setProviderPricing", serde_json::json!([pricing]))
             .await?;
@@ -706,11 +754,26 @@ impl PricingShowCmd {
         use serde::Deserialize;
 
         #[derive(Deserialize)]
+        struct ModalityRates {
+            price_per_request: u64,
+            price_per_compute_ms: u64,
+            price_per_cached_read_token: u64,
+            price_per_cached_write_token: u64,
+            price_per_reasoning_loop: u64,
+            price_per_image_token: u64,
+            price_per_audio_second: u64,
+            price_per_video_second: u64,
+            price_per_pixel_step: u64,
+            price_per_frame: u64,
+        }
+
+        #[derive(Deserialize)]
         struct ProviderPricing {
             input_price_per_token_wei: String,
             output_price_per_token_wei: String,
             network_max_input_wei: String,
             network_max_output_wei: String,
+            modality_rates: ModalityRates,
         }
 
         output::print_header("Provider Pricing");
@@ -732,6 +795,32 @@ impl PricingShowCmd {
             "Output Price",
             &format!("{} wei/token", pricing.output_price_per_token_wei),
         );
+
+        println!();
+        let rates = &pricing.modality_rates;
+        for (label, value, unit) in [
+            ("Per Request", rates.price_per_request, "wei/request"),
+            ("Per Compute ms", rates.price_per_compute_ms, "wei/ms"),
+            (
+                "Cached Read",
+                rates.price_per_cached_read_token,
+                "wei/token",
+            ),
+            (
+                "Cached Write",
+                rates.price_per_cached_write_token,
+                "wei/token",
+            ),
+            ("Reasoning Loop", rates.price_per_reasoning_loop, "wei/loop"),
+            ("Image Token", rates.price_per_image_token, "wei/token"),
+            ("Audio", rates.price_per_audio_second, "wei/second"),
+            ("Video", rates.price_per_video_second, "wei/second"),
+            ("Pixel Step", rates.price_per_pixel_step, "wei/pixel-step"),
+            ("Frame", rates.price_per_frame, "wei/frame"),
+        ] {
+            output::print_field(label, &format!("{} {}", value, unit));
+        }
+
         println!();
         output::print_field(
             "Network Max Input",
@@ -739,7 +828,7 @@ impl PricingShowCmd {
         );
         output::print_field(
             "Network Max Output",
-            &format!("{} wei/token", pricing.network_max_output_wei),
+            &format!("{} wei/unit", pricing.network_max_output_wei),
         );
 
         Ok(())

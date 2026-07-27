@@ -79,12 +79,12 @@ A Tenzro Network deployment claims OAN conformance when:
 3. ValidationRecords from `ZkCommitmentRegistry` and TEE attestation paths emit OAN-shaped JSON envelopes per TNIP-005 §4.2.
 4. AgentCard signatures validate under JCS (RFC 8785).
 
-The Tenzro Network adoption path is staged across three waves (read-only publishing, federation push, federation pull). Wave details are in `implementations/tenzro.md`.
+The Tenzro Network adoption path is staged in three steps (read-only publishing, federation push, federation pull). Each step is described in `implementations/tenzro.md`.
 
 ## Boundary
 
 - **OAN specs are authoritative for the wire format.** Tenzro Network adapts to the wire; the specs do not adapt to Tenzro Network.
-- **Tenzro Network continues to ship its native types** (TDIP identities, MeshReceipts, on-chain validation records). OAN projection happens at the boundary.
+- **Tenzro Network keeps its native types** (TDIP identities, MeshReceipts, on-chain validation records). OAN projection happens at the boundary.
 - **No reference-implementation privilege.** Tenzro Network's status as the reference implementation does not privilege it in OAN conformance — any other implementation conforming to the OAN wire format is equally valid.
 
 ## See also

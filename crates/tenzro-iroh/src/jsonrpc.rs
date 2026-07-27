@@ -17,7 +17,8 @@
 //! dispatch. It's a great fit when the wire shape is your own typed
 //! Rust enum, but for A2A and MCP we already have a settled JSON-RPC 2.0
 //! contract (`{jsonrpc, method, params, id}`) and a working axum dispatcher
-//! that handles serialization end-to-end. Wrapping that in irpc would
+//! that handles serialization across the whole request path. Wrapping
+//! that in irpc would
 //! re-serialize the same payload twice (JSON → typed enum → postcard →
 //! wire) and tie the wire format to a Rust-specific framework, which
 //! breaks the cross-language interop story that JSON-RPC 2.0 gives us
@@ -126,7 +127,7 @@ pub trait JsonRpcDispatcher: Send + Sync + std::fmt::Debug + 'static {
 ///
 /// `DeferredJsonRpcDispatcher` resolves the cycle: it can be constructed
 /// empty, registered with `JsonRpcProtocol::a2a` / `::mcp` at bind time,
-/// then have its real backing dispatcher installed via [`Self::set`]
+/// then have its backing dispatcher installed via [`Self::set`]
 /// later. Until that happens, calls return a JSON-RPC `-32603` (server
 /// not ready) error so peers see a defined response rather than a hung
 /// stream.
@@ -148,14 +149,14 @@ impl DeferredJsonRpcDispatcher {
         }
     }
 
-    /// Install the real backing dispatcher. Idempotent — subsequent calls
+    /// Install the backing dispatcher. Idempotent — subsequent calls
     /// overwrite the previous binding (useful for tests and live
     /// reconfiguration).
     pub fn set(&self, dispatcher: Arc<dyn JsonRpcDispatcher>) {
         *self.inner.write() = Some(dispatcher);
     }
 
-    /// Has a real dispatcher been installed?
+    /// Has a backing dispatcher been installed?
     pub fn is_ready(&self) -> bool {
         self.inner.read().is_some()
     }
@@ -169,7 +170,7 @@ impl JsonRpcDispatcher for DeferredJsonRpcDispatcher {
             Some(d) => d.dispatch(request).await,
             None => {
                 // Server-not-ready: encode as a JSON-RPC `-32603` envelope
-                // so peers see a real response. The request `id` is
+                // so peers see a well-formed response. The request `id` is
                 // unparseable here without round-tripping the body; use
                 // `null` per JSON-RPC 2.0 §5.1 ("If there was an error
                 // in detecting the id ... it MUST be Null").
@@ -441,12 +442,12 @@ impl DeferredMcpHandler {
         }
     }
 
-    /// Install the real backing handler. Idempotent.
+    /// Install the backing handler. Idempotent.
     pub fn set(&self, handler: Arc<dyn McpStreamHandler>) {
         *self.inner.write() = Some(handler);
     }
 
-    /// Has a real handler been installed?
+    /// Has a backing handler been installed?
     pub fn is_ready(&self) -> bool {
         self.inner.read().is_some()
     }
@@ -609,12 +610,12 @@ impl DeferredHttpHandler {
         }
     }
 
-    /// Install the real backing handler. Idempotent.
+    /// Install the backing handler. Idempotent.
     pub fn set(&self, handler: Arc<dyn HttpForwardHandler>) {
         *self.inner.write() = Some(handler);
     }
 
-    /// Has a real handler been installed?
+    /// Has a backing handler been installed?
     pub fn is_ready(&self) -> bool {
         self.inner.read().is_some()
     }

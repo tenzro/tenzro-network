@@ -180,7 +180,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ### 3.2 GPU / accelerator inference (optional)
 
-llama.cpp ships every backend; a build enables one via a `tenzro-node` feature flag. Pick the one that matches your hardware — a build with no backend feature is CPU-only.
+llama.cpp provides every backend; a build enables one via a `tenzro-node` feature flag. Pick the one that matches your hardware — a build with no backend feature is CPU-only.
 
 | Feature | Hardware | Build requirement |
 |---------|----------|-------------------|
@@ -410,6 +410,63 @@ cut.
 Useful flags: `--path {network,local,private}`, `--mode {consume,provide,validate}`,
 `--network-name`, `--chain-id`, `--data-dir`, `--stake`, `--bootstrap`,
 `--genesis`, `--name`, `--rpc`, `--yes` (accept all defaults, no prompts).
+
+### 4.8 Brokering Canton access (optional)
+
+Everything above runs on protocol resources — no credential beyond your own
+identity. Canton is different: the ledger sits outside Tenzro, and the node
+reaches it with credentials you supply. That makes it an operator-brokered
+resource, and it is the one surface where callers need an API key.
+
+The bridge is off unless you turn it on, and it is configured per Canton
+network. `devnet` and `mainnet` each read their own variable group, and a
+network counts as served only when its `LEDGER_API_HOST` is set:
+
+| Variable | Purpose |
+|---|---|
+| `CANTON_ENABLED=true` | Master switch. Unset or `false` and the Canton surface stays off. |
+| `CANTON_DEFAULT_NETWORK=devnet` | Which network a request resolves to when the caller names none. |
+| `CANTON_<NET>_LEDGER_API_HOST` | JSON Ledger API hostname. Its presence declares you serve that network. |
+| `CANTON_<NET>_LEDGER_API_PORT` | Defaults to `5001`. Use `443` for a TLS-fronted participant. |
+| `CANTON_<NET>_TLS` | `true` to dial over TLS. Defaults to `false`. |
+| `CANTON_<NET>_OAUTH_TOKEN_URL` | OAuth2 client-credentials token endpoint. |
+| `CANTON_<NET>_OAUTH_CLIENT_ID` | OAuth2 client id. |
+| `CANTON_<NET>_OAUTH_CLIENT_SECRET` | OAuth2 client secret. |
+| `CANTON_<NET>_OAUTH_AUDIENCE` | Audience the participant expects. |
+| `CANTON_<NET>_OAUTH_SCOPE` | Defaults to `daml_ledger_api`. |
+| `CANTON_<NET>_JWT_TOKEN` | Static bearer token, honoured only when the OAuth group is absent. |
+
+`<NET>` is `DEVNET` or `MAINNET`. The four `OAUTH_*` values are
+all-or-nothing: if any one is missing the grant is dropped and the node
+talks to the participant unauthenticated.
+
+Callers pick a network with the `canton_network` request parameter over
+JSON-RPC, or the `X-Canton-Network` header on the Canton MCP server.
+Resolution order is explicit selector, then the key's sole authorized
+network, then `CANTON_DEFAULT_NETWORK`.
+
+You mint keys with `tenzro_createApiKey` (admin-token-gated, so set
+`TENZRO_ADMIN_TOKEN` first) and hand them out yourself. Each key carries a
+tier that bounds its request budget over a sliding 60-second window:
+
+| Tier | Requests/min | Writes |
+|---|---|---|
+| `free` | 60 | refused |
+| `standard` | 600 | allowed |
+| `priority` | 6,000 | allowed |
+
+A request with no key, an unknown key, or a key lacking the `canton` scope
+returns `-32004`. Exceeding the budget returns `-32005` with
+`retry_after_ms`, `requests_per_minute`, and `tier`. Tenant keys act as the
+party bound to the key and are confined to the networks it lists; operator
+admin-token requests skip the key gate, reach the participant's own parties,
+and can allocate parties, upload DARs, and grant rights.
+
+API keys gate operator-brokered resources only. Publishing to the
+marketplace registry — agents, skills, workflows, MCP servers — is
+permissionless: you set your own TNZO price or offer it free, and no
+operator approves the listing. See [`api-keys.md`](api-keys.md) for the full
+reference.
 
 ---
 
@@ -749,6 +806,10 @@ RUST_LOG=tenzro_node=debug,tenzro_consensus=info \
 | `RUST_LOG` | Tracing filter (e.g., `debug`, `tenzro_consensus=trace`) |
 | `RUST_BACKTRACE=1` | Print backtrace on panic |
 | `TENZRO_MCP_AUTH` | `tiered` (default) / `false` / `full` |
+| `TENZRO_ADMIN_TOKEN` | Operator secret gating admin RPCs (key minting, Canton party/DAR/IDP operations). Unset = fail-closed |
+| `TENZRO_API_KEY` | Client-side key the CLI and SDKs send as `X-Tenzro-Api-Key` |
+| `TENZRO_CANTON_NETWORK` | Default Canton network for the CLI and Python clients (§4.8) |
+| `CANTON_ENABLED` / `CANTON_<NET>_*` | Canton bridge configuration, per network (§4.8) |
 | `TENZRO_SIMULATE_TDX` etc. | Enable TEE simulation when no hardware available |
 | `HF_TOKEN` | Hugging Face auth for gated model downloads |
 | `OPENSSL_DIR` | OpenSSL install path (macOS with Homebrew) |
@@ -767,7 +828,7 @@ curl http://localhost:9090/metrics
 
 Metric families include `tenzro_consensus_*` (rounds, votes, view changes), `tenzro_network_*` (peers, gossip throughput), `tenzro_rpc_*` (request rates, latencies), `tenzro_storage_*` (RocksDB stats), and `tenzro_mempool_*` (pending tx counts).
 
-Wire to Prometheus by scraping `http://<node>:9090/metrics`. A reference Grafana dashboard ships with `docker compose up`.
+Wire to Prometheus by scraping `http://<node>:9090/metrics`. A reference Grafana dashboard is included in `docker compose up`.
 
 ### 13.2 Health checks
 

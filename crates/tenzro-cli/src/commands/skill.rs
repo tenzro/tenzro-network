@@ -94,9 +94,15 @@ pub struct ListSkillsCmd {
     /// Filter by category
     #[arg(long)]
     category: Option<String>,
-    /// Filter by status (active, inactive, available)
+    /// Filter by required capability
     #[arg(long)]
-    status: Option<String>,
+    capability: Option<String>,
+    /// Only show skills publishing a content-addressed bundle a caller can pin
+    #[arg(long)]
+    bundled_only: bool,
+    /// Include inactive and deprecated skills (default hides them)
+    #[arg(long)]
+    all: bool,
     /// Maximum number to show
     #[arg(long, default_value = "20")]
     limit: u32,
@@ -116,8 +122,14 @@ impl ListSkillsCmd {
         if let Some(ref c) = self.category {
             filter["category"] = serde_json::json!(c);
         }
-        if let Some(ref s) = self.status {
-            filter["status"] = serde_json::json!(s);
+        if let Some(ref c) = self.capability {
+            filter["capability"] = serde_json::json!(c);
+        }
+        if self.bundled_only {
+            filter["bundled_only"] = serde_json::json!(true);
+        }
+        if self.all {
+            filter["active_only"] = serde_json::json!(false);
         }
 
         let result: Result<serde_json::Value> = rpc.call("tenzro_listSkills", serde_json::json!([filter])).await;
@@ -144,13 +156,16 @@ impl ListSkillsCmd {
                     output::print_field("Status", status);
                     output::print_field("Description", &description.chars().take(80).collect::<String>());
 
-                    if let Some(caps) = skill["capabilities"].as_array() {
+                    if let Some(caps) = skill["required_capabilities"].as_array() {
                         let cap_list: Vec<&str> = caps.iter()
                             .filter_map(|c| c.as_str())
                             .collect();
                         if !cap_list.is_empty() {
                             output::print_field("Capabilities", &cap_list.join(", "));
                         }
+                    }
+                    if let Some(sha) = skill["bundle"]["sha256"].as_str() {
+                        output::print_field("Bundle SHA-256", sha);
                     }
                     println!();
                 }
@@ -182,12 +197,27 @@ pub struct RegisterSkillCmd {
     /// Version string (e.g. "1.0.0")
     #[arg(long, default_value = "1.0.0")]
     version: String,
-    /// Creator DID (optional, e.g. "did:tenzro:human:...")
+    /// Creator DID (e.g. "did:tenzro:human:...")
     #[arg(long)]
-    creator_did: Option<String>,
+    creator_did: String,
     /// MCP endpoint URL where the skill is served (optional)
     #[arg(long)]
     endpoint: Option<String>,
+    /// Price per call in TNZO base units (0 = free)
+    #[arg(long)]
+    price_per_call: Option<String>,
+    /// Wallet receiving the creator share; required when price_per_call > 0
+    #[arg(long)]
+    creator_wallet: Option<String>,
+    /// Content-addressed artifact locator, e.g. tenzro://blob/<blake3-hex>
+    #[arg(long, requires_all = ["bundle_sha256", "bundle_size"])]
+    bundle_uri: Option<String>,
+    /// Hex SHA-256 of the artifact bytes callers pin against
+    #[arg(long, requires_all = ["bundle_uri", "bundle_size"])]
+    bundle_sha256: Option<String>,
+    /// Artifact size in bytes
+    #[arg(long, requires_all = ["bundle_uri", "bundle_sha256"])]
+    bundle_size: Option<u64>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -205,16 +235,29 @@ impl RegisterSkillCmd {
         let mut params = serde_json::json!({
             "name": self.name,
             "description": self.description,
-            "capabilities": caps,
+            "required_capabilities": caps,
             "category": self.category,
             "version": self.version,
+            "creator_did": self.creator_did,
         });
 
-        if let Some(ref did) = self.creator_did {
-            params["creator_did"] = serde_json::json!(did);
-        }
         if let Some(ref ep) = self.endpoint {
             params["endpoint"] = serde_json::json!(ep);
+        }
+        if let Some(ref price) = self.price_per_call {
+            params["price_per_call"] = serde_json::json!(price);
+        }
+        if let Some(ref wallet) = self.creator_wallet {
+            params["creator_wallet"] = serde_json::json!(wallet);
+        }
+        if let (Some(uri), Some(sha), Some(size)) =
+            (&self.bundle_uri, &self.bundle_sha256, self.bundle_size)
+        {
+            params["bundle"] = serde_json::json!({
+                "uri": uri,
+                "sha256": sha.trim().to_ascii_lowercase(),
+                "size_bytes": size,
+            });
         }
 
         let result: Result<serde_json::Value> = rpc.call("tenzro_registerSkill", serde_json::json!([params])).await;
@@ -307,7 +350,13 @@ pub struct UseSkillCmd {
     skill_id: String,
     /// Input parameters as JSON (e.g. '{"prompt":"hello"}')
     #[arg(long, default_value = "{}")]
-    params: String,
+    input: String,
+    /// Refuse the invocation unless the registry holds this exact version
+    #[arg(long)]
+    expected_version: Option<String>,
+    /// Refuse the invocation unless the registry holds this exact artifact digest
+    #[arg(long)]
+    expected_sha256: Option<String>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -317,16 +366,22 @@ impl UseSkillCmd {
     pub async fn execute(self) -> Result<()> {
         output::print_header("Use Skill");
 
-        let input_params: serde_json::Value = serde_json::from_str(&self.params)
-            .unwrap_or_else(|_| serde_json::json!({}));
+        let input: serde_json::Value = serde_json::from_str(&self.input)
+            .map_err(|e| anyhow::anyhow!("--input is not valid JSON: {}", e))?;
 
         let spinner = output::create_spinner(&format!("Invoking skill {}...", self.skill_id));
         let rpc = rpc::RpcClient::new(&self.rpc);
 
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "skill_id": self.skill_id,
-            "params": input_params,
+            "input": input,
         });
+        if let Some(ref v) = self.expected_version {
+            params["expected_version"] = serde_json::json!(v);
+        }
+        if let Some(ref h) = self.expected_sha256 {
+            params["expected_sha256"] = serde_json::json!(h);
+        }
 
         let result: Result<serde_json::Value> = rpc.call("tenzro_useSkill", serde_json::json!([params])).await;
         spinner.finish_and_clear();
@@ -441,6 +496,21 @@ pub struct UpdateSkillCmd {
     /// New endpoint
     #[arg(long)]
     endpoint: Option<String>,
+    /// New category
+    #[arg(long)]
+    category: Option<String>,
+    /// New status (active, inactive, deprecated)
+    #[arg(long)]
+    status: Option<String>,
+    /// Republish the artifact locator, e.g. tenzro://blob/<blake3-hex>
+    #[arg(long, requires_all = ["bundle_sha256", "bundle_size"])]
+    bundle_uri: Option<String>,
+    /// Hex SHA-256 of the republished artifact bytes
+    #[arg(long, requires_all = ["bundle_uri", "bundle_size"])]
+    bundle_sha256: Option<String>,
+    /// Republished artifact size in bytes
+    #[arg(long, requires_all = ["bundle_uri", "bundle_sha256"])]
+    bundle_size: Option<u64>,
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -455,6 +525,17 @@ impl UpdateSkillCmd {
         if let Some(ref d) = self.description { params["description"] = serde_json::json!(d); }
         if let Some(ref v) = self.version { params["version"] = serde_json::json!(v); }
         if let Some(ref e) = self.endpoint { params["endpoint"] = serde_json::json!(e); }
+        if let Some(ref c) = self.category { params["category"] = serde_json::json!(c); }
+        if let Some(ref s) = self.status { params["status"] = serde_json::json!(s); }
+        if let (Some(uri), Some(sha), Some(size)) =
+            (&self.bundle_uri, &self.bundle_sha256, self.bundle_size)
+        {
+            params["bundle"] = serde_json::json!({
+                "uri": uri,
+                "sha256": sha.trim().to_ascii_lowercase(),
+                "size_bytes": size,
+            });
+        }
         let _result: serde_json::Value = rpc.call("tenzro_updateSkill", serde_json::json!([params])).await?;
         spinner.finish_and_clear();
         output::print_success("Skill updated!");

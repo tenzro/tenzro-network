@@ -120,3 +120,82 @@ impl tenzro_model::meta_router::BalanceProvider for TnzoBalanceProvider {
         self.token.balance_of(payer_address)
     }
 }
+
+/// Adapts the node's [`TextEmbeddingRuntime`] to the meta-router's
+/// [`tenzro_model::meta_router::PromptEmbedder`].
+///
+/// The runtime is shared with the agent memory tier, so a node that has loaded
+/// an embedding model for either purpose serves both. The model is resolved per
+/// call from whatever is currently loaded rather than pinned at construction:
+/// operators load and unload embedding models through
+/// `tenzro_loadTextEmbeddingModel` at runtime, and routing picks up the change
+/// without a restart.
+///
+/// When no embedding model is loaded this returns an error, which the
+/// meta-router absorbs by routing on declared metadata instead. Difficulty
+/// estimation is an optimization, so an operator who never loads an embedding
+/// model still gets working intent routing.
+pub struct RuntimePromptEmbedder {
+    runtime: Arc<tenzro_model::text_embedding_runtime::TextEmbeddingRuntime>,
+    /// Model to prefer when several are loaded. Falls through to the first
+    /// loaded model when unset or not currently loaded.
+    preferred_model_id: Option<String>,
+}
+
+impl RuntimePromptEmbedder {
+    /// Wraps the node's text-embedding runtime.
+    pub fn new(
+        runtime: Arc<tenzro_model::text_embedding_runtime::TextEmbeddingRuntime>,
+    ) -> Self {
+        Self {
+            runtime,
+            preferred_model_id: None,
+        }
+    }
+
+    /// Pins a preferred embedding model. Routing still works if it is not
+    /// loaded — another loaded model is used instead.
+    #[must_use]
+    pub fn with_preferred_model(mut self, model_id: impl Into<String>) -> Self {
+        self.preferred_model_id = Some(model_id.into());
+        self
+    }
+
+    fn resolve_model(&self) -> Option<String> {
+        if let Some(ref preferred) = self.preferred_model_id
+            && self.runtime.is_loaded(preferred)
+        {
+            return Some(preferred.clone());
+        }
+        // Deterministic pick: the loaded set is a DashMap, so sort so every
+        // prompt lands in the same embedding space for as long as the set is
+        // unchanged.
+        let mut loaded = self.runtime.loaded_models();
+        loaded.sort();
+        loaded.into_iter().next()
+    }
+}
+
+#[async_trait::async_trait]
+impl tenzro_model::difficulty::PromptEmbedder for RuntimePromptEmbedder {
+    async fn embed_prompt(&self, prompt: &str) -> tenzro_model::Result<Vec<f32>> {
+        let model_id = self.resolve_model().ok_or_else(|| {
+            tenzro_model::ModelError::ProviderNotAvailable(
+                "no text-embedding model loaded for route difficulty estimation".to_string(),
+            )
+        })?;
+        let result = self
+            .runtime
+            .embed(
+                &model_id,
+                vec![prompt.to_string()],
+                tenzro_model::text_embedding_runtime::TextEmbedConfig::default(),
+            )
+            .await?;
+        result.embeddings.into_iter().next().ok_or_else(|| {
+            tenzro_model::ModelError::InferenceError(format!(
+                "embedder {model_id} returned no vectors"
+            ))
+        })
+    }
+}

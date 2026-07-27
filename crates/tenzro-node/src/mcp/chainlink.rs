@@ -882,7 +882,7 @@ impl ChainlinkMcpServer {
         };
 
         // Build EIP-1559 transaction envelope
-        // For a real implementation we would: get nonce, estimate gas, sign with the sender_key.
+        // A full implementation would: get nonce, estimate gas, sign with the sender_key.
         // Here we construct the calldata and return the prepared transaction for the user to review.
         let sender_key_bytes = parse_hex(&params.sender_key)?;
         if sender_key_bytes.len() != 32 {

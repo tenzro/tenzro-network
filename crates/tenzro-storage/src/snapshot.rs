@@ -563,8 +563,8 @@ pub fn serialize_snapshot_entries(entries: &[SnapshotEntry]) -> Result<Vec<u8>> 
 /// that the consensus state layer maintains separately and threads in via
 /// `create_snapshot(state_root, ...)`. This helper exists so callers that
 /// don't have an MPT (offline tooling, lightweight snapshots, tests) can
-/// still produce and verify a load-bearing root without falling back to
-/// `Hash::zero()`.
+/// still produce and verify a root that actually binds the entries, without
+/// falling back to `Hash::zero()`.
 pub fn compute_state_root(entries: &[SnapshotEntry]) -> Hash {
     use sha2::{Digest, Sha256};
     const DOMAIN: &[u8] = b"tenzro/snapshot/state-root/v1";

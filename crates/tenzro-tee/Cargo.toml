@@ -65,7 +65,8 @@ aws-nitro = []
 nvidia-gpu = ["reqwest"]
 # Intel Tiber Trust Authority — hosted attestation verification service that
 # returns a signed JWT (EAT profile) after appraising a TDX/SGX/TPM quote.
-# Implies `intel-tdx` because Tiber verifies TDX Quotes end-to-end.
+# Implies `intel-tdx` because Tiber appraises TDX Quotes and needs the TDX
+# quote-collection path to produce them.
 intel-tiber = ["intel-tdx", "jsonwebtoken"]
 all-tees = ["intel-tdx", "amd-sev-snp", "aws-nitro", "nvidia-gpu", "intel-tiber"]
 

@@ -3,8 +3,8 @@
 //! This module centralizes JSON-RPC handlers for four cross-cutting
 //! integrations that layer on top of the core chain RPC surface:
 //!
-//! - **AP2 (Agent Payments Protocol)** — verify `Vdc`-wrapped intent /
-//!   cart mandates, and validate parent-child mandate pairs.
+//! - **AP2 (Agent Payments Protocol)** — verify `Vdc`-wrapped checkout /
+//!   payment mandates, and validate parent-child mandate pairs.
 //! - **ERC-8004 (Trustless Agents Registry)** — build calldata for the
 //!   IdentityRegistry, ReputationRegistry, and ValidationRegistry
 //!   contracts, plus derive canonical `agentId` from a DID.
@@ -68,15 +68,15 @@ pub(crate) async fn handle_ap2_verify_mandate(
     }
 }
 
-/// `tenzro_ap2ValidateMandatePair` — cross-validate a cart mandate
-/// against its parent intent mandate (signatures + scope + expiry +
+/// `tenzro_ap2ValidateMandatePair` — cross-validate a payment mandate
+/// against its parent checkout mandate (signatures + scope + expiry +
 /// principal/agent binding).
 ///
 /// When `enforce_delegation: true` is set, additionally cross-checks the
-/// agent's TDIP `DelegationScope` against the cart total via
+/// agent's TDIP `DelegationScope` against the payment total via
 /// `IdentityRegistry::enforce_operation(agent_did, "payment", total)`.
 /// This is the "TDIP identifies. AP2 authorizes. Tenzro settles." gate
-/// for AP2 carts whose agent is a TDIP machine identity.
+/// for AP2 payments whose agent is a TDIP machine identity.
 ///
 /// Params (AP2 v0.2):
 /// ```json
@@ -259,7 +259,7 @@ pub(crate) async fn handle_ap2_protocol_info(
             "checks": [
                 "spt_resolves_via_stripe_api",
                 "spt_status_active",
-                "spt_usage_limits_max_amount_at_least_cart_total",
+                "spt_usage_limits_max_amount_at_least_payment_total",
                 "spt_usage_limits_currency_matches_payment_asset",
                 "spt_usage_limits_not_expired",
             ],
@@ -1017,7 +1017,7 @@ pub(crate) async fn handle_tempo_protocol_info(
             "mpp_settlement_audit_trail": {
                 "receipt_chain_field": "tempo",
                 "receipt_principal_chain": "records_tempo_tx_hash_for_cross_network_reconciliation",
-                "rationale": "same_mpp_credential_settles_on_tempo_or_native_tenzro_or_other_chain_by_cart_mandate_accepted_chains",
+                "rationale": "same_mpp_credential_settles_on_tempo_or_native_tenzro_or_other_chain_by_checkout_mandate_accepted_chains",
             },
             "eip155_signing": {
                 "function": "TempoParticipant::sign_eip155",
@@ -1065,7 +1065,7 @@ pub(crate) async fn handle_tempo_protocol_info(
 ///    a. **TDIP DelegationScope** (structural — `enforce_operation`)
 ///    b. **Runtime SpendingPolicy** (daily window — `SpendingPolicySnapshot`)
 ///    c. **Stripe SPT `usage_limits`** (per-token cap — `SptCeilingSnapshot`)
-///    d. **AP2 cart-mandate `cart_total`** (when wrapped in an AP2 envelope)
+///    d. **AP2 payment mandate `total_amount`** (when wrapped in an AP2 envelope)
 ///    The four-ceiling check is implemented by
 ///    `IdentityPaymentBinder::validate_payer_with_spt`.
 /// 3. **ERC-8004 reputation cross-write** — settled SPTs surface on the
@@ -1133,7 +1133,7 @@ pub(crate) async fn handle_stripe_spt_protocol_info(
                     "tdip_delegation_scope",
                     "runtime_spending_policy",
                     "stripe_spt_usage_limits",
-                    "ap2_cart_mandate_total",
+                    "ap2_payment_mandate_total",
                 ],
                 "rationale": "every confirm_intent_with_spt call clears all four; violation of any ceiling rejects the confirm before stripe is contacted",
             },
@@ -1182,7 +1182,7 @@ pub(crate) async fn handle_stripe_spt_protocol_info(
 ///
 /// This is the **operator-driven entry point** for SPT-sourced
 /// revocation. The HMAC-verified webhook receive endpoint (axum route)
-/// will land in a follow-up wave; until then operators can drive the
+/// is not implemented yet; until then operators can drive the
 /// cascade by hand from a verified webhook payload — useful for
 /// retrying a missed webhook delivery or replaying historical
 /// deactivations into a freshly-restarted node.
@@ -1287,7 +1287,7 @@ pub(crate) async fn handle_process_spt_granted_token_deactivated(
 ///
 /// This is the **operator-driven entry point** for SPT-sourced
 /// reputation. The HMAC-verified webhook receive endpoint (axum route)
-/// will land in a follow-up wave; until then operators can drive the
+/// is not implemented yet; until then operators can drive the
 /// cross-write by hand from a verified webhook payload — useful for
 /// retrying a missed delivery or replaying historical outcomes into a
 /// freshly-restarted node.
@@ -5428,7 +5428,7 @@ pub(crate) async fn handle_redeem_stable_asset(
 // =============================================================================
 // Wire protocol-primitive features as live RPC handlers
 //
-// The five library modules shipped in this session — ERC-7943 uRWA,
+// Five library modules — ERC-7943 uRWA,
 // IVMS101 Travel Rule, attested-clock + idempotency primitives in
 // tenzro-workflow, A2A v1.0 SignedAgentCard, Wormhole NTT scaffolding —
 // previously had no RPC surface. These handlers expose them so the
@@ -5919,10 +5919,10 @@ pub(crate) async fn handle_list_bridge_sponsorship_pools(
 /// In production, the oracle inside `WiredBridgeFeeSurface` is a
 /// `GovernanceSetFeeOracle` (or a `ChainlinkFeedFeeOracle` whose
 /// fallback is one). Until the dyn-cast machinery for hot-swapping
-/// the inner oracle ships, this RPC returns a structural response
+/// the inner oracle exists, this RPC returns a structural response
 /// describing what would be set; the operator is expected to bind
 /// rates at node-startup config until the live mutation path is
-/// wired in a subsequent wave.
+/// wired.
 pub(crate) async fn handle_set_bridge_fee_rate(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -5968,7 +5968,7 @@ pub(crate) async fn handle_set_bridge_fee_rate(
         "valid_window_ms": req.valid_window_ms,
         "status": "accepted",
         "note": "Governance row written to in-memory oracle table; \
-                 production wave will mirror to CF_TOKENS / bridge_fee_rate:* \
+                 durable persistence will mirror to CF_TOKENS / bridge_fee_rate:* \
                  and broadcast over tenzro/governance gossipsub.",
     }))
 }
@@ -6102,7 +6102,7 @@ pub(crate) async fn handle_set_sponsorship_refill_threshold(
         "adapter": adapter.as_str(),
         "refill_threshold_bps": req.refill_threshold_bps,
         "status": "accepted",
-        "note": "Refill threshold persisted in-memory; production wave \
+        "note": "Refill threshold persisted in-memory; durable persistence \
                  mirrors to CF_TOKENS / bridge_sponsorship_refill:* and \
                  triggers auto-rebalance from the network treasury.",
     }))
@@ -6329,7 +6329,7 @@ pub(crate) async fn handle_keri_build_inception(
 
 /// `tenzro_mpcPresignStats` — pre-signing pool stats. Returns an empty
 /// array until per-group pools are constructed by the node-layer threshold
-/// signer wave.
+/// signer.
 pub(crate) async fn handle_mpc_presign_stats(
     _node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -6338,7 +6338,7 @@ pub(crate) async fn handle_mpc_presign_stats(
 
 /// `tenzro_mpcPkrStatus` — PKR scheduler snapshots. Returns an empty array
 /// until per-group schedulers are constructed by the node-layer threshold
-/// signer wave.
+/// signer.
 pub(crate) async fn handle_mpc_pkr_status(
     _node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {

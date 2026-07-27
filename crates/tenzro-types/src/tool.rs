@@ -11,13 +11,13 @@
 //! Three transport modes are supported for MCP servers:
 //!
 //! - `mcp` — remote MCP over JSON-RPC 2.0 Streamable HTTP (POST). This is
-//!   how hosted MCPs ship today (Anthropic-hosted MCPs, partner MCPs).
+//!   how hosted MCPs are distributed today (Anthropic-hosted MCPs, partner MCPs).
 //! - `mcp-stdio` — local MCP subprocess. The operator declares the
 //!   command + args + env vars in `spawn_spec`; the node spawns and
 //!   supervises the subprocess and speaks JSON-RPC over stdin/stdout.
-//!   This is how most third-party MCPs ship (Stripe MCP, GitHub MCP,
+//!   This is how most third-party MCPs are distributed (Stripe MCP, GitHub MCP,
 //!   Notion MCP, Linear MCP, Slack MCP, etc.).
-//! - `mcp-sse` — legacy SSE transport. Some older MCPs still ship this.
+//! - `mcp-sse` — legacy SSE transport. Some older MCPs still use this.
 //!
 //! For all three modes, the operator's upstream credentials (their
 //! Stripe secret, OpenAI key, etc.) are injected into the MCP via

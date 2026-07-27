@@ -47,7 +47,7 @@
 //!
 //! // Calculate pricing
 //! let pricing_engine = PricingEngine::new();
-//! // let cost = pricing_engine.calculate_cost(&pricing_config, &metadata)?;
+//! // let cost = pricing_engine.calculate_cost(&model_id, &pricing_config, &metadata)?;
 //!
 //! # Ok(())
 //! # }
@@ -114,6 +114,7 @@ pub mod batching;
 pub mod catalog;
 pub mod cluster;
 pub mod detection_runtime;
+pub mod difficulty;
 pub mod download;
 pub mod external_engine;
 pub mod gguf_shape;
@@ -220,7 +221,7 @@ pub use hf_download::{
 };
 pub use runtime::{
     ChatMessage, ChatWithToolsResult, GenerationConfig, HardwareInfo, InferenceResult,
-    ModelRuntime, ToolCall, ToolDefinition,
+    ModelRuntime, StopReason, ToolCall, ToolDefinition,
 };
 pub use batching::{BatchEngine, BatchRequest};
 pub use toploc::{
@@ -238,7 +239,7 @@ pub use ts_runtime::{
 };
 pub use vision_runtime::{
     GenericImageEncoder, ImageEmbedConfig, ImageEmbedResult, ImageEncoder, ImageNormalization,
-    VisionRuntime, cosine_similarity,
+    VisionRuntime, cosine_similarity, image_dimensions,
 };
 pub use text_embedding_runtime::{
     GenericTextEncoder, StubTextEncoder, TextEmbedConfig, TextEmbedResult, TextEmbeddingRuntime,

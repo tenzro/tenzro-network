@@ -600,6 +600,71 @@ impl TnzoToken {
         Ok(())
     }
 
+    /// Books gas fees the executor has already debited from payers.
+    ///
+    /// The VM subtracts `gas_price * gas_used` from the sender's balance and
+    /// credits nobody, so without this call the TNZO leaves circulation
+    /// without leaving `total_supply` — the books drift by exactly the gas
+    /// collected on every block. This settles that gap:
+    ///
+    /// * `to_treasury` is credited to `treasury` with **no** mint, because the
+    ///   tokens already exist and are already out of the payer's balance.
+    /// * `burned` decrements `total_supply` and increments `total_burned`
+    ///   without touching any balance, for the same reason.
+    ///
+    /// The split between the two comes from the fee market's adaptive burn
+    /// dial, which is the authoritative basis for the movement.
+    pub fn settle_collected_fees(
+        &self,
+        treasury: &Address,
+        to_treasury: u128,
+        burned: u128,
+    ) -> Result<()> {
+        if to_treasury == 0 && burned == 0 {
+            return Ok(());
+        }
+
+        if to_treasury > 0 {
+            let balance = self.balance_of(treasury);
+            let new_balance =
+                balance
+                    .checked_add(to_treasury)
+                    .ok_or_else(|| TokenError::ArithmeticOverflow {
+                        operation: "fee treasury credit".to_string(),
+                    })?;
+            self.balances.insert(*treasury, new_balance);
+            self.persist_balance(treasury, new_balance)?;
+        }
+
+        if burned > 0 {
+            let mut supply = self.total_supply.write();
+            *supply = supply
+                .checked_sub(burned)
+                .ok_or_else(|| TokenError::ArithmeticOverflow {
+                    operation: "fee burn supply decrease".to_string(),
+                })?;
+            let new_supply = *supply;
+            drop(supply);
+
+            let mut total_burned = self.total_burned.write();
+            *total_burned =
+                total_burned
+                    .checked_add(burned)
+                    .ok_or_else(|| TokenError::ArithmeticOverflow {
+                        operation: "fee burn total increase".to_string(),
+                    })?;
+            drop(total_burned);
+
+            self.persist_supply(new_supply)?;
+        }
+
+        debug!(
+            "Settled collected fees: {} to treasury {}, {} burned",
+            to_treasury, treasury, burned
+        );
+        Ok(())
+    }
+
     /// Returns the total supply of TNZO
     pub fn total_supply(&self) -> u128 {
         *self.total_supply.read()

@@ -12,8 +12,8 @@
 //!   Carries `usage_limits`, last-four, brand. Confirmed via PaymentIntent
 //!   with `payment_method_data[shared_payment_granted_token]=spt_…`.
 //!
-//! `usage_limits` is the load-bearing field: `{ currency, max_amount,
-//! expires_at }`. Stripe enforces its copy at PaymentIntent confirm time;
+//! `usage_limits` is the field that carries the spend ceiling: `{ currency,
+//! max_amount, expires_at }`. Stripe enforces its copy at PaymentIntent confirm time;
 //! Tenzro's [`SptCeilingResolver`] enforces a TDIP-rooted copy alongside
 //! [`DelegationScope`] and [`SpendingPolicy`] — **whichever is stricter wins**.
 //!
@@ -44,8 +44,8 @@
 //! - **Four-ceiling enforcement.** [`SptCeilingResolver`] sits alongside
 //!   [`SpendingPolicyResolver`] in [`IdentityPaymentBinder`]. The four
 //!   ceilings are: `DelegationScope` (structural), runtime `SpendingPolicy`
-//!   (daily window), Stripe SPT `usage_limits` (per-token cap), and AP2
-//!   cart-mandate cart_total.
+//!   (daily window), Stripe SPT `usage_limits` (per-token cap), and the AP2
+//!   payment mandate's `total_amount`.
 //! - **ERC-8004 reputation cross-write.** SPT outcomes —
 //!   [`SptOutcome::Succeeded`] / [`SptOutcome::Disputed`] /
 //!   [`SptOutcome::ChargebackWon`] / [`SptOutcome::ChargebackLost`] — fan
@@ -239,8 +239,8 @@ impl SptOutcome {
 
 /// Stripe SPT-specific webhook event types.
 ///
-/// The `shared_payment.*` event family is documented; specific suffixes
-/// may shift before GA. This enum covers the four lifecycle states plus
+/// The `shared_payment.*` event family is documented upstream; specific
+/// suffixes track Stripe's spec. This enum covers the four lifecycle states plus
 /// the four downstream PaymentIntent / Charge settlement-outcome events
 /// that feed the ERC-8004 [`ReputationRegistry`] cross-write at precompile
 /// `0x101b`.

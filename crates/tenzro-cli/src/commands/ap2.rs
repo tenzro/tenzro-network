@@ -18,7 +18,7 @@ pub enum Ap2Command {
     VerifyMandate(Ap2VerifyMandateCmd),
     /// Cross-validate a PaymentMandate against its parent CheckoutMandate
     ValidatePair(Ap2ValidatePairCmd),
-    /// List persisted intent/cart mandate pairs for a controller DID
+    /// List persisted checkout/payment mandate pairs for a controller DID
     ListMandates(Ap2ListMandatesCmd),
     /// Print AP2 protocol metadata (version, signing alg, kinds)
     Info(Ap2InfoCmd),
@@ -235,8 +235,7 @@ impl Ap2ValidatePairCmd {
     }
 }
 
-/// Print AP2 protocol metadata
-/// List persisted intent/cart mandate pairs authorized by a controller DID.
+/// List persisted checkout/payment mandate pairs authorized by a controller DID.
 ///
 /// Calls `tenzro_listMandates` and prints the stored records — each carrying
 /// the mandate id, payment-mandate id, the controller/agent/merchant DIDs,
@@ -269,6 +268,8 @@ impl Ap2ListMandatesCmd {
     }
 }
 
+/// Print AP2 protocol metadata — version, signing algorithm, recognized
+/// mandate kinds, and the nested ceilings the validator enforces.
 #[derive(Debug, Parser)]
 pub struct Ap2InfoCmd {
     /// RPC endpoint

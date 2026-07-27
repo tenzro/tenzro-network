@@ -1,5 +1,5 @@
 """
-Task marketplace settlement cycle — end-to-end against the live testnet.
+Task marketplace settlement cycle — run in full against the live testnet.
 
 Walks through the full money-moving path using the OpenClaw Python
 wrappers:

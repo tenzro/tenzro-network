@@ -1,15 +1,48 @@
 //! Canton MCP Server — Model Context Protocol tools for Canton Network / DAML integration
 //!
-//! Provides 14 MCP tools for interacting with a Canton participant node:
+//! Provides 23 MCP tools for interacting with a Canton participant node:
 //! - DAML contract management (submit, query, events, transactions)
-//! - Party management (allocate, list)
-//! - Canton network info (domains, health)
+//! - Party management (allocate, list, grant/list user rights)
+//! - Canton network info (domains, health, connected synchronizers)
 //! - CIP-56 Canton Coin token operations (balance, transfer)
 //! - Tokenization (asset creation, DvP settlement)
-//! - Administration (DAR upload, fee schedule)
+//! - Administration (DAR upload, fee schedule, synchronizer reconnect,
+//!   identity-provider config, per-key analytics)
 //!
 //! All tools communicate with the Canton JSON Ledger API v2 and Admin API
 //! via HTTP/JSON using reqwest.
+//!
+//! # Authorization
+//!
+//! Every tool reaches Canton on the operator's own bearer credential (see
+//! [`CantonMcpServer::ledger_request`]) — this server has no per-tenant JWT
+//! path. Authorization therefore happens entirely in-process, against the
+//! `tnz_...` key the caller presents, and splits three ways:
+//!
+//! - **Operator-only** ([`require_operator_key`]): participant administration.
+//!   Installing DAML packages, allocating parties, granting act-as/read-as
+//!   rights, enumerating every tenant's parties and packages, reading across
+//!   every tenant's analytics, reconfiguring identity providers, mutating
+//!   synchronizer connectivity. Reserved for
+//!   [`KeyClass::OperatorProtected`](crate::api_key::KeyClass) /
+//!   `OperatorInternal`.
+//! - **Party-delegated** ([`require_party`]): every tool that names a Canton
+//!   party. Because the party arrives in tool arguments and the credential is
+//!   the operator's, an ungated tool would let a developer act as the
+//!   operator's party or another tenant's. A
+//!   [`KeyClass::Subject`](crate::api_key::KeyClass) caller must carry the
+//!   party on the matching delegation list, which is fail-closed — an empty
+//!   list authorizes nothing.
+//! - **Open to any Canton-scoped key**: participant status a developer needs
+//!   to check reachability and cost without holding a party — domains, health,
+//!   fee schedule — plus the self-scoped `canton_get_my_analytics`.
+//!
+//! The [`require_canton_api_key`] middleware authorizes against a fixed
+//! stand-in method name because it runs above MCP's own JSON-RPC envelope and
+//! never sees the tool name. That is why the split is enforced per tool here
+//! rather than in the middleware, and why the middleware scopes the key's
+//! [`RequestKeyContext`](crate::api_key::RequestKeyContext) — identity, tier,
+//! class, party delegation — for the tools to read.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -202,10 +235,7 @@ pub struct CantonListUserRightsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CantonGetMyAnalyticsParams {
-    #[schemars(
-        description = "Your API key handle (`key_id`, 16-hex prefix of the SHA-256 of the plaintext key). Returned alongside the plaintext when the operator mints the key; cache it for analytics self-reads."
-    )]
-    pub key_id: String,
+    // No parameters — the tenant is the presenting API key.
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -219,7 +249,7 @@ pub struct CantonListApiKeyAnalyticsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CantonWatchPartyParams {
     #[schemars(
-        description = "Fully-qualified party id (`<hint>::<participant-hash>`) to watch. The MCP server is operator-scoped, so any party reachable from the operator's participant credential is accessible."
+        description = "Fully-qualified party id (`<hint>::<participant-hash>`) to watch. Must be on the presenting API key's read-as or act-as delegation list."
     )]
     pub party: String,
     #[schemars(description = "DAML template ids to filter the active-contract set by. At least one is required.")]
@@ -262,6 +292,83 @@ fn err_invalid_params(msg: impl Into<String>) -> ErrorData {
     }
 }
 
+/// Refuses the call when the presenting key's tier is read-only.
+///
+/// The JSON-RPC gate classifies writes by method name via
+/// `api_key::is_gated_write_method`. That is not reachable here: the MCP gate
+/// runs above MCP's own JSON-RPC envelope, so it never learns which tool the
+/// body names. Each write tool therefore checks the tier itself.
+///
+/// Absent a tier (no key scoped the request — an internal call path) the
+/// write proceeds; the network gate above is what keeps tenants out.
+fn require_write_tier() -> std::result::Result<(), ErrorData> {
+    match crate::api_key::current_key_context() {
+        Some(ctx) if !ctx.tier.allows_write() => Err(err_invalid_params(format!(
+            "API key tier '{}' is read-only; a write tier is required for this tool",
+            ctx.tier.as_str()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Refuses the call unless the presenting key is one of the operator's own.
+///
+/// Participant administration — installing DAML packages, allocating parties,
+/// granting act-as/read-as rights, enumerating every tenant's parties and
+/// packages, reading the operator's own holdings, configuring identity
+/// providers — belongs to whoever runs the participant. A key issued to an
+/// external developer ([`KeyClass::Subject`]) rents party-scoped access to
+/// that participant; it is not an administrator of it.
+///
+/// Fail-closed on `None`, unlike [`require_write_tier`]: every tool reached
+/// through this server passes the api-key gate, which always scopes a context.
+/// A missing context therefore means the scope was not installed, and treating
+/// that as operator authority would turn a wiring defect into an escalation.
+fn require_operator_key() -> std::result::Result<(), ErrorData> {
+    match crate::api_key::current_key_context() {
+        Some(ctx) if ctx.is_operator() => Ok(()),
+        _ => Err(err_invalid_params(
+            "Unauthorized: this tool administers the Canton participant and is reserved for the \
+             operator. An API key issued to a developer authorizes party-scoped ledger access \
+             only.",
+        )),
+    }
+}
+
+/// Refuses the call unless the presenting key is delegated the named party.
+///
+/// Every tool on this server reaches Canton on the operator's bearer
+/// credential (see [`CantonMcpServer::ledger_request`]). The party therefore
+/// comes entirely from tool arguments, so without this check a developer could
+/// name the operator's party — or another tenant's — and Canton would accept
+/// it. Authorization has to happen here.
+///
+/// Operator-class keys pass: the credential is theirs. A `Subject` key must
+/// carry the party on the matching delegation list, which is fail-closed —
+/// an empty list, or an absent context, authorizes nothing.
+fn require_party(party_fq: &str, write: bool) -> std::result::Result<(), ErrorData> {
+    let allowed = match crate::api_key::current_key_context() {
+        Some(ctx) if ctx.is_operator() => true,
+        Some(ctx) if write => ctx.allows_act_as(party_fq),
+        Some(ctx) => ctx.allows_read_as(party_fq),
+        None => false,
+    };
+    if allowed {
+        return Ok(());
+    }
+    Err(err_invalid_params(format!(
+        "Unauthorized: this API key is not delegated {} party `{}`. Ask the operator to reissue \
+         the key with the party on its {} list.",
+        if write { "act-as on" } else { "read-as on" },
+        party_fq,
+        if write {
+            "can_act_as_parties"
+        } else {
+            "can_read_as_parties"
+        },
+    )))
+}
+
 fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
     Ok(Json(RpcPassthroughOutput { result: value }))
 }
@@ -278,39 +385,63 @@ fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthrou
 
 // ─── Canton MCP Server ───
 
-/// Canton MCP Server providing 14 tools for Canton Network / DAML interaction.
+/// One Canton participant this server can reach.
 ///
-/// Communicates with a Canton participant node via:
-/// - JSON Ledger API v2 — `ledger_api_url` is the BASE url (e.g.
-///   `https://json.canton.example-operator.invalid`); request paths append `/v2/...`
-/// - Admin API (e.g. `https://admin.devnet.tenzro.xyz`)
+/// The operator declares one of these per Canton network they serve. Which
+/// one a given MCP call uses is decided by the presenting API key, never by
+/// the caller alone — see [`CantonMcpServer::endpoint`].
+#[derive(Clone)]
+pub struct CantonEndpoint {
+    /// Canton JSON Ledger API base URL. Request paths append `/v2/...`, so
+    /// this must NOT already end in `/v2`.
+    pub ledger_api_url: String,
+    /// Canton Admin API base URL.
+    pub admin_api_url: String,
+    /// Static bearer JWT. Honoured only when [`Self::token_provider`] is
+    /// absent.
+    pub jwt_token: Option<String>,
+    /// OAuth2 client-credentials token provider. Takes precedence over
+    /// [`Self::jwt_token`].
+    pub token_provider: Option<Arc<CantonTokenProvider>>,
+}
+
+impl std::fmt::Debug for CantonEndpoint {
+    /// Redacts `jwt_token`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CantonEndpoint")
+            .field("ledger_api_url", &self.ledger_api_url)
+            .field("admin_api_url", &self.admin_api_url)
+            .field("jwt_token", &self.jwt_token.as_ref().map(|_| "<redacted>"))
+            .field("oauth", &self.token_provider.is_some())
+            .finish()
+    }
+}
+
+/// Canton MCP Server providing tools for Canton Network / DAML interaction.
 ///
-/// Authentication precedence:
-/// 1. If a [`CantonTokenProvider`] is attached via [`with_token_provider`],
-///    every request fetches a cached bearer JWT via the OAuth2 client-
-///    credentials flow. This is the Tenzro devnet path.
-/// 2. Otherwise falls back to a static `jwt_token` configured via
-///    [`with_jwt_token`]. This is the local / unauth path.
+/// The server fronts one participant per Canton network the operator serves.
+/// Every tool resolves its participant through [`Self::endpoint`], which
+/// reads the network the api-key gate authorized for this request out of
+/// [`crate::canton_network`] — the same task-local the JSON-RPC surface
+/// uses. A key authorized for mainnet alone therefore cannot reach the
+/// devnet participant through MCP, and vice versa.
+///
+/// Authentication precedence, per network:
+/// 1. The endpoint's [`CantonTokenProvider`], which fetches a cached bearer
+///    JWT via the OAuth2 client-credentials flow.
+/// 2. Otherwise the endpoint's static `jwt_token`.
 #[derive(Clone)]
 pub struct CantonMcpServer {
-    /// Canton JSON Ledger API base URL (e.g. "https://json.canton.example-operator.invalid")
-    ledger_api_url: String,
-    /// Canton Admin API base URL (e.g. "https://admin.devnet.tenzro.xyz")
-    admin_api_url: String,
-    /// Optional static JWT token (used only when no token provider is attached).
-    jwt_token: Option<String>,
-    /// Optional OAuth2 client-credentials token provider.
-    token_provider: Option<Arc<CantonTokenProvider>>,
+    /// Participants this server can reach, keyed by network.
+    endpoints: std::collections::BTreeMap<crate::config::CantonNetwork, CantonEndpoint>,
+    /// Network used when the request did not resolve one.
+    default_network: crate::config::CantonNetwork,
     /// Optional handle to the host node's per-tenant Canton analytics
     /// store. Wired by [`crate::mcp::server`] at boot when the node
     /// hosts this MCP server in-process; absent when the MCP runs
     /// stand-alone against an external Canton participant. Surfaces
     /// `canton_get_my_analytics` / `canton_list_api_key_analytics`.
     analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
-    /// Optional handle to the host node's API-key manager. Required by
-    /// `canton_get_my_analytics` so the MCP can resolve the presented
-    /// API key to its `key_id`.
-    api_keys: Option<Arc<crate::api_key::ApiKeyManager>>,
     /// HTTP client for API calls
     http: reqwest::Client,
     /// Tool router
@@ -326,25 +457,23 @@ impl Default for CantonMcpServer {
 impl std::fmt::Debug for CantonMcpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CantonMcpServer")
-            .field("ledger_api_url", &self.ledger_api_url)
-            .field("admin_api_url", &self.admin_api_url)
+            .field("endpoints", &self.endpoints)
+            .field("default_network", &self.default_network)
             .finish()
     }
 }
 
 #[tool_router]
 impl CantonMcpServer {
-    /// Create a new Canton MCP server. URLs default to the Tenzro-operated
-    /// Canton devnet. Override with [`with_ledger_api_url`] /
-    /// [`with_admin_api_url`] for self-hosted participants.
+    /// Create a new Canton MCP server with no participants configured.
+    /// Fails closed: until the operator registers at least one network via
+    /// [`Self::with_network`], every tool errors. Participants come from the
+    /// node's `CantonConfig` — there is no built-in default host.
     pub fn new() -> Self {
         Self {
-            ledger_api_url: "https://json.canton.example-operator.invalid".to_string(),
-            admin_api_url: "https://admin.devnet.tenzro.xyz".to_string(),
-            jwt_token: None,
-            token_provider: None,
+            endpoints: std::collections::BTreeMap::new(),
+            default_network: crate::config::CantonNetwork::default(),
             analytics: None,
-            api_keys: None,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -353,58 +482,75 @@ impl CantonMcpServer {
         }
     }
 
-    /// Wires the in-process analytics + api-key managers so analytics
-    /// tools can serve answers without an extra hop through the
-    /// node's JSON-RPC. Idempotent — pass `None` to clear.
+    /// Wires the in-process analytics manager so the analytics tools can serve
+    /// answers without an extra hop through the node's JSON-RPC. Idempotent —
+    /// pass `None` to clear.
+    ///
+    /// No api-key manager handle: the presenting key's identity arrives through
+    /// [`crate::api_key::current_key_context`], set by the gate middleware, so
+    /// a tool never needs to look a key up.
     pub fn with_node_state(
         mut self,
         analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
-        api_keys: Option<Arc<crate::api_key::ApiKeyManager>>,
     ) -> Self {
         self.analytics = analytics;
-        self.api_keys = api_keys;
         self
     }
 
-    /// Create with custom JSON Ledger API URL.
-    pub fn with_ledger_api_url(mut self, url: impl Into<String>) -> Self {
-        self.ledger_api_url = url.into();
+    /// Register the participant for one Canton network.
+    pub fn with_network(
+        mut self,
+        net: crate::config::CantonNetwork,
+        endpoint: CantonEndpoint,
+    ) -> Self {
+        self.endpoints.insert(net, endpoint);
         self
     }
 
-    /// Create with custom Admin API URL.
-    pub fn with_admin_api_url(mut self, url: impl Into<String>) -> Self {
-        self.admin_api_url = url.into();
-        self
-    }
-
-    /// Set static JWT authentication token. Used only when no token provider
-    /// is attached.
-    pub fn with_jwt_token(mut self, token: impl Into<String>) -> Self {
-        self.jwt_token = Some(token.into());
-        self
-    }
-
-    /// Attach an OAuth2 client-credentials token provider. Required for the
-    /// Tenzro-operated Canton devnet.
-    pub fn with_token_provider(mut self, provider: Arc<CantonTokenProvider>) -> Self {
-        self.token_provider = Some(provider);
+    /// Set the network used when a request resolved none.
+    pub fn with_default_network(mut self, net: crate::config::CantonNetwork) -> Self {
+        self.default_network = net;
         self
     }
 
     // ─── Internal helpers ───
 
+    /// Resolve the participant for the current request.
+    ///
+    /// The network comes from [`crate::canton_network`], which the api-key
+    /// gate scopes to whatever the presenting key authorized. Falling back
+    /// to [`Self::default_network`] is safe: the gate only leaves the slot
+    /// empty when the key authorizes several networks and named none, and it
+    /// refuses outright when the key authorizes none.
+    fn endpoint(&self) -> std::result::Result<&CantonEndpoint, ErrorData> {
+        let net = crate::canton_network::current().unwrap_or(self.default_network);
+        self.endpoints.get(&net).ok_or_else(|| {
+            let served = self
+                .endpoints
+                .keys()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            err_internal(format!(
+                "Canton network '{}' is not served by this node (serves: {})",
+                net,
+                if served.is_empty() { "none" } else { &served }
+            ))
+        })
+    }
+
     /// Resolve the bearer JWT for outgoing requests. Prefers the
     /// [`CantonTokenProvider`] (OAuth2 client-credentials) when attached,
     /// falls back to a static configured token.
     async fn resolve_bearer(&self) -> std::result::Result<Option<String>, ErrorData> {
-        if let Some(ref provider) = self.token_provider {
+        let ep = self.endpoint()?;
+        if let Some(ref provider) = ep.token_provider {
             let token = provider.bearer().await.map_err(|e| {
                 err_internal(format!("Canton auth: token refresh failed: {}", e))
             })?;
             return Ok(Some(token));
         }
-        Ok(self.jwt_token.clone())
+        Ok(ep.jwt_token.clone())
     }
 
     /// Build an authenticated request to the JSON Ledger API v2.
@@ -413,7 +559,7 @@ impl CantonMcpServer {
         method: reqwest::Method,
         endpoint: &str,
     ) -> std::result::Result<reqwest::RequestBuilder, ErrorData> {
-        let url = format!("{}/v2{}", self.ledger_api_url, endpoint);
+        let url = format!("{}/v2{}", self.endpoint()?.ledger_api_url, endpoint);
         let mut builder = self.http.request(method, url);
         if let Some(token) = self.resolve_bearer().await? {
             builder = builder.bearer_auth(token);
@@ -427,7 +573,7 @@ impl CantonMcpServer {
         method: reqwest::Method,
         endpoint: &str,
     ) -> std::result::Result<reqwest::RequestBuilder, ErrorData> {
-        let url = format!("{}{}", self.admin_api_url, endpoint);
+        let url = format!("{}{}", self.endpoint()?.admin_api_url, endpoint);
         let mut builder = self.http.request(method, url);
         if let Some(token) = self.resolve_bearer().await? {
             builder = builder.bearer_auth(token);
@@ -601,6 +747,8 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonSubmitCommandParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_write_tier()?;
+        require_party(&params.act_as, true)?;
         // Parse arguments JSON string into a Value
         let arguments: serde_json::Value = serde_json::from_str(&params.arguments)
             .map_err(|e| err_invalid_params(format!("Invalid JSON arguments: {}", e)))?;
@@ -678,6 +826,7 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonListContractsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_party(&params.party, false)?;
         // Canton 3.5+ requires `activeAtOffset` as a JSON number — null
         // / empty-string get rejected with HTTP 400. Fetch the current
         // ledger-end first.
@@ -726,12 +875,9 @@ impl CantonMcpServer {
 
     /// Helper: fetch the participant's current ledger-end offset.
     async fn fetch_ledger_end_offset(&self) -> std::result::Result<i64, ErrorData> {
-        let url = format!("{}/v2/state/ledger-end", self.ledger_api_url);
-        let mut builder = self.http.get(&url);
-        if let Some(ref token) = self.jwt_token {
-            builder = builder.bearer_auth(token);
-        }
-        let resp = builder
+        let resp = self
+            .ledger_request(reqwest::Method::GET, "/state/ledger-end")
+            .await?
             .send()
             .await
             .map_err(|e| err_internal(format!("Canton ledger-end fetch failed: {}", e)))?;
@@ -754,6 +900,9 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonGetEventsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        for party in &params.requesting_parties {
+            require_party(party, false)?;
+        }
         let body = serde_json::json!({
             "contractId": params.contract_id,
             "requestingParties": params.requesting_parties,
@@ -775,6 +924,9 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonGetTransactionParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        for party in &params.requesting_parties {
+            require_party(party, false)?;
+        }
         // Canton 3.5 unified the per-id update lookup at /v2/updates/update-by-id.
         // Both transaction-by-id and transaction-tree-by-id were removed.
         let body = serde_json::json!({
@@ -797,11 +949,13 @@ impl CantonMcpServer {
     //  2. Party Management
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Allocate a new party on the Canton participant node. Returns the fully-qualified party identifier (name::fingerprint) for use in DAML commands and queries.")]
+    #[tool(description = "Operator-only. Allocate a new party on the Canton participant node. Returns the fully-qualified party identifier (name::fingerprint) for use in DAML commands and queries.")]
     async fn canton_allocate_party(
         &self,
         Parameters(params): Parameters<CantonAllocatePartyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_operator_key()?;
+        require_write_tier()?;
         // Canton 3.5: party allocation moved to POST /v2/parties.
         // The `displayName` field was removed; only `partyIdHint` is supported.
         let body = serde_json::json!({
@@ -826,11 +980,13 @@ impl CantonMcpServer {
         }))
     }
 
-    #[tool(description = "List all known parties on the Canton participant node. Returns party identifiers and hosting participant information.")]
+    #[tool(description = "Operator-only. List all known parties on the Canton participant node. Returns party identifiers and hosting participant information.")]
     async fn canton_list_parties(
         &self,
         #[allow(unused)] Parameters(_params): Parameters<CantonListPartiesParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        // Enumerates every tenant's parties, not just the caller's.
+        require_operator_key()?;
         // Canton 3.5: GET /v2/parties replaces POST /v2/party-management/list-known-parties.
         let response = self
             .ledger_get("/parties")
@@ -847,12 +1003,17 @@ impl CantonMcpServer {
     }
 
     #[tool(
-        description = "Grant CanActAs / CanReadAs rights on a Canton party to a user (Canton 3.5+ User Management Service, CIP-26). Required before a user can submit DAML commands on behalf of a newly-allocated party. Pass user_id=null to grant to the operator's own OAuth user. The `party` argument must be the fully-qualified party id."
+        description = "Operator-only. Grant CanActAs / CanReadAs rights on a Canton party to a user (Canton 3.5+ User Management Service, CIP-26). Required before a user can submit DAML commands on behalf of a newly-allocated party. Pass user_id=null to grant to the operator's own OAuth user. The `party` argument must be the fully-qualified party id."
     )]
     async fn canton_grant_user_rights(
         &self,
         Parameters(params): Parameters<CantonGrantUserRightsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        // Grants act-as on an arbitrary party to an arbitrary user, so a
+        // tenant reaching it could authorize itself over another tenant's
+        // party.
+        require_operator_key()?;
+        require_write_tier()?;
         if !params.can_act_as && !params.can_read_as {
             return Err(err_invalid_params(
                 "at least one of can_act_as / can_read_as must be true",
@@ -862,7 +1023,7 @@ impl CantonMcpServer {
         // `<client_id>@clients` user.
         let user_id = match params.user_id {
             Some(u) => u,
-            None => match self.token_provider.as_ref() {
+            None => match self.endpoint()?.token_provider.as_ref() {
                 Some(p) => format!("{}@clients", p.client_id()),
                 None => {
                     return Err(err_invalid_params(
@@ -898,15 +1059,17 @@ impl CantonMcpServer {
     }
 
     #[tool(
-        description = "List the rights granted to a Canton user via the User Management Service (CIP-26). Returns `{rights:[{kind:{CanActAs|CanReadAs:{value:{party}}}}, ...]}`. Pass user_id=null for the operator's own user."
+        description = "Operator-only. List the rights granted to a Canton user via the User Management Service (CIP-26). Returns `{rights:[{kind:{CanActAs|CanReadAs:{value:{party}}}}, ...]}`. Pass user_id=null for the operator's own user."
     )]
     async fn canton_list_user_rights(
         &self,
         Parameters(params): Parameters<CantonListUserRightsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        // Reads any user's rights, including other tenants'.
+        require_operator_key()?;
         let user_id = match params.user_id {
             Some(u) => u,
-            None => match self.token_provider.as_ref() {
+            None => match self.endpoint()?.token_provider.as_ref() {
                 Some(p) => format!("{}@clients", p.client_id()),
                 None => {
                     return Err(err_invalid_params(
@@ -921,23 +1084,36 @@ impl CantonMcpServer {
     }
 
     #[tool(
-        description = "Subject self-read: returns this tenant's Canton call aggregates (calls_total, errors_total, per-method counts, first_seen_at, last_called_at). Pass your `key_id` (16-hex prefix of the SHA-256 of your API key) — given to you alongside the plaintext key at issuance. Requires the host node to have wired analytics + api-key state into this MCP."
+        description = "Subject self-read: returns the presenting key's own Canton call aggregates (calls_total, errors_total, per-method counts, first_seen_at, last_called_at). Takes no arguments — the tenant is resolved from the API key on the request, so no key can read another's counters. Requires the host node to have wired analytics state into this MCP."
     )]
     async fn canton_get_my_analytics(
         &self,
-        Parameters(params): Parameters<CantonGetMyAnalyticsParams>,
+        #[allow(unused)] Parameters(_params): Parameters<CantonGetMyAnalyticsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let analytics = self.analytics.as_ref().ok_or_else(|| {
             err_internal(
                 "Canton analytics is not wired into this MCP server (only available when run in-process with TenzroNode)",
             )
         })?;
-        let row = analytics.get(&params.key_id).ok_or_else(|| {
+        // The tenant is the presenting key, never an argument. A `key_id`
+        // parameter would make every tenant's counters — call volumes, error
+        // rates, bound Canton user id — readable by any other tenant that
+        // learned the handle. The operator reads across tenants through
+        // `canton_list_api_key_analytics` instead.
+        let key_id = crate::api_key::current_key_context()
+            .map(|ctx| ctx.key_id)
+            .ok_or_else(|| {
+                err_invalid_params(
+                    "Unauthorized: no API key is bound to this request, so there is no tenant to \
+                     report on",
+                )
+            })?;
+        let row = analytics.get(&key_id).ok_or_else(|| {
             ErrorData {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!(
-                    "No analytics record for key_id {} (key is unknown, or has not made a canton call yet)",
-                    params.key_id
+                    "No analytics record for key_id {} (this key has not made a canton call yet)",
+                    key_id
                 )),
                 data: None,
             }
@@ -949,12 +1125,15 @@ impl CantonMcpServer {
     }
 
     #[tool(
-        description = "Operator admin-read: list per-tenant Canton call aggregates for every API key (or one tenant when key_id is set). Requires the host node to have wired analytics state into this MCP. Rows are sorted by last_called_at descending."
+        description = "Operator-only admin-read: list per-tenant Canton call aggregates for every API key (or one tenant when key_id is set). Requires the host node to have wired analytics state into this MCP. Rows are sorted by last_called_at descending. Tenants read their own row via canton_get_my_analytics."
     )]
     async fn canton_list_api_key_analytics(
         &self,
         Parameters(params): Parameters<CantonListApiKeyAnalyticsParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        // Reads across every tenant. `canton_get_my_analytics` is the
+        // self-scoped read a developer is entitled to.
+        require_operator_key()?;
         let analytics = self.analytics.as_ref().ok_or_else(|| {
             err_internal(
                 "Canton analytics is not wired into this MCP server (only available when run in-process with TenzroNode)",
@@ -1026,12 +1205,18 @@ impl CantonMcpServer {
             .await
             .ok();
 
+        // The participant's own host:port is deliberately not reported.
+        // Tenants reach Canton only through this node, and the participant
+        // is addressed over a private network path — echoing its address
+        // back would disclose operator-internal topology.
+        let ep = self.endpoint()?;
         json_result(serde_json::json!({
             "health": health,
             "participant_status": status,
-            "ledger_api_url": self.ledger_api_url,
-            "admin_api_url": self.admin_api_url,
-            "authenticated": self.jwt_token.is_some(),
+            "canton_network": crate::canton_network::current()
+                .unwrap_or(self.default_network)
+                .as_str(),
+            "authenticated": ep.token_provider.is_some() || ep.jwt_token.is_some(),
         }))
     }
 
@@ -1039,11 +1224,18 @@ impl CantonMcpServer {
     //  4. Token (CIP-56 Canton Coin)
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Get the Canton Coin (CC) balance for a party. Queries the CIP-56 token balance via the Canton JSON Ledger API v2 by looking up active Holding contracts (Splice.Amulet:Amulet template).")]
+    #[tool(description = "Get the Canton Coin (CC) balance for a party. Queries the CIP-56 token balance via the Canton JSON Ledger API v2 by looking up active Holding contracts (Splice.Amulet:Amulet template). The presenting API key must be delegated read-as on the party.")]
     async fn canton_get_balance(
         &self,
         Parameters(params): Parameters<CantonGetBalanceParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        // `party` is caller-supplied and the query runs on the operator's
+        // credential, so without a delegation check any party's holdings
+        // would be readable — the operator's own included. Unlike the
+        // JSON-RPC `tenzro_canton_coinBalance`, which takes no party and
+        // reads the operator's configured one, this tool is usable by a
+        // tenant against a party it holds read-as on.
+        require_party(&params.party, false)?;
         // Query active Holding contracts for the party (CIP-56 standard).
         // Canton 3.5+ requires `activeAtOffset` as a JSON number and
         // tagged `TemplateFilter` wrappers (uppercase, singular
@@ -1130,6 +1322,8 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonTransferParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_write_tier()?;
+        require_party(&params.from_party, true)?;
         let command_id = format!("tenzro-mcp-transfer-{}", uuid::Uuid::new_v4());
 
         // Create a transfer command using the Splice.Amulet transfer
@@ -1178,6 +1372,9 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonCreateAssetParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_write_tier()?;
+        // `issuer` is the actAs party on the submission.
+        require_party(&params.issuer, true)?;
         // Validate asset type
         let asset_type_lower = params.asset_type.to_lowercase();
         let valid_types = ["bond", "equity", "repo", "custom"];
@@ -1261,6 +1458,12 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonDvpSettleParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_write_tier()?;
+        // Both legs submit under `actAs`, so the key must hold act-as on
+        // each. A DvP where the caller only controls one side is not a
+        // partial grant to be salvaged — it is a refusal.
+        require_party(&params.buyer, true)?;
+        require_party(&params.seller, true)?;
         let command_id = format!("tenzro-mcp-dvp-{}", uuid::Uuid::new_v4());
 
         // Exercise the DvP Settle choice on the asset contract.
@@ -1310,11 +1513,14 @@ impl CantonMcpServer {
     //  6. Administration
     // ═══════════════════════════════════════════════════════════════════════
 
-    #[tool(description = "Upload a DAR (DAML Archive) file to the Canton participant node. The DAR is installed and its packages become available for contract creation. Provide base64-encoded DAR content.")]
+    #[tool(description = "Operator-only. Upload a DAR (DAML Archive) file to the Canton participant node. The DAR is installed and its packages become available for contract creation. Provide base64-encoded DAR content.")]
     async fn canton_upload_dar(
         &self,
         Parameters(params): Parameters<CantonUploadDarParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        // Installs a package participant-wide, visible to every tenant.
+        require_operator_key()?;
+        require_write_tier()?;
         use base64::Engine;
 
         let dar_bytes = base64::engine::general_purpose::STANDARD
@@ -1330,21 +1536,15 @@ impl CantonMcpServer {
             .unwrap_or_else(|| "package.dar".to_string());
 
         // Canton 3.5+ JSON Ledger API: POST /v2/packages with raw DAR
-        // bytes and `Content-Type: application/octet-stream`. The
-        // legacy `/admin/packages/upload-dar` path is only on the gRPC
-        // Admin API, which the Tenzro-operated devnet
-        // (`json.canton.example-operator.invalid`) does not expose.
-        let url = format!("{}/v2/packages", self.ledger_api_url);
-        let mut builder = self
-            .http
-            .post(&url)
+        // bytes and a single `Content-Type: application/octet-stream`
+        // (duplicate Content-Type headers are rejected). The legacy
+        // `/admin/packages/upload-dar` path is gRPC-Admin-only and is not
+        // exposed on the JSON Ledger API.
+        let resp = self
+            .ledger_request(reqwest::Method::POST, "/packages")
+            .await?
             .header("Content-Type", "application/octet-stream")
-            .body(dar_bytes);
-        if let Some(ref token) = self.jwt_token {
-            builder = builder.bearer_auth(token);
-        }
-
-        let resp = builder
+            .body(dar_bytes)
             .send()
             .await
             .map_err(|e| err_internal(format!("DAR upload request failed: {}", e)))?;
@@ -1373,11 +1573,14 @@ impl CantonMcpServer {
         }))
     }
 
-    #[tool(description = "Reconnect a Canton participant to a synchronizer domain. Submits POST /admin/participant/synchronizer/{alias}/reconnect via the Canton Admin API. Used after a synchronizer outage or planned disconnection. Returns a plain-text confirmation on success.")]
+    #[tool(description = "Operator-only. Reconnect a Canton participant to a synchronizer domain. Submits POST /admin/participant/synchronizer/{alias}/reconnect via the Canton Admin API. Used after a synchronizer outage or planned disconnection. Returns a plain-text confirmation on success.")]
     async fn canton_reconnect_synchronizer(
         &self,
         Parameters(params): Parameters<CantonReconnectSynchronizerParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        // Mutates participant connectivity for every tenant on it.
+        require_operator_key()?;
+        require_write_tier()?;
         let endpoint = format!(
             "/admin/participant/synchronizer/{}/reconnect",
             params.synchronizer_alias
@@ -1440,11 +1643,13 @@ impl CantonMcpServer {
         }
     }
 
-    #[tool(description = "Watch active DAML contracts for a specific party. Queries `POST /v2/state/active-contracts` with the party as the sole `filtersByParty` key. The MCP server is operator-scoped, so any party reachable from the operator's participant credential is accessible.")]
+    #[tool(description = "Watch active DAML contracts for a specific party. Queries `POST /v2/state/active-contracts` with the party as the sole `filtersByParty` key. The presenting API key must be delegated read-as on the party.")]
     async fn canton_watch_party(
         &self,
         Parameters(params): Parameters<CantonWatchPartyParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_write_tier()?;
+        require_party(&params.party, false)?;
         if params.template_ids.is_empty() {
             return Err(err_invalid_params(
                 "template_ids required (at least one DAML template id)",
@@ -1486,6 +1691,8 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonCreateIdpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_operator_key()?;
+        require_write_tier()?;
         let body = serde_json::json!({
             "identityProviderConfig": {
                 "identityProviderId": params.identity_provider_id,
@@ -1503,6 +1710,7 @@ impl CantonMcpServer {
     async fn canton_list_idps(
         &self,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_operator_key()?;
         let response = self.ledger_get("/idps").await?;
         json_result(response)
     }
@@ -1512,6 +1720,8 @@ impl CantonMcpServer {
         &self,
         Parameters(params): Parameters<CantonDeleteIdpParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        require_operator_key()?;
+        require_write_tier()?;
         let path = format!("/idps/{}", urlencoding::encode(&params.identity_provider_id));
         let response = self.ledger_delete(&path).await?;
         json_result(response)
@@ -1582,8 +1792,15 @@ impl ServerHandler for CantonMcpServer {
 /// shared Canton validator party.
 ///
 /// This is the MCP-layer twin of the JSON-RPC gate enforced by
-/// `gate_api_key` in `rpc.rs` — both consult the same `ApiKeyManager`
-/// and require [`ApiKeyScope::Canton`].
+/// `gate_api_key` in `rpc.rs` — both consult the same `ApiKeyManager`,
+/// require [`ApiKeyScope::Canton`], enforce the key's tier budget, and
+/// scope the key's authorized Canton network for the request.
+///
+/// Network resolution is header-driven rather than param-driven because the
+/// gate sits above MCP's JSON-RPC envelope and does not parse tool
+/// arguments: callers name a network with `X-Canton-Network` when their key
+/// authorizes more than one. A key authorizing exactly one network needs no
+/// header, and a key authorizing none is refused outright.
 ///
 /// When the manager is absent (no API keys configured on the node), the
 /// middleware fails closed: every request returns 401.
@@ -1603,7 +1820,110 @@ async fn require_canton_api_key(
     };
 
     match outcome {
-        AuthorizeOutcome::Allowed => next.run(request).await,
+        AuthorizeOutcome::Allowed => {
+            // `Allowed` with a manager present implies the key resolves.
+            let (record, mgr) = match (
+                mgr.as_ref()
+                    .and_then(|m| presented.and_then(|k| m.lookup(k))),
+                mgr.as_ref(),
+            ) {
+                (Some(r), Some(m)) => (r, m),
+                _ => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        "Unauthorized: API key is unknown or revoked".to_string(),
+                    )
+                        .into_response();
+                }
+            };
+
+            let requested = request
+                .headers()
+                .get("x-canton-network")
+                .and_then(|v| v.to_str().ok())
+                .map(|raw| {
+                    crate::config::CantonNetwork::from_str_opt(raw).ok_or_else(|| raw.to_string())
+                });
+
+            let net = match requested {
+                Some(Err(raw)) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "Unknown Canton network '{}' in X-Canton-Network (expected devnet or mainnet)",
+                            raw
+                        ),
+                    )
+                        .into_response();
+                }
+                Some(Ok(explicit)) => {
+                    if !record.authorizes_canton_network(explicit) {
+                        return (
+                            StatusCode::FORBIDDEN,
+                            format!(
+                                "Forbidden: API key does not authorize Canton network '{}'",
+                                explicit
+                            ),
+                        )
+                            .into_response();
+                    }
+                    explicit
+                }
+                None => match record.sole_canton_network() {
+                    Some(only) => only,
+                    None if record.canton_networks.is_empty() => {
+                        return (
+                            StatusCode::FORBIDDEN,
+                            "Forbidden: API key authorizes no Canton network; ask the operator \
+                             to reissue it naming canton_networks"
+                                .to_string(),
+                        )
+                            .into_response();
+                    }
+                    None => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "X-Canton-Network header required: this key authorizes {}",
+                                record
+                                    .canton_networks
+                                    .iter()
+                                    .map(|n| n.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        )
+                            .into_response();
+                    }
+                },
+            };
+
+            if let Err((limit, retry_after_ms)) = mgr.check_rate_limit(&record) {
+                let mut resp = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "Rate limit exceeded: tier '{}' allows {} requests per minute; \
+                         retry after {} ms",
+                        record.tier.as_str(),
+                        limit,
+                        retry_after_ms
+                    ),
+                )
+                    .into_response();
+                let secs = retry_after_ms.div_euclid(1000).max(1);
+                if let Ok(v) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                    resp.headers_mut().insert("retry-after", v);
+                }
+                return resp;
+            }
+
+            let ctx = crate::api_key::RequestKeyContext::from_record(&record);
+            crate::canton_network::scope(
+                Some(net),
+                crate::api_key::scope_key_context(Some(ctx), next.run(request)),
+            )
+            .await
+        }
         AuthorizeOutcome::MissingKey(scope) => (
             StatusCode::UNAUTHORIZED,
             format!(
@@ -1630,34 +1950,30 @@ async fn require_canton_api_key(
 
 /// Start the Canton MCP server on the given address using Streamable HTTP transport.
 ///
-/// `ledger_api_url` / `admin_api_url` configure the Canton participant endpoints
-/// the tools talk to (typically derived from the node's `CantonConfig`).
-/// `jwt_token` is the optional bearer token for authenticated participants.
-/// `token_provider` is the optional OAuth2 client-credentials provider used
-/// by the Tenzro-operated devnet — when set, it takes precedence over
-/// `jwt_token`.
+/// `endpoints` carries one [`CantonEndpoint`] per Canton network the operator
+/// serves, derived from the node's `CantonConfig`. `default_network` is the
+/// entry used when a request does not name one; an entry absent from the map
+/// is refused rather than substituted.
 ///
 /// `api_key_manager` enforces caller authorization at the HTTP layer: every
 /// request must present a valid `X-Tenzro-Api-Key` with scope
-/// [`ApiKeyScope::Canton`]. When `None`, the server fails closed and refuses
-/// every request — consistent with the JSON-RPC gate, which would refuse
-/// `tenzro_*Canton*` methods on the same input.
+/// [`ApiKeyScope::Canton`]. The gate also resolves which network the key may
+/// reach and installs it for the request, so tool code never picks a network
+/// itself. When `None`, the server fails closed and refuses every request —
+/// consistent with the JSON-RPC gate, which would refuse `tenzro_*Canton*`
+/// methods on the same input.
 pub async fn start_canton_mcp_server(
     listen_addr: String,
-    ledger_api_url: String,
-    admin_api_url: String,
-    jwt_token: Option<String>,
-    token_provider: Option<Arc<CantonTokenProvider>>,
+    endpoints: std::collections::BTreeMap<crate::config::CantonNetwork, CantonEndpoint>,
+    default_network: crate::config::CantonNetwork,
     api_key_manager: Option<Arc<ApiKeyManager>>,
     canton_analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (_keep_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
     start_canton_mcp_server_with_shutdown(
         listen_addr,
-        ledger_api_url,
-        admin_api_url,
-        jwt_token,
-        token_provider,
+        endpoints,
+        default_network,
         api_key_manager,
         canton_analytics,
         shutdown_rx,
@@ -1668,13 +1984,10 @@ pub async fn start_canton_mcp_server(
 /// Start the Canton MCP server with a graceful-shutdown channel. When the
 /// broadcast sender fires, axum stops accepting new connections and lets
 /// in-flight requests drain before the future resolves.
-#[allow(clippy::too_many_arguments)]
 pub async fn start_canton_mcp_server_with_shutdown(
     listen_addr: String,
-    ledger_api_url: String,
-    admin_api_url: String,
-    jwt_token: Option<String>,
-    token_provider: Option<Arc<CantonTokenProvider>>,
+    endpoints: std::collections::BTreeMap<crate::config::CantonNetwork, CantonEndpoint>,
+    default_network: crate::config::CantonNetwork,
     api_key_manager: Option<Arc<ApiKeyManager>>,
     canton_analytics: Option<Arc<crate::canton_analytics::CantonAnalyticsManager>>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
@@ -1696,27 +2009,18 @@ pub async fn start_canton_mcp_server_with_shutdown(
             "canton-mcp.tenzro.xyz".to_string(),
         ]);
 
-    // Capture Canton endpoints into the per-session factory. The closure is
-    // invoked once per inbound MCP session and must return a fresh
-    // `CantonMcpServer`, so we clone the configured URLs/JWT into each
-    // instance via the `with_*` builders rather than relying on the
-    // hard-coded `new()` defaults.
-    let factory_api_key_manager = api_key_manager.clone();
+    // Capture the per-network Canton endpoints into the per-session factory.
+    // The closure is invoked once per inbound MCP session and must return a
+    // fresh `CantonMcpServer`, so each instance gets its own copy of the
+    // endpoint map. Which entry a call uses is decided per-request by the
+    // api-key gate, not here.
     let service = StreamableHttpService::new(
         move || {
-            let mut server = CantonMcpServer::new()
-                .with_ledger_api_url(ledger_api_url.clone())
-                .with_admin_api_url(admin_api_url.clone());
-            if let Some(token) = jwt_token.clone() {
-                server = server.with_jwt_token(token);
+            let mut server = CantonMcpServer::new().with_default_network(default_network);
+            for (net, endpoint) in &endpoints {
+                server = server.with_network(*net, endpoint.clone());
             }
-            if let Some(provider) = token_provider.clone() {
-                server = server.with_token_provider(provider);
-            }
-            server = server.with_node_state(
-                canton_analytics.clone(),
-                factory_api_key_manager.clone(),
-            );
+            server = server.with_node_state(canton_analytics.clone());
             Ok(server)
         },
         Arc::new(LocalSessionManager::default()),

@@ -17,10 +17,10 @@
 //!   alarm thresholds, gain. Persisted as a singleton in
 //!   `CF_TOKENS/burn_targets:current`.
 //! - [`SupplyMetricsSnapshot`] — observed metrics for an epoch (or rolling
-//!   window). Persisted under `burn_metrics:latest`. The epoch observer
-//!   that aggregates these from `UsageTracker` and the burn ledger lands
-//!   alongside this primitive — this ships the storage shape and a
-//!   no-op default snapshot.
+//!   window). Persisted under `burn_metrics:latest`. The node's epoch
+//!   observer aggregates burn flows (base fee, local fee, paymaster,
+//!   slash) and emission flows (staking rewards, treasury emissions) into
+//!   this shape at every epoch boundary.
 //! - [`compute_recommendation`] — the pure transfer function. Reads a
 //!   snapshot + targets + gain, returns a [`BurnRateRecommendation`] with
 //!   action and magnitude. Same input → same output, deterministic.
@@ -28,20 +28,16 @@
 //!   `BurnQuotaManager`'s pattern. Constructed in-memory for tests, with
 //!   `Arc<dyn KvStore>` for production. Hydrates on construction.
 //!
-//! Deferrals:
+//! - [`AutoProposalGenerator`] — polls the recommendation and drafts a
+//!   typed governance proposal when the dial should move. Spawned by the
+//!   node alongside the governance executor.
 //!
-//! - The `AutoProposalGenerator` and the `tenzro/burn-rate-changed`
-//!   gossipsub topic land alongside the governance executor wiring.
-//! - The EIP-1559 fee market reading `base_fee_burn_pct` to gate burn vs
-//!   treasury split lands when the dial actually starts gating fees. Until
-//!   then the dial is a published parameter only.
-//! - `SupplyMetricsSnapshot` aggregation across all burn flows (base fee,
-//!   local fee, paymaster, slash) and emission flows (staking rewards,
-//!   treasury emissions) lands alongside the epoch observer. The
-//!   primitive's storage shape is fixed now so the observer can write
-//!   into it without retrofitting.
-//! - Per-controller-DID wash-detection mitigation lives in the per-DID
-//!   flow control crate (Spec 2); this module reads aggregate metrics only.
+//! `tenzro_vm::FeeMarket::on_block_finalized_with_split` reads
+//! `base_fee_burn_bps` from this manager on every block finalize, so the
+//! dial gates the burn-vs-treasury split of collected base fees.
+//!
+//! Per-controller-DID wash-detection mitigation lives in the per-DID flow
+//! control crate (Spec 2); this module reads aggregate metrics only.
 
 use crate::error::{Result, TokenError};
 use serde::{Deserialize, Serialize};

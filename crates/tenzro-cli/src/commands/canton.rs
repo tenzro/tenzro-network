@@ -1,8 +1,8 @@
 //! Canton/DAML integration commands for the Tenzro CLI
 //!
-//! Interact with the shared Canton synchronizer domain and DAML contracts
+//! Interact with a Canton synchronizer domain and DAML contracts
 //! through the local Tenzro node. The node proxies calls to its configured
-//! Canton participant; callers never see the Auth0 secret.
+//! Canton participant; callers never see the operator's OAuth client secret.
 
 use clap::{Parser, Subcommand};
 use anyhow::{anyhow, Result};
@@ -11,9 +11,21 @@ use crate::output;
 /// Canton/DAML integration commands (Canton 3.5+ JSON Ledger API).
 ///
 /// All reads + writes route through the local Tenzro node, which proxies
-/// to its configured Canton participant. Callers never see the Auth0
-/// secret. Every method requires an API key with scope `canton`
-/// (passed via `--api-key` or `TENZRO_API_KEY` env var).
+/// to its configured Canton participant. Callers never see the operator's
+/// OAuth client secret.
+///
+/// The surface splits by who is entitled to it. Party-scoped work — DAML
+/// submission, contract queries, participant status — takes an API key
+/// with scope `canton` (`--api-key` or `TENZRO_API_KEY`). Participant
+/// administration — DAR upload, party allocation, rights grants, and any
+/// read that spans every tenant on the participant — takes the operator's
+/// admin token (`--admin-token` or `TENZRO_ADMIN_TOKEN`), because an
+/// API-key holder rents party-scoped access to a participant rather than
+/// administering it.
+///
+/// A key authorizing more than one Canton network must name the target
+/// with `--canton-network`; the node answers with the authorized set when
+/// the choice is ambiguous.
 #[derive(Debug, Subcommand)]
 pub enum CantonCommand {
     /// List configured Canton synchronizer domains
@@ -22,6 +34,8 @@ pub enum CantonCommand {
     Contracts(CantonContractsCmd),
     /// Submit a DAML create or exercise command
     Submit(CantonSubmitCmd),
+    /// Submit a DAML command bound to an AP2 mandate pair (agent write path)
+    SubmitWithMandate(CantonSubmitWithMandateCmd),
     // ── Canton 3.5+ JSON Ledger API extension surface ──
     /// Combined health probe (`/livez` + `/readyz` + `/v2/version`)
     Health(CantonSimpleCmd),
@@ -29,36 +43,38 @@ pub enum CantonCommand {
     Version(CantonSimpleCmd),
     /// OAuth principal's Canton user record (`GET /v2/users/<client_id>@clients`, CIP-26)
     MyUser(CantonSimpleCmd),
-    /// List every party known to the participant (`GET /v2/parties/known`)
-    Parties(CantonSimpleCmd),
-    /// List every DAML package installed on the participant (`GET /v2/packages`)
-    Packages(CantonSimpleCmd),
-    /// CIP-56 Canton Coin balance (sums every `Splice.Amulet:Amulet` contract)
-    CoinBalance(CantonSimpleCmd),
+    /// Operator-only: list every party known to the participant (`GET /v2/parties/known`)
+    Parties(CantonAdminSimpleCmd),
+    /// Operator-only: list every DAML package installed on the participant (`GET /v2/packages`)
+    Packages(CantonAdminSimpleCmd),
+    /// Operator-only: CIP-56 Canton Coin balance (sums every `Splice.Amulet:Amulet` contract)
+    CoinBalance(CantonAdminSimpleCmd),
     /// Canton fee schedule from the latest `Splice.AmuletRules:AmuletRules` contract
     FeeSchedule(CantonSimpleCmd),
     /// Connected synchronizers for the participant's party
     ConnectedSynchronizers(CantonSimpleCmd),
     /// Fetch a Canton transaction tree by hex update id
     GetTransaction(CantonGetTransactionCmd),
-    /// Upload a DAR (DAML Archive) to the participant via `POST /v2/packages`
+    /// Operator-only: upload a DAR (DAML Archive) to the participant via `POST /v2/packages`
     UploadDar(CantonUploadDarCmd),
-    /// Allocate a new party on the participant via `POST /v2/parties`
+    /// Operator-only: allocate a new party on the participant via `POST /v2/parties`
     AllocateParty(CantonAllocatePartyCmd),
-    /// Grant `CanActAs` / `CanReadAs` rights on a party to a user (CIP-26)
+    /// Operator-only: grant `CanActAs` / `CanReadAs` rights on a party to a user (CIP-26)
     GrantRights(CantonGrantRightsCmd),
-    /// List rights granted to a Canton user (`GET /v2/users/{userId}/rights`)
+    /// Operator-only: list rights granted to a Canton user (`GET /v2/users/{userId}/rights`)
     ListRights(CantonListRightsCmd),
     /// Self-read per-tenant Canton call analytics for the presented API key
     MyAnalytics(CantonSimpleCmd),
     /// Operator admin-read: every per-tenant analytics record
     ListAnalytics(CantonListAnalyticsCmd),
+    /// Operator admin-read: per-tenant analytics rolled up into buckets
+    AggregateAnalytics(CantonAggregateAnalyticsCmd),
     /// Watch active contracts for an explicit party (key must be authorized for it)
     WatchParty(CantonWatchPartyCmd),
     /// Operator-only: register a per-tenant Canton IdentityProviderConfig (Stage 2.b)
     IdpCreate(CantonIdpCreateCmd),
     /// Operator-only: list every Canton IdentityProviderConfig
-    IdpList(CantonSimpleCmd),
+    IdpList(CantonAdminSimpleCmd),
     /// Operator-only: delete a Canton IdentityProviderConfig
     IdpDelete(CantonIdpDeleteCmd),
     /// Operator-only: mirror a Tenzro workflow into a Canton synchronizer as a WorkflowAnchor
@@ -73,6 +89,7 @@ impl CantonCommand {
             Self::Domains(cmd) => cmd.execute().await,
             Self::Contracts(cmd) => cmd.execute().await,
             Self::Submit(cmd) => cmd.execute().await,
+            Self::SubmitWithMandate(cmd) => cmd.execute().await,
             Self::Health(cmd) => cmd.execute("Canton Health", "tenzro_canton_health").await,
             Self::Version(cmd) => cmd.execute("Canton Version", "tenzro_canton_version").await,
             Self::MyUser(cmd) => cmd.execute("Canton My User", "tenzro_canton_getMyUser").await,
@@ -101,6 +118,7 @@ impl CantonCommand {
                     .await
             }
             Self::ListAnalytics(cmd) => cmd.execute().await,
+            Self::AggregateAnalytics(cmd) => cmd.execute().await,
             Self::WatchParty(cmd) => cmd.execute().await,
             Self::IdpCreate(cmd) => cmd.execute().await,
             Self::IdpList(cmd) => cmd.execute("Canton IDPs", "tenzro_canton_listIdps").await,
@@ -122,6 +140,11 @@ pub struct CantonDomainsCmd {
     /// Falls back to the TENZRO_API_KEY env var when omitted.
     #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
+
+    /// Canton network to target. Required when the key authorizes more
+    /// than one; the node names the authorized set when it is missing.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonDomainsCmd {
@@ -135,6 +158,9 @@ impl CantonDomainsCmd {
         let mut rpc = RpcClient::new(&self.rpc);
         if let Some(key) = &self.api_key {
             rpc = rpc.with_api_key(key);
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let result: serde_json::Value = rpc
@@ -200,6 +226,11 @@ pub struct CantonContractsCmd {
     /// Falls back to the TENZRO_API_KEY env var when omitted.
     #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
+
+    /// Canton network to target. Required when the key authorizes more
+    /// than one; the node names the authorized set when it is missing.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonContractsCmd {
@@ -213,6 +244,9 @@ impl CantonContractsCmd {
         let mut rpc = RpcClient::new(&self.rpc);
         if let Some(key) = &self.api_key {
             rpc = rpc.with_api_key(key);
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let mut params = serde_json::Map::new();
@@ -274,9 +308,12 @@ impl CantonContractsCmd {
     }
 }
 
-/// Submit a DAML command
-#[derive(Debug, Parser)]
-pub struct CantonSubmitCmd {
+/// The DAML command shape shared by `tenzro canton submit` and
+/// `tenzro canton submit-with-mandate`. Both build the same
+/// `tenzro_submitDamlCommand` params; the mandate variant wraps them
+/// with an AP2 mandate pair.
+#[derive(Debug, clap::Args)]
+pub struct DamlCommandArgs {
     /// Command type: `create` or `exercise`
     #[arg(long)]
     command_type: String,
@@ -303,30 +340,15 @@ pub struct CantonSubmitCmd {
     #[arg(long)]
     choice_argument: Option<String>,
 
-    /// RPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:8545")]
-    rpc: String,
-
-    /// Operator-issued Tenzro API key (tnz_...) with scope `canton`.
-    /// Falls back to the TENZRO_API_KEY env var when omitted.
-    #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
-    api_key: Option<String>,
+    /// Submit as an explicit party instead of the key's primary party.
+    /// The node authorizes it against the key's `can_act_as_parties`.
+    #[arg(long)]
+    act_as: Option<String>,
 }
 
-impl CantonSubmitCmd {
-    pub async fn execute(&self) -> Result<()> {
-        use crate::rpc::RpcClient;
-
-        output::print_header("Submit DAML Command");
-
-        let spinner = output::create_spinner("Submitting command...");
-
-        let mut rpc = RpcClient::new(&self.rpc);
-        if let Some(key) = &self.api_key {
-            rpc = rpc.with_api_key(key);
-        }
-
-        let params = match self.command_type.as_str() {
+impl DamlCommandArgs {
+    fn to_params(&self) -> Result<serde_json::Value> {
+        let mut params = match self.command_type.as_str() {
             "create" => {
                 let raw = self
                     .create_arguments
@@ -370,6 +392,51 @@ impl CantonSubmitCmd {
                 ))
             }
         };
+        if let Some(party) = &self.act_as {
+            params["act_as"] = serde_json::Value::String(party.clone());
+        }
+        Ok(params)
+    }
+}
+
+/// Submit a DAML command
+#[derive(Debug, Parser)]
+pub struct CantonSubmitCmd {
+    #[command(flatten)]
+    command: DamlCommandArgs,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator-issued Tenzro API key (tnz_...) with scope `canton`.
+    /// Falls back to the TENZRO_API_KEY env var when omitted.
+    #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
+    api_key: Option<String>,
+
+    /// Canton network to target. Required when the key authorizes more
+    /// than one; the node names the authorized set when it is missing.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
+}
+
+impl CantonSubmitCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Submit DAML Command");
+
+        let spinner = output::create_spinner("Submitting command...");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(key) = &self.api_key {
+            rpc = rpc.with_api_key(key);
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
+        }
+
+        let params = self.command.to_params()?;
 
         let result: serde_json::Value = rpc
             .call("tenzro_submitDamlCommand", params)
@@ -380,8 +447,8 @@ impl CantonSubmitCmd {
         output::print_success("DAML command submitted.");
         println!();
 
-        output::print_field("Command Type", &self.command_type);
-        output::print_field("Template ID", &self.template);
+        output::print_field("Command Type", &self.command.command_type);
+        output::print_field("Template ID", &self.command.template);
 
         if let Some(cid) = result.get("contract_id").and_then(|v| v.as_str()) {
             output::print_field("Contract ID", cid);
@@ -410,9 +477,143 @@ impl CantonSubmitCmd {
     }
 }
 
+/// Submit a DAML command bound to an AP2 mandate pair.
+///
+/// The node validates the mandate against AP2 invariants, the TDIP
+/// DelegationScope of the agent that signed it, the per-machine
+/// SpendingPolicy, and any escrow or Stripe SPT ceiling the mandate
+/// names. The DAML command submits only when every applicable ceiling
+/// passes, and the response carries both the mandate receipt and the
+/// Canton receipt.
+#[derive(Debug, Parser)]
+pub struct CantonSubmitWithMandateCmd {
+    /// Path to a JSON file holding the AP2 checkout mandate (a signed
+    /// verifiable credential).
+    #[arg(long)]
+    checkout_vdc: String,
+
+    /// Path to a JSON file holding the AP2 payment mandate.
+    #[arg(long)]
+    payment_vdc: String,
+
+    #[command(flatten)]
+    command: DamlCommandArgs,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator-issued Tenzro API key (tnz_...) with scope `canton`.
+    #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
+    api_key: Option<String>,
+
+    /// Canton network to target. Required when the key authorizes more
+    /// than one; the node names the authorized set when it is missing.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
+}
+
+impl CantonSubmitWithMandateCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Submit DAML Command with Mandate");
+
+        let checkout = read_json_file(&self.checkout_vdc, "--checkout-vdc")?;
+        let payment = read_json_file(&self.payment_vdc, "--payment-vdc")?;
+
+        let mut params = self.command.to_params()?;
+        params["mandate"] = serde_json::json!({
+            "checkout": checkout,
+            "payment": payment,
+        });
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(key) = &self.api_key {
+            rpc = rpc.with_api_key(key);
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
+        }
+
+        let spinner = output::create_spinner("Validating mandate and submitting…");
+        let result: serde_json::Value = rpc
+            .call("tenzro_canton_submitWithMandate", params)
+            .await?;
+        spinner.finish_and_clear();
+
+        output::print_success("Mandate accepted, DAML command submitted.");
+        println!();
+        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into()));
+        Ok(())
+    }
+}
+
+fn read_json_file(path: &str, flag: &str) -> Result<serde_json::Value> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow!("{} could not read '{}': {}", flag, path, e))?;
+    serde_json::from_str(&raw).map_err(|e| anyhow!("{} is not valid JSON: {}", flag, e))
+}
+
+/// Operator admin-read: per-tenant Canton call counters rolled up into
+/// buckets for billing and capacity planning.
+#[derive(Debug, Parser)]
+pub struct CantonAggregateAnalyticsCmd {
+    /// Bucket label: `subject` (default) or `key_id`.
+    #[arg(long, default_value = "subject")]
+    group_by: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`). Falls back to
+    /// `TENZRO_ADMIN_TOKEN`.
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
+}
+
+impl CantonAggregateAnalyticsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header("Canton Aggregate Analytics");
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
+        }
+
+        let spinner = output::create_spinner("Aggregating analytics…");
+        let result: serde_json::Value = rpc
+            .call(
+                "tenzro_canton_aggregateAnalytics",
+                serde_json::json!({ "group_by": self.group_by }),
+            )
+            .await?;
+        spinner.finish_and_clear();
+
+        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into()));
+        Ok(())
+    }
+}
+
 // ── Canton 3.5+ extension subcommands ──
 
-/// Shared shape for parameter-less Canton 3.5+ JSON Ledger API reads.
+/// Shared shape for parameter-less, tenant-readable Canton 3.5+ JSON
+/// Ledger API reads: participant status and the presenting key's own
+/// records.
 #[derive(Debug, Parser)]
 pub struct CantonSimpleCmd {
     /// RPC endpoint
@@ -423,6 +624,11 @@ pub struct CantonSimpleCmd {
     /// Falls back to the TENZRO_API_KEY env var when omitted.
     #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
+
+    /// Canton network to target. Required when the key authorizes more
+    /// than one; the node names the authorized set when it is missing.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonSimpleCmd {
@@ -434,6 +640,59 @@ impl CantonSimpleCmd {
         let mut rpc = RpcClient::new(&self.rpc);
         if let Some(key) = &self.api_key {
             rpc = rpc.with_api_key(key);
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
+        }
+        let spinner = output::create_spinner("Querying Canton…");
+
+        let result: serde_json::Value = rpc.call(method, serde_json::json!({})).await?;
+        spinner.finish_and_clear();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "?".into())
+        );
+        Ok(())
+    }
+}
+
+/// Shared shape for parameter-less Canton reads that span every tenant
+/// on the participant, so they belong to the operator rather than to any
+/// one API-key holder: the full party list, the installed DAML package
+/// list, the operator's own CIP-56 holdings, and the IDP registry.
+#[derive(Debug, Parser)]
+pub struct CantonAdminSimpleCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+
+    /// Operator admin token (`X-Tenzro-Admin-Token`). Falls back to
+    /// `TENZRO_ADMIN_TOKEN` env var.
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
+}
+
+impl CantonAdminSimpleCmd {
+    pub async fn execute(&self, header: &str, method: &str) -> Result<()> {
+        use crate::rpc::RpcClient;
+
+        output::print_header(header);
+
+        let mut rpc = RpcClient::new(&self.rpc);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
         let spinner = output::create_spinner("Querying Canton…");
 
@@ -460,6 +719,11 @@ pub struct CantonGetTransactionCmd {
 
     #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
+
+    /// Canton network to target. Required when the key authorizes more
+    /// than one; the node names the authorized set when it is missing.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonGetTransactionCmd {
@@ -471,6 +735,9 @@ impl CantonGetTransactionCmd {
         let mut rpc = RpcClient::new(&self.rpc);
         if let Some(key) = &self.api_key {
             rpc = rpc.with_api_key(key);
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
         let params = serde_json::json!({ "update_id": self.update_id });
         let spinner = output::create_spinner("Fetching transaction…");
@@ -487,7 +754,9 @@ impl CantonGetTransactionCmd {
     }
 }
 
-/// Upload a DAR (DAML Archive) to the participant
+/// Operator-only: upload a DAR (DAML Archive) to the participant. A DAR
+/// installs a DAML package participant-wide, so it is the operator's
+/// call rather than a tenant's — admin-token-gated at the node.
 #[derive(Debug, Parser)]
 pub struct CantonUploadDarCmd {
     /// Path to the .dar file on disk
@@ -497,8 +766,12 @@ pub struct CantonUploadDarCmd {
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 
-    #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
-    api_key: Option<String>,
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonUploadDarCmd {
@@ -517,8 +790,15 @@ impl CantonUploadDarCmd {
         output::print_field("Size (bytes)", &size.to_string());
 
         let mut rpc = RpcClient::new(&self.rpc);
-        if let Some(key) = &self.api_key {
-            rpc = rpc.with_api_key(key);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
         let params = serde_json::json!({ "dar_content_base64": b64 });
         let spinner = output::create_spinner("Uploading DAR…");
@@ -537,7 +817,9 @@ impl CantonUploadDarCmd {
     }
 }
 
-/// Allocate a new party on the participant
+/// Operator-only: allocate a new party on the participant. Party
+/// allocation is unbounded participant state, so it is the operator's
+/// call rather than a tenant's — admin-token-gated at the node.
 #[derive(Debug, Parser)]
 pub struct CantonAllocatePartyCmd {
     /// Human-readable party id hint (e.g. "alice-test"). The participant
@@ -552,8 +834,12 @@ pub struct CantonAllocatePartyCmd {
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 
-    #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
-    api_key: Option<String>,
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonAllocatePartyCmd {
@@ -564,8 +850,15 @@ impl CantonAllocatePartyCmd {
         output::print_field("Party ID Hint", &self.party_id_hint);
 
         let mut rpc = RpcClient::new(&self.rpc);
-        if let Some(key) = &self.api_key {
-            rpc = rpc.with_api_key(key);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let mut params = serde_json::Map::new();
@@ -596,7 +889,9 @@ impl CantonAllocatePartyCmd {
     }
 }
 
-/// Grant Canton rights on a party to a user
+/// Operator-only: grant Canton rights on a party to a user. A grant can
+/// name any party on the participant, so it is the operator's call
+/// rather than a tenant's — admin-token-gated at the node.
 #[derive(Debug, Parser)]
 pub struct CantonGrantRightsCmd {
     /// Fully-qualified party id (`<hint>::<participant-hash>`)
@@ -624,8 +919,12 @@ pub struct CantonGrantRightsCmd {
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 
-    #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
-    api_key: Option<String>,
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonGrantRightsCmd {
@@ -644,8 +943,15 @@ impl CantonGrantRightsCmd {
         output::print_field("Can Read As", &self.can_read_as.to_string());
 
         let mut rpc = RpcClient::new(&self.rpc);
-        if let Some(key) = &self.api_key {
-            rpc = rpc.with_api_key(key);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let mut params = serde_json::Map::new();
@@ -681,18 +987,24 @@ impl CantonGrantRightsCmd {
     }
 }
 
-/// List rights granted to a Canton user
+/// Operator-only: list rights granted to a Canton user. The read reaches
+/// any user on the participant, so it is the operator's call rather than
+/// a tenant's — admin-token-gated at the node.
 #[derive(Debug, Parser)]
 pub struct CantonListRightsCmd {
-    /// User id (omit to list rights for the OAuth principal's own user)
+    /// User id (omit to list rights for the participant's own principal)
     #[arg(long)]
     user_id: Option<String>,
 
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
 
-    #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
-    api_key: Option<String>,
+    #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonListRightsCmd {
@@ -702,8 +1014,15 @@ impl CantonListRightsCmd {
         output::print_header("Canton List User Rights");
 
         let mut rpc = RpcClient::new(&self.rpc);
-        if let Some(key) = &self.api_key {
-            rpc = rpc.with_api_key(key);
+        if let Some(token) = &self.admin_token {
+            rpc = rpc.with_admin_token(token);
+        } else {
+            return Err(anyhow!(
+                "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
+            ));
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let params = match &self.user_id {
@@ -742,6 +1061,10 @@ pub struct CantonListAnalyticsCmd {
     /// (`key_id`, the 16-hex prefix of the SHA-256 of the key). Optional.
     #[arg(long)]
     key_id: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonListAnalyticsCmd {
@@ -757,6 +1080,10 @@ impl CantonListAnalyticsCmd {
             return Err(anyhow!(
                 "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
             ));
+        }
+
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let params = match &self.key_id {
@@ -797,6 +1124,11 @@ pub struct CantonWatchPartyCmd {
 
     #[arg(long, env = "TENZRO_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
+
+    /// Canton network to target. Required when the key authorizes more
+    /// than one; the node names the authorized set when it is missing.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonWatchPartyCmd {
@@ -808,6 +1140,9 @@ impl CantonWatchPartyCmd {
         let mut rpc = RpcClient::new(&self.rpc);
         if let Some(key) = &self.api_key {
             rpc = rpc.with_api_key(key);
+        }
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let params = serde_json::json!({
@@ -853,6 +1188,10 @@ pub struct CantonIdpCreateCmd {
 
     #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonIdpCreateCmd {
@@ -868,6 +1207,10 @@ impl CantonIdpCreateCmd {
             return Err(anyhow!(
                 "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
             ));
+        }
+
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let params = serde_json::json!({
@@ -904,6 +1247,10 @@ pub struct CantonIdpDeleteCmd {
 
     #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonIdpDeleteCmd {
@@ -919,6 +1266,10 @@ impl CantonIdpDeleteCmd {
             return Err(anyhow!(
                 "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
             ));
+        }
+
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let params = serde_json::json!({
@@ -956,6 +1307,10 @@ pub struct CantonMirrorWorkflowCmd {
 
     #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonMirrorWorkflowCmd {
@@ -971,6 +1326,10 @@ impl CantonMirrorWorkflowCmd {
             return Err(anyhow!(
                 "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
             ));
+        }
+
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let params = serde_json::json!({
@@ -1010,6 +1369,10 @@ pub struct CantonMirrorObligationCmd {
 
     #[arg(long, env = "TENZRO_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: Option<String>,
+
+    /// Canton network to target. Omit for the operator default.
+    #[arg(long, env = "TENZRO_CANTON_NETWORK")]
+    canton_network: Option<String>,
 }
 
 impl CantonMirrorObligationCmd {
@@ -1025,6 +1388,10 @@ impl CantonMirrorObligationCmd {
             return Err(anyhow!(
                 "missing admin token (pass --admin-token or set TENZRO_ADMIN_TOKEN)"
             ));
+        }
+
+        if let Some(net) = &self.canton_network {
+            rpc = rpc.with_canton_network(net);
         }
 
         let params = serde_json::json!({

@@ -6,8 +6,8 @@
 //! (typically `did:web:<host>` resolution or a `.well-known/jwks.json`
 //! published by the domain owner). This stops a hostile reverse proxy or
 //! intermediate cache from rewriting the card's `url`, `skills`, or
-//! `securitySchemes` without detection — the production-grade conformance
-//! bar in the A2A 2026 spec.
+//! `securitySchemes` without detection — the conformance bar set by the
+//! A2A 2026 spec.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -739,8 +739,8 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                      IncreaseBurnPct / DecreaseBurnPct / AlarmHighInflation / \
                      AlarmHighDeflation with magnitude bps capped at the normal / alarm \
                      ceiling). The dial moves only via on-chain governance proposals; the \
-                     auto-proposal generator + EIP-1559 fee-market consumer wiring lands in \
-                     a follow-up wave."
+                     auto-proposal generator + EIP-1559 fee-market consumer wiring is \
+                     not implemented yet."
                         .to_string(),
                 tags: vec![
                     "adaptive-burn".to_string(),
@@ -1193,7 +1193,7 @@ impl SignedAgentCard {
 
 /// Canonical JSON serialization for hash stability. Sorted-keys, no
 /// whitespace. Mirrors the `Ivms101Envelope::canonical_hash` algorithm
-/// in `tenzro-identity` so the same canonicaliser ships across the
+/// in `tenzro-identity` so the same canonicaliser is used across the
 /// workspace.
 fn canonical_json(v: &serde_json::Value) -> String {
     use serde_json::Value;

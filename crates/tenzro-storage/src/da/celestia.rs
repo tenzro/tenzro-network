@@ -181,8 +181,8 @@ impl DaBackend for CelestiaBackend {
             healthy: true,
             last_submission_ms,
             last_fetch_ms,
-            // Error-rate accounting will land alongside the metrics wave; the
-            // backend itself currently exposes only the per-call Result.
+            // The backend exposes only the per-call `Result`, so there is no
+            // rolling error window to report yet.
             error_rate_bps: 0,
         }
     }

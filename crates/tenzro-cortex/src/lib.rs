@@ -1,6 +1,6 @@
 //! # Tenzro Cortex
 //!
-//! Recurrent-depth reasoning as a first-class Tenzro Network primitive.
+//! Recurrent-depth reasoning as a schedulable Tenzro Network primitive.
 //!
 //! Cortex treats the *loop depth* of recurrent-depth transformer models
 //! (e.g. OpenMythos-style RDT/MoE architectures) as a schedulable, metered,

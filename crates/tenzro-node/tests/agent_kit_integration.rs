@@ -1,4 +1,4 @@
-//! End-to-end integration tests for the AgentKit ↔ NodeAuthIssuer seam.
+//! Integration tests for the AgentKit ↔ NodeAuthIssuer seam.
 //!
 //! These tests spin up a full in-process [`TenzroNode`] (storage, RPC,
 //! AuthEngine, IdentityRegistry, AgentRuntime), wire a fresh `AgentKit`
@@ -255,7 +255,7 @@ async fn test_spawn_solana_jupiter_swap_mints_dpop_credentials() {
     );
 
     // The DPoP signer must produce a parseable proof for an arbitrary
-    // (htm, htu) — proves the trait object is wired end-to-end.
+    // (htm, htu) — proves the trait object is wired through to the signer.
     let proof = creds
         .dpop
         .sign_proof("POST", &format!("{}/", base_url), &creds.jwt)

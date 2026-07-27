@@ -555,7 +555,7 @@ pub enum ParticipantPermission {
 /// - **Mediator**: 2PC coordinator, collects confirmations
 /// - **Topology Manager**: Party/key/package topology state
 ///
-/// All payloads are end-to-end encrypted between participant nodes — the
+/// All payloads are encrypted between participant nodes for the whole hop — the
 /// synchronizer is "blind" to transaction contents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SynchronizerConfig {

@@ -729,7 +729,7 @@ mod tests {
 
         // Re-store the mutated challenge so settle/verify can find it
         // (verify_credential itself doesn't read from the store, but this
-        // keeps the test honest about end-to-end flow).
+        // keeps the test honest about the challenge → settle flow).
         server.challenge_store().store(&challenge);
 
         let credential = PaymentCredential {

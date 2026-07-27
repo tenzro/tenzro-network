@@ -109,7 +109,7 @@ arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 
 [features]
-default = ["cluster-serving", "visa-tap", "mastercard-agent-pay"]
+default = ["cluster-serving", "visa-tap", "mastercard-agent-pay", "wasi-skills"]
 # LAN layer-pipeline cluster serving. Forwards to tenzro-model, which links
 # the ggml RPC backend and builds the rpc-server sidecar used to splice a
 # member's layer range into a head node's pipeline. Enabled by default — it
@@ -139,10 +139,12 @@ onnx-tensorrt = ["tenzro-model/onnx-tensorrt"]
 onnx-coreml = ["tenzro-model/onnx-coreml"]
 visa-tap = ["tenzro-payments/visa-tap"]
 mastercard-agent-pay = ["tenzro-payments/mastercard-agent-pay"]
-# Enable the sandboxed WASI 0.2 component runtime for community MCP
-# tools and A2A skills. When enabled, the MCP server can register
-# tool components published as `.wasm` files alongside their manifests
-# and execute them in-process under capability checks.
+# The sandboxed WASI 0.2 component runtime for marketplace skills and MCP
+# tools. Registry admission is permissionless, so a published skill is
+# untrusted code: a skill that supplies a content-addressed bundle runs as a
+# component with no filesystem, no network and no environment, under a fuel
+# budget and an epoch deadline. Enabled by default — without it a bundled
+# skill has nowhere safe to run and the node refuses the invocation.
 wasi-skills = ["dep:tenzro-wasm"]
 # Enable the Firecracker microVM supervisor for `machine`-class app hosting —
 # unmodified long-lived server processes run in a hardware-isolated microVM.

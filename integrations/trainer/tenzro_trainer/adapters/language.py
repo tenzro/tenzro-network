@@ -88,7 +88,7 @@ def _warn_if_rocm_bnb_4bit_nan_risk() -> None:
 
 
 # Default HF repo for the language adapter — Qwen 3 0.6B is the smallest
-# entry in the Tenzro catalog's language section, ideal for end-to-end
+# entry in the Tenzro catalog's language section, ideal for whole-pipeline
 # rehearsals. Production runs override this via
 # ``architecture.metadata.hf_repo``.
 DEFAULT_HF_REPO = "Qwen/Qwen3-0.6B"

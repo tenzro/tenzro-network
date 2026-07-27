@@ -102,7 +102,8 @@ pub enum DaBackendId {
     Avail,
     /// iroh-blobs content-addressed transport (Phase A2, #214).
     /// Locator is the 32-byte BLAKE3 hash; backend commitment_kzg is `None`
-    /// because BLAKE3 is verified end-to-end by iroh-blobs itself.
+    /// because iroh-blobs verifies the BLAKE3 hash over every transferred
+    /// chunk itself.
     IrohBlobs,
     /// Committee-resident Red Stuff store. Two-dimensional Reed-Solomon slivers
     /// distributed to the validator committee, with a `2f+1`-signed availability
@@ -172,7 +173,7 @@ pub struct ReceiptSummary {
 
 /// Reference to a signed off-chain mandate that authorized the receipt.
 ///
-/// Settlements that flow from an AP2 cart mandate, an x402 challenge,
+/// Settlements that flow from an AP2 checkout mandate, an x402 challenge,
 /// an MPP session, or a Stripe SPT carry a `MandateRef` so the on-chain
 /// receipt is cryptographically tied back to the user's signed intent.
 /// The mandate body itself stays off-chain (or in DA); the chain stores
@@ -180,8 +181,8 @@ pub struct ReceiptSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MandateRef {
     /// Wire protocol identifier. Canonical values:
-    /// `"ap2-cart"`, `"ap2-intent"`, `"ap2-payment"`, `"x402"`,
-    /// `"mpp"`, `"stripe-spt"`, `"visa-tap"`, `"mastercard-agent-pay"`,
+    /// `"ap2-checkout"`, `"ap2-payment"`, `"x402"`, `"mpp"`,
+    /// `"stripe-spt"`, `"visa-tap"`, `"mastercard-agent-pay"`,
     /// `"capital-intent"`, `"workflow-step"`.
     pub protocol: String,
     /// `keccak256(canonical_mandate_bytes)` or SHA-256, per the protocol
@@ -201,10 +202,10 @@ pub struct MandateRef {
 }
 
 impl MandateRef {
-    /// Construct an AP2 cart-mandate reference.
-    pub fn ap2_cart(mandate_hash: Hash, issuer_did: impl Into<String>) -> Self {
+    /// Construct an AP2 checkout-mandate reference.
+    pub fn ap2_checkout(mandate_hash: Hash, issuer_did: impl Into<String>) -> Self {
         Self {
-            protocol: "ap2-cart".into(),
+            protocol: "ap2-checkout".into(),
             mandate_hash,
             issuer_did: issuer_did.into(),
             mandate_uri: None,
@@ -287,7 +288,7 @@ impl ReceiptEnvelope {
     }
 
     /// Attach a signed off-chain mandate reference to this envelope. Used
-    /// for settlements that flow from an AP2 cart mandate, x402 challenge,
+    /// for settlements that flow from an AP2 checkout mandate, x402 challenge,
     /// MPP session, Stripe SPT, or another signed user intent.
     pub fn with_mandate(mut self, mandate_ref: MandateRef) -> Self {
         self.mandate_ref = Some(mandate_ref);
@@ -387,8 +388,8 @@ pub trait DaBackend: Send + Sync {
 /// is configured. Stores submitted payloads in an in-memory `DashMap` keyed by
 /// a synthetic locator `fallback:<sha256_hex>` and round-trips them through
 /// `fetch`. This keeps the receipt-offload path functional pre-mainnet so the
-/// rest of the system (commitments, indices, RPC) can be exercised end-to-end
-/// without standing up a real DA layer.
+/// rest of the system (commitments, indices, RPC) can be exercised in full
+/// without standing up an external DA layer.
 ///
 /// Optionally takes a [`crate::kv::KvStore`] handle (`with_storage`) so the
 /// fallback DashMap is backed by `CF_METADATA` under the `da_fallback:`

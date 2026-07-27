@@ -12,7 +12,9 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 use tenzro_model::{PricingEngine, ProviderManager};
-use tenzro_types::model::{InferenceMetadata, InferenceProvider, PricingConfig, PricingModel};
+use tenzro_types::model::{
+    BillableUnits, InferenceMetadata, InferenceProvider, ModalityRates, PricingConfig, PricingModel,
+};
 use tenzro_types::primitives::Address;
 
 fn addr(byte: u8) -> Address {
@@ -25,14 +27,31 @@ fn pricing_per_token() -> PricingConfig {
         price_per_output_token: 20,
         minimum_price: 100,
         pricing_model: PricingModel::PerToken,
+        modality_rates: ModalityRates::default(),
     }
 }
 
 fn metadata_typical() -> InferenceMetadata {
     InferenceMetadata {
-        input_tokens: 512,
-        output_tokens: 256,
+        units: BillableUnits::tokens(512, 256),
         latency_ms: 850,
+        model_version: None,
+        finish_reason: None,
+    }
+}
+
+/// A video job exercises every metered dimension at once, including the u128
+/// denoising term, so the widest arm of the meter is measured too.
+fn metadata_video() -> InferenceMetadata {
+    InferenceMetadata {
+        units: BillableUnits::tokens(512, 256)
+            .with_cache(2_048, 512)
+            .with_reasoning_loops(4)
+            .with_image_tokens(729)
+            .with_audio_ms(9_500)
+            .with_video_ms(30_000)
+            .with_pixel_steps(1_920 * 1_080 * 30, 720),
+        latency_ms: 42_000,
         model_version: None,
         finish_reason: None,
     }
@@ -42,11 +61,20 @@ fn bench_calculate_cost(c: &mut Criterion) {
     let engine = PricingEngine::new();
     let pricing = pricing_per_token();
     let metadata = metadata_typical();
+    let video = metadata_video();
     let mut group = c.benchmark_group("pricing_calculate_cost");
     group.bench_function("per_token_512in_256out", |b| {
         b.iter(|| {
             let cost = engine
-                .calculate_cost(black_box(&pricing), black_box(&metadata))
+                .calculate_cost(black_box("qwen3-7b"), black_box(&pricing), black_box(&metadata))
+                .expect("calculate_cost");
+            black_box(cost);
+        });
+    });
+    group.bench_function("all_dimensions_video_job", |b| {
+        b.iter(|| {
+            let cost = engine
+                .calculate_cost(black_box("wan-t2v"), black_box(&pricing), black_box(&video))
                 .expect("calculate_cost");
             black_box(cost);
         });

@@ -1,7 +1,7 @@
 {
   "template_id": "ref-intelligent-payment-router-v1",
   "name": "Intelligent Payment Router",
-  "description": "Autonomous agent that receives payment requests and evaluates MPP (Machine Payments Protocol), x402 (Coinbase), and native on-chain transfer to select the optimal path based on real-time fee estimation, latency, and settlement finality, then executes the payment end-to-end.",
+  "description": "Autonomous agent that receives payment requests and evaluates MPP (Machine Payments Protocol), x402 (Coinbase), and native on-chain transfer to select the optimal path based on real-time fee estimation, latency, and settlement finality, then executes the payment through to settlement.",
   "template_type": "autonomous",
   "creator": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
   "version": "1.0.0",

@@ -28,7 +28,8 @@ pub enum ModelClass {
     FrontierMoe,
 }
 
-/// How a model session should be executed end-to-end.
+/// How a model session should be executed, from weight residency to
+/// where the forward pass runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExecutionMode {
@@ -379,7 +380,7 @@ pub struct ExecutionPlan {
     pub provider_id: String,
     /// Selected execution mode.
     pub execution_mode: ExecutionMode,
-    /// Estimated end-to-end latency in milliseconds.
+    /// Estimated request-to-response latency in milliseconds.
     #[serde(default)]
     pub estimated_latency_ms: u32,
     /// KV-cache profile to use.

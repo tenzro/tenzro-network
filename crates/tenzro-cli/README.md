@@ -8,7 +8,7 @@ The official command-line interface for operating Tenzro Network nodes, managing
 - **Node Management**: Monitor node status
 - **Wallet Operations**: Create FROST-Ed25519 threshold wallets, check balances, send transactions (real reqwest RPC client)
 - **Model Management**: List, download, serve AI models (local + remote RPC)
-- **Multi-Modal Inference**: Forecast, vision/text/video embedding, segmentation, detection, audio transcription via dedicated CLI commands
+- **Multi-Modal Inference**: Forecasting, image/text/video embedding, point-and-box and text-promptable segmentation, object detection, and audio transcription — each a subcommand group with `catalog` / `list` / `load` / `unload` / `run`
 - **Distributed MoE**: Expert-shard maps, dispatch planning, expert/gate weight loading, and distributed layer forwards via `tenzro moe`
 - **Tenzro Train**: Post training tasks, enroll trainers, submit outer gradients, finalize rounds, and manage sealed manifests via `tenzro train`
 - **Tenzro Media Gen**: Post diffusion image/video jobs, enroll render workers, claim either half of a split-expert model, and fetch outputs via `tenzro media-gen`
@@ -84,7 +84,7 @@ tenzro join
 
 ```bash
 # Start a Tenzro Network node (forwards to the tenzro-node binary)
-tenzro node start --role validator --data-dir ~/.tenzro/data
+tenzro node start --roles validator --data-dir ~/.tenzro/data
 
 # Stop the running node
 tenzro node stop
@@ -402,37 +402,78 @@ audit the disclosure string in one place.
 
 ### Multi-Modal Inference
 
+Each modality is a subcommand group with the same five arms: `catalog` lists the
+curated entries, `list` shows what the node currently has loaded, `load`
+registers a model, `unload` drops it, and `run` performs inference.
+
+`load` takes `--catalog-id`, which inherits every structural parameter (input
+size, embedding dimension, decoder ABI, class count) from the catalog entry and
+applies its license tier. Without it you must supply those parameters yourself,
+and no license check runs.
+
+`embed-text load` and `text-segment load` fetch their artifacts from HuggingFace
+onto the node's models directory. The other groups register ONNX files that are
+already on the node's filesystem, so `--path` (or `--encoder-path` /
+`--decoder-path`) is a node-side path, not a local one.
+
 ```bash
 # Timeseries forecasting (tenzro_forecast)
-# Catalog: TimesFM 2.5 200M
-tenzro forecast --model timesfm-2.5-200m --context <values> --horizon 64
+# Catalog: timesfm-2.5-200m, tirex-35m
+tenzro forecast catalog
+tenzro forecast load --model fc --path /models/timesfm.onnx --catalog-id timesfm-2.5-200m
+tenzro forecast run --model fc --context 1,2,3,4,5 --horizon 64
 
 # Text embedding (tenzro_textEmbed)
-# Catalog: Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M, BGE-M3, Snowflake Arctic
-tenzro embed-text --model qwen3-embedding-0.6b --text "hello world"
+# Catalog: qwen3-embedding-0.6b/-4b/-8b, embeddinggemma-300m, bge-m3,
+#          modernbert-embed-base/-large
+tenzro embed-text load --model qwen3-embedding-0.6b
+tenzro embed-text run --model qwen3-embedding-0.6b --input "hello world"
 
-# Image embedding / similarity (tenzro_visionEmbed, tenzro_visionSimilarity)
-# Catalog: CLIP ViT-B/32 + L/14, SigLIP2 base/large/so400m, DINOv3 vits16/vitb16/vitl16
-tenzro embed-image --model siglip2-base --image ./photo.png
+# Image embedding / similarity (tenzro_imageEmbed, tenzro_imageTextSimilarity)
+# Catalog: clip-vit-b32/-l14, siglip-base-224, siglip2-base-224/-large-256/-so400m-384,
+#          dinov3-vits16/-vitb16/-vitl16
+tenzro embed-image load --model img --path /models/siglip2.onnx --catalog-id siglip2-base-224
+tenzro embed-image run --model img --image ./photo.png --normalize
+tenzro embed-image similarity --image-embedding ./img.json --text-embedding ./txt.json
 
-# Segmentation (tenzro_segment)
-# Catalog: SAM 2 base/large, EdgeSAM, MobileSAM
-tenzro segment --model sam-2-base --image ./photo.png --points "320,240"
+# Point/box segmentation (tenzro_segment)
+# Catalog: sam2-base, sam2-large, edgesam, mobilesam
+tenzro segment load --model seg --encoder-path /models/enc.onnx \
+  --decoder-path /models/dec.onnx --catalog-id sam2-base
+tenzro segment run --model seg --image ./photo.png --prompts ./prompts.json
+
+# Open-vocabulary text-promptable segmentation (tenzro_textSegment)
+# Catalog: sam3-vit-h
+tenzro text-segment load --model sam3-vit-h
+tenzro text-segment run --model sam3-vit-h --image ./photo.png --text "a red bicycle"
 
 # Object detection (tenzro_detect)
-# Catalog: RF-DETR n/s/m/b/l/2xl, D-FINE n/s/m/l/x
-tenzro detect --model rf-detr-medium --image ./photo.png --threshold 0.5
+# Catalog: rf-detr-nano/-small/-medium/-base/-large/-2xl, d-fine-n/-s/-m/-l/-x
+tenzro detect load --model det --path /models/rfdetr.onnx --catalog-id rf-detr-medium
+tenzro detect run --model det --image ./photo.png --score-threshold 0.5
 
 # Audio transcription (tenzro_transcribe)
-# Catalog: Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT-v3, Canary-1B-Flash
-tenzro transcribe --model whisper-large-v3-turbo --audio ./clip.wav
+# Catalog: moonshine-tiny/-base, distil-whisper-small-en/-medium-en/-large-v3,
+#          whisper-large-v3-turbo, parakeet-tdt-0.6b-v3, canary-1b-flash
+tenzro transcribe load --model asr --encoder-path /models/enc.onnx \
+  --decoder-path /models/dec.onnx --preprocessor-path /models/pre.onnx \
+  --vocab-path /models/vocab.txt --catalog-id parakeet-tdt-0.6b-v3
+tenzro transcribe run --model asr --audio ./clip.wav --timestamps
 
 # Video embedding (tenzro_videoEmbed)
-# Native catalog is empty; register a vision-pooled fallback (DINOv3 / SigLIP2 / CLIP) to embed clips
-tenzro embed-video --model dinov3-vitb16-pooled --video ./clip.mp4
+# The native video catalog is empty — no permissive ONNX-shippable encoder-only
+# video model exists yet. Register a vision-pooled fallback instead: it samples
+# evenly-spaced frames with ffmpeg, embeds each through a loaded image encoder,
+# and mean-pools. Requires ffmpeg on the node.
+tenzro embed-video load --model vid --vision-model img --num-frames 8
+tenzro embed-video run --model vid --video ./clip.mp4 --normalize
 ```
 
-License-tier gating applies on first load: CommercialCustom models (DINOv3, SAM, Gemma) require `--accept-license <id>`; non-commercial models require `--accept-non-commercial`.
+License-tier gating applies at load time. CommercialCustom models (DINOv3, SAM,
+Gemma) need the node operator to have started `tenzro-node` with
+`--accept-license <id>`; non-commercial models need `--accept-non-commercial`.
+Those are node flags, not CLI flags — a `load` against a node that lacks the
+acceptance is refused with a license error.
 
 ### Staking
 
@@ -677,7 +718,7 @@ tenzro bond withdraw --agent-id <id>
 tenzro bond get --agent-id <id>
 tenzro bond list
 
-# File a claim against the insurance pool for a fraudulent cart-mandate / failed
+# File a claim against the insurance pool for a fraudulent payment mandate / failed
 # settlement. Surfaces the AgentBond stake as the first loss tranche.
 tenzro insurance claim --agent-id <id> --evidence <path>
 tenzro insurance list
@@ -834,9 +875,27 @@ tenzro approval decide --approval-id <id> --decision approved --approver-did <di
 tenzro approval decide --approval-id <id> --decision denied
 ```
 
+The parked attempt itself returns `-32002` with the new id under
+`data.approval_id`, so the requesting agent learns which record to watch.
+Once the controller approves, the agent retries the same call with
+`approval_id` in its params: the engine spends the approval against that
+exact action and the call executes instead of parking a second time. An
+approval only covers the action it was raised for — a retry carrying a
+mismatched amount, counterparty, or action type parks again.
+
+`--deny-reason` on a denial is carried verbatim back to the requester. A
+retry against a denied approval returns `-32001` with the controller's
+reason in the message, so the agent can act on *why* it was refused rather
+than only that it was:
+
+```bash
+tenzro approval decide --approval-id <id> --decision denied \
+  --deny-reason "counterparty not on the approved vendor list"
+```
+
 ### Channel Disputes
 
-Micropayment-channel disputes are first-class records in the settlement
+Micropayment-channel disputes are stored records in the settlement
 engine. These read-only commands inspect dispute lifecycle records;
 open/respond/resolve transitions happen via on-chain settlement
 transactions, not here.
@@ -960,18 +1019,97 @@ tenzro agent terminate \
   --cascade
 ```
 
+### Operator API Key Management
+
+`tenzro admin api-key` wraps the RPCs behind `X-Tenzro-Admin-Token`. Every
+node operator holds their own token for their own node's state — there is
+no network-wide token, and these commands grant no authority over the
+validator set, treasury, fee schedule, or protocol params, all of which
+flow through on-chain governance. Developers request a key out of band
+from whichever operator runs the node they want to use.
+
+```bash
+# Mint a key. --scope repeats; defaults to `canton`.
+# --tier is free (default, read-only) | standard | priority.
+# --canton-network repeats; a key naming none reaches no Canton ledger.
+tenzro admin api-key create \
+    --label "acme-devnet" \
+    --subject did:tenzro:machine:... \
+    --scope canton \
+    --tier standard \
+    --canton-network devnet \
+    --canton-user-id acme@clients
+
+# The plaintext tnz_... key is returned exactly once, at issuance.
+# Only its SHA-256 hash is stored; a lost key must be revoked and reissued.
+
+# List issued keys (active + revoked)
+tenzro admin api-key list
+
+# Revoke by non-secret key_id (the 8-byte hex prefix shown in `list`)
+tenzro admin api-key revoke --key-id <key_id>
+```
+
+`--class` picks the revocation model: `subject` (default — the subject can
+self-revoke), `operator_internal` (operator-only, admin-revokable), or
+`operator_protected` (operator-only and not revokable over RPC; rotate by
+changing the operator secret and restarting, and pass
+`--confirm-operator-protected` to acknowledge that).
+
+All three commands read `TENZRO_ADMIN_TOKEN` when `--admin-token` is
+omitted, and target `http://127.0.0.1:8545` unless `--rpc` says otherwise.
+
 ### Canton Integration (Canton 3.5+ JSON Ledger API)
 
 All `tenzro canton ...` subcommands route through the local Tenzro node,
-which proxies to its configured Canton participant. Callers never see
-the Auth0 secret. Every method requires an API key with scope `canton`
-(passed via `--api-key` or `TENZRO_API_KEY` env var).
+which proxies to its configured Canton participant. Callers never see the
+operator's OAuth client secret.
+
+The surface splits by entitlement. Party-scoped work — DAML submission,
+contract queries, participant status — takes an API key with scope
+`canton` (`--api-key` or `TENZRO_API_KEY`). Participant administration —
+DAR upload, party allocation, rights grants, and reads spanning every
+tenant — takes the operator's admin token (`--admin-token` or
+`TENZRO_ADMIN_TOKEN`), because a key holder rents party-scoped access to a
+participant rather than administering it. Passing the wrong credential
+returns `-32001` (admin gate) or `-32004` (api-key gate) rather than
+silently falling back.
+
+The node serves Canton per network. `devnet` and `mainnet` are configured
+independently — a network counts as served only when its
+`CANTON_<NET>_LEDGER_API_HOST` is set — and a key is authorized for a
+subset of them. Name the target with `--canton-network`, falling back to
+`TENZRO_CANTON_NETWORK`. A key authorizing exactly one network needs
+neither; a key authorizing both and given neither gets a `-32004` naming
+the authorized set. Admin-token calls are unbounded by any key but still
+have to name a network, since there is no key to infer one from.
+
+Each key carries a tier bounding its request budget over a sliding
+60-second window:
+
+| Tier | Requests/min | Writes |
+|---|---|---|
+| `free` | 60 | refused |
+| `standard` | 600 | allowed |
+| `priority` | 6,000 | allowed |
+
+Exceeding the budget returns `-32005` with `retry_after_ms`,
+`requests_per_minute`, and `tier`.
+
+API keys gate operator-brokered resources like Canton, where the operator
+supplies upstream credentials of its own. They do not gate the
+marketplace: publishing an agent, skill, workflow, or MCP server is
+permissionless, priced by the provider in TNZO or offered free, and needs
+no operator approval.
 
 ```bash
 # Existing core commands
 tenzro canton domains                              # tenzro_listCantonDomains
 tenzro canton contracts --template '<tid>'         # tenzro_listDamlContracts
 tenzro canton submit <command>                     # tenzro_submitDamlCommand
+
+# Naming the network on a key authorized for more than one
+tenzro canton contracts --template '<tid>' --canton-network mainnet
 
 # Canton 3.5+ extension surface
 tenzro canton health                               # /livez + /readyz + /v2/version
@@ -1152,40 +1290,81 @@ tenzro marketplace register <template>
 
 ### Skill Management
 
+A skill is either an *endpoint* the node calls on your behalf or a *bundle* —
+a content-addressed WASI 0.2 component the node fetches and runs inside its
+own sandbox, under a fuel and deadline budget, with no ambient filesystem or
+network. Publishing is permissionless: you set the price in TNZO base units
+(`0` for free) and the wallet that receives your share.
+
 ```bash
 # List skills (tenzro_listSkills)
 tenzro skill list
-
-# Register skill (tenzro_registerSkill)
-tenzro skill register <skill>
+tenzro skill list --bundled-only          # only skills a caller can pin
+tenzro skill list --all                   # include inactive and deprecated
 
 # Search skills (tenzro_searchSkills)
 tenzro skill search <query>
 
-# Use skill (tenzro_useSkill)
-tenzro skill use <skill_id> <params>
-
-# Get skill (tenzro_getSkill)
+# Get skill (tenzro_getSkill) and its usage counters (tenzro_getSkillUsage)
 tenzro skill get <skill_id>
+tenzro skill usage <skill_id>
+
+# Register an endpoint skill (tenzro_registerSkill)
+tenzro skill register --name summarize --description "Summarize a document" \
+  --capabilities nlp --creator-did did:tenzro:human:... \
+  --endpoint https://example.com/mcp --price-per-call 0
+
+# Register a bundled skill — all three artifact flags are required together
+tenzro skill register --name summarize --description "Summarize a document" \
+  --capabilities nlp --creator-did did:tenzro:human:... \
+  --bundle-uri tenzro://blob/<blake3-hex> \
+  --bundle-sha256 <sha256-hex> --bundle-size 262144
+
+# Use skill (tenzro_useSkill)
+tenzro skill use <skill_id> --input '{"prompt":"hello"}'
+
+# Pin the invocation — either flag, or both
+tenzro skill use <skill_id> --input '{}' \
+  --expected-version 1.0.0 --expected-sha256 <sha256-hex>
+
+# Update or republish (tenzro_updateSkill)
+tenzro skill update <skill_id> --version 1.1.0 \
+  --bundle-uri tenzro://blob/<blake3-hex> \
+  --bundle-sha256 <sha256-hex> --bundle-size 264192
+
+# Reconcile the registry — purge inactive and deprecated rows
+tenzro skill prune
 ```
+
+`--bundle-sha256` is the digest of the artifact bytes, and it is what callers
+pin against. Republishing a bundle under a new digest fails every pin on the
+old one closed rather than silently serving different code, so a caller that
+pinned gets a refusal it can act on instead of a substituted implementation.
 
 ### Tool Management
 
 ```bash
 # List tools (tenzro_listTools)
 tenzro tool list
-
-# Register tool (tenzro_registerTool)
-tenzro tool register <tool>
+tenzro tool list --tool-type mcp --category search
 
 # Search tools (tenzro_searchTools)
 tenzro tool search <query>
 
-# Use tool (tenzro_useTool)
-tenzro tool use <tool_id> <params>
-
-# Get tool (tenzro_getTool)
+# Get tool (tenzro_getTool) and its usage counters (tenzro_getToolUsage)
 tenzro tool get <tool_id>
+tenzro tool usage <tool_id>
+
+# Register tool (tenzro_registerTool)
+tenzro tool register --name web-search --description "Web search over MCP" \
+  --endpoint https://tools.example.org/mcp --capabilities web-search
+
+# Use tool (tenzro_useTool) — --tool-name is the MCP tool on that server
+tenzro tool use <tool_id> --tool-name web_search --params '{"query":"hello"}'
+
+# Update (tenzro_updateTool) and reconcile the registry
+tenzro tool update <tool_id> --version 1.1.0
+tenzro tool prune
 ```
 
 ### Token Operations

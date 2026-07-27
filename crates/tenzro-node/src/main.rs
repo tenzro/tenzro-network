@@ -60,7 +60,7 @@ struct Cli {
     /// should pass their GCE-allocated external IP here, e.g.
     /// `/ip4/34.123.45.67/tcp/9000`. Multiple entries allow advertising both
     /// TCP and QUIC. Leave unset for nodes behind NAT; AutoNAT v2 will
-    /// discover an external address dynamically once that path lands.
+    /// discover an external address dynamically once that path exists.
     #[arg(long, value_name = "ADDRS")]
     external_p2p_addr: Option<String>,
 
@@ -76,7 +76,7 @@ struct Cli {
     /// This avoids the "rotate v0's key → break every other validator's
     /// hardcoded BOOT_PEER_ID" failure mode by externalising the
     /// bootstrap set to DNS. Operators rotate by editing the zone, not
-    /// by shipping a new wrapper script to every VM.
+    /// by distributing a new wrapper script to every VM.
     ///
     /// Example: `--bootstrap-dns boot.tenzro.xyz`
     #[arg(long, value_name = "NAME")]
@@ -344,7 +344,7 @@ async fn main() -> Result<()> {
     // Install aws-lc-rs as the process-wide rustls CryptoProvider before any
     // TLS-using subsystem (reqwest, axum-rustls, libp2p TLS, hyper-rustls)
     // touches rustls. aws-lc-rs is the only mainstream rustls provider that
-    // ships X25519MLKEM768 hybrid post-quantum key exchange (per the FIPS 203
+    // offers X25519MLKEM768 hybrid post-quantum key exchange (per the FIPS 203
     // ML-KEM-768 / IETF hybrid named-group spec).
     //
     // `install_default` returns `Err(_)` if a provider was already installed
@@ -949,72 +949,70 @@ async fn main() -> Result<()> {
     });
 
     let canton_addr = config.canton_mcp_addr.clone();
-    // Pass Canton participant URLs + optional JWT into the Canton MCP server so
-    // its tools talk to the right Canton node instead of always hitting the
-    // hard-coded `localhost:7575/7576` defaults. Ledger and admin URLs are
-    // derived from `config.canton.host`/`port` (the same source `init_vm()`
-    // uses to wire the DamlExecutor); JWT is read from `CANTON_JWT_TOKEN` env
-    // since it's a secret and intentionally not on the on-disk config.
-    // Canton MCP endpoint resolution honors the same three profiles as
-    // `Node::init_bridge`:
-    //  1. Devnet — fixed `json.canton.example-operator.invalid` host, TLS, Auth0 bearer.
-    //  2. Operator-run validator — operator's host:port (TLS per `canton.tls`),
-    //     with EITHER operator OAuth2 (`canton.oauth`) OR static JWT
-    //     (`canton.static_jwt`, set from `CANTON_JWT_TOKEN`).
-    //  3. Local unauth — plaintext HTTP to localhost, no bearer.
-    let (canton_ledger_api_url, canton_admin_api_url, canton_token_provider, canton_jwt_token) =
-        if config.canton.devnet {
-            let provider = config.canton.devnet_client_secret.clone().map(|secret| {
-                let auth_cfg =
-                    tenzro_bridge::canton_auth::CantonAuthConfig::devnet(secret);
-                tenzro_bridge::canton_auth::CantonTokenProvider::new(auth_cfg)
-            });
-            // Base URL only — CantonMcpServer appends `/v2/...` itself
-            // (mcp/canton.rs request paths); a `/v2` suffix here would
-            // produce `/v2/v2/...` → 404.
-            (
-                "https://json.canton.example-operator.invalid".to_string(),
-                "https://admin.devnet.tenzro.xyz".to_string(),
-                provider,
-                None,
-            )
-        } else {
-            let scheme = if config.canton.tls { "https" } else { "http" };
-            let ledger = format!("{}://{}:{}", scheme, config.canton.host, config.canton.port);
-            let admin = format!(
-                "{}://{}:{}",
-                scheme,
-                config.canton.host,
-                config.canton.port.saturating_add(1),
-            );
-            let provider = config.canton.oauth.as_ref().map(|oauth| {
-                let auth_cfg = tenzro_bridge::canton_auth::CantonAuthConfig {
+    // One MCP endpoint per Canton network the operator serves, built from the
+    // same `[canton.<network>]` config sections that `Node::init_bridge` reads
+    // for its adapters. Which endpoint a call reaches is decided per-request
+    // by the api-key gate inside the MCP server, so an operator who serves
+    // both devnet and mainnet fronts them from this one listener.
+    //
+    // Auth per network is one of three profiles: OAuth2 client-credentials,
+    // a long-lived static JWT (`CANTON_<NET>_JWT_TOKEN`), or unauthenticated
+    // (plaintext HTTP over a private path, dev/test only). Secrets are read
+    // from env and intentionally absent from the on-disk config.
+    //
+    // URLs are base only — CantonMcpServer appends `/v2/...` itself, so a
+    // `/v2` suffix here would produce `/v2/v2/...` → 404. The admin API sits
+    // one port above the ledger API, matching Canton's default layout.
+    let mut canton_endpoints: std::collections::BTreeMap<
+        tenzro_node::config::CantonNetwork,
+        mcp::canton::CantonEndpoint,
+    > = std::collections::BTreeMap::new();
+    for net in config.canton.configured_networks() {
+        let Some(net_cfg) = config.canton.network(net) else {
+            continue;
+        };
+        let scheme = if net_cfg.tls { "https" } else { "http" };
+        let token_provider = net_cfg.oauth.as_ref().map(|oauth| {
+            std::sync::Arc::new(tenzro_bridge::canton_auth::CantonTokenProvider::new(
+                tenzro_bridge::canton_auth::CantonAuthConfig {
                     token_url: oauth.token_url.clone(),
                     client_id: oauth.client_id.clone(),
                     client_secret: oauth.client_secret.clone(),
                     audience: oauth.audience.clone(),
                     scope: oauth.scope.clone(),
-                };
-                tenzro_bridge::canton_auth::CantonTokenProvider::new(auth_cfg)
-            });
-            // Static JWT only takes effect if no OAuth2 provider is set.
-            let jwt = if provider.is_none() {
-                config.canton.static_jwt.clone()
-            } else {
-                None
-            };
-            (ledger, admin, provider, jwt)
+                },
+            ))
+        });
+        // Static JWT only takes effect if no OAuth2 provider is set.
+        let jwt_token = if token_provider.is_none() {
+            net_cfg.static_jwt.clone()
+        } else {
+            None
         };
+        canton_endpoints.insert(
+            net,
+            mcp::canton::CantonEndpoint {
+                ledger_api_url: format!("{}://{}:{}", scheme, net_cfg.host, net_cfg.port),
+                admin_api_url: format!(
+                    "{}://{}:{}",
+                    scheme,
+                    net_cfg.host,
+                    net_cfg.port.saturating_add(1),
+                ),
+                jwt_token,
+                token_provider,
+            },
+        );
+    }
+    let canton_default_network = config.canton.default_network;
     let canton_shutdown_rx = shutdown_tx.subscribe();
     let canton_api_key_mgr = node_arc.api_key_manager().cloned();
     let canton_analytics_mgr = node_arc.canton_analytics().cloned();
     tokio::spawn(async move {
         if let Err(e) = mcp::canton::start_canton_mcp_server_with_shutdown(
             canton_addr,
-            canton_ledger_api_url,
-            canton_admin_api_url,
-            canton_jwt_token,
-            canton_token_provider,
+            canton_endpoints,
+            canton_default_network,
             canton_api_key_mgr,
             canton_analytics_mgr,
             canton_shutdown_rx,

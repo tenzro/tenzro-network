@@ -8,22 +8,37 @@
     "type": "object",
     "properties": {
       "customer_id": { "type": "string" },
-      "asset_type": { "type": "string" }
+      "asset_type": { "type": "string" },
+      "kyc_provider_id": {
+        "type": "string",
+        "description": "Registry id of a KYC-provider knowledge base. Discover one with tenzro_listKnowledge."
+      },
+      "custody_tool_id": {
+        "type": "string",
+        "description": "Registry id of a custody tool exposing a bind_custody operation. Discover one with tenzro_listTools."
+      }
     },
-    "required": ["customer_id", "asset_type"]
+    "required": ["customer_id", "asset_type", "kyc_provider_id", "custody_tool_id"]
   },
   "expected_outputs": {
     "type": "object",
     "properties": {
-      "did": { "type": "string" },
-      "mpc_wallet": { "type": "string" },
-      "kyc_status": { "type": "string" }
+      "kyc": { "type": "object" },
+      "identity": {
+        "type": "object",
+        "properties": {
+          "did": { "type": "string" },
+          "identity_type": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      },
+      "custody": { "type": "object" }
     }
   },
   "steps": [
     {
       "kind": "use_knowledge",
-      "knowledge_id": "kb-kyc-provider-default",
+      "knowledge_id": "{{ inputs.kyc_provider_id }}",
       "params": { "customer_id": "{{ inputs.customer_id }}" },
       "output_as": "kyc"
     },
@@ -33,14 +48,13 @@
       "tool_name": "register_identity",
       "params": {
         "identity_type": "human",
-        "display_name": "{{ steps.kyc.output.legal_name }}",
-        "kyc_tier": "{{ steps.kyc.output.tier }}"
+        "display_name": "{{ steps.kyc.output.legal_name }}"
       },
       "output_as": "identity"
     },
     {
       "kind": "use_tool",
-      "tool_id": "tool-custody-bind",
+      "tool_id": "{{ inputs.custody_tool_id }}",
       "tool_name": "bind_custody",
       "params": {
         "did": "{{ steps.identity.output.did }}",

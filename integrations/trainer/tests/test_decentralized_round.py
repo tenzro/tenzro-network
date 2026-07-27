@@ -1,10 +1,10 @@
-"""End-to-end proof of one decentralized outer-sync round.
+"""Whole-round proof of one decentralized outer-sync round.
 
 Existing training tests exercise the two halves in isolation: the Rust
 syncer's mean aggregator over hand-built arrays, and the state machine over
-placeholder-hash gradients. Neither drives real trainers. This test closes
-that gap: ``N`` independent trainers each run the real inner loop over a
-*distinct* synthetic shard, package a real safetensors outer gradient
+placeholder-hash gradients. Neither drives a trainer. This test closes
+that gap: ``N`` independent trainers each run the inner loop over a
+*distinct* synthetic shard, package a safetensors outer gradient
 (``Δθ = θ⁽ᴴ⁾ − θ⁽⁰⁾``), and the syncer-side decode + coordinate-wise mean is
 checked against the mean of the independently-trained deltas.
 

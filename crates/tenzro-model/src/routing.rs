@@ -5,6 +5,7 @@
 
 use crate::{
     error::{ModelError, Result},
+    pricing::PricingEngine,
     provider::{ProviderManager, ProviderWithMetrics},
     registry::ModelRegistry,
     usage::{UsageRecord, UsageTracker},
@@ -15,7 +16,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tenzro_types::{
     hardware::HardwareClass,
-    model::{InferenceRequest, InferenceResponse, InferenceMetadata, ModelModality},
+    model::{
+        BillableUnits, InferenceRequest, InferenceResponse, InferenceMetadata, ModelModality,
+    },
     primitives::{Address, Timestamp},
 };
 use tracing::{debug, info, warn};
@@ -485,6 +488,12 @@ pub struct InferenceRouter {
     /// into the store under their `content_hash` so the
     /// `tenzro_getProvenance(content_hash)` RPC can resolve them later.
     provenance_store: Option<Arc<crate::provenance::ProvenanceStore>>,
+    /// Prices every routed call under the model its provider declared, and
+    /// accumulates the resulting prices as the market history that
+    /// [`PricingModel::Dynamic`] scales against. The router is the only
+    /// component that observes every settled price for every model, so it is
+    /// where that history can be built.
+    pricing: Arc<PricingEngine>,
     /// Hedged-dispatch counters.
     metrics: RouterMetrics,
 }
@@ -506,6 +515,7 @@ impl InferenceRouter {
             usage_tracker: None,
             provenance_signer: None,
             provenance_store: None,
+            pricing: Arc::new(PricingEngine::new()),
             metrics: RouterMetrics::default(),
         }
     }
@@ -525,6 +535,7 @@ impl InferenceRouter {
             usage_tracker: None,
             provenance_signer: None,
             provenance_store: None,
+            pricing: Arc::new(PricingEngine::new()),
             metrics: RouterMetrics::default(),
         }
     }
@@ -1727,17 +1738,55 @@ impl InferenceRouter {
                             raw_output, output_cap
                         );
                     }
-                    let input_tokens = raw_input.min(input_cap) as u32;
+                    let prompt_tokens = raw_input.min(input_cap) as u32;
                     let output_tokens = raw_output.min(output_cap) as u32;
+
+                    // A prefix-cache hit is reported inside `prompt_tokens`, so
+                    // the cached share is split out and the remainder billed at
+                    // the fresh-input rate — otherwise a cached token would be
+                    // charged twice, once at each rate.
+                    let cached_read_tokens = resp_body["usage"]["prompt_tokens_details"]
+                        ["cached_tokens"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .min(prompt_tokens as u64) as u32;
+                    let cached_write_tokens = resp_body["usage"]["prompt_tokens_details"]
+                        ["cache_write_tokens"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .min(prompt_tokens as u64) as u32;
+                    let input_tokens = prompt_tokens.saturating_sub(cached_read_tokens);
+
                     let finish_reason = resp_body["choices"]
                         .get(0)
                         .and_then(|c| c["finish_reason"].as_str())
                         .map(String::from);
 
-                    // Calculate price
-                    let price = (input_tokens as u64 * provider.pricing.price_per_input_token)
-                        + (output_tokens as u64 * provider.pricing.price_per_output_token);
-                    let price = price.max(provider.pricing.minimum_price);
+                    let units = BillableUnits::tokens(input_tokens, output_tokens)
+                        .with_cache(cached_read_tokens, cached_write_tokens);
+                    let metadata = InferenceMetadata {
+                        units: units.clone(),
+                        latency_ms: elapsed_ms,
+                        model_version: resp_body["model"].as_str().map(String::from),
+                        finish_reason,
+                    };
+
+                    // Price under whichever model the provider's announcement
+                    // declared, so a per-request or per-compute-time offer bills
+                    // the way it was advertised rather than being silently
+                    // re-metered per token.
+                    let price = PricingEngine::price_units(
+                        &provider.pricing,
+                        &units,
+                        elapsed_ms,
+                        self.pricing.get_market_average(&request.model_id),
+                    );
+
+                    // Feed the price back as market history, which is what makes
+                    // a dynamic offer track the going rate for the model rather
+                    // than standing at its metered cost forever.
+                    self.pricing
+                        .update_market_price(request.model_id.clone(), price);
 
                     let mut response = InferenceResponse::new(
                         request.request_id.clone(),
@@ -1746,13 +1795,7 @@ impl InferenceRouter {
                         output_text.into_bytes(),
                         price,
                     );
-                    response.metadata = InferenceMetadata {
-                        input_tokens,
-                        output_tokens,
-                        latency_ms: elapsed_ms,
-                        model_version: resp_body["model"].as_str().map(String::from),
-                        finish_reason,
-                    };
+                    response.metadata = metadata;
 
                     info!(
                         "Inference request {} completed in {}ms ({} input, {} output tokens)",
@@ -1762,19 +1805,21 @@ impl InferenceRouter {
                     // Record durable usage iff a tracker is attached. The
                     // tracker aggregates per-model / per-provider / global
                     // stats and persists them to RocksDB CF_MODELS, so this
-                    // is the only producer call site for marketplace
-                    // observability data.
+                    // is the producer call site for marketplace observability
+                    // data on routed inference. The record is keyed on
+                    // `request_id` — the same id the caller holds — so the
+                    // generation can be read back per-request afterwards.
                     if let Some(tracker) = &self.usage_tracker {
                         let record = UsageRecord::new(
                             request.model_id.clone(),
                             provider_address,
-                            input_tokens,
-                            output_tokens,
+                            units,
                             bytes_in,
                             bytes_out,
                             price,
                             elapsed_ms,
-                        );
+                        )
+                        .with_record_id(request.request_id.clone());
                         if let Err(e) = tracker.record_usage(record) {
                             warn!(
                                 "Failed to record usage for request {}: {}",

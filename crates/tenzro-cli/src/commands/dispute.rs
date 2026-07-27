@@ -1,6 +1,6 @@
 //! Channel-dispute inspection commands.
 //!
-//! Micropayment-channel disputes are first-class records in the
+//! Micropayment-channel disputes are stored as their own records in the
 //! settlement engine — `MicropaymentChannelManager` exposes the full
 //! open / respond / resolve lifecycle, and disputes are durable in
 //! RocksDB (`CF_CHANNELS`, `dispute:<id>` prefix). These subcommands

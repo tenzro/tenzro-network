@@ -259,7 +259,7 @@ There are no privileged token-holder classes and no lock-ups for special parties
 
 Because there is no team allocation and no investor allocation:
 
-- There is no investor unlock cliff and no quarterly vesting events that release a wave of supply onto the market.
+- There is no investor unlock cliff and no quarterly vesting events that release a large block of supply onto the market.
 - There is no team unlock schedule. Contributors who build the protocol receive grants the same way ecosystem builders do — through governance-approved disbursements from the public treasury, on terms the community can see.
 - There is no early-backer carry.
 

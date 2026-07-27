@@ -272,13 +272,13 @@ The supervisor boots the microVM on the first request that resolves to it and ke
 
 ### Sealed secrets
 
-Environment secrets never travel in plaintext. The deploy client fetches the assigned node's X25519 sealing public key, envelope-wraps each value to it (X25519 key agreement + AES-256-GCM), and ships only the ciphertext in `sealed_env`. Only the node holding the matching sealing key can unseal the values, and it does so in memory when it launches the microVM. The plaintext never leaves the deploying host and is never persisted in the clear.
+Environment secrets never travel in plaintext. The deploy client fetches the assigned node's X25519 sealing public key, envelope-wraps each value to it (X25519 key agreement + AES-256-GCM), and sends only the ciphertext in `sealed_env`. Only the node holding the matching sealing key can unseal the values, and it does so in memory when it launches the microVM. The plaintext never leaves the deploying host and is never persisted in the clear.
 
 ### Isolation
 
 The supervisor launches every microVM under `jailer`, which sets up a chroot as root and then drops privileges before executing firecracker. The defaults harden this drop:
 
-- **Unprivileged uid/gid.** Each microVM runs as a non-root host account (uid/gid `30000` by default), so a guest-to-host escape lands on an account with no privileges rather than root. Operators reserve a dedicated system account and can override the pair.
+- **Unprivileged uid/gid.** Each microVM runs as a non-root host account (uid/gid `30000` by default), so a guest-to-host escape reaches an account with no privileges rather than root. Operators reserve a dedicated system account and can override the pair.
 - **cgroup accounting.** The jailer places each microVM in a cgroup v2 hierarchy for per-machine resource accounting. Legacy hosts can select cgroup v1.
 - **Seccomp filtering.** Firecracker installs its advanced per-thread syscall allow-list (`--seccomp-level 2`).
 

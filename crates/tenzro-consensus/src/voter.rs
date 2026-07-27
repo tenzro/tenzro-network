@@ -13,7 +13,7 @@ use tenzro_types::primitives::{Address, BlockHeight, Hash};
 /// auto-derive `Serialize`/`Deserialize` for arrays larger than 32 bytes; we
 /// don't want to add a `serde_big_array` dependency for one field, and we don't
 /// want to widen `bls_aggregate` to `Vec<u8>` because the 96-byte invariant
-/// (BLS12-381 G2 compressed point) is load-bearing for `BlsSignature::from_bytes`.
+/// (BLS12-381 G2 compressed point) is required by `BlsSignature::from_bytes`.
 /// Wire format: a borrowed byte slice; deserialization rejects any length other
 /// than 96.
 mod bls_aggregate_serde {

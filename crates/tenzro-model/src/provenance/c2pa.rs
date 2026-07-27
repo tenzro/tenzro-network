@@ -4,8 +4,8 @@
 //! manifest signed with the provider's Ed25519 key. The encoding is
 //! intentionally not the on-the-wire C2PA Content Credentials format yet —
 //! that swap will happen once the EU AI Office Code of Practice's June 2026
-//! final spec lands and a stable `c2pa-rs` release ships under a permissive
-//! license.
+//! final spec is published and a stable `c2pa-rs` release is available under
+//! a permissive license.
 //!
 //! Until then, this signer + the `verify_manifest` helper in the parent
 //! module are byte-stable: a manifest signed today will verify against the

@@ -14,11 +14,11 @@ This document describes the inference surface, the MoE serving primitives, MTP w
 
 ### Verified on the live network
 
-The following paths have been exercised end to end against live network nodes, using the network's own registry and node machinery — no external orchestration:
+The following paths have been exercised from request through settlement against live network nodes, using the network's own registry and node machinery — no external orchestration:
 
 - **Decentralized MoE serving.** Registry-native expert extraction turns a catalog MoE entry into per-expert and gate blobs addressed by `tenzro://blob/` URI. Independent nodes each load a subset of those experts into their own memory, so the full model is assembled across distributed memory that no single node holds. A router node runs the gating step and dispatches per-token expert batches to the holders — local when the expert is resident, over the holder's iroh QUIC endpoint otherwise — and combines the returned hidden states into a single forward pass. Cross-node expert loads, the distributed forward pass, and finite outputs were all confirmed.
 - **Decentralized MoE-aware training.** The reference trainer auto-detects the MoE backbone (expert and router parameter groups, auxiliary load-balancing loss) and attaches an alternating low-rank (LoRA) adapter under the `LoraAlternating` aggregation rule, which freezes one adapter factor per round. Independent trainers run their inner loops, sign gradient fragments, and submit them to the syncer; the syncer reaches cross-node quorum, aggregates per coordinate, produces the aggregated state root, records it on-chain via the round-finalize path, and advances the run to the next round. A genuine multi-trainer quorum finalize was confirmed.
-- **Confidential-tier attestation on real hardware.** The TEE attestation path was exercised on genuine confidential-compute hardware — both an Intel TDX node and an AMD SEV-SNP node — reading real hardware evidence rather than a simulated device. This is the trust primitive the Verified and Confidential training tiers and confidential inference bind to.
+- **Confidential-tier attestation on confidential-compute hardware.** The TEE attestation path was exercised on both an Intel TDX node and an AMD SEV-SNP node, reading evidence from the `/dev/tdx-guest` and `/dev/sev-guest` devices rather than a simulated device. This is the trust primitive the Verified and Confidential training tiers and confidential inference bind to.
 - **Supporting surface.** The provider registry, `tenzro://blob/` addressing, cross-node blob fetch over iroh, gradient-fragment submission, and on-chain round finalization were all verified in the same runs.
 
 ---
@@ -83,11 +83,12 @@ Counters are exposed over `tenzro_getRouterMetrics`: `requests` (total routed), 
 
 ### 2.4 Chat surface
 
-Language inference is exposed five ways over one runtime:
+Language inference is exposed six ways over one runtime:
 
 - `tenzro_chat` and `tenzro_chatCompletion` JSON-RPC (the canonical Tenzro chat shape, with `params.custom["draft_n"]` for MTP and `params.custom["chat_session"]` for the persisted session id)
 - `tenzro_chatStream` JSON-RPC streaming variant
 - `POST /v1/chat/completions` — OpenAI-compatible HTTP endpoint (handler: `handle_openai_chat_completions`)
+- `POST /v1/responses` — the Responses shape over the same handler (handler: `handle_openai_responses`, translation in `openai_responses.rs`)
 - `POST /api/paid/chat/completions` — HTTP 402-gated variant for x402 / MPP / AP2 payment binding
 - `POST /chat-stream` — Anthropic-style SSE endpoint (handler: `handle_chat_stream_rich`)
 - MCP `chat_completion` tool, A2A `inference` skill, CLI `tenzro chat`
@@ -106,7 +107,7 @@ Tenzro wires MTP through the full path:
 - **Runtime.** The MTP variant of llama.cpp consumes the joint head via the vendored `llama-cpp-rs` `MtpSpeculative` wrapper. `generate_speculative` accepts the longest matching prefix on each step.
 - **Drafter auto-load.** `tenzro_serveModel` reads the catalog entry's `drafter_id` and loads the paired drafter automatically. If the drafter GGUF is on disk it loads inline; otherwise a background download starts and the drafter attaches when it completes — the target serves non-speculatively in the meantime. The serve response carries an `mtp` field reporting the outcome: `none` (entry declares no MTP), `inline` (single-file MTP model, the draft head lives inside the target GGUF), `drafter_loaded`, `drafter_downloading`, `drafter_load_failed`, `drafter_unavailable`, or `disabled` (caller passed `"load_drafter": false`). A drafter problem never fails the serve. `tenzro_stopModel` unloads the drafter with its target, and the drafter is re-attached on node restart when the served model is restored.
 
-Shipped in the catalog with `mtp_kind: DraftMtp`: DeepSeek V3 (native MTP head), DeepSeek V4 Pro / Flash, GLM 5.2, Gemma 4 (E2B / E4B / 12B / 26B-A4B / 31B), Qwen 3.5 every size (0.8B / 2B / 4B / 9B / 27B / 35B-A3B / 122B-A10B / 397B-A17B), Qwen 3.6 27B and 35B-A3B. For dense models without a joint head, classical two-model speculative decoding (`MtpKind::Generic`) is wired through the same path.
+Listed in the catalog with `mtp_kind: DraftMtp`: DeepSeek V3 (native MTP head), DeepSeek V4 Pro / Flash, GLM 5.2, Gemma 4 (E2B / E4B / 12B / 26B-A4B / 31B), Qwen 3.5 every size (0.8B / 2B / 4B / 9B / 27B / 35B-A3B / 122B-A10B / 397B-A17B), Qwen 3.6 27B and 35B-A3B. For dense models without a joint head, classical two-model speculative decoding (`MtpKind::Generic`) is wired through the same path.
 
 ### 2.6 Per-model serving profile
 
@@ -114,7 +115,7 @@ The catalog is the single source of truth for serving behaviour. Each `HfModelEn
 
 ### 2.7 Hardware backends
 
-A provider can serve inference on whatever accelerator it has. llama.cpp's ggml runtime ships a backend for every major vendor; Tenzro exposes each one as a cargo feature on `tenzro-model` that forwards to the corresponding `GGML_<X>` cmake define at build time. A node compiled with a backend feature detects the device at runtime and reports it through `HardwareInfo` (`compiled_backends` + `active_backend`), logged when the llama backend initialises. The default build (`cluster-serving`) is CPU-only plus the ggml RPC backend for LAN layer-pipeline serving.
+A provider can serve inference on whatever accelerator it has. llama.cpp's ggml runtime provides a backend for every major vendor; Tenzro exposes each one as a cargo feature on `tenzro-model` that forwards to the corresponding `GGML_<X>` cmake define at build time. A node compiled with a backend feature detects the device at runtime and reports it through `HardwareInfo` (`compiled_backends` + `active_backend`), logged when the llama backend initialises. The default build (`cluster-serving`) is CPU-only plus the ggml RPC backend for LAN layer-pipeline serving.
 
 | Hardware | Backend | Cargo feature | Build-time requirement |
 |---|---|---|---|
@@ -177,7 +178,7 @@ A provider whose hardware fits the entire model holds it and serves single-peer 
 
 For models too large for any single provider, providers declare which subset of expert weights they hold via `ProviderCapacity.moe_holdings` — a list of `MoeExpertHolding { model_id, layer, expert, residency, committed_tps }`. Residency is `Warm` (memory-resident), `Cold` (on the holder's disk tier, decoded on demand), or `Evicting`. Each holder derives this residency from its own `MoeExpertRuntime` tier state (§3.6) rather than a static declaration, so the shard map reflects what is actually loaded at query time.
 
-A dispatch planner (`plan_dispatch`) aggregates per-token top-k routing decisions into per-holder batches. Each batch carries the tokens whose top-k landed on the same `(expert, holder)` tuple. The batch is dispatched directly over the holder's iroh QUIC endpoint when available, or the OpenAI-compatible HTTP endpoint otherwise.
+A dispatch planner (`plan_dispatch`) aggregates per-token top-k routing decisions into per-holder batches. Each batch carries the tokens whose top-k resolved to the same `(expert, holder)` tuple. The batch is dispatched directly over the holder's iroh QUIC endpoint when available, or the OpenAI-compatible HTTP endpoint otherwise.
 
 Three mechanisms overlap and harden the cross-holder fan-out:
 
@@ -316,7 +317,7 @@ Catalog entries that declare a `moe: Some(MoeShape { ... })` topology:
 | Gemma 4 | `gemma4-26b-a4b`, `gemma4-26b-a4b-qat`, `gemma4-26b-a4b-mtp-draft` | 128 | 4 | 1 |
 | DiffusionGemma | `diffusiongemma-26b-a4b` | 128 | 4 | 1 |
 | Kimi | `kimi-k2-instruct`, `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code` | 384 | 8 | 1 |
-| Kimi K3 | `kimi-k3` | 896 | 16 | 1 |
+| Kimi K3 | `kimi-k3` | 896 | 16 | 2 |
 | MiniMax | `minimax-m1-40b`, `minimax-m3` | 32 | 2 | 0 |
 | DeepSeek | `deepseek-v3-0324`, `deepseek-v4-flash`, `deepseek-v4-pro` | 256 / 256 / 512 | 8 | 1 |
 | GLM | `glm-5`, `glm-5.1`, `glm-5.2` | 160 | 8 | 1 |
@@ -349,19 +350,32 @@ The catalog covers seven ONNX runtimes plus the llama.cpp language path. All ent
 
 Each modality has a dedicated runtime in `tenzro-model` with model-specific preprocessing (mel-spectrogram for ASR, ImageNet / CLIP / SigLIP normalization for vision, BPE tokenization for text-embed). The runtime dispatch hides the per-family ABI differences (SAM 1 vs SAM 2 decoder, RF-DETR vs D-FINE post-processing, Parakeet RNN-T vs Canary NeMo Conformer-AED).
 
-**Serving embeddings — local or network.** `tenzro_loadTextEmbeddingModel` with just `{ model_id }` (a catalog id) fetches the ONNX graph, its `model.onnx_data` external-data sidecar when the export ships one (Qwen3-Embedding, EmbeddingGemma, BGE-M3 do; ModernBERT-embed is self-contained), and the tokenizer from HuggingFace as a co-located bundle onto the persistent models directory, then registers the encoder — pooling family and dimensions come from the catalog entry. Passing explicit `path` + `tokenizer_path` + `family` instead loads a self-hosted file already on disk. Once loaded, `tenzro_textEmbed` serves from the local runtime handle; when the model is not loaded on this node, the router dispatches to a remote provider serving it. The same choice a node makes for language models and blobs applies to embeddings: run it locally or use the network. CLI: `tenzro embed-text {catalog,load,unload,list,run}`.
+**Serving embeddings — local or network.** `tenzro_loadTextEmbeddingModel` with just `{ model_id }` (a catalog id) fetches the ONNX graph, its `model.onnx_data` external-data sidecar when the export has one (Qwen3-Embedding, EmbeddingGemma, BGE-M3 do; ModernBERT-embed is self-contained), and the tokenizer from HuggingFace as a co-located bundle onto the persistent models directory, then registers the encoder — pooling family and dimensions come from the catalog entry. Passing explicit `path` + `tokenizer_path` + `family` instead loads a self-hosted file already on disk. Once loaded, `tenzro_textEmbed` serves from the local runtime handle; when the model is not loaded on this node, the router dispatches to a remote provider serving it. The same choice a node makes for language models and blobs applies to embeddings: run it locally or use the network. CLI: `tenzro embed-text {catalog,load,unload,list,run}`.
 
 **OpenAI-compatible endpoint.** `POST /v1/embeddings` (handler: `handle_openai_embeddings`) serves any loaded encoder in the OpenAI wire shape — `input` as a string or array, optional `dimensions` for Matryoshka truncation, response `{ object, data: [{ object, index, embedding }], model, usage }`. It sits on the same router as `/v1/chat/completions` and is HTTP 402-gated when a payment gate is configured, open otherwise. The ORT encoder path does not meter tokens, so `usage` reports 0.
+
+**OpenAI-compatible transcription endpoint.** `POST /v1/audio/transcriptions` (handler: `handle_openai_transcriptions`) serves any loaded transcriber over `multipart/form-data` in the OpenAI wire shape — a `file` part carrying the audio and a `model` part naming the catalog entry, with `language`, `temperature`, `timestamp_granularities` and `response_format` alongside. All five OpenAI response formats are served: `json`, `text`, `verbose_json` (segment list with `start` / `end` / `text`), and the `srt` / `vtt` subtitle bodies rendered from the runtime's segment time ranges. Requesting a format that renders time ranges makes the runtime emit them regardless of `timestamp_granularities`. The body ceiling on this route is 128 MiB rather than the 2 MiB that governs JSON bodies, since a limit sized for chat would reject an ordinary audio file. Word-level granularity, a non-empty `prompt`, and unknown form fields are refused by name rather than dropped. Wire details in [`chat-api.md`](chat-api.md#audio-transcriptions).
+
+**Tenzro-namespaced endpoints for the modalities no vendor covers.** Forecasting, detection, segmentation and clip embedding have no OpenAI path to be compatible with, so they sit under `/v1/tenzro/…` rather than occupying a vendor name the vendor may later define differently:
+
+| Route | Handler | Body | Response |
+|---|---|---|---|
+| `POST /v1/tenzro/forecasts` | `handle_openai_forecasts` | `model`, `history` (oldest first), `horizon`, optional `quantiles` + `frequency_seconds` | `{ object: "forecast", point, quantiles, quantile_levels, generation_time_ms }` |
+| `POST /v1/tenzro/detections` | `handle_openai_detections` | `model`, `image_base64`, optional `score_threshold` (default `0.25`) | `{ object: "detection", detections, generation_time_ms }` |
+| `POST /v1/tenzro/segmentations` | `handle_openai_segmentations` | `model`, `image_base64`, exactly one of `prompts` (geometric) or `text_prompt` (open-vocabulary), optional `box_prompt` + `score_threshold` | `{ object: "segmentation", masks: [{ score, mask_base64 }], generation_time_ms }` |
+| `POST /v1/tenzro/video/embeddings` | `handle_openai_video_embeddings` | `model`, `video_base64`, optional `normalize` + `frame_stride` | `{ object: "video_embedding", embedding, dim, frames_consumed, generation_time_ms }` |
+
+Three details follow from the modalities rather than from the wire shape. `prompts` and `text_prompt` are mutually exclusive because they select different runtimes holding different models under different ids — sending both is refused rather than resolved, since the route cannot pick for the caller. Masks travel base64-encoded: a 1024² mask as a JSON integer array is roughly 3 MB of text for one artifact, and no vendor standard governs the noun. Clip embedding is its own route rather than another `input` on `/v1/embeddings` because a clip returns one vector plus a frame count, and the vendor's `data[]` shape has no field to report how much of the clip was consumed. All four carry a base64 payload or a long series, so they sit on the 64 MiB media ceiling. When the named runtime holds nothing under that id, the error names both the RPC that loads one and the RPC that lists what is loaded. Wire details in [`chat-api.md`](chat-api.md#forecasts).
 
 **Execution providers.** All ONNX runtimes share one session builder that registers hardware execution providers before falling back to CPU. The `onnx-tensorrt`, `onnx-cuda`, and `onnx-coreml` cargo features compile in the corresponding providers; the default registration priority is TensorRT → CUDA → CoreML, restricted to whichever features are compiled in. The `TENZRO_ONNX_EP` environment variable overrides the priority as a comma-separated list drawn from `tensorrt`, `cuda`, `coreml`, `cpu` (`cpu` terminates the list). A provider that fails to register logs a warning and falls through to the next — a GPU-featured binary on a machine without the matching driver still serves on CPU. The CUDA container image and GPU model-serving setup are covered in [`deploy/validator-deployment.md`](../deploy/validator-deployment.md).
 
 ### 4.1 Vision-language GGUFs (mmproj)
 
-Natively-multimodal chat models (the Gemma 4 family) run on the same llama.cpp language path as text-only models but accept image input. llama.cpp loads two files for these: the language GGUF plus a separate **multimodal projector** (mmproj) that encodes images into the model's embedding space. The catalog carries this on `HfModelEntry::mmproj` (`Some(MmprojSpec { filename })`); the projector ships in the model's own `hf_repo`, so only the filename is stored. The post-construction catalog pass stamps `mmproj-F16.gguf` onto every Gemma 4 language model (the tiny speculative `-mtp-draft` entries are text-only and stay `None`). The downloader fetches the projector alongside the model into `<models_dir>/<id>.mmproj.gguf`, and the serving client emits llama.cpp `--mmproj <path>`. When the projector is declared but absent on disk, the model degrades gracefully to text-only rather than failing the load.
+Natively-multimodal chat models (the Gemma 4 family) run on the same llama.cpp language path as text-only models but accept image input. llama.cpp loads two files for these: the language GGUF plus a separate **multimodal projector** (mmproj) that encodes images into the model's embedding space. The catalog carries this on `HfModelEntry::mmproj` (`Some(MmprojSpec { filename })`); the projector lives in the model's own `hf_repo`, so only the filename is stored. The post-construction catalog pass stamps `mmproj-F16.gguf` onto every Gemma 4 language model (the tiny speculative `-mtp-draft` entries are text-only and stay `None`). The downloader fetches the projector alongside the model into `<models_dir>/<id>.mmproj.gguf`, and the serving client emits llama.cpp `--mmproj <path>`. When the projector is declared but absent on disk, the model degrades gracefully to text-only rather than failing the load.
 
 ### 4.2 Sharded (gguf-split) downloads
 
-Frontier-scale GGUFs (Kimi K2, DeepSeek V3, GLM 5, MiniMax M3, the largest Qwen 3.5 MoE quants) ship as `gguf-split` sets where the catalog `hf_filename` points at the first shard (`...-00001-of-000NN.gguf`). The downloader detects this pattern, enumerates all `NN` shards from the self-describing suffix, and downloads them into a per-model directory (`<models_dir>/<id>/`) preserving their original filenames — llama.cpp only auto-continues a split set when every shard sits in one directory under its split name. `model_path`/`is_downloaded`/`downloaded_size`/`delete_model` all recognize the per-model-directory layout; single-file models keep the flat `<id>.gguf` form.
+Frontier-scale GGUFs (Kimi K2, DeepSeek V3, GLM 5, MiniMax M3, the largest Qwen 3.5 MoE quants) are published as `gguf-split` sets where the catalog `hf_filename` points at the first shard (`...-00001-of-000NN.gguf`). The downloader detects this pattern, enumerates all `NN` shards from the self-describing suffix, and downloads them into a per-model directory (`<models_dir>/<id>/`) preserving their original filenames — llama.cpp only auto-continues a split set when every shard sits in one directory under its split name. `model_path`/`is_downloaded`/`downloaded_size`/`delete_model` all recognize the per-model-directory layout; single-file models keep the flat `<id>.gguf` form.
 
 ---
 
@@ -425,7 +439,7 @@ Both markets apply equally to language models, timeseries models, vision models,
 Low-communication training reduces synchronization bandwidth by performing many local SGD steps on each worker before exchanging parameter updates. Decoupled outer aggregation extends this with three further changes that matter for our setting:
 
 1. **Asynchronous learners.** M learners train independently. None waits for any other.
-2. **Centralized syncer.** A coordinator holds the global parameter state. After every H inner SGD steps a learner sends its outer gradient (param delta) to the syncer; the syncer applies a fragment-wise outer optimizer (Nesterov-momentum SGD) and ships the updated fragment back.
+2. **Centralized syncer.** A coordinator holds the global parameter state. After every H inner SGD steps a learner sends its outer gradient (param delta) to the syncer; the syncer applies a fragment-wise outer optimizer (Nesterov-momentum SGD) and returns the updated fragment.
 3. **Fragment-wise quorum.** Parameters are partitioned into P fragments. The syncer accepts an outer gradient for fragment j as soon as K of M learners have submitted; stragglers are absorbed via an adaptive grace window τ.
 
 Reported results at large chip scale with realistic per-chip MTBF show substantially higher goodput than elastic data-parallel, with no correctness loss versus a synchronous baseline. Bandwidth between learners and syncer is approximately two orders of magnitude lower than elastic data-parallel.
@@ -575,7 +589,7 @@ trait ModalityAdapter {
 }
 ```
 
-Tenzro Train ships reference adapters for the modalities below. Sponsors can register additional adapters by publishing the adapter code's hash on-chain alongside their `TrainingTask`.
+Tenzro Train provides reference adapters for the modalities below. Sponsors can register additional adapters by publishing the adapter code's hash on-chain alongside their `TrainingTask`.
 
 #### 7.4.1 Language
 
@@ -793,7 +807,7 @@ The trainer can run anywhere Python + PyTorch run, including inside a TEE (Verif
 - **`tenzro-storage`** — add `CF_TRAINING_RUNS`, `CF_TRAINING_RECEIPTS` column families.
 - **`tenzro-network`** — add gossipsub topic `tenzro/training` for outer gradient broadcast and `tenzro/training/syncer` for syncer state roots.
 - **`tenzro-token`** — add `TrainerCapability` to staking; add `SyncerCapability` for elected syncers.
-- **`tenzro-vm`** — add precompile `0x1008` (TRAINING_VERIFY) for fraud-proof verification on-chain. Phase 1 ships the precompile shell; Phase 2 lights up full re-aggregation verification.
+- **`tenzro-vm`** — add precompile `0x1008` (TRAINING_VERIFY) for fraud-proof verification on-chain. Phase 1 defines the precompile shell; Phase 2 adds full re-aggregation verification.
 - **`tenzro-node`** — RPC namespace `tenzro_training_*`: `postTrainingTask`, `enrollTrainer`, `submitOuterGradient`, `getTrainingRun`, `getTrainingReceipt`, `challengeStateRoot`.
 - **`tenzro-cli`** — `tenzro train` subcommand: `post`, `enroll`, `status`, `claim-rewards`, `verify-receipt`.
 - **`tenzro-agent-kit`** — reference templates: `language-trainer`, `timeseries-trainer`, `vision-trainer` agents that wrap the Python reference trainer and auto-enroll in matching tasks.
@@ -806,7 +820,7 @@ The trainer can run anywhere Python + PyTorch run, including inside a TEE (Verif
 
 #### 7.7.4 Phased Delivery
 
-**Phase 1: Single-modality MVP (timeseries)**
+**Phase 1: Single modality (timeseries)**
 - 200M-parameter TimesFM-style model
 - 4-8 trainers, single-region
 - TEE attestation + simple mean aggregation (no Byzantine defense yet)
@@ -854,7 +868,7 @@ order: `python_executable`, then `<venv_path>/bin/python`, then
 `$TENZRO_TRAINING_VENV_PATH/bin/python`, then `python3` / `python` on `PATH` —
 and requires the `tenzro_trainer` package to be importable. If no such
 interpreter is found, the daemon logs a warning and stays disabled; the node
-otherwise runs normally. This is why the base node image ships without a Python
+otherwise runs normally. This is why the base node image contains no Python
 trainer runtime (see below) — a validator, RPC provider, or light client never
 carries the multi-GB PyTorch dependency unless it opts into training.
 
@@ -947,7 +961,7 @@ The result is a network where any participant with compute can earn TNZO by trai
 
 ### 7.A Reference hyperparameters
 
-For initial timeseries MVP (Phase 1):
+For the initial timeseries run (Phase 1):
 
 | Parameter | Value |
 |---|---|
@@ -1064,6 +1078,10 @@ low_bps  = 10_000 − high_bps
 
 `steps_completed` comes from the signed handoff, not from either worker's later claim. Overstating a half would take a forged Ed25519 signature over the handoff preimage.
 
+The money moves when the receipt is accepted, not before: `tenzro_mediaGen_submitReceipt` runs the runtime's validation first, and settles only against a receipt the runtime sealed. The requester is debited `price_paid` and no more — the 5% network commission is carved out of that amount rather than added on top, so the charge matches the price the worker sealed and the requester was quoted against. What remains is divided by the basis points above; integer division leaves at most one attoTNZO per worker unallocated, and that dust goes to the last share so the parts sum to the remainder exactly. The commission reaches the treasury at a derived address, so an operator cannot redirect it.
+
+The full debit is checked before any of it moves, so a requester who cannot cover the job does not pay one expert and strand the other. A transfer that fails after that check leaves the job completed and short-paid rather than unwinding what already moved: the render happened and the receipt is valid, so the shortfall is the requester's to make good. Every leg that could not be paid is written as an unpaid marker for retry and named in the JSON-RPC error (`-32023`). The response carries a `settlement` block — `price_paid`, `commission_wei`, and one payout per assignment — which the CLI prints and the Python worker logs against its own DID.
+
 ### 8.6 Commitments
 
 Three SHA-256 preimages under three distinct domain tags:
@@ -1107,6 +1125,12 @@ Eighteen JSON-RPC methods under `tenzro_mediaGen_`:
 | Worker | `enrollWorker`, `claimJob`, `markRunning`, `failJob`, `publishOutput`, `recordHandoff`, `submitReceipt`, `fetchLatent` |
 
 The same surface is reachable through the CLI (`tenzro media-gen …`), the MCP server, and the A2A `media-gen` skill. Job, worker, and receipt events broadcast on the `tenzro/media-gen` gossip topic.
+
+**OpenAI-compatible endpoint.** `POST /v1/images/generations` (handler: `handle_openai_images_generations`) projects text-to-image onto the OpenAI wire shape so an unmodified OpenAI SDK client reaches the queue. It posts a job through the same `post_job` / `post_split_job` admission the RPC uses — the split decision is read from the catalog, and `job_id` is derived by the runtime from the spec — announces it on `tenzro/media-gen`, polls to a terminal status under a bounded deadline, then fetches the bytes and returns them as `data[0].b64_json` alongside a `tenzro` block carrying the receipt (`output_hash`, `seed_used`, `worker_did`, `generation_time_ms`, `price_paid`). `requester_did` and `requester_address` are required request extensions: the queue binds every job to the identity that posted it, and an HTTP request carries no authenticated Tenzro principal to infer one from. A render that outruns `wait_seconds` (default and cap 300) returns HTTP 504 naming the `job_id` — the work continues and the caller polls `tenzro_mediaGen_getJob` then `tenzro_mediaGen_fetchOutput`. Wire details in [`chat-api.md`](chat-api.md#image-generations).
+
+**Image edits.** `POST /v1/images/edits` (handler: `handle_openai_images_edits`) is the image-to-image route, `multipart/form-data` per the vendor shape. Reference frames arrive under `image`, `image[]` or `images[]`; a `mask` part is accepted for inpainting pipelines. It shares the admission, announcement, terminal-wait and receipt path with generations, so a caller reads the result identically. The kind is fixed by the route — image-to-image whatever the body says — because letting a field override it would reach a pipeline the route was not priced for. Vendor controls the pipelines have no home for (`background`, `output_compression`, `input_fidelity`, `partial_images`, `quality`, `style`) are refused by name with the reason, rather than accepted and quietly ignored: a caller is never billed for a render that dropped an instruction it was given. Wire details in [`chat-api.md`](chat-api.md#image-edits).
+
+**Video renders.** `POST /v1/videos` (handler: `handle_openai_videos_create`) is a job resource rather than a synchronous call, matching the vendor's video surface — a render that takes minutes has no business holding a connection open for them. The POST admits the job and returns it immediately at `status: "queued"`; the caller polls `GET /v1/videos/{video_id}` and collects the clip from `GET /v1/videos/{video_id}/content`. Both GETs stay ungated even when a payment gate governs generation: they are the back half of a render already priced and charged on the POST, and gating them would bill twice for one artifact. An `input_reference` part selects `Image2Video`, its absence `Text2Video` — again, no field names the kind. `seconds` is converted to a frame count against the pipeline's frame rate, since that is what a diffusion schedule is denominated in; a catalog entry declaring neither an fps nor a default frame count cannot yield a frame budget and the request is refused. The job resource maps queue status onto the vendor vocabulary (`Pending` / `Claimed` → `queued`, `Running` → `in_progress`, `Completed` → `completed`, `Failed` / `Cancelled` → `failed`) with a coarse `progress` that reads the split handoff, and carries the receipt fields under `tenzro` once one exists. Asking for the bytes before completion returns HTTP 409 naming the current status: an SDK client writes any 2xx body straight to a file, and a zero-length clip is harder to diagnose than a status code saying what to wait for. Wire details in [`chat-api.md`](chat-api.md#video-renders).
 
 The Python worker's own CLI (`tenzro-media-gen`) covers both sides: `catalog`, `quote`, `post`, `jobs`, `get`, `cancel`, `receipt`, `fetch` for requesters, and `keygen`, `enroll`, `serve`, `workers` for operators. The requester surface installs without torch. See [`integrations/media_gen/README.md`](../integrations/media_gen/README.md).
 

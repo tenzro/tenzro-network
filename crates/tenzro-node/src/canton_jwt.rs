@@ -16,7 +16,7 @@
 //! canton handlers fetch the JWT via [`current`] just before calling
 //! the bridge, and the slot vanishes with the future.
 //!
-//! `task_local!` (not `thread_local!`) is load-bearing: the dispatch
+//! `task_local!` (not `thread_local!`) is required for correctness: the dispatch
 //! future is full of await points, so on a multi-threaded runtime a
 //! thread-local slot would be read by whichever task happens to be on
 //! the worker thread — cross-tenant leakage. Task-local storage rides

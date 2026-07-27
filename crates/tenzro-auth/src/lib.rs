@@ -121,7 +121,7 @@
 //!
 //! ## Testing strategy
 //!
-//! Each public method has a unit test. The end-to-end onboarding +
+//! Each public method has a unit test. The combined onboarding +
 //! signing + revocation flows are covered by an integration test in
 //! `crates/tenzro-node/tests/auth_integration.rs` (subtask #56).
 

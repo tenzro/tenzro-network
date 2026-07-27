@@ -21,9 +21,8 @@ It provides:
   Tenzro DID envelope (the auth lingua franca of Layer 1 of the bridge
   doc). The canonical preimage layout is pinned below and MUST be kept in
   sync with the Rust verifier.
-* AP2 mandate helpers (IntentMandate / CartMandate / CheckoutMandate /
-  PaymentMandate dicts) per ``docs/protocol-research-2026-05/ap2-v02.md``
-  and ``crates/tenzro-payments/src/ap2/mod.rs`` field names.
+* AP2 mandate helpers (CheckoutMandate / CartItem / PaymentMandate dicts)
+  per ``crates/tenzro-payments/src/ap2/mod.rs`` field names.
 * :class:`ReputationHook` — encodes ERC-8004 feedback calldata on task /
   graph finish (caller signs & broadcasts; see :meth:`TenzroClient.submit_feedback`).
 
@@ -52,6 +51,21 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import httpx
 import nacl.signing
+
+def _is_canton_method(method: str) -> bool:
+    """Whether a JSON-RPC method carries a Canton scope.
+
+    Matches how the node decides: any ``tenzro_`` method naming Canton or
+    DAML, in either the CamelCase (``tenzro_listCantonDomains``) or
+    snake-case (``tenzro_canton_health``) form.
+    """
+    return method.startswith("tenzro_") and (
+        "Canton" in method
+        or "canton" in method
+        or "Daml" in method
+        or "daml" in method
+    )
+
 
 # ---------------------------------------------------------------------------
 # DID envelope
@@ -263,12 +277,19 @@ class TenzroClient:
     rides in the request ``params`` under the ``tenzro_did_envelope`` key
     (the generic-HTTP envelope-ridealong path of bridge doc Layer 1).
 
+    Canton-scoped RPCs take a target network. Pass ``canton_network``
+    (or set ``TENZRO_CANTON_NETWORK``) and it is merged into the params of
+    every canton-scoped call as ``canton_network`` — the node reads the
+    choice from the params rather than a header. An API key authorizing
+    exactly one network needs no setting; a key authorizing several does,
+    and the node names the authorized set when the choice is missing.
+
     NOTE: as of bridge-doc Phase 1, the shared ``tenzro-identity`` envelope
     is defined and signable but is NOT yet verified on the JSON-RPC path
     (wiring into MCP / x402 / RPC is Phase 2-3). The envelope built by
     :meth:`call_signed` uses the authoritative ``tenzro-identity`` preimage
-    layout, so it will be accepted once that verification lands; today the
-    node ignores it on the RPC path.
+    layout, so it will be accepted once that verification is wired; today
+    the node ignores it on the RPC path.
     """
 
     def __init__(
@@ -279,6 +300,7 @@ class TenzroClient:
         did: Optional[str] = None,
         bearer_jwt: Optional[str] = None,
         api_key: Optional[str] = None,
+        canton_network: Optional[str] = None,
         timeout: float = 30.0,
         client: Optional[httpx.Client] = None,
     ) -> None:
@@ -289,6 +311,9 @@ class TenzroClient:
         self.did = did
         self.bearer_jwt = bearer_jwt or os.environ.get("TENZRO_BEARER_JWT")
         self.api_key = api_key or os.environ.get("TENZRO_API_KEY")
+        self.canton_network = canton_network or os.environ.get(
+            "TENZRO_CANTON_NETWORK"
+        )
         self.timeout = timeout
         self._client = client
         self._owns_client = client is None
@@ -320,6 +345,24 @@ class TenzroClient:
             headers["X-Tenzro-Api-Key"] = self.api_key
         return headers
 
+    def _with_canton_network(self, method: str, params: Any) -> Any:
+        """Merge the configured Canton network into canton-scoped params.
+
+        The node reads the target network from the request params rather
+        than a header, so a key authorizing more than one network names
+        the target here. A network already present in ``params`` wins.
+        Applied before envelope signing so the signed params hash covers
+        the final shape.
+        """
+        if (
+            not self.canton_network
+            or not _is_canton_method(method)
+            or not isinstance(params, dict)
+            or "canton_network" in params
+        ):
+            return params
+        return {**params, "canton_network": self.canton_network}
+
     def call(self, method: str, params: Any = None) -> Any:
         """Send a raw JSON-RPC 2.0 request and return ``result``."""
         self._request_id += 1
@@ -327,7 +370,9 @@ class TenzroClient:
             "jsonrpc": "2.0",
             "id": self._request_id,
             "method": method,
-            "params": params if params is not None else [],
+            "params": self._with_canton_network(
+                method, params if params is not None else []
+            ),
         }
         resp = self._http().post(
             self.rpc_url, headers=self._headers(), json=payload
@@ -354,6 +399,7 @@ class TenzroClient:
             raise ValueError(
                 "call_signed requires signing_key and did on the client"
             )
+        params = self._with_canton_network(method, params)
         envelope = TenzroDidEnvelope.sign(
             self.signing_key, self.did, method, params
         )
@@ -633,49 +679,14 @@ class TenzroClient:
 # Field names follow the Tenzro AP2 model in
 # crates/tenzro-payments/src/ap2/mod.rs (CheckoutMandate / CartItem /
 # PaymentMandate) and the AP2 v0.2 spec (vct claims, checkout_hash binding,
-# cnf). The IntentMandate / CartMandate dicts express the AP2 canonical
-# mandate names; in the Tenzro model the principal-signed CheckoutMandate
-# is the "intent" declaration and CartItem[] is the cart.
+# cnf). The principal-signed CheckoutMandate declares what the agent may
+# buy; the agent-signed PaymentMandate carries the CartItem[] it committed
+# to and binds back via checkout_mandate_id + checkout_hash.
 
 
 def _now_iso() -> str:
     # AP2 mandates use RFC3339 timestamps; Tenzro stores DateTime<Utc>.
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def intent_mandate(
-    *,
-    principal_did: str,
-    agent_did: str,
-    description: str,
-    max_amount: int,
-    asset: str = "USDC",
-    accepted_chains: Optional[Sequence[str]] = None,
-    expires_at: Optional[str] = None,
-    open_mandate: bool = False,
-    cnf: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Build an AP2 IntentMandate dict (pre-authorised autonomous flow).
-
-    Per ``ap2-v02.md`` the IntentMandate authorises a future autonomous
-    purchase. ``open_mandate=True`` selects the ``.open`` ``vct`` variants
-    (human-not-present) and then ``cnf`` (agent public-key JWK) is required.
-    """
-    m: Dict[str, Any] = {
-        "vct": "mandate.intent.open.1" if open_mandate else "mandate.intent.1",
-        "mandate_id": str(uuid.uuid4()),
-        "principal_did": principal_did,
-        "agent_did": agent_did,
-        "description": description,
-        "max_amount": int(max_amount),
-        "asset": asset,
-        "accepted_chains": list(accepted_chains or []),
-        "issued_at": _now_iso(),
-        "expires_at": expires_at,
-    }
-    if cnf is not None:
-        m["cnf"] = dict(cnf)
-    return m
 
 
 def cart_item(
@@ -694,33 +705,6 @@ def cart_item(
         "unit_price": int(unit_price),
         "total": int(quantity) * int(unit_price),
         "category": category,
-    }
-
-
-def cart_mandate(
-    *,
-    agent_did: str,
-    merchant_did: str,
-    items: Sequence[Mapping[str, Any]],
-    asset: str = "USDC",
-    chain: str = "tenzro",
-) -> Dict[str, Any]:
-    """Build an AP2 CartMandate dict (the agent-signed cart).
-
-    The cart total is derived from the line items; the validator checks
-    ``cart total ≤ checkout ceiling``.
-    """
-    items = [dict(i) for i in items]
-    return {
-        "vct": "mandate.cart.1",
-        "mandate_id": str(uuid.uuid4()),
-        "agent_did": agent_did,
-        "merchant_did": merchant_did,
-        "items": items,
-        "total_amount": sum(int(i["total"]) for i in items),
-        "asset": asset,
-        "chain": chain,
-        "issued_at": _now_iso(),
     }
 
 
@@ -868,9 +852,7 @@ __all__ = [
     "TenzroDidEnvelope",
     "TenzroRpcError",
     "TenzroClient",
-    "intent_mandate",
     "cart_item",
-    "cart_mandate",
     "checkout_mandate",
     "checkout_hash",
     "payment_mandate",

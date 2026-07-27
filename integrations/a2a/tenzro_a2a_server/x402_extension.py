@@ -13,7 +13,7 @@ Wire-shape rules (must stay in lock-step with Rust):
   scheme name (``exact-eip3009``, ``exact-permit2``, ``exact-erc7710``).
 * PaymentStatus values are kebab-case strings.
 
-Slice (a) ships the dispatcher state machine plus a verifier that rejects
+Slice (a) is the dispatcher state machine plus a verifier that rejects
 every payload with ``payment-rejected`` because no scheme backends are wired
 yet. Slice (c) replaces ``UnimplementedSchemeVerifier`` with concrete
 backends.

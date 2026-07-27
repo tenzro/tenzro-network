@@ -87,10 +87,10 @@ enum Policy {
     /// Stock RocksDB defaults (no WAL/memtable tuning at all).
     Baseline,
     /// The earlier "fix" that turned WAL ARCHIVAL ON via set_wal_size_limit_mb.
-    /// This is what actually shipped and bloated: live WAL stayed small but
+    /// This is the configuration that bloated: live WAL stayed small but
     /// every rotated log was moved to db/archive and parked there.
     ArchivedWal,
-    /// The real fix: aggregate memtable budget + a live-WAL ceiling, with WAL
+    /// The corrected policy: aggregate memtable budget + a live-WAL ceiling, with WAL
     /// archival left OFF so rotated logs are deleted as soon as they flush.
     Tuned,
 }

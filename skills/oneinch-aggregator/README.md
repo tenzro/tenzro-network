@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Provider | 1inch Developer Portal |
-| Auth | Required (API key from `https://portal.1inch.dev`) |
+| Auth | Required (API key from `https://business.1inch.com/portal`) |
 | Categories | DEX aggregation, Fusion+ cross-chain |
 
 ## Skill registration

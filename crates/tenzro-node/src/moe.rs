@@ -1649,8 +1649,10 @@ async fn settle_moe_forward(
             && let Err(e) = tracker.record_usage(tenzro_model::UsageRecord::new(
                 model_id.clone(),
                 holder,
-                tokens_u32,
-                0,
+                // A remote expert is billed on the tokens routed to it, which
+                // are prefill work on the holder's side: there is no completion
+                // leg, no cache, and no media dimension in a forward pass.
+                tenzro_types::model::BillableUnits::tokens(tokens_u32, 0),
                 0,
                 0,
                 gross,

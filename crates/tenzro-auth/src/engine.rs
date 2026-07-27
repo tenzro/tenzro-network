@@ -149,6 +149,15 @@ pub struct AuthorityRequest {
     pub action: AuthorityAction,
     /// Per-action constraint payload (asset, amount, counterparty, …).
     pub constraint: ResourceConstraint,
+    /// Approval granted out-of-band for *this* attempt, if the caller is
+    /// retrying an action that previously returned
+    /// [`AuthorityDecision::RequireApproval`].
+    ///
+    /// When set, oversight adjudication looks the record up and — if it
+    /// is `Approved` and describes the same action and constraint —
+    /// permits the action and marks the approval consumed. Approvals are
+    /// single-use, so a second retry with the same id is refused.
+    pub approval_id: Option<String>,
 }
 
 /// Result of a successful refresh-token exchange. Surfaces enough state
@@ -220,6 +229,9 @@ pub enum AuthorityAction {
     Contract,
     /// Spawn a child identity under the bearer's act-chain.
     RegisterIdentity,
+    /// Pay for a marketplace resource invocation (skill, tool, workflow
+    /// template, knowledge base, agent template).
+    InvokeResource,
 }
 
 /// The OAuth/DPoP/RAR engine. Wrap in `Arc` and share across the node.
@@ -768,9 +780,9 @@ impl AuthEngine {
         }
 
         // Step 3: AAP oversight — if the action is on the
-        // requires_human_approval_for list, surface RequireApproval
-        // and create the ApprovalRecord. Caller decides what to do
-        // with the resulting approval_id.
+        // requires_human_approval_for list, either honour an approval the
+        // caller already holds or surface RequireApproval with a fresh
+        // ApprovalRecord.
         if let Some(oversight) = &claims.aap_oversight {
             let action_name = crate::aap::authority_action_to_aap(request.action);
             if oversight
@@ -778,6 +790,16 @@ impl AuthEngine {
                 .iter()
                 .any(|a| a == action_name)
             {
+                // Retry path: the caller is presenting an approval granted
+                // out-of-band. Spend it if it genuinely authorizes this
+                // action, so an approved action executes instead of
+                // parking again.
+                if let Some(id) = &request.approval_id {
+                    self.spend_approval_for(id, &claims.sub, request)?;
+                    return Ok(AuthorityDecision::Permit {
+                        wallet_id: wallet_id_for_controller.unwrap_or_default(),
+                    });
+                }
                 let approver_did = oversight
                     .approver_did
                     .clone()
@@ -797,6 +819,7 @@ impl AuthEngine {
                     ),
                     status: ApprovalStatus::Pending,
                     decided_at_ms: None,
+                    deny_reason: None,
                 };
                 let approval_id = self.record_approval(approval)?;
                 return Ok(AuthorityDecision::RequireApproval { approval_id });
@@ -913,11 +936,16 @@ impl AuthEngine {
     /// `decision` must be [`ApprovalStatus::Approved`] or
     /// [`ApprovalStatus::Denied`]. Any other variant returns
     /// [`AuthError::Internal`].
+    ///
+    /// `deny_reason` is recorded on the request and surfaced to the
+    /// requesting agent when the decision is `Denied`, so the agent can
+    /// act on *why* it was refused. It is ignored for `Approved`.
     pub fn decide_approval(
         &self,
         approval_id: &str,
         decision: ApprovalStatus,
         expected_approver_did: Option<&str>,
+        deny_reason: Option<String>,
     ) -> Result<ApprovalRecord> {
         if !matches!(decision, ApprovalStatus::Approved | ApprovalStatus::Denied) {
             return Err(AuthError::Internal(format!(
@@ -952,6 +980,9 @@ impl AuthEngine {
 
         record.status = decision;
         record.decided_at_ms = Some(unix_now_ms());
+        if matches!(decision, ApprovalStatus::Denied) {
+            record.deny_reason = deny_reason;
+        }
         self.persist_approval_status_change(&record, /*was_pending=*/ true)?;
         Ok(record)
     }
@@ -976,6 +1007,66 @@ impl AuthEngine {
         // decided_at_ms already set when approver acted; do not overwrite.
         self.persist_approval_status_change(&record, /*was_pending=*/ false)?;
         Ok(record)
+    }
+
+    /// Spend an approval that the caller is presenting to retry an action
+    /// which previously returned [`AuthorityDecision::RequireApproval`].
+    ///
+    /// The approval only authorizes the action it was minted for, so this
+    /// re-checks every binding before consuming it:
+    ///
+    /// - the requester must be the bearer now retrying (`sub`), so one
+    ///   agent cannot spend another's approval;
+    /// - the recorded [`crate::rar::AuthorizationDetail`] must equal the
+    ///   detail this request projects to, so an approval for a 10 TNZO
+    ///   transfer cannot be redeemed against a 10,000 TNZO one;
+    /// - the status must be `Approved` — `Denied`, `Expired`, `Pending`
+    ///   and the already-spent `Consumed` all refuse.
+    fn spend_approval_for(
+        &self,
+        approval_id: &str,
+        requester_did: &str,
+        request: &AuthorityRequest,
+    ) -> Result<ApprovalRecord> {
+        let record = self.get_approval(approval_id)?.ok_or_else(|| {
+            AuthError::Forbidden(format!("approval {} not found", approval_id))
+        })?;
+
+        if record.requester_did != requester_did {
+            return Err(AuthError::Forbidden(format!(
+                "approval {} was requested by {}, not {}",
+                approval_id, record.requester_did, requester_did
+            )));
+        }
+
+        match record.status {
+            ApprovalStatus::Approved => {}
+            ApprovalStatus::Denied => {
+                let reason = record
+                    .deny_reason
+                    .as_deref()
+                    .unwrap_or("no reason given by approver");
+                return Err(AuthError::Forbidden(format!(
+                    "approval {} was denied: {}",
+                    approval_id, reason
+                )));
+            }
+            other => {
+                return Err(AuthError::Forbidden(format!(
+                    "approval {} is not usable from state {:?}",
+                    approval_id, other
+                )));
+            }
+        }
+
+        if record.action != authority_request_to_detail(request) {
+            return Err(AuthError::Forbidden(format!(
+                "approval {} authorizes a different action than the one being retried",
+                approval_id
+            )));
+        }
+
+        self.consume_approval(approval_id)
     }
 
     /// List approvals currently in `Pending` state for the given
@@ -1641,6 +1732,33 @@ fn detail_covers(detail: &AuthorizationDetail, request: &AuthorityRequest) -> bo
             // engine tracks issuance counts in the audit log.
             true
         }
+        (
+            AuthorizationDetail::ResourceInvocation {
+                max_amount_per_call,
+                class,
+                allowed_resource_ids,
+            },
+            A::InvokeResource,
+        ) => {
+            amount_within(*max_amount_per_call, request.constraint.amount)
+                && match request
+                    .constraint
+                    .resource_id
+                    .as_deref()
+                    .and_then(|rid| rid.split_once(':'))
+                {
+                    Some((req_class, req_id)) => {
+                        class.as_deref().is_none_or(|c| c == req_class)
+                            && allowed_resource_ids
+                                .as_ref()
+                                .is_none_or(|ids| ids.iter().any(|i| i == req_id))
+                    }
+                    // The caller did not qualify the resource by class, so
+                    // neither allow-list can be checked — only a grant that
+                    // restricts nothing covers it.
+                    None => class.is_none() && allowed_resource_ids.is_none(),
+                }
+        }
         _ => false,
     }
 }
@@ -1733,6 +1851,22 @@ fn authority_request_to_detail(request: &AuthorityRequest) -> AuthorizationDetai
         AuthorityAction::RegisterIdentity => AuthorizationDetail::RegisterIdentity {
             max_children: None,
         },
+        AuthorityAction::InvokeResource => {
+            let (class, allowed_resource_ids) = match request
+                .constraint
+                .resource_id
+                .as_deref()
+                .and_then(|rid| rid.split_once(':'))
+            {
+                Some((c, id)) => (Some(c.to_string()), Some(vec![id.to_string()])),
+                None => (None, None),
+            };
+            AuthorizationDetail::ResourceInvocation {
+                max_amount_per_call: amount,
+                class,
+                allowed_resource_ids,
+            }
+        }
     }
 }
 
@@ -1932,6 +2066,7 @@ mod tests {
                 counterparty: None,
                 resource_id: None,
             },
+            approval_id: None,
         };
         let decision = e.resolve_authority(&claims, &req, None).unwrap();
         assert!(matches!(decision, AuthorityDecision::Deny { .. }));
@@ -1964,6 +2099,7 @@ mod tests {
                 counterparty: None,
                 resource_id: None,
             },
+            approval_id: None,
         };
         let decision = e
             .resolve_authority(&claims, &req, Some("wallet-1".into()))
@@ -1991,6 +2127,7 @@ mod tests {
             summary: "Transfer 1 TNZO".into(),
             status: ApprovalStatus::Pending,
             decided_at_ms: None,
+            deny_reason: None,
         }
     }
 
@@ -2005,7 +2142,7 @@ mod tests {
         assert_eq!(listed[0].approval_id, "apv-1");
 
         let decided = e
-            .decide_approval("apv-1", ApprovalStatus::Approved, Some("did:tenzro:human:alice"))
+            .decide_approval("apv-1", ApprovalStatus::Approved, Some("did:tenzro:human:alice"), None)
             .unwrap();
         assert_eq!(decided.status, ApprovalStatus::Approved);
         assert!(decided.decided_at_ms.is_some());
@@ -2024,6 +2161,187 @@ mod tests {
         assert!(matches!(err, AuthError::Forbidden(_)));
     }
 
+    /// Issues a token whose controller has put `transfer` on the
+    /// always-ask list, and returns the engine plus validated claims.
+    fn oversight_engine_and_claims(approver: &str) -> (AuthEngine, AuthClaims) {
+        let e = engine();
+        let details = AuthorizationDetails::single(AuthorizationDetail::Transfer {
+            asset: tenzro_types::AssetId("TNZO".into()),
+            max_amount: 10_000,
+            max_daily_amount: None,
+            allowed_counterparties: None,
+        });
+        let token = e
+            .issue_jwt_with_aap(
+                "did:tenzro:machine:overseen",
+                approver,
+                "jkt-oversight",
+                details,
+                None,
+                AapOverrides {
+                    oversight: Some(AapOversightClaim {
+                        requires_human_approval_for: vec!["transfer".into()],
+                        approver_did: Some(approver.into()),
+                        approval_ttl_secs: Some(600),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let claims = e.validate_jwt(&token, None).unwrap();
+        (e, claims)
+    }
+
+    fn transfer_request(amount: u128, approval_id: Option<String>) -> AuthorityRequest {
+        AuthorityRequest {
+            action: AuthorityAction::Transfer,
+            constraint: ResourceConstraint {
+                asset: Some(tenzro_types::AssetId("TNZO".into())),
+                amount: Some(amount),
+                counterparty: None,
+                resource_id: None,
+            },
+            approval_id,
+        }
+    }
+
+    #[test]
+    fn oversight_approved_retry_permits_and_spends_the_approval() {
+        let approver = "did:tenzro:human:alice";
+        let (e, claims) = oversight_engine_and_claims(approver);
+
+        // First attempt parks on the always-ask list.
+        let approval_id = match e
+            .resolve_authority(&claims, &transfer_request(5_000, None), None)
+            .unwrap()
+        {
+            AuthorityDecision::RequireApproval { approval_id } => approval_id,
+            other => panic!("expected RequireApproval, got {:?}", other),
+        };
+
+        e.decide_approval(&approval_id, ApprovalStatus::Approved, Some(approver), None)
+            .unwrap();
+
+        // Retry carrying the approval now executes rather than re-parking.
+        let decision = e
+            .resolve_authority(
+                &claims,
+                &transfer_request(5_000, Some(approval_id.clone())),
+                Some("wallet-overseen".into()),
+            )
+            .unwrap();
+        match decision {
+            AuthorityDecision::Permit { wallet_id } => assert_eq!(wallet_id, "wallet-overseen"),
+            other => panic!("expected Permit, got {:?}", other),
+        }
+
+        // The approval is single-use, so a replay is refused.
+        assert_eq!(
+            e.get_approval(&approval_id).unwrap().unwrap().status,
+            ApprovalStatus::Consumed
+        );
+        let err = e
+            .resolve_authority(
+                &claims,
+                &transfer_request(5_000, Some(approval_id)),
+                Some("wallet-overseen".into()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Forbidden(_)));
+    }
+
+    #[test]
+    fn oversight_approval_does_not_authorize_a_different_action() {
+        let approver = "did:tenzro:human:alice";
+        let (e, claims) = oversight_engine_and_claims(approver);
+
+        let approval_id = match e
+            .resolve_authority(&claims, &transfer_request(10, None), None)
+            .unwrap()
+        {
+            AuthorityDecision::RequireApproval { approval_id } => approval_id,
+            other => panic!("expected RequireApproval, got {:?}", other),
+        };
+        e.decide_approval(&approval_id, ApprovalStatus::Approved, Some(approver), None)
+            .unwrap();
+
+        // Approved for 10 TNZO; redeeming against 9_000 must refuse, and
+        // the approval must survive unspent.
+        let err = e
+            .resolve_authority(
+                &claims,
+                &transfer_request(9_000, Some(approval_id.clone())),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Forbidden(_)));
+        assert_eq!(
+            e.get_approval(&approval_id).unwrap().unwrap().status,
+            ApprovalStatus::Approved
+        );
+    }
+
+    #[test]
+    fn oversight_denial_reason_reaches_the_requesting_agent() {
+        let approver = "did:tenzro:human:alice";
+        let (e, claims) = oversight_engine_and_claims(approver);
+
+        let approval_id = match e
+            .resolve_authority(&claims, &transfer_request(5_000, None), None)
+            .unwrap()
+        {
+            AuthorityDecision::RequireApproval { approval_id } => approval_id,
+            other => panic!("expected RequireApproval, got {:?}", other),
+        };
+
+        e.decide_approval(
+            &approval_id,
+            ApprovalStatus::Denied,
+            Some(approver),
+            Some("wrong counterparty — route through escrow".into()),
+        )
+        .unwrap();
+
+        let err = e
+            .resolve_authority(&claims, &transfer_request(5_000, Some(approval_id)), None)
+            .unwrap_err();
+        match err {
+            AuthError::Forbidden(msg) => {
+                assert!(msg.contains("route through escrow"), "got: {}", msg)
+            }
+            other => panic!("expected Forbidden, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn oversight_approval_cannot_be_spent_by_another_agent() {
+        let approver = "did:tenzro:human:alice";
+        let (e, claims) = oversight_engine_and_claims(approver);
+
+        let approval_id = match e
+            .resolve_authority(&claims, &transfer_request(5_000, None), None)
+            .unwrap()
+        {
+            AuthorityDecision::RequireApproval { approval_id } => approval_id,
+            other => panic!("expected RequireApproval, got {:?}", other),
+        };
+        e.decide_approval(&approval_id, ApprovalStatus::Approved, Some(approver), None)
+            .unwrap();
+
+        // A different bearer under the same controller and the same
+        // always-ask list must not be able to redeem it.
+        let mut impostor = claims.clone();
+        impostor.sub = "did:tenzro:machine:impostor".into();
+        let err = e
+            .resolve_authority(
+                &impostor,
+                &transfer_request(5_000, Some(approval_id)),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Forbidden(_)));
+    }
+
     #[test]
     fn approval_decide_rejects_wrong_approver() {
         let e = engine();
@@ -2031,7 +2349,7 @@ mod tests {
         e.record_approval(rec).unwrap();
 
         let err = e
-            .decide_approval("apv-2", ApprovalStatus::Approved, Some("did:tenzro:human:eve"))
+            .decide_approval("apv-2", ApprovalStatus::Approved, Some("did:tenzro:human:eve"), None)
             .unwrap_err();
         assert!(matches!(err, AuthError::Forbidden(_)));
     }
@@ -2041,10 +2359,11 @@ mod tests {
         let e = engine();
         let rec = make_pending_record("apv-3", "did:tenzro:human:alice", 60_000);
         e.record_approval(rec).unwrap();
-        e.decide_approval("apv-3", ApprovalStatus::Denied, None).unwrap();
+        e.decide_approval("apv-3", ApprovalStatus::Denied, None, None)
+            .unwrap();
 
         let err = e
-            .decide_approval("apv-3", ApprovalStatus::Approved, None)
+            .decide_approval("apv-3", ApprovalStatus::Approved, None, None)
             .unwrap_err();
         assert!(matches!(err, AuthError::Internal(_)));
     }
@@ -2056,7 +2375,7 @@ mod tests {
         e.record_approval(rec).unwrap();
 
         let err = e
-            .decide_approval("apv-4", ApprovalStatus::Pending, None)
+            .decide_approval("apv-4", ApprovalStatus::Pending, None, None)
             .unwrap_err();
         assert!(matches!(err, AuthError::Internal(_)));
     }
@@ -2318,6 +2637,68 @@ mod tests {
             e2.validate_jwt(&token_c, None).unwrap_err(),
             AuthError::TokenRevoked(_)
         ));
+    }
+
+    fn invoke_request(resource_id: Option<&str>, amount: u128) -> AuthorityRequest {
+        AuthorityRequest {
+            action: AuthorityAction::InvokeResource,
+            constraint: ResourceConstraint {
+                asset: Some(tenzro_types::AssetId::tnzo()),
+                amount: Some(amount),
+                counterparty: None,
+                resource_id: resource_id.map(|s| s.to_string()),
+            },
+            approval_id: None,
+        }
+    }
+
+    #[test]
+    fn resource_invocation_grant_restricts_class_id_and_ceiling() {
+        let grant = AuthorizationDetail::ResourceInvocation {
+            max_amount_per_call: 1_000,
+            class: Some("skill".to_string()),
+            allowed_resource_ids: Some(vec!["web-search".to_string()]),
+        };
+
+        assert!(detail_covers(&grant, &invoke_request(Some("skill:web-search"), 1_000)));
+        // Ceiling is per call.
+        assert!(!detail_covers(&grant, &invoke_request(Some("skill:web-search"), 1_001)));
+        // Wrong class.
+        assert!(!detail_covers(&grant, &invoke_request(Some("tool:web-search"), 10)));
+        // Id outside the allow-list.
+        assert!(!detail_covers(&grant, &invoke_request(Some("skill:code-review"), 10)));
+        // Unqualified id cannot be checked against either allow-list.
+        assert!(!detail_covers(&grant, &invoke_request(Some("web-search"), 10)));
+    }
+
+    #[test]
+    fn unrestricted_resource_invocation_grant_covers_any_resource() {
+        let grant = AuthorizationDetail::ResourceInvocation {
+            max_amount_per_call: 500,
+            class: None,
+            allowed_resource_ids: None,
+        };
+
+        assert!(detail_covers(&grant, &invoke_request(Some("tool:code-executor"), 500)));
+        assert!(detail_covers(&grant, &invoke_request(None, 1)));
+        assert!(!detail_covers(&grant, &invoke_request(Some("tool:code-executor"), 501)));
+    }
+
+    #[test]
+    fn resource_invocation_request_round_trips_into_a_grant() {
+        let detail = authority_request_to_detail(&invoke_request(Some("skill:web-search"), 250));
+        match detail {
+            AuthorizationDetail::ResourceInvocation {
+                max_amount_per_call,
+                class,
+                allowed_resource_ids,
+            } => {
+                assert_eq!(max_amount_per_call, 250);
+                assert_eq!(class.as_deref(), Some("skill"));
+                assert_eq!(allowed_resource_ids, Some(vec!["web-search".to_string()]));
+            }
+            other => panic!("expected ResourceInvocation, got {other:?}"),
+        }
     }
 
     #[test]

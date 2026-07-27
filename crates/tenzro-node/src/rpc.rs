@@ -5,7 +5,7 @@
 //! and Ethereum tooling (MetaMask, ethers.js, web3.js).
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response, sse::{Event, Sse}},
     routing::{get, post},
@@ -20,19 +20,21 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{debug, error, info, warn};
 
+use crate::chat_content::MessageContent;
 use crate::error::{NodeError, Result};
 use crate::node::{TenzroNode, detect_hardware, ModelDownloadStatus, UserResource};
 use crate::event_loop::NodeEvent;
 use tenzro_crypto::{KeyPair, KeyType};
 use tenzro_model::{
     get_audio_catalog, get_audio_model_by_id, get_detection_catalog, get_detection_model_by_id,
-    get_forecast_catalog, get_model_by_id, get_model_catalog, get_segmentation_catalog,
+    get_forecast_catalog, get_forecast_model_by_id, get_model_by_id, get_model_catalog,
+    get_segmentation_catalog,
     get_segmentation_model_by_id, get_text_embedding_catalog, get_text_embedding_model_by_id,
     get_text_segmentation_catalog, get_text_segmentation_model_by_id, get_video_catalog,
     get_vision_catalog, get_vision_model_by_id, ChatMessage as ModelChatMessage, DetrFamily,
     ExternalEngine, ExternalEngineKind,
     ForecastConfig, GenerationConfig, ImageEmbedConfig, ImageNormalization, OnnxTextEmbeddingEntry,
-    SamFamily, SegmentPrompt,
+    SamFamily, SegmentPrompt, StopReason,
     TextEmbedConfig, TextEncoderFamily, TextSegmentBoxPrompt, TextSegmentConfig,
     ToolDefinition as RuntimeToolDefinition, TranscribeConfig, VideoEmbedConfig, WhisperFamily,
 };
@@ -44,6 +46,80 @@ use tenzro_types::model::{ModelLocation, ModelVisibility};
 use tenzro_types::primitives::{Address, BlockHeight, ChainId, Hash, Nonce};
 use tenzro_types::transaction::{Transaction, SignedTransaction, TransactionType};
 use tenzro_types::Signature;
+
+/// Body ceiling for JSON request bodies.
+const JSON_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Body ceiling for audio uploads on `/v1/audio/transcriptions`. Sized for a
+/// long-form recording at a common bitrate; the ASR runtimes additionally
+/// enforce their own `max_audio_seconds`.
+const AUDIO_BODY_LIMIT: usize = 128 * 1024 * 1024;
+
+/// Body ceiling for requests carrying an image or a video clip, whether
+/// base64-encoded inside JSON or uploaded as a multipart part. A single 4K
+/// frame or a short clip does not fit under [`JSON_BODY_LIMIT`], and base64
+/// inflates the payload by a third on top of that.
+const MEDIA_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Every route a payment gate governs. Named once so the startup log cannot
+/// drift from what the router actually mounts behind the gate.
+const PAID_ROUTES: &[&str] = &[
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/v1/images/generations",
+    "/api/paid/chat/completions",
+    "/chat-stream",
+    "/v1/tenzro/forecasts",
+    "/v1/embeddings",
+    "/v1/images/edits",
+    "/v1/videos",
+    "/v1/tenzro/detections",
+    "/v1/tenzro/segmentations",
+    "/v1/tenzro/video/embeddings",
+    "/v1/audio/transcriptions",
+];
+
+/// Generation routes whose bodies are plain JSON — a prompt, a message list,
+/// or a numeric series.
+fn paid_json_routes() -> Router<Arc<TenzroNode>> {
+    Router::new()
+        .route("/v1/chat/completions", post(handle_openai_chat_completions))
+        .route("/v1/responses", post(handle_openai_responses))
+        .route(
+            "/v1/images/generations",
+            post(handle_openai_images_generations),
+        )
+        .route(
+            "/api/paid/chat/completions",
+            post(handle_openai_chat_completions),
+        )
+        .route("/chat-stream", post(handle_chat_stream_rich))
+        .route("/v1/tenzro/forecasts", post(handle_openai_forecasts))
+}
+
+/// Routes carrying an image or a video clip — base64 inside a JSON body for
+/// the Tenzro-namespaced paths, a multipart part for the two vendor paths
+/// whose published shape is `multipart/form-data`.
+fn paid_media_routes() -> Router<Arc<TenzroNode>> {
+    Router::new()
+        .route("/v1/embeddings", post(handle_openai_embeddings))
+        .route("/v1/images/edits", post(handle_openai_images_edits))
+        .route("/v1/videos", post(handle_openai_videos_create))
+        .route("/v1/tenzro/detections", post(handle_openai_detections))
+        .route("/v1/tenzro/segmentations", post(handle_openai_segmentations))
+        .route(
+            "/v1/tenzro/video/embeddings",
+            post(handle_openai_video_embeddings),
+        )
+}
+
+/// Routes taking a multipart upload of a recording.
+fn paid_audio_routes() -> Router<Arc<TenzroNode>> {
+    Router::new().route(
+        "/v1/audio/transcriptions",
+        post(handle_openai_transcriptions),
+    )
+}
 
 /// JSON-RPC server
 pub struct RpcServer {
@@ -130,33 +206,78 @@ impl RpcServer {
             .route("/health", get(handle_rpc_get))
             // OpenAI-compatible model listing (free)
             .route("/v1/models", get(handle_openai_list_models))
-            .route("/v1/models/{instance_id}", get(handle_openai_get_model));
+            .route("/v1/models/:instance_id", get(handle_openai_get_model))
+            // Post-hoc generation stats. Reading back what a caller was
+            // already told is not itself billable, so this stays open even
+            // when a payment gate governs the generation routes.
+            .route("/v1/generation", get(handle_openai_generation))
+            // Reading a video job's status and collecting its bytes are the
+            // back half of a render that was already priced and charged on
+            // the POST that created it. Gating them would bill the caller a
+            // second time for the artifact they already paid to produce.
+            .route("/v1/videos/:video_id", get(handle_openai_videos_get))
+            .route(
+                "/v1/videos/:video_id/content",
+                get(handle_openai_videos_content),
+            );
 
-        // Paid routes: /v1/chat/completions, /api/paid/chat/completions, and
-        // /chat-stream (Anthropic-style SSE for the rich shape).
-        // When a payment gate is configured, these routes require an HTTP 402
-        // credential. Otherwise they are accessible freely (dev/testnet mode).
+        // When a payment gate is configured, the generation routes require an
+        // HTTP 402 credential. Otherwise they are accessible freely
+        // (dev/testnet mode).
+        //
+        // Body ceilings are applied per sub-router rather than globally: an
+        // uploaded audio file is orders of magnitude larger than any JSON
+        // body, and a larger per-route limit cannot take effect underneath a
+        // smaller outer one. Routes whose JSON carries a base64 image or clip
+        // sit in their own tier between the two.
         let app = if let Some(gate) = self.payment_gate {
-            info!("RPC payment gate enabled for /v1/chat/completions, /v1/embeddings, /api/paid/chat/completions, and /chat-stream");
-            let paid_routes = Router::new()
-                .route("/v1/chat/completions", post(handle_openai_chat_completions))
-                .route("/v1/embeddings", post(handle_openai_embeddings))
-                .route("/api/paid/chat/completions", post(handle_openai_chat_completions))
-                .route("/chat-stream", post(handle_chat_stream_rich))
+            info!(
+                "RPC payment gate enabled for {}",
+                PAID_ROUTES.join(", ")
+            );
+            let gate_layer = axum::middleware::from_fn_with_state(
+                gate,
+                tenzro_payments::middleware::payment_gate_handler,
+            );
+            let paid_json = paid_json_routes()
                 .with_state(node_state.clone())
-                .layer(axum::middleware::from_fn_with_state(
-                    gate,
-                    tenzro_payments::middleware::payment_gate_handler,
-                ));
-            open_routes.with_state(node_state).merge(paid_routes)
+                .layer(RequestBodyLimitLayer::new(JSON_BODY_LIMIT))
+                .layer(gate_layer.clone());
+            let paid_media = paid_media_routes()
+                .with_state(node_state.clone())
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .layer(RequestBodyLimitLayer::new(MEDIA_BODY_LIMIT))
+                .layer(gate_layer.clone());
+            let paid_audio = paid_audio_routes()
+                .with_state(node_state.clone())
+                // axum's own 2 MB default applies to Multipart independently
+                // of the tower-http layer, so it has to be turned off for the
+                // tower-http ceiling below to be the one that governs.
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .layer(RequestBodyLimitLayer::new(AUDIO_BODY_LIMIT))
+                .layer(gate_layer);
+            open_routes
+                .with_state(node_state)
+                .layer(RequestBodyLimitLayer::new(JSON_BODY_LIMIT))
+                .merge(paid_json)
+                .merge(paid_media)
+                .merge(paid_audio)
         } else {
             // No payment gate — mount inference routes openly
+            let media = paid_media_routes()
+                .with_state(node_state.clone())
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .layer(RequestBodyLimitLayer::new(MEDIA_BODY_LIMIT));
+            let audio = paid_audio_routes()
+                .with_state(node_state.clone())
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .layer(RequestBodyLimitLayer::new(AUDIO_BODY_LIMIT));
             open_routes
-                .route("/v1/chat/completions", post(handle_openai_chat_completions))
-                .route("/v1/embeddings", post(handle_openai_embeddings))
-                .route("/api/paid/chat/completions", post(handle_openai_chat_completions))
-                .route("/chat-stream", post(handle_chat_stream_rich))
+                .merge(paid_json_routes())
                 .with_state(node_state)
+                .layer(RequestBodyLimitLayer::new(JSON_BODY_LIMIT))
+                .merge(media)
+                .merge(audio)
         };
 
         let app = app
@@ -169,8 +290,6 @@ impl RpcServer {
             // caused all 200 slots to drain in lockstep, manifesting
             // as a periodic pause to external observers.
             .layer(ConcurrencyLimitLayer::new(1000))
-            // Request body size limit: 2 MB
-            .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
             // Per-IP GCRA gate, outermost so an abusive source is
             // rejected with 429 before consuming a concurrency slot.
             // 50 req/s sustained per IP with a burst of 200 — generous
@@ -236,7 +355,7 @@ async fn handle_rpc_get(
 /// Both fields are `None` for requests submitted without auth headers,
 /// which is normal for read-only RPCs (e.g. `tenzro_blockNumber`).
 #[derive(Debug, Clone, Default)]
-pub(crate) struct AuthContext {
+pub struct AuthContext {
     /// Verbatim `Authorization` header value, e.g. `DPoP eyJ...`. The
     /// `DPoP ` prefix is preserved (callers strip it) so we can also
     /// surface a useful error if a `Bearer ` scheme slipped through.
@@ -441,8 +560,9 @@ async fn handle_rpc_post(
 
 /// Gates a request against the node's API key manager. Returns `Some(err)`
 /// when the method is scoped and the presented key is missing, unknown,
-/// revoked, or lacks the required scope. Returns `None` when the call is
-/// authorized to proceed.
+/// revoked, or lacks the required scope; when the key's tier is read-only
+/// and the method writes; or when the key is over its per-minute budget.
+/// Returns `None` when the call is authorized to proceed.
 pub(crate) fn gate_api_key(
     node: &Arc<TenzroNode>,
     request: &JsonRpcRequest,
@@ -458,45 +578,87 @@ pub(crate) fn gate_api_key(
     }
     let mgr = node.api_key_manager()?;
     use crate::api_key::AuthorizeOutcome;
+    let refuse = |code: i32, message: String, data: Option<Value>| JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        id: request.id.clone(),
+        result: None,
+        error: Some(JsonRpcError {
+            code,
+            message,
+            data,
+        }),
+    };
     match mgr.authorize(api_key, &request.method) {
-        AuthorizeOutcome::Allowed => None,
-        AuthorizeOutcome::MissingKey(scope) => Some(JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id.clone(),
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32004,
-                message: format!(
+        AuthorizeOutcome::Allowed => {}
+        AuthorizeOutcome::MissingKey(scope) => {
+            return Some(refuse(
+                -32004,
+                format!(
                     "Unauthorized: missing X-Tenzro-Api-Key header (required scope: {})",
                     scope.as_str()
                 ),
-                data: None,
-            }),
-        }),
-        AuthorizeOutcome::UnknownOrRevoked => Some(JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id.clone(),
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32004,
-                message: "Unauthorized: API key is unknown or revoked".to_string(),
-                data: None,
-            }),
-        }),
-        AuthorizeOutcome::InsufficientScope(scope) => Some(JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id.clone(),
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32004,
-                message: format!(
+                None,
+            ));
+        }
+        AuthorizeOutcome::UnknownOrRevoked => {
+            return Some(refuse(
+                -32004,
+                "Unauthorized: API key is unknown or revoked".to_string(),
+                None,
+            ));
+        }
+        AuthorizeOutcome::InsufficientScope(scope) => {
+            return Some(refuse(
+                -32004,
+                format!(
                     "Unauthorized: API key lacks required scope ({})",
                     scope.as_str()
                 ),
-                data: None,
-            }),
-        }),
+                None,
+            ));
+        }
     }
+
+    // Tier enforcement. Only applies when a key was actually presented:
+    // ungated methods reach here with no key and nothing to bill, so the
+    // `?` below yields `None` — "authorized to proceed".
+    let record = api_key.and_then(|k| mgr.lookup(k))?;
+
+    if !record.tier.allows_write() && crate::api_key::is_gated_write_method(&request.method) {
+        return Some(refuse(
+            -32004,
+            format!(
+                "Unauthorized: tier '{}' is read-only; {} requires tier standard or higher",
+                record.tier.as_str(),
+                request.method
+            ),
+            None,
+        ));
+    }
+
+    // Per-minute budget. The JSON-RPC envelope carries no HTTP status, so
+    // 429 semantics are encoded as `-32005` plus `retry_after_ms` — the
+    // same convention `gate_chainlink_rate_limit` uses, so one SDK
+    // backoff path covers both.
+    if let Err((limit, retry_after_ms)) = mgr.check_rate_limit(&record) {
+        return Some(refuse(
+            -32005,
+            format!(
+                "Rate limit exceeded: tier '{}' allows {} requests per minute; \
+                 retry after {} ms",
+                record.tier.as_str(),
+                limit,
+                retry_after_ms
+            ),
+            Some(serde_json::json!({
+                "retry_after_ms": retry_after_ms,
+                "requests_per_minute": limit,
+                "tier": record.tier.as_str(),
+            })),
+        ));
+    }
+
+    None
 }
 
 /// Records a per-tenant Canton call against `CF_CANTON_ANALYTICS`.
@@ -664,6 +826,28 @@ fn requires_admin_token(method: &str) -> bool {
             | "tenzro_canton_createIdp"
             | "tenzro_canton_listIdps"
             | "tenzro_canton_deleteIdp"
+            // Canton participant administration. An API-key holder is an
+            // external developer renting party-scoped access to the
+            // operator's participant — never an administrator of it.
+            // These methods either mutate participant-global state or
+            // read across every tenant on the participant:
+            //   uploadDar        — installs a DAML package participant-wide
+            //   allocateParty    — unbounded party allocation
+            //   grantUserRights  — CanActAs/CanReadAs on arbitrary parties
+            //   listUserRights   — reads any user's rights
+            //   listParties      — enumerates every tenant's parties
+            //   listPackages     — enumerates every tenant's DAML models
+            //   coinBalance      — the operator's own CIP-56 holdings
+            // Participant status stays tenant-readable (health, version,
+            // connectedSynchronizers, feeSchedule) so a developer can
+            // check reachability and network fees without a party.
+            | "tenzro_canton_uploadDar"
+            | "tenzro_allocateParty"
+            | "tenzro_canton_listParties"
+            | "tenzro_canton_listPackages"
+            | "tenzro_canton_grantUserRights"
+            | "tenzro_canton_listUserRights"
+            | "tenzro_canton_coinBalance"
             // Workflow / obligation mirror: writes operator-signed DAML
             // contracts (Tenzro.Workflow:WorkflowAnchor /
             // Tenzro.Workflow:ObligationAnchor) using the operator's
@@ -673,6 +857,12 @@ fn requires_admin_token(method: &str) -> bool {
             | "tenzro_mirrorWorkflowToCanton"
             | "tenzro_canton_mirrorReceipt"
             | "tenzro_mirrorObligationToCanton"
+            // Reading the mirror is as operator-scoped as writing it:
+            // the event poll returns every WorkflowAnchor /
+            // ObligationAnchor / ApprovalAnchor / LifecycleAnchor held by
+            // the operator's party, which is internal node state.
+            | "tenzro_consumeDamlEvents"
+            | "tenzro_canton_streamEvents"
             // Cross-chain mint/burn: bridge ack writes that move
             // settlement supply. Production drive should be signed
             // gossip from validators; the RPC path is operator-only.
@@ -1081,7 +1271,10 @@ fn normalize_params(params: Option<Value>) -> Option<Value> {
 ///    for tenants provisioned against their own upstream IdP (no
 ///    stored credentials on the record).
 /// 3. Neither → `Ok(None)`: the request rides the operator's own token
-///    provider (operator/admin keys without a bound tenant client).
+///    provider. Reserved for operator-class keys (`operator_internal` /
+///    `operator_protected`) and admin-token calls. A subject-class key
+///    reaching a party-scoped method this way is refused — see
+///    [`is_party_scoped_canton_method`].
 ///
 /// Keys that carry a `tenant_oauth_client_id` but no stored secret and
 /// no header JWT fail closed with a reissue directive — silently
@@ -1089,6 +1282,7 @@ fn normalize_params(params: Option<Value>) -> Option<Value> {
 /// with the operator's authority.
 async fn resolve_canton_jwt(
     node: &Arc<TenzroNode>,
+    method: &str,
     api_key: Option<&str>,
     canton_auth: Option<&str>,
 ) -> std::result::Result<Option<String>, JsonRpcError> {
@@ -1144,8 +1338,153 @@ async fn resolve_canton_jwt(
                 data: None,
             }),
         },
-        _ => Ok(canton_auth.map(|s| s.to_string())),
+        // No tenant OAuth material on the record at all. An
+        // operator-class key is the operator's own ops credential and
+        // legitimately rides the operator's token provider. A
+        // subject-class key belongs to an external developer: falling
+        // through would run the request as the operator's
+        // participant-default party, making every other tenant's
+        // contracts visible to it. Refuse unless the caller brought a
+        // JWT from its own issuer.
+        _ => match canton_auth {
+            Some(jwt) => Ok(Some(jwt.to_string())),
+            None if record.class == crate::api_key::KeyClass::Subject
+                && is_party_scoped_canton_method(method) =>
+            {
+                Err(JsonRpcError {
+                    code: -32004,
+                    message: format!(
+                        "Unauthorized: '{}' acts on a Canton party, and this API key has no \
+                         Canton identity bound to it. Ask the operator to reissue the key with \
+                         a canton_user_id so the node can mint a tenant JWT server-side, or \
+                         present a JWT from your own issuer via X-Canton-Auth.",
+                        method
+                    ),
+                    data: None,
+                })
+            }
+            None => Ok(None),
+        },
     }
+}
+
+/// Whether a Canton method's result depends on *which party* the request
+/// is submitted as.
+///
+/// These methods read or write contracts under a specific party, so
+/// running one without a tenant-bound Canton identity would silently
+/// resolve to the operator's participant-default party and cross the
+/// tenant boundary. The participant-status reads left out of this set
+/// (`canton_health`, `canton_version`, `canton_connectedSynchronizers`,
+/// `canton_feeSchedule`, `listCantonDomains`) are party-independent, so a
+/// developer can check reachability and network fees before the operator
+/// has bound a party to their key.
+fn is_party_scoped_canton_method(method: &str) -> bool {
+    matches!(
+        method,
+        "tenzro_listDamlContracts"
+            | "tenzro_canton_listMirroredContracts"
+            | "tenzro_submitDamlCommand"
+            | "tenzro_canton_getTransaction"
+            | "tenzro_canton_watchParty"
+            | "tenzro_canton_submitWithMandate"
+            | "tenzro_canton_getMyUser"
+    )
+}
+
+/// Resolves which Canton network a canton-scoped request targets.
+///
+/// Order: explicit `canton_network` param → the key's sole authorized
+/// network → the operator's default network (represented as `None`, which
+/// `canton_adapter_or_err` reads as "use the default"). The explicit
+/// param is kept because admin-token holders bypass the api-key gate
+/// entirely and still need to name a network — uploading a DAR to
+/// mainnet, for instance.
+///
+/// When a key is presented, the resolved network is checked against the
+/// key's authorized set. An empty set authorizes nothing: a Canton
+/// network is a distinct ledger with distinct parties and assets, so the
+/// operator has to name the networks at issuance.
+fn resolve_canton_network(
+    node: &Arc<TenzroNode>,
+    request: &JsonRpcRequest,
+    api_key: Option<&str>,
+) -> std::result::Result<Option<crate::config::CantonNetwork>, JsonRpcError> {
+    // `params` may arrive positionally; read through the same
+    // normalization the dispatcher applies so `[{...}]` works too.
+    let explicit = normalize_params(request.params.clone())
+        .as_ref()
+        .and_then(|p| p.get("canton_network"))
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            crate::config::CantonNetwork::from_str_opt(s).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("Unknown canton_network: {} (expected devnet | mainnet)", s),
+                data: None,
+            })
+        })
+        .transpose()?;
+
+    let record = match (api_key, node.api_key_manager()) {
+        (Some(key), Some(mgr)) => mgr.lookup(key),
+        _ => None,
+    };
+    // No key on the request: the admin-token path, which the api-key
+    // gate skips. Honour an explicit param, otherwise the default.
+    let Some(record) = record else {
+        return Ok(explicit);
+    };
+
+    if record.canton_networks.is_empty() {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: "Unauthorized: this API key authorizes no Canton network; ask the \
+                      operator to reissue it naming canton_networks"
+                .to_string(),
+            data: None,
+        });
+    }
+
+    let net = match explicit.or_else(|| record.sole_canton_network()) {
+        Some(net) => net,
+        None => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "This API key authorizes {} Canton networks; name the target with \
+                     the `canton_network` param (authorized: {})",
+                    record.canton_networks.len(),
+                    record
+                        .canton_networks
+                        .iter()
+                        .map(|n| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                data: None,
+            });
+        }
+    };
+
+    if !record.authorizes_canton_network(net) {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!(
+                "Unauthorized: this API key does not authorize Canton network '{}' \
+                 (authorized: {})",
+                net,
+                record
+                    .canton_networks
+                    .iter()
+                    .map(|n| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            data: None,
+        });
+    }
+
+    Ok(Some(net))
 }
 
 pub(crate) async fn handle_request(
@@ -1160,10 +1499,10 @@ pub(crate) async fn handle_request(
     // and scope it task-locally around the dispatch so canton handlers
     // further down the call tree pick it up without every handler
     // taking the parameter explicitly.
-    let resolved_canton_jwt = if crate::api_key::required_scope_for_method(&request.method)
-        == Some(crate::api_key::ApiKeyScope::Canton)
-    {
-        match resolve_canton_jwt(node, api_key, canton_auth).await {
+    let is_canton = crate::api_key::required_scope_for_method(&request.method)
+        == Some(crate::api_key::ApiKeyScope::Canton);
+    let resolved_canton_jwt = if is_canton {
+        match resolve_canton_jwt(node, &request.method, api_key, canton_auth).await {
             Ok(jwt) => jwt,
             Err(error) => {
                 return JsonRpcResponse {
@@ -1177,9 +1516,31 @@ pub(crate) async fn handle_request(
     } else {
         canton_auth.map(|s| s.to_string())
     };
-    crate::canton_jwt::scope(
-        resolved_canton_jwt,
-        dispatch_request(node, request, auth_ctx, api_key),
+    // Same treatment for the target Canton network: resolve it once here
+    // against the key's authorized set and scope it task-locally, so the
+    // ~30 canton handlers pick their adapter without threading a network
+    // parameter through every signature.
+    let resolved_canton_network = if is_canton {
+        match resolve_canton_network(node, &request, api_key) {
+            Ok(net) => net,
+            Err(error) => {
+                return JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(error),
+                };
+            }
+        }
+    } else {
+        None
+    };
+    crate::canton_network::scope(
+        resolved_canton_network,
+        crate::canton_jwt::scope(
+            resolved_canton_jwt,
+            dispatch_request(node, request, auth_ctx, api_key),
+        ),
     )
     .await
 }
@@ -1454,9 +1815,9 @@ async fn dispatch_request(
         // The protocol exposes the live burn-rate split (base fee burn vs
         // treasury, local fee, paymaster), the governance-tunable supply
         // targets, the most recent supply metrics snapshot, and the current
-        // recommendation from the transfer function. Auto-proposal generation,
-        // fast-track timelock, and the `tenzro/burn-rate-changed`
-        // gossipsub topic land alongside the governance executor wiring.
+        // recommendation from the transfer function. Auto-proposal generation
+        // and the fast-track timelock run in the node's
+        // `AutoProposalGenerator` alongside the governance executor.
         "tenzro_getBurnRateConfig" => handle_get_burn_rate_config(node).await,
         "tenzro_getSupplyMetrics" => handle_get_supply_metrics(node).await,
         "tenzro_getBurnRateRecommendation" => handle_get_burn_rate_recommendation(node).await,
@@ -1470,8 +1831,8 @@ async fn dispatch_request(
         // the network-activity view (with optional `exclude_seed` filter
         // for organic-traffic measurement). The off-chain provisioning
         // daemon, monthly decay enforcement at refill, sunset wind-down
-        // sweep, and governance-executor mutation paths land in a later
-        // wave.
+        // sweep, and governance-executor mutation paths are not
+        // implemented yet.
         "tenzro_getTreasuryEarmark" => handle_get_treasury_earmark(node, request.params).await,
         "tenzro_getSeedAgentCharter" => handle_get_seed_agent_charter(node, request.params).await,
         "tenzro_listSeedAgentCharters" => handle_list_seed_agent_charters(node).await,
@@ -1529,6 +1890,7 @@ async fn dispatch_request(
         "tenzro_updatePaymentChannel" => handle_update_payment_channel(node, request.params).await,
         "tenzro_closePaymentChannel" => handle_close_payment_channel(node, request.params).await,
         "tenzro_listInferenceUsage" => handle_list_inference_usage(node, request.params).await,
+        "tenzro_getGeneration" => handle_get_generation(node, request.params).await,
         "tenzro_getProviderReputation" => handle_get_provider_reputation(node, request.params).await,
         "tenzro_getRouterMetrics" => handle_get_router_metrics(node, request.params).await,
         "tenzro_getProvenance" => handle_get_provenance(node, request.params).await,
@@ -1683,11 +2045,11 @@ async fn dispatch_request(
         "tenzro_listAgentJwks" => handle_list_agent_jwks(node).await,
         "tenzro_getAgentJwk" => handle_get_agent_jwk(node, request.params).await,
         // `tenzro_issueCredential` is the TDIP-spec name for adding a verifiable
-        // credential to an identity; aliased onto the shipped add-credential handler.
+        // credential to an identity; aliased onto the add-credential handler.
         "tenzro_addCredential" | "tenzro_issueCredential" => handle_add_credential(node, request.params).await,
         "tenzro_addService" => handle_add_service(node, request.params).await,
         // `tenzro_registerUsername` is the TDIP-spec name for binding a username
-        // to an identity; aliased onto the shipped set-username handler.
+        // to an identity; aliased onto the set-username handler.
         "tenzro_setUsername" | "tenzro_registerUsername" => handle_set_username(node, request.params).await,
         "tenzro_resolveUsername" => handle_resolve_username(node, request.params).await,
         // `tenzro_updateIdentity` is the did:tenzro spec §3.3 name for a
@@ -1875,7 +2237,7 @@ async fn dispatch_request(
         // own audit row with `cascaded: true`.
         "tenzro_revokeJwt" => handle_revoke_jwt(node, request.params).await,
         // `tenzro_revokeIdentity` is the TDIP/did-method-spec name; aliased onto
-        // the shipped revoke-DID handler.
+        // the revoke-DID handler.
         "tenzro_revokeDid" | "tenzro_revokeIdentity" => handle_revoke_did(node, request.params).await,
         // TDIP/GDPR Article 17 right-to-erasure: hard-delete a previously
         // revoked identity from the registry and persistent storage. The
@@ -1964,7 +2326,9 @@ async fn dispatch_request(
         // the same chat path as a named-model request.
         "tenzro_routeIntent" => handle_route_intent(node, request.params).await,
         "tenzro_chatByIntent" => handle_chat_by_intent(node, request.params).await,
-        "tenzro_orchestrate" => handle_orchestrate(node, request.params).await,
+        "tenzro_recordRouteOutcome" => handle_record_route_outcome(node, request.params).await,
+        "tenzro_routeDifficultyStats" => handle_route_difficulty_stats(node, request.params).await,
+        "tenzro_orchestrate" => handle_orchestrate(node, request.params, auth_ctx).await,
         // Timeseries forecasting (ONNX runtime)
         "tenzro_loadForecastModel" => handle_load_forecast_model(node, request.params).await,
         "tenzro_unloadForecastModel" => handle_unload_forecast_model(node, request.params).await,
@@ -2097,7 +2461,7 @@ async fn dispatch_request(
         "tenzro_listDamlContracts" | "tenzro_canton_listMirroredContracts" => handle_list_daml_contracts(node, request.params, api_key).await,
         "tenzro_submitDamlCommand" => handle_submit_daml_command(node, request.params, api_key).await,
         "tenzro_allocateParty" => handle_allocate_party(node, request.params).await,
-        // Canton 3.5+ JSON Ledger API extension methods (M11 — Canton-fix wave).
+        // Canton 3.5+ JSON Ledger API extension methods (M11 Canton fixes).
         "tenzro_canton_uploadDar" => handle_canton_upload_dar(node, request.params).await,
         "tenzro_canton_listParties" => handle_canton_list_parties(node).await,
         "tenzro_canton_health" => handle_canton_health(node).await,
@@ -2256,7 +2620,7 @@ async fn dispatch_request(
         "tenzro_registerSkill" => handle_register_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_listSkills" => handle_list_skills(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_searchSkills" => handle_search_skills(node.clone(), request.params.clone().unwrap_or_default()).await,
-        "tenzro_useSkill" => handle_use_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
+        "tenzro_useSkill" => handle_use_skill(node.clone(), request.params.clone().unwrap_or_default(), auth_ctx).await,
         "tenzro_getSkill" => handle_get_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_updateSkill" => handle_update_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_heartbeatSkill" => handle_heartbeat_skill(node.clone(), request.params.clone().unwrap_or_default()).await,
@@ -2265,13 +2629,13 @@ async fn dispatch_request(
         "tenzro_registerTool" => handle_register_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_listTools" => handle_list_tools(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_searchTools" => handle_search_tools(node.clone(), request.params.clone().unwrap_or_default()).await,
-        "tenzro_useTool" => handle_use_tool(node.clone(), request.params.clone().unwrap_or_default(), api_key).await,
+        "tenzro_useTool" => handle_use_tool(node.clone(), request.params.clone().unwrap_or_default(), api_key, auth_ctx).await,
         "tenzro_getTool" => handle_get_tool(node.clone(), request.params.clone().unwrap_or_default()).await,
 
         // Knowledge registry (CF_KNOWLEDGE)
         "tenzro_registerKnowledge" => handle_register_knowledge(node.clone(), request.params.clone().unwrap_or_default()).await,
         "tenzro_listKnowledge" | "tenzro_searchKnowledge" => handle_list_knowledge(node.clone(), request.params.clone().unwrap_or_default()).await,
-        "tenzro_useKnowledge" => handle_use_knowledge(node.clone(), request.params.clone().unwrap_or_default(), api_key).await,
+        "tenzro_useKnowledge" => handle_use_knowledge(node.clone(), request.params.clone().unwrap_or_default(), api_key, auth_ctx).await,
         "tenzro_getKnowledge" => handle_get_knowledge(node.clone(), request.params.clone().unwrap_or_default()).await,
 
         // Workflow template catalog (CF_WORKFLOW_TEMPLATES)
@@ -2282,7 +2646,7 @@ async fn dispatch_request(
 
         // Unified resource discovery + invocation (cross-registry)
         "tenzro_listResources" => handle_list_resources(node.clone(), request.params.clone().unwrap_or_default()).await,
-        "tenzro_useResource" => handle_use_resource(node.clone(), request.params.clone().unwrap_or_default(), api_key).await,
+        "tenzro_useResource" => handle_use_resource(node.clone(), request.params.clone().unwrap_or_default(), api_key, auth_ctx).await,
 
         // Child-agent atomic spawn — TDIP identity + MPC wallet +
         // parent-funded TNZO budget + spending policy + delegation
@@ -2443,7 +2807,7 @@ async fn dispatch_request(
         "tenzro_ap2SignMandate" => handle_ap2_sign_mandate(node, request.params, auth_ctx).await,
         "tenzro_ap2VerifyMandate" => crate::rpc_integrations::handle_ap2_verify_mandate(node, request.params).await,
         // `tenzro_validateMandatePair` is the bridge/SPEC-doc name; aliased onto
-        // the shipped AP2 mandate-pair validator.
+        // the AP2 mandate-pair validator.
         "tenzro_ap2ValidateMandatePair" | "tenzro_validateMandatePair" => crate::rpc_integrations::handle_ap2_validate_mandate_pair(node, request.params).await,
         "tenzro_ap2ProtocolInfo" => crate::rpc_integrations::handle_ap2_protocol_info(node, request.params).await,
         "tenzro_listMandates" => crate::rpc_integrations::handle_list_mandates(node, request.params).await,
@@ -2644,7 +3008,9 @@ async fn dispatch_request(
 
 // Handler implementations
 
-async fn handle_block_number(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+pub(crate) async fn handle_block_number(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     // Read the live chain tip maintained by EventLoop via Arc<AtomicU64>.
     // This is updated with Ordering::Release on every finalized block (both locally
     // produced and gossipsub-received), so it always reflects the real chain tip
@@ -2828,7 +3194,7 @@ fn classify_header_age(age_secs: u64) -> &'static str {
     }
 }
 
-async fn handle_get_block(
+pub(crate) async fn handle_get_block(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -3236,7 +3602,7 @@ fn parse_u64_value(v: &Value) -> Option<u64> {
     }
 }
 
-async fn handle_get_transaction(
+pub(crate) async fn handle_get_transaction(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -3332,7 +3698,7 @@ async fn handle_get_transaction(
     Ok(Value::Null)
 }
 
-async fn handle_get_balance(
+pub(crate) async fn handle_get_balance(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -3372,7 +3738,7 @@ async fn handle_get_balance(
     Ok(serde_json::json!(format!("0x{:x}", balance)))
 }
 
-async fn handle_get_nonce(
+pub(crate) async fn handle_get_nonce(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -3671,12 +4037,17 @@ async fn handle_list_models(node: &Arc<TenzroNode>) -> std::result::Result<Value
 enum SettlementOutcome {
     /// Payment cleared. `via` is "channel" (micropayment channel debit) or
     /// "transfer" (direct on-chain token transfer). `margin_wei` is the
-    /// developer margin routed to `app_id`'s app wallet on top of the
-    /// network cost (zero on unattributed calls and channel debits —
-    /// channel margin is carved at finalize, not per-update).
+    /// developer margin routed to `app_id`'s app wallet on top of the network
+    /// cost (zero on unattributed calls and channel debits — channel margin is
+    /// carved at finalize, not per-update). `commission_wei` +
+    /// `provider_wei` sum to the network cost: the split between the treasury
+    /// and `provider`, the wallet actually paid for serving the call.
     Settled {
         via: &'static str,
         margin_wei: u128,
+        commission_wei: u128,
+        provider_wei: u128,
+        provider: Option<Address>,
         app_id: Option<String>,
     },
     /// No settlement was attempted: zero cost, anonymous caller, or the
@@ -3687,10 +4058,20 @@ enum SettlementOutcome {
 impl SettlementOutcome {
     fn to_json(&self) -> Value {
         match self {
-            SettlementOutcome::Settled { via, margin_wei, app_id } => serde_json::json!({
+            SettlementOutcome::Settled {
+                via,
+                margin_wei,
+                commission_wei,
+                provider_wei,
+                provider,
+                app_id,
+            } => serde_json::json!({
                 "status": "settled",
                 "via": via,
                 "margin_wei": margin_wei.to_string(),
+                "commission_wei": commission_wei.to_string(),
+                "provider_wei": provider_wei.to_string(),
+                "provider": provider.map(|a| format!("0x{}", hex::encode(a.as_bytes()))),
                 "app_id": app_id,
             }),
             SettlementOutcome::NotApplicable => serde_json::json!({
@@ -3734,17 +4115,11 @@ fn resolve_app_attribution(
     Ok(Some(record))
 }
 
-/// Resolves the wallet address this node bills inference to (the node
-/// operator's first registered identity).
+/// Resolves the wallet address this node bills inference to. Same resolution
+/// as the payee advertised in model / provider announcements, so the address a
+/// consumer prices against is the address the transfer lands at.
 fn provider_billing_address(node: &Arc<TenzroNode>) -> Option<Address> {
-    let registry = node.identity_registry()?;
-    let all = registry.list_all();
-    let (_, identity) = all.first()?;
-    if identity.wallet_address == Address::default() {
-        None
-    } else {
-        Some(identity.wallet_address)
-    }
+    node.operator_payee()
 }
 
 /// Persists a failed settlement to CF_SETTLEMENTS under the `unpaid:`
@@ -3789,6 +4164,202 @@ fn record_unpaid_settlement(
     Some(key)
 }
 
+/// Serializes billable units for the wire, carrying only the dimensions that
+/// hold work.
+///
+/// A forwarding node meters what the serving node reports, so every dimension a
+/// modality consumed has to survive the hop or the work is served for free.
+/// Omitting zeros keeps a text completion's units object to two keys.
+/// `pixel_steps` is a decimal string because it is u128 and JSON numbers are
+/// not.
+fn units_to_json(units: &tenzro_types::model::BillableUnits) -> Value {
+    let mut obj = serde_json::Map::new();
+    let mut put = |key: &str, value: u64| {
+        if value > 0 {
+            obj.insert(key.to_string(), serde_json::json!(value));
+        }
+    };
+    put("input_tokens", units.input_tokens as u64);
+    put("output_tokens", units.output_tokens as u64);
+    put("cached_read_tokens", units.cached_read_tokens as u64);
+    put("cached_write_tokens", units.cached_write_tokens as u64);
+    put("reasoning_loops", units.reasoning_loops as u64);
+    put("image_tokens", units.image_tokens as u64);
+    put("audio_ms", units.audio_ms);
+    put("video_ms", units.video_ms);
+    put("frames", units.frames as u64);
+    if units.pixel_steps > 0 {
+        obj.insert(
+            "pixel_steps".to_string(),
+            serde_json::json!(units.pixel_steps.to_string()),
+        );
+    }
+    Value::Object(obj)
+}
+
+/// Reads back a units object written by [`units_to_json`].
+///
+/// A peer that reports nothing billable yields default units, which meter to
+/// the offer's per-request floor rather than to zero.
+fn units_from_json(value: &Value) -> tenzro_types::model::BillableUnits {
+    let u32_at = |key: &str| -> u32 {
+        value
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32
+    };
+    let u64_at = |key: &str| -> u64 { value.get(key).and_then(|v| v.as_u64()).unwrap_or(0) };
+
+    tenzro_types::model::BillableUnits {
+        input_tokens: u32_at("input_tokens"),
+        output_tokens: u32_at("output_tokens"),
+        cached_read_tokens: u32_at("cached_read_tokens"),
+        cached_write_tokens: u32_at("cached_write_tokens"),
+        reasoning_loops: u32_at("reasoning_loops"),
+        image_tokens: u32_at("image_tokens"),
+        audio_ms: u64_at("audio_ms"),
+        video_ms: u64_at("video_ms"),
+        pixel_steps: value
+            .get("pixel_steps")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u128>().ok())
+            .unwrap_or(0),
+        frames: u32_at("frames"),
+    }
+}
+
+/// Reads the billable units out of a forwarded chat result.
+///
+/// A peer running this node's own handler reports a `units` object covering
+/// every dimension. An external OpenAI-compatible upstream reports only the
+/// token pair, so that pair is the fallback and the units collapse to what a
+/// text completion consumes.
+fn forwarded_units(rpc_result: &Value) -> tenzro_types::model::BillableUnits {
+    if let Some(units) = rpc_result.get("units") {
+        return units_from_json(units);
+    }
+    let token_at = |key: &str| -> u32 {
+        rpc_result
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32
+    };
+    tenzro_types::model::BillableUnits::tokens(token_at("input_tokens"), token_at("output_tokens"))
+}
+
+/// Reads the billable units out of a forwarded rich-shape chat result.
+///
+/// The rich shape reports its counts inside an Anthropic-style `usage` block
+/// rather than at the top level, and that block names the cache dimensions
+/// `cache_read_input_tokens` and `cache_creation_input_tokens`. A peer running
+/// this node's own handler also emits a `units` object covering every dimension,
+/// which is preferred; the `usage` block is the fallback for an external
+/// upstream speaking only the rich shape.
+fn forwarded_rich_units(rpc_result: &Value) -> tenzro_types::model::BillableUnits {
+    if let Some(units) = rpc_result.get("units") {
+        return units_from_json(units);
+    }
+    let usage = rpc_result.get("usage");
+    let token_at = |key: &str| -> u32 {
+        usage
+            .and_then(|u| u.get(key))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32
+    };
+    tenzro_types::model::BillableUnits::tokens(
+        token_at("input_tokens"),
+        token_at("output_tokens"),
+    )
+    .with_cache(
+        token_at("cache_read_input_tokens"),
+        token_at("cache_creation_input_tokens"),
+    )
+}
+
+/// Prices a network-served call against the offer its provider signed.
+///
+/// The gateway settles routed calls, so the price has to come from the
+/// announcement the routing decision scored rather than from the serving
+/// node's own current pricing — otherwise a provider could win an offer
+/// cheaply and bill at a different rate. The units still come from the
+/// provider's response.
+///
+/// Dispatch honours whichever [`tenzro_types::model::PricingModel`] the offer
+/// declared, so a per-request or per-compute-time offer bills the way it was
+/// advertised instead of being silently re-metered per token. `market_average`
+/// anchors a dynamic offer; a gateway holding no market history for the model
+/// passes `None`, which leaves the quote at its metered cost.
+fn network_offer_cost(
+    pricing: &tenzro_types::model::PricingConfig,
+    units: &tenzro_types::model::BillableUnits,
+    latency_ms: u64,
+    market_average: Option<u64>,
+) -> u128 {
+    tenzro_model::PricingEngine::price_units(pricing, units, latency_ms, market_average) as u128
+}
+
+/// Pays the peer that served a proxied OpenAI-shape completion.
+///
+/// The OpenAI request schema carries no payer field, so the forwarded request
+/// gives the serving provider nobody to bill. This node consumed that peer's
+/// service and collects from its own caller through the payment gate on
+/// `/v1/chat/completions`, so it is the counterparty on the peer leg and
+/// settles it from the operator payee. `pricing` is the announcement the
+/// routing decision scored, so a provider cannot re-price after serving.
+///
+/// A failure here is the operator's own solvency problem, not the caller's:
+/// the completion was already generated and the caller already paid the gate,
+/// so the response still goes out and the debt persists as an unpaid marker
+/// for retry rather than turning into a lost response.
+fn settle_network_leg(
+    node: &Arc<TenzroNode>,
+    provider: Address,
+    pricing: &tenzro_types::model::PricingConfig,
+    model_id: &str,
+    units: &tenzro_types::model::BillableUnits,
+    latency_ms: u64,
+) {
+    let cost_wei = network_offer_cost(pricing, units, latency_ms, None);
+    if cost_wei == 0 {
+        return;
+    }
+    let Some(payer) = node.operator_payee() else {
+        warn!(
+            model = %model_id,
+            "Proxied a network completion but this node has no payee to settle the provider leg from"
+        );
+        return;
+    };
+    // An operator that registered an external endpoint under its own address
+    // is both sides of this leg and settles with the upstream out of band.
+    // Transferring to itself would still carve a network commission.
+    if payer == provider {
+        return;
+    }
+    let payer_hex = hex::encode(payer.as_bytes());
+    if let Err(e) = settle_inference_cost(
+        node,
+        Some(&payer_hex),
+        None,
+        None,
+        None,
+        Some(provider),
+        model_id,
+        cost_wei,
+    ) {
+        error!(
+            model = %model_id,
+            provider = %provider,
+            cost_wei = %cost_wei,
+            error = %e.message,
+            "Failed to settle the provider leg of a proxied completion"
+        );
+    }
+}
+
 /// Settles the cost of one inference call. Settlement failure fails the
 /// request (error -32023) after recording an unpaid marker for retry —
 /// never a silent free inference.
@@ -3799,19 +4370,26 @@ fn record_unpaid_settlement(
 ///      authorization over the next cumulative state, so a failure means the
 ///      caller did NOT authorize any other debit — no fallback to a direct
 ///      transfer.
-///   2. Direct: single-shot on-chain `token.transfer`. When the call is
-///      attributed to an app (`app_id` resolved via
-///      [`resolve_app_attribution`]), the caller is additionally debited
-///      the developer margin (`cost × margin_bps/10000`), routed to the
-///      app wallet in the same settlement. The channel path never
-///      applies margin per-update — the payer signed the exact debit —
-///      margin for channel-billed apps is carved at channel finalize.
+///   2. Direct: single-shot on-chain `token.transfer`, split three ways in one
+///      settlement — `cost - commission` to the serving provider,
+///      `commission` (`NetworkCommissionRates::inference_commission_bps`) to
+///      the network treasury, and, when the call is attributed to an app
+///      (`app_id` resolved via [`resolve_app_attribution`]), the developer
+///      margin (`cost × margin_bps/10000`) to the app wallet on top of the
+///      network cost. The channel path applies neither margin nor commission
+///      per-update — the payer signed the exact cumulative debit — both are
+///      carved at channel finalize.
+///
+/// `provider_override` is the payee chosen by network routing: when the
+/// request was routed to a remote provider's offer, that provider is paid
+/// instead of this node's own payee.
 fn settle_inference_cost(
     node: &Arc<TenzroNode>,
     caller_address: Option<&str>,
     channel_id: Option<&str>,
     channel_update_sig: Option<&str>,
     app: Option<&crate::app_registry::AppRecord>,
+    provider_override: Option<Address>,
     model_id: &str,
     cost_wei: u128,
 ) -> std::result::Result<SettlementOutcome, JsonRpcError> {
@@ -3845,6 +4423,9 @@ fn settle_inference_cost(
                 Ok(SettlementOutcome::Settled {
                     via: "channel",
                     margin_wei: 0,
+                    commission_wei: 0,
+                    provider_wei: cost_wei,
+                    provider: provider_override,
                     app_id: None,
                 })
             }
@@ -3872,9 +4453,22 @@ fn settle_inference_cost(
     let Some(token) = node.token() else {
         return Ok(SettlementOutcome::NotApplicable);
     };
-    let Some(provider_addr) = provider_billing_address(node) else {
+    let Some(provider_addr) = provider_override.or_else(|| provider_billing_address(node)) else {
         return Ok(SettlementOutcome::NotApplicable);
     };
+
+    // Network commission, carved out of the quoted cost rather than added to
+    // it: the consumer pays what the offer advertised, the provider receives
+    // the remainder. `network_treasury_address()` is derived, so an operator
+    // cannot redirect it, and a node whose token layer has no treasury set
+    // takes the whole cost to the provider rather than silently burning it.
+    let commission_wei = match token.treasury_address_ref() {
+        Some(_) => tenzro_types::NetworkCommissionRates::default()
+            .calculate_inference_commission(cost_wei)
+            .unwrap_or(0),
+        None => 0,
+    };
+    let provider_wei = cost_wei.saturating_sub(commission_wei);
 
     // Developer-margin attribution (direct path only). Registration caps
     // margin_bps, so a rejection here means a corrupt record or overflow.
@@ -3898,20 +4492,22 @@ fn settle_inference_cost(
         None => (0u128, None, None),
     };
 
-    // Pre-check the full debit so the provider transfer never succeeds
-    // while the margin transfer would bounce on balance.
-    if margin_wei > 0 && token.balance_of(&caller_addr) < cost_wei.saturating_add(margin_wei) {
+    // Pre-check the full debit so the provider transfer never succeeds while
+    // the commission or margin transfer would bounce on balance.
+    if (margin_wei > 0 || commission_wei > 0)
+        && token.balance_of(&caller_addr) < cost_wei.saturating_add(margin_wei)
+    {
         let unpaid_key = record_unpaid_settlement(
             node,
             &caller_addr,
             Some(&provider_addr),
             model_id,
             cost_wei.saturating_add(margin_wei),
-            "insufficient balance for cost + developer margin",
+            "insufficient balance for inference cost + developer margin",
         );
         return Err(JsonRpcError {
             code: -32023,
-            message: "Settlement failed: insufficient balance for cost + developer margin"
+            message: "Settlement failed: insufficient balance for inference cost + developer margin"
                 .to_string(),
             data: Some(serde_json::json!({
                 "cost_wei": cost_wei.to_string(),
@@ -3921,8 +4517,33 @@ fn settle_inference_cost(
         });
     }
 
-    match token.transfer(&caller_addr, &provider_addr, cost_wei) {
+    match token.transfer(&caller_addr, &provider_addr, provider_wei) {
         Ok(_) => {
+            if commission_wei > 0 {
+                let treasury = tenzro_types::network_treasury_address();
+                if let Err(e) = token.transfer(&caller_addr, &treasury, commission_wei) {
+                    let unpaid_key = record_unpaid_settlement(
+                        node,
+                        &caller_addr,
+                        Some(&treasury),
+                        model_id,
+                        commission_wei,
+                        &format!("network commission transfer failed: {}", e),
+                    );
+                    return Err(JsonRpcError {
+                        code: -32023,
+                        message: format!(
+                            "Settlement failed: network commission transfer rejected: {}",
+                            e
+                        ),
+                        data: Some(serde_json::json!({
+                            "cost_wei": cost_wei.to_string(),
+                            "commission_wei": commission_wei.to_string(),
+                            "unpaid_key": unpaid_key,
+                        })),
+                    });
+                }
+            }
             if margin_wei > 0 {
                 let wallet = app_wallet.expect("margin_wei > 0 implies an attributed app");
                 if let Err(e) = token.transfer(&caller_addr, &wallet, margin_wei) {
@@ -3951,6 +4572,9 @@ fn settle_inference_cost(
             Ok(SettlementOutcome::Settled {
                 via: "transfer",
                 margin_wei,
+                commission_wei,
+                provider_wei,
+                provider: Some(provider_addr),
                 app_id,
             })
         }
@@ -4061,14 +4685,12 @@ async fn handle_inference_request(
             Ok(result) => {
                 node.metrics().record_inference();
                 // Calculate and wire TNZO billing (wei)
-                let pricing = node.provider_pricing.read();
-                let cost_wei = (result.input_tokens as u128)
-                    .saturating_mul(pricing.input_price_per_token_wei)
-                    .saturating_add(
-                        (result.output_tokens as u128)
-                            .saturating_mul(pricing.output_price_per_token_wei),
-                    );
-                drop(pricing);
+                let units = tenzro_types::model::BillableUnits::tokens(
+                    result.input_tokens,
+                    result.output_tokens,
+                );
+                let cost_wei =
+                    price_local_units(node, model_id, &units, result.generation_time_ms);
                 let app = resolve_app_attribution(node, &params)?;
                 let settlement = settle_inference_cost(
                     node,
@@ -4076,6 +4698,9 @@ async fn handle_inference_request(
                     params.get("channel_id").and_then(|v| v.as_str()),
                     params.get("channel_update_sig").and_then(|v| v.as_str()),
                     app.as_ref(),
+                    // Served by this node's own runtime, so the payee is this
+                    // node's payee.
+                    None,
                     model_id,
                     cost_wei,
                 )?;
@@ -7555,7 +8180,7 @@ async fn handle_iroh_get_info(
     }))
 }
 
-async fn handle_iroh_publish_blob(
+pub(crate) async fn handle_iroh_publish_blob(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -9744,10 +10369,46 @@ async fn handle_get_workflow_operational_metrics(
 fn canton_adapter_or_err(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Arc<tenzro_bridge::canton::CantonAdapter>, JsonRpcError> {
-    let base = node.canton_adapter().cloned().ok_or_else(|| JsonRpcError {
-        code: -32000,
-        message: "Canton adapter not initialized (set [canton].enabled = true)".to_string(),
-        data: None,
+    // Which network this request targets. The api-key gate resolved it
+    // from the request's `canton_network` param against the key's
+    // authorized set and installed it in the task-local slot. Internal
+    // call paths (the workflow receipt mirror) run outside that scope
+    // and fall back to the operator's default network.
+    let net =
+        crate::canton_network::current().unwrap_or(node.config().canton.default_network);
+    canton_adapter_for_network(node, net)
+}
+
+/// Resolves the adapter for an explicitly-named Canton network, ignoring
+/// the task-local slot. Used where the network is decided by something
+/// other than the request that is being dispatched — key issuance picks
+/// the network the key will be bound to, not the network the issuance
+/// call itself targets.
+fn canton_adapter_for_network(
+    node: &Arc<TenzroNode>,
+    net: crate::config::CantonNetwork,
+) -> std::result::Result<Arc<tenzro_bridge::canton::CantonAdapter>, JsonRpcError> {
+    let base = node.canton_adapter(net).cloned().ok_or_else(|| {
+        let configured = node
+            .canton_networks()
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        JsonRpcError {
+            code: -32000,
+            message: if configured.is_empty() {
+                "Canton adapter not initialized (set [canton].enabled = true and \
+                 configure at least one network)"
+                    .to_string()
+            } else {
+                format!(
+                    "Canton network '{}' is not served by this node (available: {})",
+                    net, configured
+                )
+            },
+            data: None,
+        }
     })?;
     // When a tenant JWT is in the task-local slot (server-minted from
     // the API key's stored OAuth credentials, or BYO via
@@ -11386,7 +12047,7 @@ fn tenzro_7683_order_to_json(order: &tenzro_types::intent_7683::Tenzro7683Order)
 /// a second call with the same `(swapper, nonce, origin_chain_id,
 /// fill_deadline, order_data_type, order_data)` returns the same
 /// `order_id` and `{ opened: false }` if an envelope already exists.
-async fn handle_open_7683_order(
+pub(crate) async fn handle_open_7683_order(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -12791,9 +13452,9 @@ async fn handle_get_network_activity(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    // Stub: returns shape only. UsageTracker integration with
-    // exclude_seed filter (skipping txns where either side `is_seed_agent`)
-    // lands alongside the off-chain daemon and per-DID flow control wiring.
+    // Returns shape only. The `exclude_seed` filter (skipping txns where
+    // either side is `is_seed_agent`) needs the UsageTracker counterparty
+    // index, which the per-DID flow control crate owns.
     let manager = node.seed_agent_manager().ok_or_else(|| JsonRpcError {
         code: -32000,
         message: "SeedAgent manager not initialized".to_string(),
@@ -13865,6 +14526,106 @@ async fn handle_list_inference_usage(
             "providers": tracker.list_provider_stats(),
         })),
     }
+}
+
+/// Read back the recorded stats for one generation, by the id the caller
+/// already holds.
+///
+/// A caller that consumed a stream and let the terminal chunk go by — or one
+/// reconciling a billing period against its own request log — has the
+/// completion id and nothing else. This resolves that id to the token counts,
+/// latency, serving provider and TNZO cost that were recorded when the
+/// generation finished.
+///
+/// Params:
+///   - `id`: the completion id (`chatcmpl-…` on the chat routes) or the
+///     `request_id` of a routed inference
+///
+/// Errors with `-32004` when no record exists for the id. A generation is
+/// recorded when it finishes, so a missing record means the id is unknown to
+/// this node, the generation is still running, or it failed before completing.
+async fn handle_get_generation(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let tracker = node.usage_tracker().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "Usage tracker not initialized".to_string(),
+        data: None,
+    })?;
+
+    let id = params
+        .as_ref()
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing generation id".to_string(),
+            data: None,
+        })?;
+
+    let record = tracker.get_record(id).ok_or_else(|| JsonRpcError {
+        code: -32004,
+        message: format!("No recorded generation for id {}", id),
+        data: None,
+    })?;
+
+    Ok(generation_stats_json(&record))
+}
+
+/// Shape one usage record as generation stats. Shared by the JSON-RPC handler
+/// and the `/v1/generation` route so both report the same fields under the
+/// same names.
+fn generation_stats_json(record: &tenzro_model::UsageRecord) -> Value {
+    let units = &record.units;
+    let tokens_per_second = if record.latency_ms > 0 {
+        Some(units.output_tokens as f64 / (record.latency_ms as f64 / 1000.0))
+    } else {
+        None
+    };
+
+    let mut stats = serde_json::json!({
+        "id": record.record_id,
+        "model": record.model_id,
+        "provider": format!("{}", record.provider_id),
+        // The whole prompt, matching what an OpenAI-compatible caller counted.
+        "input_tokens": units.prompt_tokens(),
+        "output_tokens": units.output_tokens,
+        "total_tokens": record.total_tokens(),
+        "bytes_in": record.bytes_in,
+        "bytes_out": record.bytes_out,
+        "cost_wei": record.cost.to_string(),
+        "latency_ms": record.latency_ms,
+        "tokens_per_second": tokens_per_second,
+        "created": record.timestamp,
+    });
+
+    // The dimensions beyond prompt and completion are reported only when the
+    // call actually consumed them, so a chat completion is not padded with
+    // eight zeroed media fields.
+    let obj = stats.as_object_mut().expect("stats is an object");
+    let mut billed = |key: &str, value: u64| {
+        if value > 0 {
+            obj.insert(key.to_string(), serde_json::json!(value));
+        }
+    };
+    billed("cached_read_tokens", units.cached_read_tokens as u64);
+    billed("cached_write_tokens", units.cached_write_tokens as u64);
+    billed("reasoning_loops", units.reasoning_loops as u64);
+    billed("image_tokens", units.image_tokens as u64);
+    billed("audio_seconds", units.audio_seconds());
+    billed("video_seconds", units.video_seconds());
+    billed("frames", units.frames as u64);
+    if units.pixel_steps > 0 {
+        // u128 exceeds what JSON numbers carry exactly, so denoising work is a
+        // decimal string on the wire, as the cost is.
+        obj.insert(
+            "pixel_steps".to_string(),
+            serde_json::json!(units.pixel_steps.to_string()),
+        );
+    }
+
+    stats
 }
 
 /// Read the current reputation score for a provider.
@@ -15490,7 +16251,9 @@ async fn handle_export_config(node: &Arc<TenzroNode>) -> std::result::Result<Val
     }))
 }
 
-async fn handle_node_info(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
+pub(crate) async fn handle_node_info(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
     let status = node.status().await;
     Ok(serde_json::to_value(status).unwrap())
 }
@@ -16299,7 +17062,7 @@ async fn handle_apply_snapshot_chunk(
 /// callers). Machine registrations require `controller_did` + `capabilities`;
 /// `autonomous` registrations only require `capabilities`. Both honor the optional
 /// `delegation_scope` block.
-async fn handle_register_identity(
+pub(crate) async fn handle_register_identity(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -19188,6 +19951,7 @@ fn approval_to_json(rec: &tenzro_auth::ApprovalRecord) -> Value {
         "expires_at_ms": rec.expires_at_ms,
         "status": format!("{:?}", rec.status),
         "decided_at_ms": rec.decided_at_ms,
+        "deny_reason": rec.deny_reason,
         "summary": rec.summary,
         "action": rec.action,
     })
@@ -19267,13 +20031,17 @@ async fn handle_get_approval(
 /// `tenzro_decideApproval` — approver acts on a pending request.
 ///
 /// Params: `{ approval_id, decision ("approved" | "denied"),
-///            approver_did? }`
+///            approver_did?, deny_reason? }`
 ///
 /// `approver_did` is optional but recommended: when supplied, the
 /// engine refuses to apply the decision unless the record's
 /// `approver_did` matches. This protects against accidental
 /// cross-approver tampering until subtask #55 derives the approver
 /// identity from the caller's JWT.
+///
+/// `deny_reason` is recorded on a `denied` decision and surfaced to the
+/// requesting agent when it retries, so the agent can act on *why* it
+/// was refused. Ignored for `approved`.
 async fn handle_decide_approval(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -19291,10 +20059,11 @@ async fn handle_decide_approval(
     })?;
     let decision = parse_approval_status(decision_str)?;
     let approver_did = p["approver_did"].as_str();
+    let deny_reason = p["deny_reason"].as_str().map(|s| s.to_string());
 
     let engine = auth_engine_or_error(node)?;
     let updated = engine
-        .decide_approval(approval_id, decision, approver_did)
+        .decide_approval(approval_id, decision, approver_did, deny_reason)
         .map_err(|e| match e {
             // Approver mismatch / wrong state → 401-shape (-32001).
             tenzro_auth::AuthError::Forbidden(_) => JsonRpcError {
@@ -19633,7 +20402,8 @@ async fn handle_oauth_discovery(
         "dpop_signing_alg_values_supported": ["EdDSA"],
         "authorization_details_types_supported": [
             "transfer", "create_escrow", "discharge_escrow", "inference",
-            "stake", "vote", "contract", "register_identity"
+            "stake", "vote", "contract", "register_identity",
+            "resource_invocation"
         ],
         "aap_claims_supported": [
             "aap_agent", "aap_task", "aap_capabilities",
@@ -19987,18 +20757,8 @@ async fn handle_set_provider_pricing(
         data: None,
     })?;
 
-    // Enforce network maximums (wei per token)
-    // 0.001 TNZO/token = 1_000_000_000_000_000 wei
-    // 0.002 TNZO/token = 2_000_000_000_000_000 wei
-    let network_max_input_wei: u128 = 1_000_000_000_000_000;
-    let network_max_output_wei: u128 = 2_000_000_000_000_000;
+    pricing.clamp_to_network_maximums();
 
-    pricing.input_price_per_token_wei = pricing.input_price_per_token_wei.min(network_max_input_wei);
-    pricing.output_price_per_token_wei = pricing.output_price_per_token_wei.min(network_max_output_wei);
-    pricing.network_max_input_wei = network_max_input_wei;
-    pricing.network_max_output_wei = network_max_output_wei;
-
-    // Store the pricing
     *node.provider_pricing.write() = pricing.clone();
 
     serde_json::to_value(&pricing).map_err(|e| JsonRpcError {
@@ -20580,10 +21340,7 @@ async fn handle_compute_set_pricing(
 /// `tenzro_computeStatus` — summary of this node's compute-rental state.
 async fn handle_compute_status(node: &Arc<TenzroNode>) -> std::result::Result<Value, JsonRpcError> {
     let runtime = require_compute_runtime(node)?;
-    let provider = node
-        .identity_registry()
-        .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
-        .unwrap_or_default();
+    let provider = node.operator_payee().unwrap_or_default();
     let active = runtime
         .manager()
         .get_rentals_by_provider(&provider)
@@ -20871,10 +21628,7 @@ async fn handle_download_model(
     // verified holder — without loading the weights into llama.cpp. Storage
     // provision costs disk (the recorded hash), not RAM (a served model).
     let hash_registry = node.model_hash_registry().cloned();
-    let recorder_did = node
-        .identity_registry()
-        .and_then(|r| r.list_all().first().map(|(_, id)| id.did.to_string()))
-        .unwrap_or_default();
+    let recorder_did = node.operator_did().unwrap_or_default();
     let record_epoch = current_epoch_or_err(node).unwrap_or(0);
     let node_for_hash = node.clone();
     tokio::spawn(async move {
@@ -21101,8 +21855,7 @@ async fn discover_cluster_members(
     // The head itself, serving the first stage. Built from the local device
     // profile so its commit / backend / cap_key match what it will load with.
     let self_address = node
-        .identity_registry()
-        .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+        .operator_payee()
         .unwrap_or_else(tenzro_types::primitives::Address::zero);
     let self_peer = match node.network() {
         Some(net) => net.local_peer_id().await.ok().map(|p| p.to_string()),
@@ -23176,10 +23929,7 @@ async fn handle_serve_model(
         // this node's detected memory budget says nothing about fit and the
         // routing memory filter must not apply.
         if let Some(registry) = node.model_registry() {
-            match node
-                .identity_registry()
-                .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
-            {
+            match node.operator_payee() {
                 Some(provider) => {
                     let mut info = entry.to_model_info(provider);
                     info.size_bytes = 0;
@@ -23283,8 +24033,7 @@ async fn handle_serve_model(
                 (msg_schedule, per_token)
             };
             let provider_address = node
-                .identity_registry()
-                .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+                .operator_payee()
                 .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
                 .unwrap_or_default();
             let peer_id = network
@@ -23657,11 +24406,8 @@ async fn handle_serve_model(
     // same hash.
     {
         let registry = node.model_registry().cloned();
-        // Provider identity from the local identity registry (matches the
-        // provider announcement's `provider_address`).
-        let provider_wallet = node
-            .identity_registry()
-            .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address));
+        // Same payee the provider announcement advertises.
+        let provider_wallet = node.operator_payee();
 
         // Announcement context, snapshotted before the spawn. The pricing +
         // schedule guards are parking_lot (`!Send`) and must not cross an
@@ -23730,10 +24476,7 @@ async fn handle_serve_model(
             .and_then(|n| n.to_str())
             .unwrap_or("model.gguf")
             .to_string();
-        let recorder_did = node
-            .identity_registry()
-            .and_then(|r| r.list_all().first().map(|(_, id)| id.did.to_string()))
-            .unwrap_or_default();
+        let recorder_did = node.operator_did().unwrap_or_default();
         let record_epoch = current_epoch_or_err(node).unwrap_or(0);
         let iroh_resolver = node.iroh_resolver().cloned();
         tokio::spawn(async move {
@@ -23997,8 +24740,7 @@ async fn handle_stop_model(
     {
         let network = network.clone();
         let provider_address = node
-            .identity_registry()
-            .and_then(|r| r.list_all().first().map(|(_, id)| id.wallet_address))
+            .operator_payee()
             .map(|addr| format!("0x{}", hex::encode(addr.as_bytes())))
             .unwrap_or_default();
         let signer = node.announce_signer().cloned();
@@ -24474,13 +25216,12 @@ fn model_hash_registry_or_err(
     })
 }
 
-/// This node's recorder DID for first-recorder-wins authorship. Uses the first
-/// local identity; empty when the node holds no identity yet (a recording node
-/// always has one, since serving requires a provider identity).
+/// This node's recorder DID for first-recorder-wins authorship. The identity
+/// that owns the node's payee wallet, so a recorded hash is attributable to the
+/// same identity peers pay. Empty when the node holds no identity yet (a
+/// recording node always has one, since serving requires a provider identity).
 fn node_recorder_did(node: &Arc<TenzroNode>) -> String {
-    node.identity_registry()
-        .and_then(|r| r.list_all().first().map(|(_, id)| id.did.to_string()))
-        .unwrap_or_default()
+    node.operator_did().unwrap_or_default()
 }
 
 /// Serializes a [`tenzro_model::CanonicalModelHash`] to the RPC wire shape —
@@ -24879,9 +25620,13 @@ fn missing_param(name: &str) -> JsonRpcError {
 }
 
 /// `tenzro_loadForecastModel`: load an ONNX timeseries model from a local
-/// path and register it under `model_id`.
+/// path and register it under `model_id`. Either pass full params, or pass
+/// `catalog_id` to pick up the preset from the curated forecast catalog.
 ///
-/// Params: `{ model_id: String, path: String, context_length: usize, max_horizon: usize, output_name?: String, batch_size?: usize }`
+/// Params (explicit): `{ model_id, path, context_length, max_horizon, output_name?, batch_size? }`
+/// Params (catalog):  `{ model_id, path, catalog_id }`  ← context_length,
+///                    max_horizon, output_name, batch_size come from the
+///                    catalog entry, and its license tier is enforced.
 async fn handle_load_forecast_model(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -24895,29 +25640,57 @@ async fn handle_load_forecast_model(
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing_param("path"))?;
-    let context_length = p
-        .get("context_length")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| missing_param("context_length"))? as usize;
-    let max_horizon = p
-        .get("max_horizon")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| missing_param("max_horizon"))? as usize;
-    // Optional: explicit prediction output tensor name. Required for
-    // multi-output ONNX graphs (e.g. TimesFM transformers export) where
-    // the first output is `last_hidden_state` rather than the forecast.
-    let output_name = p
-        .get("output_name")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    // Optional: fixed leading batch dim. Defaults to 1. TimesFM 2.5
-    // transformers ONNX requires 2 because its decoder applies
-    // flip-invariance averaging across the batch axis (config flag
-    // `force_flip_invariance: true`).
-    let batch_size = p
-        .get("batch_size")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
+
+    let (context_length, max_horizon, output_name, batch_size) =
+        if let Some(catalog_id) = p.get("catalog_id").and_then(|v| v.as_str()) {
+            let entry = get_forecast_model_by_id(catalog_id).ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: format!("Unknown catalog_id '{}'", catalog_id),
+                data: None,
+            })?;
+            node.check_model_license(
+                catalog_id,
+                entry.license_tier,
+                tenzro_model::custom_license_id(&entry.license).as_deref(),
+            )
+            .map_err(|m| JsonRpcError {
+                code: -32010,
+                message: m,
+                data: None,
+            })?;
+            (
+                entry.context_length,
+                entry.max_horizon,
+                entry.output_name.clone(),
+                Some(entry.batch_size),
+            )
+        } else {
+            let context_length = p
+                .get("context_length")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| missing_param("context_length"))? as usize;
+            let max_horizon = p
+                .get("max_horizon")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| missing_param("max_horizon"))? as usize;
+            // Explicit prediction output tensor name. Required for
+            // multi-output ONNX graphs (e.g. TimesFM transformers export)
+            // where the first output is `last_hidden_state` rather than the
+            // forecast.
+            let output_name = p
+                .get("output_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            // Fixed leading batch dim. Defaults to 1. TimesFM 2.5
+            // transformers ONNX requires 2 because its decoder applies
+            // flip-invariance averaging across the batch axis (config flag
+            // `force_flip_invariance: true`).
+            let batch_size = p
+                .get("batch_size")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            (context_length, max_horizon, output_name, batch_size)
+        };
 
     node.timeseries_runtime
         .load_onnx(
@@ -25016,17 +25789,43 @@ async fn handle_forecast(
         frequency_seconds,
     };
 
+    let history_len = history.len();
     let result = node
         .timeseries_runtime
         .forecast(model_id, history, cfg)
         .await
         .map_err(forecast_err)?;
 
-    serde_json::to_value(result).map_err(|e| JsonRpcError {
+    // A forecaster consumes one timestep per context position and emits one per
+    // horizon position, and each quantile level is a separate emitted series —
+    // so the same token dimensions a text model bills on carry the work here
+    // without inventing a timestep-specific rate.
+    let emitted = result
+        .point
+        .len()
+        .saturating_add(result.quantiles.iter().map(|q| q.len()).sum::<usize>());
+    let units = tenzro_types::model::BillableUnits::tokens(
+        history_len.min(u32::MAX as usize) as u32,
+        emitted.min(u32::MAX as usize) as u32,
+    );
+    let bytes_in = (history_len * std::mem::size_of::<f32>()) as u64;
+    let bytes_out = (emitted * std::mem::size_of::<f32>()) as u64;
+    let latency_ms = result.generation_time_ms;
+    let (cost_wei, settlement) = bill_local_units(
+        node, &p, model_id, units.clone(), bytes_in, bytes_out, latency_ms,
+    )?;
+
+    let mut out = serde_json::to_value(result).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("forecast result serialization: {}", e),
         data: None,
-    })
+    })?;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("units".to_string(), units_to_json(&units));
+        obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
+        obj.insert("settlement".to_string(), settlement.to_json());
+    }
+    Ok(out)
 }
 
 /// Resolve a normalization key (`"clip"`/`"imagenet"`/`"siglip"`) into
@@ -25165,17 +25964,38 @@ async fn handle_image_embed(
         })?;
 
     let cfg = ImageEmbedConfig { normalize };
+    let bytes_in = bytes.len() as u64;
+    // Geometry is read from the header before the encoder consumes the bytes,
+    // since the encoder resizes to its own input size and the caller is billed
+    // on what they submitted.
+    let geometry = tenzro_model::image_dimensions(&bytes);
     let result = node
         .vision_runtime
         .embed(model_id, bytes, cfg)
         .await
         .map_err(forecast_err)?;
 
-    serde_json::to_value(result).map_err(|e| JsonRpcError {
+    let image_tokens = geometry
+        .map(|(w, h)| image_tokenization_for(node, model_id).image_tokens(w, h))
+        .unwrap_or(0);
+    let units = tenzro_types::model::BillableUnits::default().with_image_tokens(image_tokens);
+    let bytes_out = (result.embedding.len() * std::mem::size_of::<f32>()) as u64;
+    let latency_ms = result.generation_time_ms;
+    let (cost_wei, settlement) = bill_local_units(
+        node, &p, model_id, units.clone(), bytes_in, bytes_out, latency_ms,
+    )?;
+
+    let mut out = serde_json::to_value(result).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("embed result serialization: {}", e),
         data: None,
-    })
+    })?;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("units".to_string(), units_to_json(&units));
+        obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
+        obj.insert("settlement".to_string(), settlement.to_json());
+    }
+    Ok(out)
 }
 
 /// `tenzro_imageTextSimilarity`: pure cosine similarity between two
@@ -25610,11 +26430,14 @@ fn parse_text_encoder_family(s: &str) -> std::result::Result<TextEncoderFamily, 
     }
 }
 
+/// EdgeSAM and MobileSAM are SAM-1-architecture distillations, so they share
+/// the 6-input decoder ABI. Accepting their catalog `family` strings here lets
+/// a caller pass the catalog value through verbatim.
 fn parse_sam_family(s: &str) -> std::result::Result<SamFamily, JsonRpcError> {
     match s.to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
-        "sam1" | "sam" => Ok(SamFamily::Sam1),
+        "sam1" | "sam" | "edgesam" | "mobilesam" => Ok(SamFamily::Sam1),
         "sam2" => Ok(SamFamily::Sam2),
-        other => Err(JsonRpcError { code: -32602, message: format!("unknown SAM family '{other}' (sam1|sam2)"), data: None }),
+        other => Err(JsonRpcError { code: -32602, message: format!("unknown SAM family '{other}' (sam1|sam2|edgesam|mobilesam)"), data: None }),
     }
 }
 
@@ -25659,7 +26482,7 @@ async fn handle_list_text_embedding_catalog() -> std::result::Result<Value, Json
 /// `tenzro_textEmbed`: embed strings with a registered encoder.
 ///
 /// Params: `{ model_id, inputs: [String,...], requested_dim?: u32, normalize?: bool }`
-async fn handle_text_embed(
+pub(crate) async fn handle_text_embed(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -25691,16 +26514,35 @@ async fn handle_text_embed(
         requested_dim,
         normalize,
     };
+    let bytes_in = inputs.iter().map(|s| s.len() as u64).sum();
     let result = node
         .text_embedding_runtime
         .embed(model_id, inputs, cfg)
         .await
         .map_err(forecast_err)?;
-    serde_json::to_value(result).map_err(|e| JsonRpcError {
+
+    // An encoder produces no completion, so the whole charge falls on the
+    // prompt side — counted from the attention mask so batch padding is not
+    // billed as caller work.
+    let units = tenzro_types::model::BillableUnits::tokens(result.prompt_tokens, 0);
+    let bytes_out =
+        (result.embeddings.iter().map(|e| e.len()).sum::<usize>() * std::mem::size_of::<f32>()) as u64;
+    let latency_ms = result.generation_time_ms;
+    let (cost_wei, settlement) = bill_local_units(
+        node, &p, model_id, units.clone(), bytes_in, bytes_out, latency_ms,
+    )?;
+
+    let mut out = serde_json::to_value(result).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("text-embed serialization: {}", e),
         data: None,
-    })
+    })?;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("units".to_string(), units_to_json(&units));
+        obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
+        obj.insert("settlement".to_string(), settlement.to_json());
+    }
+    Ok(out)
 }
 
 // ============================================================================
@@ -25709,9 +26551,11 @@ async fn handle_text_embed(
 
 /// `tenzro_loadSegmentationModel`: register a segmenter by `model_id`.
 ///
-/// Params: `{ model_id, encoder_path, decoder_path, family (sam1|sam2), and
-/// either catalog_id OR input_size }`. The ONNX session loads only with
-/// `--features onnx` (else "ONNX backend not enabled").
+/// Params: `{ model_id, encoder_path, decoder_path, and either catalog_id OR
+/// (family (sam1|sam2) + input_size) }`. `catalog_id` supplies the family and
+/// input resolution from the curated catalog and applies the licence gate. The
+/// ONNX session loads only with `--features onnx` (else "ONNX backend not
+/// enabled").
 async fn handle_load_segmentation_model(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -25720,8 +26564,7 @@ async fn handle_load_segmentation_model(
     let model_id = p.get("model_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("model_id"))?.to_string();
     let encoder_path = p.get("encoder_path").and_then(|v| v.as_str()).ok_or_else(|| missing_param("encoder_path"))?.to_string();
     let decoder_path = p.get("decoder_path").and_then(|v| v.as_str()).ok_or_else(|| missing_param("decoder_path"))?.to_string();
-    let family = parse_sam_family(p.get("family").and_then(|v| v.as_str()).ok_or_else(|| missing_param("family"))?)?;
-    let input_size = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
+    let (family, input_size) = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
         let e = get_segmentation_model_by_id(cid)
             .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Unknown catalog_id '{cid}'"), data: None })?;
         node.check_model_license(
@@ -25730,9 +26573,11 @@ async fn handle_load_segmentation_model(
             tenzro_model::custom_license_id(&e.license).as_deref(),
         )
         .map_err(|m| JsonRpcError { code: -32010, message: m, data: None })?;
-        e.input_size
+        (parse_sam_family(&e.family)?, e.input_size)
     } else {
-        p.get("input_size").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("input_size"))? as u32
+        let family = parse_sam_family(p.get("family").and_then(|v| v.as_str()).ok_or_else(|| missing_param("family"))?)?;
+        let input_size = p.get("input_size").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("input_size"))? as u32;
+        (family, input_size)
     };
     node.segmentation_runtime
         .load_onnx(model_id.clone(), encoder_path, decoder_path, family, input_size)
@@ -25798,16 +26643,40 @@ async fn handle_segment(
             message: format!("invalid base64 in 'image_base64': {}", e),
             data: None,
         })?;
+    let bytes_in = bytes.len() as u64;
+    let geometry = tenzro_model::image_dimensions(&bytes);
+    let prompt_count = prompts.len() as u32;
     let result = node
         .segmentation_runtime
         .segment(model_id, bytes, prompts)
         .await
         .map_err(forecast_err)?;
-    serde_json::to_value(result).map_err(|e| JsonRpcError {
+
+    // The encoder pass scales with image geometry; each prompt then runs the
+    // decoder once more over the cached embedding, so the mask count is the
+    // second dimension of the work rather than a flat per-call charge.
+    let image_tokens = geometry
+        .map(|(w, h)| image_tokenization_for(node, model_id).image_tokens(w, h))
+        .unwrap_or(0);
+    let units = tenzro_types::model::BillableUnits::tokens(0, prompt_count.max(1))
+        .with_image_tokens(image_tokens);
+    let bytes_out = result.masks.iter().map(|m| m.mask.len() as u64).sum();
+    let latency_ms = result.generation_time_ms;
+    let (cost_wei, settlement) = bill_local_units(
+        node, &p, model_id, units.clone(), bytes_in, bytes_out, latency_ms,
+    )?;
+
+    let mut out = serde_json::to_value(result).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("segment result serialization: {}", e),
         data: None,
-    })
+    })?;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("units".to_string(), units_to_json(&units));
+        obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
+        obj.insert("settlement".to_string(), settlement.to_json());
+    }
+    Ok(out)
 }
 
 // ============================================================================
@@ -25939,8 +26808,7 @@ async fn handle_list_text_segmentation_catalog() -> std::result::Result<Value, J
 /// `tenzro_textSegment`: open-vocabulary text-promptable segmentation.
 ///
 /// Params: `{ model_id, image_base64: String, text_prompt: String,
-///            box_prompts?: [TextSegmentBoxPrompt,...],
-///            score_threshold?: f32 }`
+///            box_prompt?: TextSegmentBoxPrompt, score_threshold?: f32 }`
 async fn handle_text_segment(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -25983,21 +26851,50 @@ async fn handle_text_segment(
             message: format!("invalid base64 in 'image_base64': {}", e),
             data: None,
         })?;
+    let prompt_len = text_prompt.len();
     let config = TextSegmentConfig {
         text_prompt,
         box_prompt,
         score_threshold,
     };
+    let bytes_in = bytes.len() as u64 + prompt_len as u64;
+    let geometry = tenzro_model::image_dimensions(&bytes);
     let result = node
         .text_segmentation_runtime
         .segment_with_text(model_id, bytes, config)
         .await
         .map_err(forecast_err)?;
-    serde_json::to_value(result).map_err(|e| JsonRpcError {
+
+    // Three passes run here: the image encoder over the geometry, the language
+    // encoder over the phrase, and the decoder once per detection returned. The
+    // language pass pads to the tokenizer's fixed length, so its cost does not
+    // vary with the phrase and the per-request floor already covers it — only
+    // the geometry and the detection count are charged as units.
+    let image_tokens = geometry
+        .map(|(w, h)| image_tokenization_for(node, model_id).image_tokens(w, h))
+        .unwrap_or(0);
+    let units = tenzro_types::model::BillableUnits::tokens(
+        0,
+        result.segmentations.len().min(u32::MAX as usize) as u32,
+    )
+    .with_image_tokens(image_tokens);
+    let bytes_out = result.segmentations.iter().map(|s| s.mask.len() as u64).sum();
+    let latency_ms = result.generation_time_ms;
+    let (cost_wei, settlement) = bill_local_units(
+        node, &p, model_id, units.clone(), bytes_in, bytes_out, latency_ms,
+    )?;
+
+    let mut out = serde_json::to_value(result).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("text-segment result serialization: {}", e),
         data: None,
-    })
+    })?;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("units".to_string(), units_to_json(&units));
+        obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
+        obj.insert("settlement".to_string(), settlement.to_json());
+    }
+    Ok(out)
 }
 
 // ============================================================================
@@ -26006,9 +26903,11 @@ async fn handle_text_segment(
 
 /// `tenzro_loadDetectionModel`: register an object detector by `model_id`.
 ///
-/// Params: `{ model_id, path, family (rf_detr|d_fine), and either catalog_id OR
-/// (input_size + num_classes) }`. The ONNX session loads only with
-/// `--features onnx` (else "ONNX backend not enabled").
+/// Params: `{ model_id, path, and either catalog_id OR (family (rf_detr|d_fine)
+/// + input_size + num_classes) }`. `catalog_id` supplies the family, input
+/// resolution and class count from the curated catalog and applies the licence
+/// gate. The ONNX session loads only with `--features onnx` (else "ONNX backend
+/// not enabled").
 async fn handle_load_detection_model(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
@@ -26016,8 +26915,7 @@ async fn handle_load_detection_model(
     let p = params.ok_or_else(|| missing_param("params"))?;
     let model_id = p.get("model_id").and_then(|v| v.as_str()).ok_or_else(|| missing_param("model_id"))?.to_string();
     let path = p.get("path").and_then(|v| v.as_str()).ok_or_else(|| missing_param("path"))?.to_string();
-    let family = parse_detr_family(p.get("family").and_then(|v| v.as_str()).ok_or_else(|| missing_param("family"))?)?;
-    let (input_size, num_classes) = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
+    let (family, input_size, num_classes) = if let Some(cid) = p.get("catalog_id").and_then(|v| v.as_str()) {
         let e = get_detection_model_by_id(cid)
             .ok_or_else(|| JsonRpcError { code: -32602, message: format!("Unknown catalog_id '{cid}'"), data: None })?;
         node.check_model_license(
@@ -26026,11 +26924,12 @@ async fn handle_load_detection_model(
             tenzro_model::custom_license_id(&e.license).as_deref(),
         )
         .map_err(|m| JsonRpcError { code: -32010, message: m, data: None })?;
-        (e.input_size, e.num_classes)
+        (parse_detr_family(&e.family)?, e.input_size, e.num_classes)
     } else {
+        let family = parse_detr_family(p.get("family").and_then(|v| v.as_str()).ok_or_else(|| missing_param("family"))?)?;
         let is = p.get("input_size").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("input_size"))? as u32;
         let nc = p.get("num_classes").and_then(|v| v.as_u64()).ok_or_else(|| missing_param("num_classes"))? as u32;
-        (is, nc)
+        (family, is, nc)
     };
     node.detection_runtime
         .load_onnx(model_id.clone(), path, family, input_size, num_classes)
@@ -26094,16 +26993,42 @@ async fn handle_detect(
             message: format!("invalid base64 in 'image_base64': {}", e),
             data: None,
         })?;
+    let bytes_in = bytes.len() as u64;
+    let geometry = tenzro_model::image_dimensions(&bytes);
     let result = node
         .detection_runtime
         .detect(model_id, bytes, score_threshold)
         .await
         .map_err(forecast_err)?;
-    serde_json::to_value(result).map_err(|e| JsonRpcError {
+
+    // A DETR runs one encoder pass over the geometry and emits a fixed query
+    // set; what varies with the caller's threshold is how many detections
+    // survive, so the returned count is the emitted dimension.
+    let image_tokens = geometry
+        .map(|(w, h)| image_tokenization_for(node, model_id).image_tokens(w, h))
+        .unwrap_or(0);
+    let units = tenzro_types::model::BillableUnits::tokens(
+        0,
+        result.detections.len().min(u32::MAX as usize) as u32,
+    )
+    .with_image_tokens(image_tokens);
+    let latency_ms = result.generation_time_ms;
+
+    let mut out = serde_json::to_value(result).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("detect result serialization: {}", e),
         data: None,
-    })
+    })?;
+    let bytes_out = out.to_string().len() as u64;
+    let (cost_wei, settlement) = bill_local_units(
+        node, &p, model_id, units.clone(), bytes_in, bytes_out, latency_ms,
+    )?;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("units".to_string(), units_to_json(&units));
+        obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
+        obj.insert("settlement".to_string(), settlement.to_json());
+    }
+    Ok(out)
 }
 
 // ============================================================================
@@ -26389,37 +27314,92 @@ async fn handle_transcribe(
         timestamps,
         temperature,
     };
+    let bytes_in = bytes.len() as u64;
     let result = node
         .audio_runtime
         .transcribe(model_id, bytes, cfg)
         .await
         .map_err(forecast_err)?;
-    serde_json::to_value(result).map_err(|e| JsonRpcError {
+
+    // ASR is charged on the audio the encoder actually consumed. The transcript
+    // is not counted as output tokens: the runtime returns detokenized text and
+    // the decoder step count is not recoverable from it, so a word or character
+    // count would be a guess rather than a measurement.
+    let units = tenzro_types::model::BillableUnits::default().with_audio_ms(result.audio_ms);
+    let bytes_out = result.text.len() as u64;
+    let latency_ms = result.generation_time_ms;
+    let (cost_wei, settlement) = bill_local_units(
+        node, &p, model_id, units.clone(), bytes_in, bytes_out, latency_ms,
+    )?;
+
+    let mut out = serde_json::to_value(result).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("transcribe result serialization: {}", e),
         data: None,
-    })
+    })?;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("units".to_string(), units_to_json(&units));
+        obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
+        obj.insert("settlement".to_string(), settlement.to_json());
+    }
+    Ok(out)
 }
 
 // ============================================================================
 // Video — V-JEPA 2 ViT-L/H/g advertised; loader pending per-model ONNX export
 // ============================================================================
 
+/// `tenzro_loadVideoModel`: register a clip encoder built from a loaded image
+/// encoder.
+///
+/// Params: `{ model_id, vision_model_id, num_frames? }`
+///
+/// The catalog advertises V-JEPA 2 ViT-L / ViT-H / ViT-g, but the upstream
+/// facebook/vjepa2-* repos ship safetensors only, so there is no native video
+/// graph to load. The frame-pooling path is what the runtime can serve: it
+/// borrows an already-loaded image encoder, samples evenly-spaced frames, and
+/// mean-pools their embeddings. Load the image tower first via
+/// `tenzro_loadVisionModel`, then name it here as `vision_model_id`.
 async fn handle_load_video_model(
-    _node: &Arc<TenzroNode>,
-    _params: Option<Value>,
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    // The catalog advertises V-JEPA 2 ViT-L / ViT-H / ViT-g
-    // (LicenseTier::Permissive: MIT / MIT / Apache-2.0), but the
-    // upstream facebook/vjepa2-* repos ship safetensors only — no
-    // native ONNX export. Loading is gated until the ONNX-export
-    // pipeline (see tools/video-export) emits per-model `model.onnx`
-    // files matching the catalog `hf_filename`.
-    Err(JsonRpcError {
-        code: -32004,
-        message: "video ONNX loading not yet wired; catalog lists V-JEPA 2 ViT-L/H/g but per-model ONNX exports have not landed (see tools/video-export)".to_string(),
-        data: None,
-    })
+    let p = params.ok_or_else(|| missing_param("params"))?;
+    let model_id = p
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("model_id"))?;
+    let vision_model_id = p
+        .get("vision_model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing_param("vision_model_id"))?;
+    let num_frames = p
+        .get("num_frames")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8)
+        .clamp(1, 128) as u32;
+
+    let encoder = node
+        .vision_runtime
+        .encoder(vision_model_id)
+        .ok_or_else(|| JsonRpcError {
+            code: -32004,
+            message: format!(
+                "image encoder '{}' is not loaded; load it with tenzro_loadVisionModel first",
+                vision_model_id
+            ),
+            data: None,
+        })?;
+
+    node.video_runtime
+        .register_vision_fallback(model_id, encoder, num_frames);
+
+    Ok(serde_json::json!({
+        "model_id": model_id,
+        "vision_model_id": vision_model_id,
+        "num_frames": num_frames,
+        "loaded": true,
+    }))
 }
 
 async fn handle_unload_video_model(
@@ -26482,16 +27462,37 @@ async fn handle_video_embed(
         normalize,
         frame_stride,
     };
+    let bytes_in = bytes.len() as u64;
     let result = node
         .video_runtime
         .embed(model_id, bytes, cfg)
         .await
         .map_err(forecast_err)?;
-    serde_json::to_value(result).map_err(|e| JsonRpcError {
+
+    // Two costs sit behind one call: decoding the source clip, which scales with
+    // its duration, and embedding the sampled frames, which scales with how many
+    // were kept. A caller who uploads an hour and samples eight frames still paid
+    // for the hour of decode.
+    let units = tenzro_types::model::BillableUnits::default()
+        .with_video_ms(result.video_ms)
+        .with_frames(result.frames_consumed);
+    let bytes_out = (result.embedding.len() * std::mem::size_of::<f32>()) as u64;
+    let latency_ms = result.generation_time_ms;
+    let (cost_wei, settlement) = bill_local_units(
+        node, &p, model_id, units.clone(), bytes_in, bytes_out, latency_ms,
+    )?;
+
+    let mut out = serde_json::to_value(result).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("video embed serialization: {}", e),
         data: None,
-    })
+    })?;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("units".to_string(), units_to_json(&units));
+        obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
+        obj.insert("settlement".to_string(), settlement.to_json());
+    }
+    Ok(out)
 }
 
 /// Top-level dispatcher for `tenzro_chat`. Routes by shape:
@@ -26536,7 +27537,11 @@ pub(crate) async fn handle_chat(
 /// unit; absent means no per-request cap), `optimize` (optional f32 in
 /// `[0.0, 1.0]`, cost↔quality knob), `quality_floor` (optional `cheap`/
 /// `strong`), `est_input_tokens` / `est_output_tokens` (optional u64 cost-
-/// estimation inputs), `payer_did` (optional; enables the per-DID budget gate).
+/// estimation inputs), `payer_did` (optional; enables the per-DID budget gate),
+/// `prompt` (optional; places the request in a difficulty cluster). When
+/// `prompt` is absent it is derived from the chat params, so
+/// `tenzro_chatByIntent` gets difficulty scoring without the caller repeating
+/// the text.
 fn parse_route_intent(
     params: &Value,
 ) -> std::result::Result<tenzro_model::meta_router::RouteIntent, JsonRpcError> {
@@ -26624,16 +27629,66 @@ fn parse_route_intent(
         intent = intent.with_payer_address(parse_address(addr_str)?);
     }
 
+    if let Some(prompt) = extract_route_prompt(params) {
+        intent = intent.with_prompt(prompt);
+    }
+
     Ok(intent)
 }
 
+/// Pulls the text used for difficulty clustering out of the params: an explicit
+/// `prompt`, else the simple shape's `message`, else the last user turn of the
+/// rich shape's `messages`. The last user turn is what the model is being asked
+/// to answer; earlier turns are context and would blur the placement.
+fn extract_route_prompt(params: &Value) -> Option<String> {
+    if let Some(p) = params.get("prompt").and_then(|v| v.as_str())
+        && !p.trim().is_empty()
+    {
+        return Some(p.to_string());
+    }
+    if let Some(m) = params.get("message").and_then(|v| v.as_str())
+        && !m.trim().is_empty()
+    {
+        return Some(m.to_string());
+    }
+    params
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .and_then(|turns| {
+            turns
+                .iter()
+                .rev()
+                .find(|t| t.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .or_else(|| turns.last())
+        })
+        .and_then(|t| t.get("content"))
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.trim().is_empty())
+        .map(str::to_string)
+}
+
 /// Serializes a [`RouteDecision`] to the JSON-RPC result shape.
+///
+/// `cluster` is the difficulty cluster the prompt landed in; callers echo it
+/// back to `tenzro_recordRouteOutcome` so the observation lands on the right
+/// cluster. `expected_error` is the chosen model's observed adverse-outcome rate
+/// in that cluster, and is present only when the cluster has observations —
+/// absent means the decision was made on declared metadata alone.
+///
+/// `provider` and `endpoint` are present when the winner is a live offer another
+/// provider is announcing on the network: the offer names the address that serves
+/// the call and takes the provider share. They are absent for a winner from this
+/// node's own catalog, where the serving operator is resolved at dispatch time.
 fn route_decision_to_json(d: &tenzro_model::meta_router::RouteDecision) -> Value {
     serde_json::json!({
         "model_id": d.model_id,
         "tier": format!("{:?}", d.tier).to_lowercase(),
         "estimated_cost": d.estimated_cost.to_string(),
         "fallback_chain": d.fallback_chain,
+        "cluster": d.cluster,
+        "expected_error": d.expected_error,
+        "provider": d.provider.map(|p| hex::encode(p.as_bytes())),
+        "endpoint": d.endpoint,
         "reason": d.reason,
     })
 }
@@ -26660,7 +27715,7 @@ async fn handle_route_intent(
         data: None,
     })?;
 
-    match meta.route(&intent) {
+    match meta.route_intent(&intent).await {
         Ok(decision) => Ok(route_decision_to_json(&decision)),
         Err(tenzro_model::ModelError::NoProvidersAvailable(m)) => Err(JsonRpcError {
             code: -32004,
@@ -26675,17 +27730,22 @@ async fn handle_route_intent(
     }
 }
 
-/// `tenzro_chatByIntent` — resolves an intent to a model, then dispatches the
-/// chat through the same path as a named-model request. The resolved `model_id`
-/// is injected into the params and `tenzro_chat` handles provider selection,
-/// provenance, and usage recording. The `RouteDecision` is attached to the
-/// response under `route` for observability.
+/// `tenzro_chatByIntent` — resolves an intent to a model *and* to the operator
+/// that serves it, then dispatches the chat through the same path as a
+/// named-model request. Selection walks the cross-model fallback chain, so an
+/// intent resolves as long as any model that satisfies it has a live offer.
+///
+/// Both the resolved `model_id` and the winning provider are injected into the
+/// chat params, which pins dispatch to the offer that was scored: the price the
+/// decision quoted is the price settled, and the provider share goes to the
+/// address that offer named. The `RouteDecision` is attached to the response
+/// under `route`.
 ///
 /// Params are the union of `parse_route_intent`'s intent fields and
 /// `tenzro_chat`'s chat fields (`message` for the simple shape or `messages`
-/// for the rich shape). A `model_id` in the params is overwritten by the
-/// resolved model.
-async fn handle_chat_by_intent(
+/// for the rich shape). A caller-supplied `model_id` or `provider` is
+/// overwritten — intent routing is authoritative.
+pub(crate) async fn handle_chat_by_intent(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -26696,14 +27756,27 @@ async fn handle_chat_by_intent(
     })?;
     let intent = parse_route_intent(&params)?;
 
-    let decision = {
+    // The requester is who the inference router prices and rate-limits
+    // against. `payer_address` when the caller declared one, else the address
+    // the call bills to — the same wallet either way for a well-formed request.
+    let requester = intent
+        .payer_address
+        .or_else(|| {
+            params
+                .get("caller_address")
+                .and_then(|v| v.as_str())
+                .and_then(|s| tenzro_types::primitives::Address::from_hex(s).ok())
+        })
+        .unwrap_or_default();
+
+    let (model_id, provider, decision) = {
         let meta = node.meta_router().ok_or_else(|| JsonRpcError {
             code: -32603,
             message: "Meta-router not initialized on this node".to_string(),
             data: None,
         })?;
-        match meta.route(&intent) {
-            Ok(d) => d,
+        match meta.route_and_select(&intent, requester).await {
+            Ok(selected) => selected,
             Err(tenzro_model::ModelError::NoProvidersAvailable(m)) => {
                 return Err(JsonRpcError { code: -32004, message: m, data: None });
             }
@@ -26713,17 +27786,195 @@ async fn handle_chat_by_intent(
         }
     };
 
-    // Inject the resolved model into the chat params, dropping any caller-
+    // Inject the resolved model and the winning provider, dropping any caller-
     // supplied model so intent routing is authoritative.
     if let Value::Object(ref mut map) = params {
-        map.insert("model_id".to_string(), Value::String(decision.model_id.clone()));
+        map.insert("model_id".to_string(), Value::String(model_id.clone()));
         map.remove("model");
+        map.insert(
+            "provider".to_string(),
+            Value::String(format!("0x{}", hex::encode(provider.as_bytes()))),
+        );
     }
 
-    let mut result = handle_chat(node, Some(params)).await?;
+    let chat = handle_chat(node, Some(params)).await;
+
+    // Close the difficulty loop from the dispatch itself. Whether the call
+    // succeeded is observed here, not reported by the caller, so it cannot be
+    // spoofed. `escalated` is the one outcome only the caller can know, and it
+    // arrives through `tenzro_recordRouteOutcome`.
+    if let Some(cluster) = decision.cluster
+        && let Some(meta) = node.meta_router()
+    {
+        let observed = match &chat {
+            Ok(_) => tenzro_model::difficulty::RouteOutcome::Resolved,
+            Err(_) => tenzro_model::difficulty::RouteOutcome::Failed,
+        };
+        // Records against the model that was dispatched, not the one the decision
+        // named — selection walks the fallback chain, so those differ whenever the
+        // top-scored model had no live offer.
+        if let Err(e) = meta.record_outcome(&model_id, cluster, observed) {
+            debug!(error = %e, "route outcome not recorded");
+        }
+    }
+
+    let mut result = chat?;
     if let Value::Object(ref mut map) = result {
         map.insert("route".to_string(), route_decision_to_json(&decision));
     }
+    Ok(result)
+}
+
+/// `tenzro_recordRouteOutcome` — reports how a routed call turned out, so the
+/// meta-router's per-cluster error rates reflect what actually happened rather
+/// than only what the catalog declares.
+///
+/// Params: `model_id` (required), `cluster` (required, the `cluster` from the
+/// routing decision), `outcome` (required, one of `resolved` / `escalated` /
+/// `failed`).
+///
+/// `retained: false` means the node has no difficulty index wired, so the
+/// feedback was accepted and discarded. That is not an error — reporting is
+/// advisory, and a node without an embedding model routes on declared metadata.
+async fn handle_record_route_outcome(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let params = params.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let model_id = params
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing 'model_id'".to_string(),
+            data: None,
+        })?;
+
+    let cluster = params
+        .get("cluster")
+        .and_then(|v| v.as_u64())
+        .and_then(|c| u32::try_from(c).ok())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing or out-of-range 'cluster' (expected the cluster id from the routing decision)"
+                .to_string(),
+            data: None,
+        })?;
+
+    let valid = tenzro_model::difficulty::RouteOutcome::ALL.join("|");
+    let outcome_str = params
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("Missing 'outcome' ({valid})"),
+            data: None,
+        })?;
+    let outcome = tenzro_model::difficulty::RouteOutcome::parse(outcome_str).ok_or_else(|| {
+        JsonRpcError {
+            code: -32602,
+            message: format!("Unknown outcome '{outcome_str}' (expected one of {valid})"),
+            data: None,
+        }
+    })?;
+
+    let meta = node.meta_router().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Meta-router not initialized on this node".to_string(),
+        data: None,
+    })?;
+
+    let retained = meta
+        .record_outcome(model_id, cluster, outcome)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "retained": retained,
+        "model_id": model_id,
+        "cluster": cluster,
+        "outcome": outcome.as_str(),
+    }))
+}
+
+/// `tenzro_routeDifficultyStats` — read-only view of the node's difficulty
+/// index: how many clusters it has discovered, how big each one is, and the
+/// per-cluster outcome counters for a model when `model_id` is supplied.
+///
+/// Centroids are not returned; they are high-dimensional vectors of no use to a
+/// caller and would dominate the response.
+async fn handle_route_difficulty_stats(
+    node: &Arc<TenzroNode>,
+    params: Option<Value>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let meta = node.meta_router().ok_or_else(|| JsonRpcError {
+        code: -32603,
+        message: "Meta-router not initialized on this node".to_string(),
+        data: None,
+    })?;
+
+    let Some(index) = meta.difficulty_index() else {
+        return Ok(serde_json::json!({
+            "enabled": false,
+            "cluster_count": 0,
+            "clusters": [],
+        }));
+    };
+
+    let map = index.map_snapshot();
+    let clusters: Vec<Value> = map
+        .counts
+        .iter()
+        .enumerate()
+        .map(|(id, count)| serde_json::json!({ "cluster": id, "prompts": count }))
+        .collect();
+
+    let mut result = serde_json::json!({
+        "enabled": true,
+        "cluster_count": index.cluster_count(),
+        "capacity": map.capacity,
+        "embedding_dim": map.dim,
+        "split_threshold": map.split_threshold,
+        "clusters": clusters,
+    });
+
+    if let Some(model_id) = params
+        .as_ref()
+        .and_then(|p| p.get("model_id"))
+        .and_then(|v| v.as_str())
+    {
+        let per_cluster: Vec<Value> = index
+            .model_stats(model_id)
+            .map(|stats| {
+                stats
+                    .clusters
+                    .iter()
+                    .map(|(cluster, counts)| {
+                        serde_json::json!({
+                            "cluster": cluster,
+                            "resolved": counts.resolved,
+                            "escalated": counts.escalated,
+                            "failed": counts.failed,
+                            "error_rate": counts.error_rate(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Value::Object(ref mut map) = result {
+            map.insert("model_id".to_string(), Value::String(model_id.to_string()));
+            map.insert("model_clusters".to_string(), Value::Array(per_cluster));
+        }
+    }
+
     Ok(result)
 }
 
@@ -26742,6 +27993,7 @@ async fn handle_chat_by_intent(
 async fn handle_orchestrate(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
+    auth_ctx: &AuthContext,
 ) -> std::result::Result<Value, JsonRpcError> {
     use crate::orchestrator::OrchestratorError;
     use tenzro_model::meta_router::{Budget, UseCase};
@@ -26814,7 +28066,8 @@ async fn handle_orchestrate(
     }
 
     let catalog = crate::orchestrator_bridge::build_catalog_snapshot(node);
-    let orchestrator = crate::orchestrator_bridge::build_orchestrator(node.clone());
+    let orchestrator =
+        crate::orchestrator_bridge::build_orchestrator(node.clone(), auth_ctx.clone());
 
     match orchestrator.execute(&request, &catalog).await {
         Ok(outcome) => {
@@ -27013,6 +28266,61 @@ pub(crate) fn sign_local_jurisdiction(
     }
 }
 
+/// Fold the optional sampling knobs from a JSON-RPC chat params object onto a
+/// generation config. `top_k` and `min_p` stay unset when the caller omits
+/// them, so the untruncated distribution is sampled rather than a
+/// neutral-valued truncation stage being inserted. `seed` is pinned so a
+/// dropped stream can be re-prefilled from the same distribution.
+///
+/// Stop sequences arrive under `stop` on the simple shape and the
+/// OpenAI-compatible surface, and under `stop_sequences` on the rich shape,
+/// which mirrors Anthropic's Messages API. Both keys are read so the same
+/// generation config serves the simple, rich, and OpenAI-compatible shapes.
+///
+/// The temperature / top_p / max_tokens / repeat_penalty trio is left to the
+/// caller because each surface validates those against its own bounds first.
+fn apply_sampling_params(config: &mut GenerationConfig, params: &Value) {
+    config.top_k = params
+        .get("top_k")
+        .and_then(|v| v.as_u64())
+        .and_then(|k| u32::try_from(k).ok())
+        .filter(|k| *k > 0);
+    config.min_p = params.get("min_p").and_then(|v| v.as_f64()).filter(|p| *p > 0.0);
+    config.frequency_penalty = params
+        .get("frequency_penalty")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+    config.presence_penalty = params
+        .get("presence_penalty")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as f32;
+    config.stop = params
+        .get("stop")
+        .or_else(|| params.get("stop_sequences"))
+        .map(parse_stop_sequences)
+        .unwrap_or_default();
+    if let Some(seed) = params.get("seed").and_then(|v| v.as_u64()) {
+        config.seed = seed;
+    }
+}
+
+/// Normalize a stop-sequence value into the runtime's `Vec<String>`. Accepts a
+/// bare string or an array of strings; empty sequences are dropped because a
+/// zero-length suffix matches every decoded text and would halt generation
+/// before the first token.
+fn parse_stop_sequences(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(s) if !s.is_empty() => vec![s.clone()],
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Parse the caller-facing jurisdiction knobs from chat params: the
 /// comma-separated locality pin and the `jurisdiction_receipt: "required"`
 /// strictness flag.
@@ -27087,6 +28395,395 @@ fn store_local_commitment(
             None
         }
     }
+}
+
+/// Record a locally-served generation with the usage tracker, keyed on the
+/// completion id the caller holds.
+///
+/// A routed generation is recorded by [`tenzro_model::InferenceRouter`] on the
+/// way back through the gateway. A generation this node served from its own
+/// weights never enters the router, so this is where it gets accounted for —
+/// otherwise a node's own serving work is missing from its per-model and
+/// per-provider stats, and `tenzro_getGeneration` has nothing to answer with.
+///
+/// `bytes_in` / `bytes_out` are the UTF-8 lengths of the prompt and completion
+/// text. The routed path measures the HTTP bodies instead, which include the
+/// JSON envelope, so the two are not directly comparable — each is the byte
+/// count of what that path actually moved.
+///
+/// `units` carries whatever the call actually consumed, so this serves every
+/// modality: a chat completion passes a token pair, a transcription passes
+/// audio seconds, a generation passes denoising work. Recording is what makes
+/// the work visible to the reward meter, so a modality that skips it is served
+/// for free.
+///
+/// Does nothing when the node has no tracker, or when it has no payee address
+/// to attribute the work to. Attributing to the zero address instead would
+/// feed a phantom provider into the reward metering that reads
+/// `provider_stats` at epoch close.
+fn record_local_generation(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    completion_id: &str,
+    units: tenzro_types::model::BillableUnits,
+    bytes_in: u64,
+    bytes_out: u64,
+    cost_wei: u128,
+    latency_ms: u64,
+) {
+    let Some(tracker) = node.usage_tracker() else {
+        return;
+    };
+    let Some(provider) = node.self_provider_address() else {
+        return;
+    };
+
+    // `UsageRecord.cost` is u64 TNZO wei. A posted price high enough to
+    // overflow it on one generation is a misconfiguration, but clamp rather
+    // than wrap so the aggregate stays monotonic.
+    let cost = cost_wei.min(u64::MAX as u128) as u64;
+
+    let record = tenzro_model::UsageRecord::new(
+        model_id.to_string(),
+        provider,
+        units,
+        bytes_in,
+        bytes_out,
+        cost,
+        latency_ms,
+    )
+    .with_record_id(completion_id.to_string());
+
+    if let Err(e) = tracker.record_usage(record) {
+        tracing::warn!(model = %model_id, completion_id = %completion_id,
+            "Failed to record local generation usage: {}", e);
+    }
+}
+
+/// The [`ImageTokenization`](tenzro_types::model::ImageTokenization) descriptor
+/// a model declares, so image geometry converts to tokens the way that model
+/// family actually charges rather than by one workspace-wide formula: a
+/// patch-grid encoder and a tiled vision-language model disagree by an order of
+/// magnitude on the same 1024×1024 image.
+///
+/// Falls back to the descriptor default for a model the registry does not
+/// carry — an unregistered model is still served, so it still has to be priced.
+fn image_tokenization_for(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+) -> tenzro_types::model::ImageTokenization {
+    node.model_registry()
+        .and_then(|registry| registry.get_model(model_id).ok())
+        .map(|info| info.parameters.image_tokenization)
+        .unwrap_or_default()
+}
+
+/// Prices one locally-served call under the scheme this node's card declares.
+///
+/// Every local serving path routes its price through here, so an operator who
+/// posts a per-request or per-compute-time card is billed that way on all of
+/// them rather than only on whichever handler remembered to dispatch.
+///
+/// Only [`tenzro_types::model::PricingModel::Dynamic`] needs a demand signal,
+/// so the market read happens on that branch alone. The signal is this model's
+/// own settled average: a serving node's own history is the one demand reading
+/// it holds without asking the network.
+fn price_local_units(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    units: &tenzro_types::model::BillableUnits,
+    latency_ms: u64,
+) -> u128 {
+    let pricing = node.provider_pricing.read();
+    let market_average = match pricing.pricing_model {
+        tenzro_types::model::PricingModel::Dynamic => node
+            .usage_tracker()
+            .and_then(|tracker| tracker.get_model_stats(model_id))
+            .map(|stats| u128::from(stats.avg_cost())),
+        _ => None,
+    };
+    pricing.price(units, latency_ms, market_average)
+}
+
+/// Meter, collect, and record one locally-served JSON-RPC call.
+///
+/// Every modality handler reaches the same three obligations: price the units
+/// against this node's card, collect from the caller, and add the call to the
+/// usage aggregate that reward metering reads at epoch close. Factored out so a
+/// newly added modality cannot serve for free by forgetting one of the three.
+///
+/// Returns the metered cost and the settlement outcome for the handler to merge
+/// into its response.
+fn bill_local_units(
+    node: &Arc<TenzroNode>,
+    params: &Value,
+    model_id: &str,
+    units: tenzro_types::model::BillableUnits,
+    bytes_in: u64,
+    bytes_out: u64,
+    latency_ms: u64,
+) -> std::result::Result<(u128, SettlementOutcome), JsonRpcError> {
+    let cost_wei = price_local_units(node, model_id, &units, latency_ms);
+    let app = resolve_app_attribution(node, params)?;
+    let settlement = settle_inference_cost(
+        node,
+        params.get("caller_address").and_then(|v| v.as_str()),
+        params.get("channel_id").and_then(|v| v.as_str()),
+        params.get("channel_update_sig").and_then(|v| v.as_str()),
+        app.as_ref(),
+        // Served by this node's own runtime, so the payee is this node's payee.
+        None,
+        model_id,
+        cost_wei,
+    )?;
+    record_local_generation(
+        node,
+        model_id,
+        &uuid::Uuid::new_v4().to_string(),
+        units,
+        bytes_in,
+        bytes_out,
+        cost_wei,
+        latency_ms,
+    );
+    Ok((cost_wei, settlement))
+}
+
+/// Meter and record one locally-served call on the compatible HTTP surface.
+///
+/// The `/v1` routes collect through the HTTP 402 gate rather than through
+/// [`settle_inference_cost`], so this is the same obligation minus the
+/// collection: the metered price still has to reach the usage aggregate, or the
+/// provider serves the work without it counting toward rewards.
+///
+/// Returns the metered cost so the handler can report it alongside the units.
+fn record_modality_usage(
+    node: &Arc<TenzroNode>,
+    model_id: &str,
+    units: tenzro_types::model::BillableUnits,
+    bytes_in: u64,
+    bytes_out: u64,
+    latency_ms: u64,
+) -> u128 {
+    let cost_wei = price_local_units(node, model_id, &units, latency_ms);
+    record_local_generation(
+        node,
+        model_id,
+        &uuid::Uuid::new_v4().to_string(),
+        units,
+        bytes_in,
+        bytes_out,
+        cost_wei,
+        latency_ms,
+    );
+    cost_wei
+}
+
+/// Work units for a sealed generative-media job, in the shape the rate card
+/// prices: pixel-steps carry the denoising work, and the frame count travels
+/// alongside so a clip's receipt says how much of its price was length.
+fn media_gen_units(
+    receipt: &tenzro_types::MediaGenReceipt,
+) -> tenzro_types::model::BillableUnits {
+    let kind = receipt.task_spec.kind;
+    let params = &receipt.task_spec.params;
+    // Same frame rule the rate card applies: a still is one frame of work
+    // however many frames a stray field claims.
+    let frames = if kind.is_video() {
+        params.num_frames.unwrap_or(1).max(1)
+    } else {
+        1
+    };
+    tenzro_types::model::BillableUnits::default()
+        .with_pixel_steps(tenzro_media_gen::pixel_steps(kind, params), frames)
+}
+
+/// Record one sealed generative-media job against the worker that rendered it.
+///
+/// Diffusion work carries its own rate card and the charge is sealed on the
+/// receipt, so the price is read from `price_paid` rather than re-metered: a
+/// local card is free to differ from the one the requester was quoted against,
+/// and re-pricing here would put a third number beside the quote the requester
+/// accepted and the amount the worker signed for.
+///
+/// Attribution is to `worker_address`, not this node's payee. A node seals
+/// receipts for the worker that did the rendering, which is a different identity
+/// whenever the job was scheduled away.
+fn record_media_gen_usage(node: &Arc<TenzroNode>, receipt: &tenzro_types::MediaGenReceipt) {
+    let Some(tracker) = node.usage_tracker() else {
+        return;
+    };
+    let params = &receipt.task_spec.params;
+    let units = media_gen_units(receipt);
+
+    // `UsageRecord.cost` is u64 wei; clamp rather than wrap so the aggregate
+    // stays monotonic under a misconfigured card.
+    let record = tenzro_model::UsageRecord::new(
+        receipt.task_spec.model_id.clone(),
+        receipt.worker_address.clone(),
+        units,
+        (params.prompt.len() + params.negative_prompt.as_deref().unwrap_or("").len()) as u64,
+        receipt.output_bytes,
+        receipt.price_paid.min(u64::MAX as u128) as u64,
+        receipt.generation_time_ms,
+    )
+    .with_record_id(receipt.job_id.clone());
+
+    if let Err(e) = tracker.record_usage(record) {
+        tracing::warn!(
+            job_id = %receipt.job_id,
+            model = %receipt.task_spec.model_id,
+            "Failed to record media-generation usage: {}", e
+        );
+    }
+}
+
+/// Pay out a completed generative-media job.
+///
+/// The requester pays `price_paid` and no more: the network commission is
+/// carved out of that amount rather than added on top, so the charge matches
+/// the price the worker sealed and the requester was quoted against. What
+/// remains is divided across the job's assignments by the `share_bps` the
+/// runtime fixed at completion — a whole job is one worker at 10000 bps, a
+/// split job is the two experts in proportion to the denoising steps each
+/// actually ran.
+///
+/// Integer division leaves at most `assignments.len() - 1` wei unallocated;
+/// that dust goes to the last assignment so the parts sum to the remainder
+/// exactly. Nothing is left stranded in the requester's balance and nothing is
+/// conjured.
+///
+/// A failure part-way through leaves the job completed and short-paid rather
+/// than unwinding what already moved. The work was done and the receipt is
+/// valid, so the shortfall is the requester's to make good; every leg that
+/// could not be paid is written as an unpaid marker for retry and named in the
+/// error.
+fn settle_media_gen_job(
+    node: &Arc<TenzroNode>,
+    job: &tenzro_types::MediaGenJob,
+    receipt: &tenzro_types::MediaGenReceipt,
+) -> std::result::Result<Value, JsonRpcError> {
+    let Some(token) = node.token() else {
+        return Ok(Value::Null);
+    };
+    if receipt.price_paid == 0 || job.assignments.is_empty() {
+        return Ok(Value::Null);
+    }
+
+    let payer = &receipt.task_spec.requester_address;
+    let model_id = &receipt.task_spec.model_id;
+    let total = receipt.price_paid;
+
+    // A node whose token layer has no treasury takes the whole price to the
+    // workers rather than silently burning the commission.
+    let commission_wei = match token.treasury_address_ref() {
+        Some(_) => tenzro_types::NetworkCommissionRates::default()
+            .calculate_inference_commission(total)
+            .unwrap_or(0),
+        None => 0,
+    };
+    let workers_wei = total.saturating_sub(commission_wei);
+
+    // Check the whole debit before moving any of it, so a requester who cannot
+    // cover the job does not pay one expert and stiff the other.
+    if token.balance_of(payer) < total {
+        let unpaid_key = record_unpaid_settlement(
+            node,
+            payer,
+            Some(&receipt.worker_address),
+            model_id,
+            total,
+            "insufficient balance for media-generation payout",
+        );
+        return Err(JsonRpcError {
+            code: -32023,
+            message: "Settlement failed: insufficient balance for media-generation payout"
+                .to_string(),
+            data: Some(serde_json::json!({
+                "job_id": receipt.job_id,
+                "price_paid": total.to_string(),
+                "unpaid_key": unpaid_key,
+            })),
+        });
+    }
+
+    let amounts = tenzro_media_gen::split_payout(workers_wei, &job.assignments);
+    let mut payouts = Vec::with_capacity(job.assignments.len());
+
+    for (assignment, amount) in job.assignments.iter().zip(amounts) {
+        if amount == 0 {
+            continue;
+        }
+        if let Err(e) = token.transfer(payer, &assignment.worker_address, amount) {
+            let unpaid_key = record_unpaid_settlement(
+                node,
+                payer,
+                Some(&assignment.worker_address),
+                model_id,
+                amount,
+                &format!("media-generation worker payout failed: {}", e),
+            );
+            return Err(JsonRpcError {
+                code: -32023,
+                message: format!(
+                    "Settlement failed: media-generation payout to {} rejected: {}",
+                    assignment.worker_did, e
+                ),
+                data: Some(serde_json::json!({
+                    "job_id": receipt.job_id,
+                    "worker_did": assignment.worker_did,
+                    "amount": amount.to_string(),
+                    "unpaid_key": unpaid_key,
+                })),
+            });
+        }
+        payouts.push(serde_json::json!({
+            "worker_did": assignment.worker_did,
+            "role": assignment.role.map(|r| r.to_string()),
+            "share_bps": assignment.share_bps,
+            "amount": amount.to_string(),
+        }));
+    }
+
+    if commission_wei > 0 {
+        let treasury = tenzro_types::network_treasury_address();
+        if let Err(e) = token.transfer(payer, &treasury, commission_wei) {
+            let unpaid_key = record_unpaid_settlement(
+                node,
+                payer,
+                Some(&treasury),
+                model_id,
+                commission_wei,
+                &format!("media-generation network commission transfer failed: {}", e),
+            );
+            return Err(JsonRpcError {
+                code: -32023,
+                message: format!(
+                    "Settlement failed: media-generation network commission rejected: {}",
+                    e
+                ),
+                data: Some(serde_json::json!({
+                    "job_id": receipt.job_id,
+                    "commission_wei": commission_wei.to_string(),
+                    "unpaid_key": unpaid_key,
+                })),
+            });
+        }
+    }
+
+    debug!(
+        job_id = %receipt.job_id,
+        price_paid = %total,
+        commission_wei = %commission_wei,
+        workers = job.assignments.len(),
+        "Media-generation job settled"
+    );
+
+    Ok(serde_json::json!({
+        "price_paid": total.to_string(),
+        "commission_wei": commission_wei.to_string(),
+        "payouts": payouts,
+    }))
 }
 
 /// Shared lookup for the challenge-lifecycle handlers — errors when the
@@ -27821,6 +29518,16 @@ async fn handle_chat_simple(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Pins the call to one provider's offer. Set by intent routing, which
+    // scored a specific announcement on its advertised capabilities and price
+    // — dispatching to a different provider would settle a split the consumer
+    // never priced against. Absent (a direct named-model call), any healthy
+    // announcement for the model is acceptable.
+    let pinned_provider = match params.get("provider").and_then(|v| v.as_str()) {
+        Some(hex) => Some(parse_address(hex)?),
+        None => None,
+    };
+
     // Resolve model: try service registry, then local served_models, then
     // gossip-discovered network models. This ensures non-provider nodes (e.g.
     // the public RPC tier) can forward chat requests to any validator that
@@ -27835,7 +29542,18 @@ async fn handle_chat_simple(
     // the loopback-only `api_endpoint`.
     let mut net_iroh_endpoint_id: Option<String> = None;
 
-    if service.is_none() && !node.served_models.contains_key(model_query) {
+    // A pin naming another operator outranks anything resolved locally: the
+    // consumer priced the remote offer, so serving it here would pay the wrong
+    // payee at the wrong price.
+    if let Some(pin) = pinned_provider
+        && service.as_ref().is_some_and(|s| s.provider_address != pin)
+    {
+        service = None;
+    }
+
+    if service.is_none()
+        && (pinned_provider.is_some() || !node.served_models.contains_key(model_query))
+    {
         // Identity of this node's own iroh endpoint, if bound — used to skip
         // any announcement that resolves back to us (self-dial guard).
         let own_endpoint_id = node
@@ -27846,6 +29564,12 @@ async fn handle_chat_simple(
         for entry in node.network_models_snapshot() {
             let reg = &entry.registration;
             if reg.model_id == model_query {
+                if let Some(pin) = pinned_provider
+                    && tenzro_types::primitives::Address::from_hex(&reg.provider)
+                        .is_ok_and(|a| a != pin)
+                {
+                    continue;
+                }
                 // Self-dial guard: never treat our own announcement as a
                 // remote provider. A node that both serves and consumes would
                 // otherwise dial its own loopback endpoint and hang.
@@ -27872,12 +29596,7 @@ async fn handle_chat_simple(
                     mcp_endpoint: String::new(),
                     status: tenzro_types::model::ServiceStatus::Online,
                     parameters: reg.parameters.clone(),
-                    pricing: tenzro_types::model::PricingConfig {
-                        price_per_input_token: reg.pricing.per_token.unwrap_or(0),
-                        price_per_output_token: reg.pricing.per_token.unwrap_or(0),
-                        minimum_price: reg.pricing.per_request,
-                        pricing_model: tenzro_types::model::PricingModel::PerToken,
-                    },
+                    pricing: crate::network_catalog::announced_pricing(&reg.pricing),
                     created_at: 0,
                     last_seen: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -27889,6 +29608,24 @@ async fn handle_chat_simple(
                 break;
             }
         }
+    }
+
+    // The pinned offer is gone from the announcement set and it was not this
+    // node's own. Fail rather than silently serving a different provider's
+    // offer at a price the consumer never agreed to — the caller can re-route.
+    if let Some(pin) = pinned_provider
+        && service.is_none()
+        && node.operator_payee() != Some(pin)
+    {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!(
+                "Provider 0x{} is no longer offering model '{}'. Route again to pick a live offer.",
+                hex::encode(pin.as_bytes()),
+                model_query
+            ),
+            data: None,
+        });
     }
 
     let is_local = if let Some(ref svc) = service {
@@ -27913,7 +29650,7 @@ async fn handle_chat_simple(
         max_tokens, "max_tokens", tenzro_types::validation::MAX_INFERENCE_TOKENS,
     ).map_err(|e| JsonRpcError { code: -32602, message: e.to_string(), data: None })?;
 
-    let config = GenerationConfig {
+    let mut config = GenerationConfig {
         temperature,
         top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
         max_tokens: max_tokens as u32,
@@ -27930,6 +29667,7 @@ async fn handle_chat_simple(
         commitment_k: verifiable.then_some(tenzro_model::DEFAULT_COMMITMENT_K),
         ..GenerationConfig::default()
     };
+    apply_sampling_params(&mut config, &params);
 
     // Optional jurisdiction pin + receipt strictness (locality routing).
     let (jurisdiction_pin, jurisdiction_receipt_required) = parse_jurisdiction_params(&params);
@@ -28003,14 +29741,9 @@ async fn handle_chat_simple(
         // is bound to real usage rather than registration time.
         node.touch_local_model_service(&model_id);
 
-        let pricing = node.provider_pricing.read();
-        let cost_wei = (result.input_tokens as u128)
-            .saturating_mul(pricing.input_price_per_token_wei)
-            .saturating_add(
-                (result.output_tokens as u128)
-                    .saturating_mul(pricing.output_price_per_token_wei),
-            );
-        drop(pricing);
+        let units =
+            tenzro_types::model::BillableUnits::tokens(result.input_tokens, result.output_tokens);
+        let cost_wei = price_local_units(node, &model_id, &units, result.generation_time_ms);
 
         let app = resolve_app_attribution(node, &params)?;
         let settlement = settle_inference_cost(
@@ -28019,6 +29752,9 @@ async fn handle_chat_simple(
             params.get("channel_id").and_then(|v| v.as_str()),
             params.get("channel_update_sig").and_then(|v| v.as_str()),
             app.as_ref(),
+            // Served by this node's own runtime, so the payee is this node's
+            // payee.
+            None,
             &model_id,
             cost_wei,
         )?;
@@ -28069,6 +29805,10 @@ async fn handle_chat_simple(
             "output": result.text,
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
+            // Every billable dimension this call consumed, so a node that
+            // forwarded the request can meter all of them rather than only the
+            // token pair above.
+            "units": units_to_json(&units),
             "generation_time_ms": result.generation_time_ms,
             "tokens_per_second": result.tokens_per_second,
             "cost_wei": cost_wei.to_string(),
@@ -28131,8 +29871,11 @@ async fn handle_chat_simple(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let input_tokens = rpc_result.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let output_tokens = rpc_result.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let units = forwarded_units(rpc_result);
+        let latency_ms = rpc_result
+            .get("generation_time_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
 
         // Verify any provider-attached provenance manifest against the key
         // pinned from the provider's signed gossip announcement. Invalid or
@@ -28185,13 +29928,36 @@ async fn handle_chat_simple(
         // Record Prometheus inference counter for observability
         node.metrics().record_inference();
 
+        // Settle here rather than at the serving provider. The forwarded
+        // request carries no payer, so the provider cannot bill; this node
+        // holds the payer and the offer, and every node shares one ledger, so
+        // debiting here credits the provider on the same chain state it would
+        // have credited itself on. Pricing comes from the announcement the
+        // routing decision scored, not from anything the provider returns, so
+        // a provider cannot re-price the call after serving it.
+        let cost_wei = network_offer_cost(&svc.pricing, &units, latency_ms, None);
+        let app = resolve_app_attribution(node, &params)?;
+        let settlement = settle_inference_cost(
+            node,
+            params.get("caller_address").and_then(|v| v.as_str()),
+            params.get("channel_id").and_then(|v| v.as_str()),
+            params.get("channel_update_sig").and_then(|v| v.as_str()),
+            app.as_ref(),
+            Some(svc.provider_address),
+            &model_id,
+            cost_wei,
+        )?;
+
         Ok(serde_json::json!({
             "output": output,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
+            "input_tokens": units.input_tokens,
+            "output_tokens": units.output_tokens,
+            "units": units_to_json(&units),
             "model_id": model_id,
             "location": "network",
             "provider": svc.provider_name,
+            "cost_wei": cost_wei.to_string(),
+            "settlement": settlement.to_json(),
             "tenzro_provenance": provenance,
             "tenzro_jurisdiction": jurisdiction,
             // The provider persists the commitment; the hash rides through
@@ -28321,6 +30087,14 @@ async fn handle_chat_rich(
         }
     }
 
+    // Pins the call to one provider's offer — same contract as the simple
+    // shape: intent routing scored one announcement, and dispatching elsewhere
+    // would settle a split the consumer never priced against.
+    let pinned_provider = match params.get("provider").and_then(|v| v.as_str()) {
+        Some(hex) => Some(parse_address(hex)?),
+        None => None,
+    };
+
     // ── resolve model service (local or network) ─────────────────────
     let mut service = node.get_model_service(model_query)
         .or_else(|| node.find_model_service_by_model_id(model_query));
@@ -28330,7 +30104,16 @@ async fn handle_chat_rich(
     // because `ModelServiceInstance` carries no iroh field.
     let mut net_iroh_endpoint_id: Option<String> = None;
 
-    if service.is_none() && !node.served_models.contains_key(model_query) {
+    // A pin naming another operator outranks anything resolved locally.
+    if let Some(pin) = pinned_provider
+        && service.as_ref().is_some_and(|s| s.provider_address != pin)
+    {
+        service = None;
+    }
+
+    if service.is_none()
+        && (pinned_provider.is_some() || !node.served_models.contains_key(model_query))
+    {
         let own_endpoint_id = node
             .iroh_resolver
             .as_ref()
@@ -28339,6 +30122,12 @@ async fn handle_chat_rich(
         for entry in node.network_models_snapshot() {
             let reg = &entry.registration;
             if reg.model_id == model_query {
+                if let Some(pin) = pinned_provider
+                    && tenzro_types::primitives::Address::from_hex(&reg.provider)
+                        .is_ok_and(|a| a != pin)
+                {
+                    continue;
+                }
                 // Self-dial guard: skip our own announcement.
                 let is_self = own_endpoint_id
                     .as_deref()
@@ -28364,12 +30153,7 @@ async fn handle_chat_rich(
                     mcp_endpoint: String::new(),
                     status: tenzro_types::model::ServiceStatus::Online,
                     parameters: reg.parameters.clone(),
-                    pricing: tenzro_types::model::PricingConfig {
-                        price_per_input_token: reg.pricing.per_token.unwrap_or(0),
-                        price_per_output_token: reg.pricing.per_token.unwrap_or(0),
-                        minimum_price: reg.pricing.per_request,
-                        pricing_model: tenzro_types::model::PricingModel::PerToken,
-                    },
+                    pricing: crate::network_catalog::announced_pricing(&reg.pricing),
                     created_at: 0,
                     last_seen: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -28381,6 +30165,22 @@ async fn handle_chat_rich(
                 break;
             }
         }
+    }
+
+    // The pinned offer left the announcement set and was not this node's own.
+    if let Some(pin) = pinned_provider
+        && service.is_none()
+        && node.operator_payee() != Some(pin)
+    {
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!(
+                "Provider 0x{} is no longer offering model '{}'. Route again to pick a live offer.",
+                hex::encode(pin.as_bytes()),
+                model_query
+            ),
+            data: None,
+        });
     }
 
     let is_local = if let Some(ref svc) = service {
@@ -28415,7 +30215,7 @@ async fn handle_chat_rich(
         .get("verifiable")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let config = GenerationConfig {
+    let mut config = GenerationConfig {
         temperature,
         top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
         max_tokens,
@@ -28431,13 +30231,14 @@ async fn handle_chat_rich(
         commitment_k: verifiable.then_some(tenzro_model::DEFAULT_COMMITMENT_K),
         ..GenerationConfig::default()
     };
+    apply_sampling_params(&mut config, &params);
 
     // Optional jurisdiction pin + receipt strictness (locality routing).
     let (jurisdiction_pin, jurisdiction_receipt_required) = parse_jurisdiction_params(&params);
 
     // Canonical request input for jurisdiction receipts: the final
     // user-role message rendered as text — the same bytes both the local
-    // stamp and the forwarded-receipt verification hash on every surface.
+    // stamp and the forwarded-receipt verification both hash.
     let request_input_text = messages
         .iter()
         .rev()
@@ -28514,6 +30315,7 @@ async fn handle_chat_rich(
             output_tokens,
             inferred_stop_reason,
             result_commitment,
+            generation_time_ms,
         ) = if !tools.is_empty() {
             let runtime_tools: Vec<RuntimeToolDefinition> = tools
                 .iter()
@@ -28546,6 +30348,7 @@ async fn handle_chat_rich(
                 r.output_tokens,
                 r.stop_reason,
                 r.commitment,
+                r.generation_time_ms,
             )
         } else {
             let r = model_runtime
@@ -28564,20 +30367,23 @@ async fn handle_chat_rich(
             } else {
                 "end_turn".to_string()
             };
-            (r.text, Vec::new(), r.input_tokens, r.output_tokens, stop, r.commitment)
+            (
+                r.text,
+                Vec::new(),
+                r.input_tokens,
+                r.output_tokens,
+                stop,
+                r.commitment,
+                r.generation_time_ms,
+            )
         };
 
         node.metrics().record_inference();
         node.touch_local_model_service(&model_id);
 
         // ── build response ───────────────────────────────────────────
-        let pricing = node.provider_pricing.read();
-        let cost_wei = (input_tokens as u128)
-            .saturating_mul(pricing.input_price_per_token_wei)
-            .saturating_add(
-                (output_tokens as u128).saturating_mul(pricing.output_price_per_token_wei),
-            );
-        drop(pricing);
+        let units = tenzro_types::model::BillableUnits::tokens(input_tokens, output_tokens);
+        let cost_wei = price_local_units(node, &model_id, &units, generation_time_ms);
 
         let app = resolve_app_attribution(node, &params)?;
         let settlement = settle_inference_cost(
@@ -28586,6 +30392,9 @@ async fn handle_chat_rich(
             params.get("channel_id").and_then(|v| v.as_str()),
             params.get("channel_update_sig").and_then(|v| v.as_str()),
             app.as_ref(),
+            // Served by this node's own runtime, so the payee is this node's
+            // payee.
+            None,
             &model_id,
             cost_wei,
         )?;
@@ -28659,6 +30468,9 @@ async fn handle_chat_rich(
             "stop_reason": stop_reason,
             "stop_sequence": serde_json::Value::Null,
             "usage": usage,
+            // The usage block above is the caller-facing token view; this is the
+            // full billable breakdown a forwarding node meters against.
+            "units": units_to_json(&units),
             "cost_wei": cost_wei.to_string(),
             "settlement": settlement.to_json(),
             "location": "local",
@@ -28777,9 +30589,39 @@ async fn handle_chat_rich(
                 });
             }
 
+            // Settle here rather than at the serving provider: the forwarded
+            // request carries no payer, so the provider cannot bill, and every
+            // node shares one ledger so debiting here credits the provider on
+            // the same chain state. Token counts come from the provider's usage
+            // block; the rate comes from the announcement that was scored, so a
+            // provider cannot re-price the call after serving it.
+            let units = forwarded_rich_units(&out);
+            let latency_ms = out
+                .get("generation_time_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cost_wei = network_offer_cost(&svc.pricing, &units, latency_ms, None);
+            let app = resolve_app_attribution(node, &params)?;
+            let settlement = settle_inference_cost(
+                node,
+                params.get("caller_address").and_then(|v| v.as_str()),
+                params.get("channel_id").and_then(|v| v.as_str()),
+                params.get("channel_update_sig").and_then(|v| v.as_str()),
+                app.as_ref(),
+                Some(svc.provider_address),
+                &model_id,
+                cost_wei,
+            )?;
+
             if let Some(obj) = out.as_object_mut() {
                 obj.insert("location".to_string(), serde_json::json!("network"));
                 obj.insert("provider".to_string(), serde_json::json!(svc.provider_name));
+                obj.insert("cost_wei".to_string(), serde_json::json!(cost_wei.to_string()));
+                obj.insert("settlement".to_string(), settlement.to_json());
+                // Normalize what the provider reported so a caller that is itself
+                // a gateway meters the same dimensions rather than re-deriving
+                // them from the shape-specific usage block.
+                obj.insert("units".to_string(), units_to_json(&units));
                 match &jurisdiction {
                     Some(receipt) => {
                         obj.insert(
@@ -29041,7 +30883,7 @@ async fn handle_list_provider_capacity(
             "uptime_percentage": metrics.as_ref().map(|m| m.uptime_percentage),
             "reputation": reputation,
             "inference_count": usage.as_ref().map(|u| u.inference_count),
-            "total_output_tokens": usage.as_ref().map(|u| u.total_output_tokens),
+            "total_output_tokens": usage.as_ref().map(|u| u.total_units.output_tokens),
             "measured_tokens_per_sec": measured_tps,
             "reputation_discounted_tokens_per_sec": trusted_tps,
             "total_revenue_wei": usage.as_ref().map(|u| u.total_revenue.to_string()),
@@ -29241,8 +31083,44 @@ struct OpenAIChatRequest {
     max_tokens: Option<u32>,
     #[serde(default)]
     top_p: Option<f64>,
+    /// Truncate the candidate set to the `k` highest-probability tokens.
+    /// Omitted rather than neutral-valued when unset, so a request that does
+    /// not ask for it samples from the untruncated distribution.
+    #[serde(default)]
+    top_k: Option<u32>,
+    /// Drop candidates below `min_p` times the top candidate's probability.
+    #[serde(default)]
+    min_p: Option<f64>,
+    /// Penalty applied per prior occurrence of a token.
+    #[serde(default)]
+    frequency_penalty: Option<f32>,
+    /// Flat penalty applied once to any token that already occurred.
+    #[serde(default)]
+    presence_penalty: Option<f32>,
+    /// Multiplicative repetition penalty, as named by router networks. Maps
+    /// onto the same llama.cpp penalty stage as `frequency_penalty` and
+    /// `presence_penalty` but scales logits rather than subtracting from them.
+    #[serde(default)]
+    repetition_penalty: Option<f32>,
+    /// Sequences that end generation. The delimiter itself is withheld from
+    /// the response, matching every other provider on this shape.
+    #[serde(default)]
+    stop: Option<StopSequences>,
+    /// Number of completions to return. Only `1` is served; a higher count is
+    /// refused rather than silently truncated, so a caller never mistakes one
+    /// choice for the several it asked and paid for.
+    #[serde(default)]
+    n: Option<u32>,
     #[serde(default)]
     stream: Option<bool>,
+    /// Streaming options. `include_usage` appends a final chunk carrying the
+    /// token counts, which a streamed request otherwise never learns.
+    #[serde(default)]
+    stream_options: Option<OpenAIStreamOptions>,
+    /// Opaque end-user identifier. Carried through to the serving peer so an
+    /// operator's own abuse accounting sees the same value the caller sent.
+    #[serde(default)]
+    user: Option<String>,
     /// Tenzro extension: Multi-Token-Prediction draft count (1..=6).
     /// Out-of-band on the OpenAI schema but tolerated by every client
     /// since it's an unknown field. Tenzro-aware clients can opt in
@@ -29272,12 +31150,168 @@ struct OpenAIChatRequest {
     /// response carries a verifiable signed jurisdiction receipt.
     #[serde(default)]
     jurisdiction_receipt: Option<String>,
+    /// Ordered fallback model ids. When `model` has no serving offer the
+    /// gateway walks this list and serves the first entry that does. Applies
+    /// to initial offer resolution only — see [`resolve_failover_target`] for
+    /// why a mid-stream continuation stays on the model it started with.
+    #[serde(default)]
+    models: Option<Vec<String>>,
+    /// Provider allow/deny pin. Narrows both initial offer resolution and
+    /// mid-stream failover to the providers the caller is willing to pay.
+    #[serde(default)]
+    provider: Option<ProviderPreferences>,
+}
+
+/// Caller-supplied provider pin. Entries match a provider's announced name or
+/// its address in either the base58 or hex spelling, case-insensitively. A
+/// non-empty `only` restricts routing to the named providers; `ignore` removes
+/// providers from consideration and is applied after `only`.
+#[derive(Debug, Clone, Deserialize)]
+struct ProviderPreferences {
+    #[serde(default)]
+    only: Option<Vec<String>>,
+    #[serde(default)]
+    ignore: Option<Vec<String>>,
+}
+
+impl ProviderPreferences {
+    /// Whether a provider is routable under this pin. `name` is the
+    /// announcement's provider string (hex address on network offers), `addr`
+    /// the parsed address whose `Display` is base58.
+    fn admits(&self, addr: &tenzro_types::primitives::Address, name: &str) -> bool {
+        let base58 = addr.to_string();
+        let matches = |entry: &String| {
+            let e = entry.trim();
+            let e = e.strip_prefix("0x").unwrap_or(e);
+            !e.is_empty()
+                && (e.eq_ignore_ascii_case(name.strip_prefix("0x").unwrap_or(name))
+                    || e.eq_ignore_ascii_case(&base58))
+        };
+        if let Some(only) = self.only.as_ref().filter(|v| !v.is_empty())
+            && !only.iter().any(matches)
+        {
+            return false;
+        }
+        if let Some(ignore) = self.ignore.as_ref()
+            && ignore.iter().any(matches)
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Stop sequences arrive either as a bare string or as an array. Both shapes
+/// are accepted and re-serialized in the shape they arrived so a proxied
+/// request reaches the serving peer byte-identical to what the client sent.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum StopSequences {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StopSequences {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(s) => vec![s],
+            Self::Many(v) => v,
+        }
+    }
+}
+
+/// OpenAI `finish_reason` and the engine's own termination cause for a
+/// generation the local runtime completed, as `(normalized, native)`.
+///
+/// A matched stop sequence is trimmed out of the returned text, so the engine's
+/// [`StopReason`] is the only place that distinction survives — the gateway
+/// carries it as `native_finish_reason` and folds it onto the OpenAI vocabulary
+/// for `finish_reason`.
+fn local_finish_reasons(stop_reason: StopReason) -> (&'static str, &'static str) {
+    let native = stop_reason.as_str();
+    (normalize_finish_reason(native), native)
+}
+
+/// Project an engine-native termination cause onto the OpenAI `finish_reason`
+/// vocabulary. Serving peers spell the same causes differently — `end_turn`,
+/// `max_tokens`, `STOP`, `eos`, `tool_use` all appear in the wild — so the
+/// gateway normalizes what it forwards and carries the original alongside it.
+fn normalize_finish_reason(native: &str) -> &'static str {
+    match native.trim().to_ascii_lowercase().as_str() {
+        "length" | "max_tokens" | "model_length" | "token_limit" | "max_output_tokens" => "length",
+        "tool_calls" | "tool_use" | "function_call" => "tool_calls",
+        "content_filter" | "safety" | "recitation" | "blocked" => "content_filter",
+        _ => "stop",
+    }
+}
+
+/// Normalize `finish_reason` on one choice object in place, keeping the serving
+/// peer's own spelling in `native_finish_reason`.
+///
+/// A peer that already carries both fields keeps its `native_finish_reason` —
+/// deriving it from the already-normalized `finish_reason` would replace the
+/// real cause with the OpenAI word for it. Choices without a string reason are
+/// left alone.
+fn annotate_choice_finish_reason(choice: &mut serde_json::Map<String, Value>) {
+    let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()).map(String::from) else {
+        return;
+    };
+    let native = choice
+        .get("native_finish_reason")
+        .and_then(|r| r.as_str())
+        .map(String::from)
+        .unwrap_or(reason);
+    choice.insert(
+        "finish_reason".to_string(),
+        Value::String(normalize_finish_reason(&native).to_string()),
+    );
+    choice.insert("native_finish_reason".to_string(), Value::String(native));
+}
+
+/// Rewrite one proxied SSE payload so `finish_reason` carries the normalized
+/// vocabulary and `native_finish_reason` carries the serving peer's own
+/// spelling. Frames that don't parse as JSON or don't carry a choice pass
+/// through byte-identical.
+fn annotate_finish_reason_frame(payload: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(payload) else {
+        return payload.to_string();
+    };
+    let Some(choice) = v
+        .get_mut("choices")
+        .and_then(|c| c.get_mut(0))
+        .and_then(|c| c.as_object_mut())
+    else {
+        return payload.to_string();
+    };
+    annotate_choice_finish_reason(choice);
+    serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string())
+}
+
+/// Apply [`annotate_finish_reason_frame`] to a non-streaming response body in
+/// place. Same normalization the streaming path does per frame.
+fn annotate_finish_reason_body(body: &mut Value) {
+    if let Some(choice) = body
+        .get_mut("choices")
+        .and_then(|c| c.get_mut(0))
+        .and_then(|c| c.as_object_mut())
+    {
+        annotate_choice_finish_reason(choice);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OpenAIStreamOptions {
+    #[serde(default)]
+    include_usage: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 struct OpenAIChatMessage {
     role: String,
-    content: String,
+    /// Bare string or an array of typed parts. The array form carries image,
+    /// audio and file inputs; it is flattened to text for the local text-only
+    /// runtime and forwarded in its arrival shape on the network path.
+    content: MessageContent,
 }
 
 /// Context window + max output tokens for a model, resolved from the
@@ -29316,18 +31350,101 @@ fn provider_geography(node: &Arc<TenzroNode>, provider: &str) -> Option<String> 
     })
 }
 
+/// Declared ISO 3166-1 alpha-2 country code for a provider address, read from
+/// the jurisdiction claim on its signed gossip announcement. Never derived
+/// from the free-form `geography` string — `eu-west` and `ap-southeast` are
+/// pseudo-regions spanning many countries, so projecting them onto a country
+/// code would misdeclare where the hardware sits.
+fn provider_country_code(node: &Arc<TenzroNode>, provider: &str) -> Option<String> {
+    let wanted = provider.strip_prefix("0x").unwrap_or(provider);
+    node.network_providers_snapshot().into_iter().find_map(|entry| {
+        let ann = &entry.announcement;
+        let addr = ann.provider_address.strip_prefix("0x").unwrap_or(&ann.provider_address);
+        if addr.eq_ignore_ascii_case(wanted) {
+            ann.capacity.jurisdiction.as_ref().map(|j| j.country.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// The `datacenters` array aggregators read for jurisdiction filtering: one
+/// entry per declared locality, keyed by country code. `Value::Null` when the
+/// operator declared no jurisdiction — an empty array would assert "serves
+/// from nowhere", which is a different claim than "did not say".
+fn openai_datacenters(country: Option<String>) -> Value {
+    match country {
+        Some(cc) => serde_json::json!([{ "country_code": cc }]),
+        None => Value::Null,
+    }
+}
+
+/// Render a count of 1e-12 USD units as a decimal USD string, trimming
+/// trailing fractional zeros. Aggregators expect per-token prices as strings
+/// because the values are far below float precision at the token scale.
+fn format_usd_1e12(units: u128) -> String {
+    const SCALE: u128 = 1_000_000_000_000;
+    let whole = units / SCALE;
+    let frac = units % SCALE;
+    if frac == 0 {
+        return whole.to_string();
+    }
+    let mut digits = format!("{frac:012}");
+    while digits.ends_with('0') {
+        digits.pop();
+    }
+    format!("{whole}.{digits}")
+}
+
+/// Build the `pricing` object for one listing entry. The wei-per-token figures
+/// are always present and remain the authoritative settlement amounts. When
+/// the operator has declared a TNZO listing rate, the USD-denominated
+/// `prompt` / `completion` / `request` prices external marketplaces ingest are
+/// derived from it and included alongside `tnzo_usd`. With no declared rate
+/// the USD keys are absent rather than null, because a null price reads as
+/// free to a typed aggregator parser.
+fn openai_pricing(
+    node: &Arc<TenzroNode>,
+    input_wei: u64,
+    output_wei: u64,
+    minimum_wei: u64,
+    pricing_model: String,
+) -> Value {
+    let mut pricing = serde_json::Map::new();
+    pricing.insert("input_wei_per_token".into(), Value::String(input_wei.to_string()));
+    pricing.insert("output_wei_per_token".into(), Value::String(output_wei.to_string()));
+    pricing.insert("minimum_wei".into(), Value::String(minimum_wei.to_string()));
+    pricing.insert("pricing_model".into(), Value::String(pricing_model));
+
+    if let Some(micro) = node.config().listing_tnzo_usd_micro {
+        // wei -> USD: wei * (micro / 1e6) / 1e18, carried in 1e-12 USD units
+        // so the whole derivation stays exact integer arithmetic.
+        let usd_1e12 = |wei: u64| -> String {
+            format_usd_1e12(u128::from(wei) * u128::from(micro) / 1_000_000_000_000)
+        };
+        pricing.insert("prompt".into(), Value::String(usd_1e12(input_wei)));
+        pricing.insert("completion".into(), Value::String(usd_1e12(output_wei)));
+        pricing.insert("request".into(), Value::String(usd_1e12(minimum_wei)));
+        pricing.insert("currency".into(), Value::String("USD".into()));
+        pricing.insert("tnzo_usd".into(), Value::String(format_usd_1e12(u128::from(micro) * 1_000_000)));
+    }
+
+    Value::Object(pricing)
+}
+
 /// The gateway's machine-readable data-handling declaration, derived from
 /// what the serving path actually does: prompt/completion bodies are never
 /// written to disk; SSE chunks live in an in-memory resume buffer bounded by
-/// the cursor TTL; the usage tracker records token counts, cost, and latency
-/// only. Aggregators consume this alongside the per-model listing.
+/// the cursor TTL; the usage tracker records the metered units, cost, and
+/// latency only, never the content that produced them. Aggregators consume
+/// this alongside the per-model listing.
 fn openai_data_policy() -> Value {
     serde_json::json!({
         "prompt_retention": "none",
         "completion_retention": "none",
         "stream_resume_buffer_secs": crate::streaming::DEFAULT_TTL.as_secs(),
         "trains_on_data": false,
-        "usage_accounting": "token_counts_cost_latency_only",
+        "usage_accounting": "metered_units_cost_latency_only",
     })
 }
 
@@ -29345,7 +31462,13 @@ fn openai_model_features(node: &Arc<TenzroNode>, model_id: &str, local: bool) ->
         "mtp": mtp_capable,
         "provenance_signing": local && node.provenance_signer().is_some(),
         "jurisdiction_signing": local && node.jurisdiction_signer().is_some(),
-        "supported_parameters": ["temperature", "top_p", "max_tokens", "stream", "draft_n", "verifiable", "jurisdiction", "jurisdiction_receipt"],
+        "supported_parameters": [
+            "temperature", "top_p", "top_k", "min_p", "max_tokens",
+            "frequency_penalty", "presence_penalty", "repetition_penalty",
+            "stop", "seed", "stream", "stream_options", "user",
+            "draft_n", "verifiable", "jurisdiction", "jurisdiction_receipt",
+            "models", "provider",
+        ],
     })
 }
 
@@ -29376,16 +31499,23 @@ fn quantization_label(model_id: &str) -> Value {
 
 /// Serialize one model-service instance as an enriched `/v1/models` entry:
 /// the OpenAI core fields plus the serving contract an aggregator needs —
-/// per-token pricing, context window, max output tokens, feature flags, and
-/// declared datacenter geography. Everything is derived from registry /
-/// announcement state; no operator-side listing configuration exists.
+/// per-token pricing in both TNZO wei and USD, context window, max output
+/// tokens, feature flags, and declared datacenter geography and jurisdiction.
+/// Everything is derived from registry / announcement state plus the
+/// operator's declared TNZO listing rate.
 fn openai_model_entry(node: &Arc<TenzroNode>, svc: &tenzro_types::model::ModelServiceInstance) -> Value {
     let (context_length, max_output_tokens) = model_context_limits(node, &svc.model_id);
     let is_local = svc.location == ModelLocation::Local;
-    let datacenter_location = if is_local {
-        node.config().geography.clone()
+    let (datacenter_location, country_code) = if is_local {
+        (
+            node.config().geography.clone(),
+            node.jurisdiction_claim().map(|j| j.country.clone()),
+        )
     } else {
-        provider_geography(node, &svc.provider_name)
+        (
+            provider_geography(node, &svc.provider_name),
+            provider_country_code(node, &svc.provider_name),
+        )
     };
     serde_json::json!({
         "id": svc.instance_id,
@@ -29402,14 +31532,16 @@ fn openai_model_entry(node: &Arc<TenzroNode>, svc: &tenzro_types::model::ModelSe
         "quantization": quantization_label(&svc.model_id),
         "context_length": context_length,
         "max_output_tokens": max_output_tokens,
-        "pricing": {
-            "input_wei_per_token": svc.pricing.price_per_input_token.to_string(),
-            "output_wei_per_token": svc.pricing.price_per_output_token.to_string(),
-            "minimum_wei": svc.pricing.minimum_price.to_string(),
-            "pricing_model": format!("{:?}", svc.pricing.pricing_model),
-        },
+        "pricing": openai_pricing(
+            node,
+            svc.pricing.price_per_input_token,
+            svc.pricing.price_per_output_token,
+            svc.pricing.minimum_price,
+            format!("{:?}", svc.pricing.pricing_model),
+        ),
         "features": openai_model_features(node, &svc.model_id, is_local),
         "datacenter_location": datacenter_location,
+        "datacenters": openai_datacenters(country_code),
         "api_endpoint": svc.api_endpoint,
         "mcp_endpoint": svc.mcp_endpoint,
     })
@@ -29444,14 +31576,16 @@ fn openai_model_entry_from_registration(
         "quantization": quantization_label(&reg.model_id),
         "context_length": context_length,
         "max_output_tokens": Value::Null,
-        "pricing": {
-            "input_wei_per_token": reg.pricing.per_token.unwrap_or(0).to_string(),
-            "output_wei_per_token": reg.pricing.per_token.unwrap_or(0).to_string(),
-            "minimum_wei": reg.pricing.per_request.to_string(),
-            "pricing_model": "PerToken",
-        },
+        "pricing": openai_pricing(
+            node,
+            reg.pricing.per_token.unwrap_or(0),
+            reg.pricing.per_token.unwrap_or(0),
+            reg.pricing.per_request,
+            "PerToken".to_string(),
+        ),
         "features": openai_model_features(node, &reg.model_id, false),
         "datacenter_location": provider_geography(node, &reg.provider),
+        "datacenters": openai_datacenters(provider_country_code(node, &reg.provider)),
         "api_endpoint": reg.rpc_endpoint,
         "mcp_endpoint": "",
     })
@@ -29537,12 +31671,55 @@ async fn handle_openai_get_model(
     )
 }
 
+/// Query string for `GET /v1/generation`.
+#[derive(Debug, Deserialize)]
+struct GenerationStatsQuery {
+    id: String,
+}
+
+/// GET /v1/generation?id={completion_id} — recorded stats for one generation.
+///
+/// The token counts and cost of a generation ride on the response that carried
+/// it, which a streamed caller frequently never reads: the terminal chunk
+/// arrives after the text the caller was waiting for, and dropping the
+/// connection there is normal. This resolves the completion id the caller
+/// already has back to what was recorded when the generation finished, so a
+/// consumer can reconcile its own spend without keeping the stream open.
+///
+/// The id is the `chatcmpl-…` from any of the chat routes, or the `request_id`
+/// of a routed inference. Answers 404 when this node has no record for it.
+async fn handle_openai_generation(
+    State(node): State<Arc<TenzroNode>>,
+    Query(query): Query<GenerationStatsQuery>,
+) -> impl IntoResponse {
+    let Some(tracker) = node.usage_tracker() else {
+        return json_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Usage accounting is not enabled on this node",
+            "server_error",
+            "usage_tracker_unavailable",
+        );
+    };
+
+    match tracker.get_record(&query.id) {
+        Some(record) => (StatusCode::OK, Json(generation_stats_json(&record))).into_response(),
+        None => json_error_response(
+            StatusCode::NOT_FOUND,
+            &format!("No recorded generation for id '{}'", query.id),
+            "invalid_request_error",
+            "generation_not_found",
+        ),
+    }
+}
+
 /// OpenAI-compatible request body for `/v1/embeddings`.
 ///
-/// `input` accepts either a single string or an array of strings, matching the
-/// OpenAI spec. `dimensions` requests Matryoshka truncation on models that
-/// support it (EmbeddingGemma, Qwen3-Embedding). `encoding_format` is accepted
-/// for wire compatibility but only `float` is served — base64 packing is not.
+/// `input` accepts a single string, an array of strings, or an array of typed
+/// content parts. The first two are the OpenAI spec; the third is how image
+/// embedding reaches the same endpoint instead of needing its own path.
+/// `dimensions` requests Matryoshka truncation on text encoders that support it
+/// (EmbeddingGemma, Qwen3-Embedding). `encoding_format` is accepted for wire
+/// compatibility but only `float` is served — base64 packing is not.
 #[derive(Debug, Deserialize)]
 struct OpenAIEmbeddingsRequest {
     model: String,
@@ -29564,59 +31741,210 @@ struct OpenAIEmbeddingsRequest {
 enum OpenAIEmbeddingInput {
     Single(String),
     Batch(Vec<String>),
+    /// Ordered last: an array of strings matches `Batch` first, and an array of
+    /// objects fails `Batch` and falls through to here.
+    Parts(Vec<OpenAIEmbeddingPart>),
 }
 
-impl OpenAIEmbeddingInput {
-    fn into_vec(self) -> Vec<String> {
-        match self {
-            OpenAIEmbeddingInput::Single(s) => vec![s],
-            OpenAIEmbeddingInput::Batch(v) => v,
-        }
-    }
+/// One element of a content-part `input` array.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAIEmbeddingPart {
+    Text { text: String },
+    /// Tenzro extension: raw image bytes, base64-encoded, embedded by the
+    /// vision encoder named in `model`.
+    Image { image_base64: String },
 }
 
-/// POST /v1/embeddings — OpenAI-compatible text embeddings.
+/// What a caller's `input` resolved to. One request names one `model`, and a
+/// text encoder and a vision encoder are different models, so a request cannot
+/// be both.
+enum EmbeddingInput {
+    Text(Vec<String>),
+    Images(Vec<String>),
+}
+
+/// POST /v1/embeddings — OpenAI-compatible embeddings over text or images.
 ///
-/// Serves any encoder registered in this node's [`TextEmbeddingRuntime`]
-/// (loaded via `tenzro_loadTextEmbeddingModel` / `tenzro embed-text load`).
-/// Returns the OpenAI `{ object, data: [{ object, index, embedding }], model,
-/// usage }` shape so drop-in OpenAI SDK clients work unchanged. Token usage is
-/// not metered by the ORT encoder path, so `usage` fields report 0.
+/// Text input is served by this node's [`TextEmbeddingRuntime`] (loaded via
+/// `tenzro_loadTextEmbeddingModel`); image parts are served by its
+/// [`VisionRuntime`] (loaded via `tenzro_loadVisionModel`). Both return the
+/// OpenAI `{ object, data: [{ object, index, embedding }], model, usage }`
+/// shape so drop-in OpenAI SDK clients work unchanged. Token usage is not
+/// metered by the ORT encoder path, so `usage` fields report 0.
+///
+/// [`TextEmbeddingRuntime`]: tenzro_model::TextEmbeddingRuntime
+/// [`VisionRuntime`]: tenzro_model::VisionRuntime
 async fn handle_openai_embeddings(
     State(node): State<Arc<TenzroNode>>,
     Json(request): Json<OpenAIEmbeddingsRequest>,
 ) -> Response {
+    use base64::Engine as _;
+
     if let Some(fmt) = request.encoding_format.as_deref()
         && !fmt.eq_ignore_ascii_case("float")
     {
-        return openai_error_response(
+        return json_error_response(
             StatusCode::BAD_REQUEST,
             &format!("unsupported encoding_format '{fmt}' (only 'float' is served)"),
+            "invalid_request_error",
+            "unsupported_encoding_format",
         );
     }
 
-    let inputs = request.input.into_vec();
-    if inputs.is_empty() {
-        return openai_error_response(StatusCode::BAD_REQUEST, "'input' must be a non-empty string or array of strings");
-    }
-
-    let cfg = TextEmbedConfig {
-        requested_dim: request.dimensions,
-        normalize: request.normalize.unwrap_or(false),
-    };
-
-    let result = match node.text_embedding_runtime.embed(&request.model, inputs, cfg).await {
-        Ok(r) => r,
-        Err(e) => {
-            return openai_error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("embedding failed for model '{}': {}", request.model, e),
-            );
+    let input = match request.input {
+        OpenAIEmbeddingInput::Single(s) => EmbeddingInput::Text(vec![s]),
+        OpenAIEmbeddingInput::Batch(v) => EmbeddingInput::Text(v),
+        OpenAIEmbeddingInput::Parts(parts) => {
+            let mut texts = Vec::new();
+            let mut images = Vec::new();
+            for part in parts {
+                match part {
+                    OpenAIEmbeddingPart::Text { text } => texts.push(text),
+                    OpenAIEmbeddingPart::Image { image_base64 } => images.push(image_base64),
+                }
+            }
+            match (texts.is_empty(), images.is_empty()) {
+                (false, true) => EmbeddingInput::Text(texts),
+                (true, false) => EmbeddingInput::Images(images),
+                (false, false) => {
+                    return json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "'input' mixes text and image parts — one request names one 'model', and a text encoder cannot embed an image; post them separately",
+                        "invalid_request_error",
+                        "mixed_embedding_input",
+                    );
+                }
+                (true, true) => EmbeddingInput::Text(Vec::new()),
+            }
         }
     };
 
-    let data: Vec<Value> = result
-        .embeddings
+    let mut units = tenzro_types::model::BillableUnits::default();
+    let mut bytes_in = 0u64;
+    let mut latency_ms = 0u64;
+
+    let (embeddings, dim) = match input {
+        EmbeddingInput::Text(inputs) => {
+            if inputs.is_empty() {
+                return json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "'input' must be a non-empty string, array of strings, or array of content parts",
+                    "invalid_request_error",
+                    "missing_input",
+                );
+            }
+            let cfg = TextEmbedConfig {
+                requested_dim: request.dimensions,
+                normalize: request.normalize.unwrap_or(false),
+            };
+            bytes_in = inputs.iter().map(|s| s.len() as u64).sum();
+            match node
+                .text_embedding_runtime
+                .embed(&request.model, inputs, cfg)
+                .await
+            {
+                Ok(r) => {
+                    // An encoder emits no completion, so the whole charge falls
+                    // on the prompt side. The count comes from the attention
+                    // mask, so batch padding is not billed as caller work.
+                    units = tenzro_types::model::BillableUnits::tokens(r.prompt_tokens, 0);
+                    latency_ms = r.generation_time_ms;
+                    (r.embeddings, r.dim)
+                }
+                // A model this node has no encoder for is a caller mistake;
+                // anything else faulted inside the runtime and is ours to own.
+                Err(tenzro_model::ModelError::ModelNotFound(_)) => {
+                    return json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!(
+                            "model '{}' is not loaded — load it with tenzro_loadTextEmbeddingModel and list what is loaded with tenzro_listTextEmbeddingModels",
+                            request.model
+                        ),
+                        "invalid_request_error",
+                        "model_not_loaded",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(model = %request.model, error = %e, "Text embedding failed");
+                    return json_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &sanitize_model_error(&e),
+                        "server_error",
+                        "embedding_error",
+                    );
+                }
+            }
+        }
+        EmbeddingInput::Images(encoded) => {
+            if request.dimensions.is_some() {
+                return json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "'dimensions' is not served for image input — Matryoshka truncation is a property of the text encoders, and a vision encoder emits its trained width",
+                    "invalid_request_error",
+                    "unsupported_dimensions_for_image",
+                );
+            }
+            let cfg = ImageEmbedConfig {
+                normalize: request.normalize.unwrap_or(false),
+            };
+            let mut embeddings = Vec::with_capacity(encoded.len());
+            let mut dim = 0usize;
+            for (index, b64) in encoded.into_iter().enumerate() {
+                let bytes = match base64::engine::general_purpose::STANDARD.decode(&b64) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return json_error_response(
+                            StatusCode::BAD_REQUEST,
+                            &format!("could not read 'image_base64' on input part {index}: {e}"),
+                            "invalid_request_error",
+                            "invalid_image_base64",
+                        );
+                    }
+                };
+                bytes_in = bytes_in.saturating_add(bytes.len() as u64);
+                // Geometry is read before the encoder takes the bytes, since it
+                // resizes to its own input size and the caller is billed on what
+                // they submitted.
+                let geometry = tenzro_model::image_dimensions(&bytes);
+                match node.vision_runtime.embed(&request.model, bytes, cfg).await {
+                    Ok(r) => {
+                        dim = r.dim;
+                        embeddings.push(r.embedding);
+                        if let Some((w, h)) = geometry {
+                            units.image_tokens = units.image_tokens.saturating_add(
+                                image_tokenization_for(&node, &request.model).image_tokens(w, h),
+                            );
+                        }
+                        latency_ms = latency_ms.saturating_add(r.generation_time_ms);
+                    }
+                    Err(tenzro_model::ModelError::ModelNotFound(_)) => {
+                        return json_error_response(
+                            StatusCode::BAD_REQUEST,
+                            &format!(
+                                "model '{}' is not loaded — load it with tenzro_loadVisionModel and list what is loaded with tenzro_listVisionModels",
+                                request.model
+                            ),
+                            "invalid_request_error",
+                            "model_not_loaded",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(model = %request.model, error = %e, "Image embedding failed");
+                        return json_error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            &sanitize_model_error(&e),
+                            "server_error",
+                            "embedding_error",
+                        );
+                    }
+                }
+            }
+            (embeddings, dim)
+        }
+    };
+
+    let data: Vec<Value> = embeddings
         .into_iter()
         .enumerate()
         .map(|(index, embedding)| {
@@ -29628,22 +31956,2161 @@ async fn handle_openai_embeddings(
         })
         .collect();
 
+    let bytes_out = (data.len() * dim * std::mem::size_of::<f32>()) as u64;
+    let cost_wei = record_modality_usage(
+        &node,
+        &request.model,
+        units.clone(),
+        bytes_in,
+        bytes_out,
+        latency_ms,
+    );
+
     let body = serde_json::json!({
         "object": "list",
         "data": data,
         "model": request.model,
-        "usage": { "prompt_tokens": 0, "total_tokens": 0 },
+        "dimensions": dim,
+        // An image encoder reports no text tokens, so an image request carries
+        // its work in `units.image_tokens` and leaves the OpenAI token fields at
+        // zero rather than restating geometry as a token count.
+        "usage": {
+            "prompt_tokens": units.prompt_tokens(),
+            "total_tokens": units.total_tokens(),
+        },
+        "units": units_to_json(&units),
+        "cost_wei": cost_wei.to_string(),
     });
 
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// Build an OpenAI-shaped error body: `{ error: { message, type } }`.
-fn openai_error_response(status: StatusCode, message: &str) -> Response {
+/// Response shape requested on `/v1/audio/transcriptions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptionFormat {
+    Json,
+    Text,
+    VerboseJson,
+    Srt,
+    Vtt,
+}
+
+impl TranscriptionFormat {
+    fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "json" => Some(Self::Json),
+            "text" => Some(Self::Text),
+            "verbose_json" => Some(Self::VerboseJson),
+            "srt" => Some(Self::Srt),
+            "vtt" => Some(Self::Vtt),
+            _ => None,
+        }
+    }
+
+    /// Whether the format renders per-segment time ranges, and so needs the
+    /// runtime to emit them regardless of what the caller asked for.
+    fn needs_timestamps(self) -> bool {
+        matches!(self, Self::VerboseJson | Self::Srt | Self::Vtt)
+    }
+}
+
+/// Render seconds as `HH:MM:SS,mmm` (SubRip) or `HH:MM:SS.mmm` (WebVTT).
+fn format_timecode(seconds: f32, millis_separator: char) -> String {
+    let total_ms = (seconds.max(0.0) * 1000.0).round() as u64;
+    let ms = total_ms % 1000;
+    let total_s = total_ms / 1000;
+    format!(
+        "{:02}:{:02}:{:02}{}{:03}",
+        total_s / 3600,
+        (total_s % 3600) / 60,
+        total_s % 60,
+        millis_separator,
+        ms
+    )
+}
+
+/// POST /v1/audio/transcriptions — OpenAI-compatible speech recognition.
+///
+/// Serves any transcriber registered in this node's [`AudioRuntime`] (loaded
+/// via `tenzro_loadAudioModel` / `tenzro transcribe load`). The request is
+/// `multipart/form-data` with a `file` part carrying the audio bytes and a
+/// `model` part naming the catalog entry, matching the OpenAI wire shape so an
+/// unmodified OpenAI SDK client reaches the ASR runtimes.
+///
+/// `response_format` selects `json` (default), `text`, `verbose_json`, `srt`,
+/// or `vtt`. The three formats that render time ranges force the runtime to
+/// emit segment timestamps even when the caller did not ask for them, because
+/// the body cannot be built without them.
+///
+/// Fields with no home in [`TranscribeConfig`] are refused by name rather than
+/// dropped, so a caller is never billed for a request whose instructions were
+/// silently ignored.
+async fn handle_openai_transcriptions(
+    State(node): State<Arc<TenzroNode>>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let mut audio: Option<Vec<u8>> = None;
+    let mut model: Option<String> = None;
+    let mut language: Option<String> = None;
+    let mut response_format = TranscriptionFormat::Json;
+    let mut temperature: Option<f32> = None;
+    let mut want_segment_timestamps = false;
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                return json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("malformed multipart body: {e}"),
+                    "invalid_request_error",
+                    "malformed_multipart",
+                );
+            }
+        };
+        let Some(name) = field.name().map(|s| s.to_string()) else {
+            continue;
+        };
+        match name.as_str() {
+            "file" => match field.bytes().await {
+                Ok(b) => audio = Some(b.to_vec()),
+                Err(e) => {
+                    return json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("could not read the 'file' part: {e}"),
+                        "invalid_request_error",
+                        "unreadable_form_field",
+                    );
+                }
+            },
+            "model" | "language" | "response_format" | "temperature"
+            | "timestamp_granularities" | "timestamp_granularities[]" | "prompt" => {
+                let value = match field.text().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return json_error_response(
+                            StatusCode::BAD_REQUEST,
+                            &format!("could not read the '{name}' part: {e}"),
+                            "invalid_request_error",
+                            "unreadable_form_field",
+                        );
+                    }
+                };
+                match name.as_str() {
+                    "model" => model = Some(value),
+                    "language" => {
+                        if !value.trim().is_empty() {
+                            language = Some(value);
+                        }
+                    }
+                    "response_format" => match TranscriptionFormat::parse(&value) {
+                        Some(f) => response_format = f,
+                        None => {
+                            return json_error_response(
+                                StatusCode::BAD_REQUEST,
+                                &format!(
+                                    "unsupported response_format '{value}' (json, text, verbose_json, srt, vtt)"
+                                ),
+                                "invalid_request_error",
+                                "unsupported_response_format",
+                            );
+                        }
+                    },
+                    "temperature" => match value.trim().parse::<f32>() {
+                        Ok(t) => temperature = Some(t),
+                        Err(_) => {
+                            return json_error_response(
+                                StatusCode::BAD_REQUEST,
+                                &format!("'temperature' must be a number, got '{value}'"),
+                                "invalid_request_error",
+                                "invalid_temperature",
+                            );
+                        }
+                    },
+                    "timestamp_granularities" | "timestamp_granularities[]" => {
+                        match value.to_ascii_lowercase().as_str() {
+                            "segment" => want_segment_timestamps = true,
+                            "word" => {
+                                return json_error_response(
+                                    StatusCode::BAD_REQUEST,
+                                    "timestamp_granularities 'word' is not served — the ASR runtimes emit segment-level time ranges only; request 'segment'",
+                                    "invalid_request_error",
+                                    "unsupported_timestamp_granularity",
+                                );
+                            }
+                            other => {
+                                return json_error_response(
+                                    StatusCode::BAD_REQUEST,
+                                    &format!("unknown timestamp_granularities value '{other}'"),
+                                    "invalid_request_error",
+                                    "unsupported_timestamp_granularity",
+                                );
+                            }
+                        }
+                    }
+                    "prompt" => {
+                        if !value.trim().is_empty() {
+                            return json_error_response(
+                                StatusCode::BAD_REQUEST,
+                                "'prompt' is not served — the ASR decoders take no text conditioning on this route",
+                                "invalid_request_error",
+                                "unsupported_prompt",
+                            );
+                        }
+                    }
+                    _ => unreachable!("outer match restricts the arm set"),
+                }
+            }
+            other => {
+                return json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("unknown form field '{other}'"),
+                    "invalid_request_error",
+                    "unknown_form_field",
+                );
+            }
+        }
+    }
+
+    let Some(audio) = audio else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'file' is required",
+            "invalid_request_error",
+            "missing_file",
+        );
+    };
+    if audio.is_empty() {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'file' carried no bytes",
+            "invalid_request_error",
+            "missing_file",
+        );
+    }
+    let Some(model) = model else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'model' is required",
+            "invalid_request_error",
+            "missing_model",
+        );
+    };
+
+    let cfg = TranscribeConfig {
+        language,
+        timestamps: want_segment_timestamps || response_format.needs_timestamps(),
+        temperature,
+    };
+
+    let bytes_in = audio.len() as u64;
+    let result = match node.audio_runtime.transcribe(&model, audio, cfg).await {
+        Ok(r) => r,
+        // A model this node has no transcriber for is a caller mistake; anything
+        // else faulted inside the runtime and is ours to own.
+        Err(tenzro_model::ModelError::ModelNotFound(_)) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "model '{model}' is not loaded — load it with tenzro_loadAudioModel and list what is loaded with tenzro_listAudioModels"
+                ),
+                "invalid_request_error",
+                "model_not_loaded",
+            );
+        }
+        Err(e) => {
+            tracing::warn!(model = %model, error = %e, "Transcription failed");
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &sanitize_model_error(&e),
+                "server_error",
+                "transcription_error",
+            );
+        }
+    };
+
+    // ASR is charged on the audio the encoder consumed. Recording happens before
+    // the body is rendered, because three of the five formats are plain text or
+    // subtitles with nowhere to carry a usage block — the work still has to
+    // count toward the provider's rewards.
+    let units = tenzro_types::model::BillableUnits::default().with_audio_ms(result.audio_ms);
+    let cost_wei = record_modality_usage(
+        &node,
+        &model,
+        units.clone(),
+        bytes_in,
+        result.text.len() as u64,
+        result.generation_time_ms,
+    );
+
+    match response_format {
+        TranscriptionFormat::Json => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "text": result.text,
+                "units": units_to_json(&units),
+                "cost_wei": cost_wei.to_string(),
+            })),
+        )
+            .into_response(),
+        TranscriptionFormat::Text => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            result.text,
+        )
+            .into_response(),
+        TranscriptionFormat::VerboseJson => {
+            let duration = result
+                .segments
+                .iter()
+                .filter_map(|s| s.end_seconds)
+                .fold(0.0f32, f32::max);
+            let segments: Vec<Value> = result
+                .segments
+                .iter()
+                .enumerate()
+                .map(|(index, seg)| {
+                    serde_json::json!({
+                        "id": index,
+                        "start": seg.start_seconds,
+                        "end": seg.end_seconds,
+                        "text": seg.text,
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "task": "transcribe",
+                    "language": result.language,
+                    "duration": duration,
+                    "text": result.text,
+                    "segments": segments,
+                    "units": units_to_json(&units),
+                    "cost_wei": cost_wei.to_string(),
+                })),
+            )
+                .into_response()
+        }
+        TranscriptionFormat::Srt | TranscriptionFormat::Vtt => {
+            let timed: Vec<_> = result
+                .segments
+                .iter()
+                .filter_map(|s| match (s.start_seconds, s.end_seconds) {
+                    (Some(start), Some(end)) => Some((start, end, s.text.as_str())),
+                    _ => None,
+                })
+                .collect();
+            if timed.is_empty() {
+                return json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "model '{model}' returned no segment time ranges, so a subtitle body cannot be built — request response_format 'json' or 'text'"
+                    ),
+                    "invalid_request_error",
+                    "timestamps_unavailable",
+                );
+            }
+            let is_srt = response_format == TranscriptionFormat::Srt;
+            let sep = if is_srt { ',' } else { '.' };
+            let mut body = if is_srt { String::new() } else { "WEBVTT\n\n".to_string() };
+            for (index, (start, end, text)) in timed.iter().enumerate() {
+                if is_srt {
+                    body.push_str(&format!("{}\n", index + 1));
+                }
+                body.push_str(&format!(
+                    "{} --> {}\n{}\n\n",
+                    format_timecode(*start, sep),
+                    format_timecode(*end, sep),
+                    text.trim()
+                ));
+            }
+            let mime = if is_srt {
+                "application/x-subrip; charset=utf-8"
+            } else {
+                "text/vtt; charset=utf-8"
+            };
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, mime)],
+                body,
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Projects a [`tenzro_model::ModelError`] onto the HTTP surface.
+///
+/// A model this node holds no runtime for is a caller mistake and names the
+/// two RPCs that resolve it — the one that loads a model and the one that says
+/// what is loaded. Every other variant faulted inside the runtime and is the
+/// operator's to own, so it logs and returns a 500 carrying only the sanitized
+/// message.
+fn modality_error_response(
+    error: &tenzro_model::ModelError,
+    model: &str,
+    load_method: &str,
+    list_method: &str,
+    modality: &str,
+) -> Response {
+    match error {
+        tenzro_model::ModelError::ModelNotFound(_) => json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "model '{model}' is not loaded — load it with {load_method} and list what is loaded with {list_method}"
+            ),
+            "invalid_request_error",
+            "model_not_loaded",
+        ),
+        e => {
+            tracing::warn!(model = %model, modality = %modality, error = %e, "Modality inference failed");
+            json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &sanitize_model_error(e),
+                "server_error",
+                &format!("{modality}_error"),
+            )
+        }
+    }
+}
+
+/// Reads base64 media out of a JSON body, naming the field that failed.
+fn decode_inline_image(field: &str, encoded: &str) -> std::result::Result<Vec<u8>, Response> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| {
+            json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("could not read '{field}': {e}"),
+                "invalid_request_error",
+                "invalid_base64",
+            )
+        })
+}
+
+/// Request body for `POST /v1/tenzro/forecasts`.
+///
+/// Tenzro-namespaced because no vendor covers timeseries forecasting on an
+/// OpenAI-shaped surface: there is no `/v1/forecasts` to be compatible with,
+/// and inventing one under the vendor's namespace would collide the day they
+/// ship theirs.
+#[derive(Debug, Deserialize)]
+struct TenzroForecastRequest {
+    model: String,
+    /// Observed univariate series, oldest first.
+    history: Vec<f32>,
+    /// Number of future steps to predict.
+    horizon: usize,
+    /// Quantile levels in (0, 1) to return alongside the point forecast.
+    #[serde(default)]
+    quantiles: Vec<f32>,
+    /// Seconds per step (3600 = hourly). Some models read it, others ignore it.
+    #[serde(default)]
+    frequency_seconds: Option<u64>,
+}
+
+/// POST /v1/tenzro/forecasts — timeseries forecasting over the loaded
+/// [`TimeseriesRuntime`].
+async fn handle_openai_forecasts(
+    State(node): State<Arc<TenzroNode>>,
+    Json(request): Json<TenzroForecastRequest>,
+) -> Response {
+    if request.history.is_empty() {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'history' must be a non-empty array of numbers",
+            "invalid_request_error",
+            "missing_history",
+        );
+    }
+    if request.horizon == 0 {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'horizon' must be at least 1",
+            "invalid_request_error",
+            "invalid_horizon",
+        );
+    }
+
+    let cfg = ForecastConfig {
+        horizon: request.horizon,
+        quantiles: request.quantiles,
+        frequency_seconds: request.frequency_seconds,
+    };
+    let history_len = request.history.len();
+    let result = match node
+        .timeseries_runtime
+        .forecast(&request.model, request.history, cfg)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return modality_error_response(
+                &e,
+                &request.model,
+                "tenzro_loadForecastModel",
+                "tenzro_listForecastModels",
+                "forecast",
+            );
+        }
+    };
+
+    // A forecaster consumes one timestep per context position and emits one per
+    // horizon position, and each quantile level is a separate emitted series — so
+    // the token dimensions carry the work without inventing a timestep rate.
+    let emitted = result
+        .point
+        .len()
+        .saturating_add(result.quantiles.iter().map(|q| q.len()).sum::<usize>());
+    let units = tenzro_types::model::BillableUnits::tokens(
+        history_len.min(u32::MAX as usize) as u32,
+        emitted.min(u32::MAX as usize) as u32,
+    );
+    let cost_wei = record_modality_usage(
+        &node,
+        &request.model,
+        units.clone(),
+        (history_len * std::mem::size_of::<f32>()) as u64,
+        (emitted * std::mem::size_of::<f32>()) as u64,
+        result.generation_time_ms,
+    );
+
     let body = serde_json::json!({
-        "error": { "message": message, "type": "invalid_request_error" }
+        "object": "forecast",
+        "model": request.model,
+        "point": result.point,
+        "quantiles": result.quantiles,
+        "quantile_levels": result.quantile_levels,
+        "generation_time_ms": result.generation_time_ms,
+        "units": units_to_json(&units),
+        "cost_wei": cost_wei.to_string(),
     });
-    (status, Json(body)).into_response()
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Request body for `POST /v1/tenzro/detections`.
+#[derive(Debug, Deserialize)]
+struct TenzroDetectionRequest {
+    model: String,
+    image_base64: String,
+    /// Detections below this confidence are dropped. Matches the `tenzro_detect`
+    /// default.
+    #[serde(default)]
+    score_threshold: Option<f32>,
+}
+
+/// POST /v1/tenzro/detections — object detection over the loaded
+/// [`DetectionRuntime`].
+async fn handle_openai_detections(
+    State(node): State<Arc<TenzroNode>>,
+    Json(request): Json<TenzroDetectionRequest>,
+) -> Response {
+    let bytes = match decode_inline_image("image_base64", &request.image_base64) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+    let bytes_in = bytes.len() as u64;
+    let geometry = tenzro_model::image_dimensions(&bytes);
+    let result = match node
+        .detection_runtime
+        .detect(&request.model, bytes, request.score_threshold.unwrap_or(0.25))
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return modality_error_response(
+                &e,
+                &request.model,
+                "tenzro_loadDetectionModel",
+                "tenzro_listDetectionModels",
+                "detection",
+            );
+        }
+    };
+
+    // The encoder pass scales with geometry; what varies with the caller's
+    // threshold is how many detections survive, so the returned count is the
+    // emitted dimension.
+    let image_tokens = geometry
+        .map(|(w, h)| image_tokenization_for(&node, &request.model).image_tokens(w, h))
+        .unwrap_or(0);
+    let units = tenzro_types::model::BillableUnits::tokens(
+        0,
+        result.detections.len().min(u32::MAX as usize) as u32,
+    )
+    .with_image_tokens(image_tokens);
+
+    let body = serde_json::json!({
+        "object": "detection",
+        "model": request.model,
+        "detections": result.detections,
+        "generation_time_ms": result.generation_time_ms,
+    });
+    let cost_wei = record_modality_usage(
+        &node,
+        &request.model,
+        units.clone(),
+        bytes_in,
+        body.to_string().len() as u64,
+        result.generation_time_ms,
+    );
+    let mut body = body;
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("units".to_string(), units_to_json(&units));
+        obj.insert("cost_wei".to_string(), Value::String(cost_wei.to_string()));
+    }
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Request body for `POST /v1/tenzro/segmentations`.
+///
+/// The prompt fields select which of the two segmentation runtimes serves the
+/// request: `prompts` is the geometric SAM 1 / SAM 2 path, `text_prompt` is the
+/// open-vocabulary SAM 3 path. They are mutually exclusive rather than merged,
+/// because the two runtimes hold different models under different ids and a
+/// request naming one model cannot reach both.
+#[derive(Debug, Deserialize)]
+struct TenzroSegmentationRequest {
+    model: String,
+    image_base64: String,
+    /// Geometric prompts — points, point sets, or boxes.
+    #[serde(default)]
+    prompts: Option<Vec<SegmentPrompt>>,
+    /// Free-text label to segment, for the open-vocabulary runtime.
+    #[serde(default)]
+    text_prompt: Option<String>,
+    /// Normalized cxcywh box narrowing a `text_prompt`.
+    #[serde(default)]
+    box_prompt: Option<TextSegmentBoxPrompt>,
+    #[serde(default)]
+    score_threshold: Option<f32>,
+}
+
+/// POST /v1/tenzro/segmentations — promptable segmentation over either the
+/// geometric ([`SegmentationRuntime`]) or the open-vocabulary
+/// ([`TextSegmentationRuntime`]) path.
+///
+/// Masks travel base64-encoded. A 1024² mask as a JSON array of integers is
+/// roughly 3 MB of text for one artifact, and no vendor standard governs the
+/// noun, so nothing is lost by encoding it compactly.
+async fn handle_openai_segmentations(
+    State(node): State<Arc<TenzroNode>>,
+    Json(request): Json<TenzroSegmentationRequest>,
+) -> Response {
+    use base64::Engine as _;
+
+    match (request.prompts.is_some(), request.text_prompt.is_some()) {
+        (true, true) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                "'prompts' and 'text_prompt' name different runtimes holding different models — send one or the other",
+                "invalid_request_error",
+                "ambiguous_segmentation_prompt",
+            );
+        }
+        (false, false) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                "send 'prompts' for point or box segmentation, or 'text_prompt' for open-vocabulary segmentation",
+                "invalid_request_error",
+                "missing_segmentation_prompt",
+            );
+        }
+        _ => {}
+    }
+    if request.box_prompt.is_some() && request.text_prompt.is_none() {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'box_prompt' narrows a 'text_prompt' — a geometric box travels as an entry in 'prompts'",
+            "invalid_request_error",
+            "misplaced_box_prompt",
+        );
+    }
+
+    let bytes = match decode_inline_image("image_base64", &request.image_base64) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+    let bytes_in = bytes.len() as u64;
+    // Read before either runtime takes the bytes. Both resize to their own
+    // encoder input, and the caller is billed on the image they submitted.
+    let image_tokens = tenzro_model::image_dimensions(&bytes)
+        .map(|(w, h)| image_tokenization_for(&node, &request.model).image_tokens(w, h))
+        .unwrap_or(0);
+
+    if let Some(text_prompt) = request.text_prompt {
+        let config = TextSegmentConfig {
+            text_prompt,
+            box_prompt: request.box_prompt,
+            score_threshold: request.score_threshold.unwrap_or(0.5),
+        };
+        let result = match node
+            .text_segmentation_runtime
+            .segment_with_text(&request.model, bytes, config)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return modality_error_response(
+                    &e,
+                    &request.model,
+                    "tenzro_loadTextSegmentationModel",
+                    "tenzro_listTextSegmentationModels",
+                    "segmentation",
+                );
+            }
+        };
+        // The image encoder pass scales with geometry; the language pass is a
+        // fixed-length tokenizer window, so it belongs in the per-request floor
+        // rather than in units. What varies is how many instances the caller's
+        // phrase matched, which is the emitted dimension.
+        let units = tenzro_types::model::BillableUnits::tokens(
+            0,
+            result.segmentations.len().min(u32::MAX as usize) as u32,
+        )
+        .with_image_tokens(image_tokens);
+        let bytes_out: u64 = result.segmentations.iter().map(|s| s.mask.len() as u64).sum();
+        let segmentations: Vec<Value> = result
+            .segmentations
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "bbox": s.bbox,
+                    "score": s.score,
+                    "width": s.width,
+                    "height": s.height,
+                    "mask_base64": base64::engine::general_purpose::STANDARD.encode(&s.mask),
+                })
+            })
+            .collect();
+        let cost_wei = record_modality_usage(
+            &node,
+            &request.model,
+            units.clone(),
+            bytes_in,
+            bytes_out,
+            result.generation_time_ms,
+        );
+        let body = serde_json::json!({
+            "object": "segmentation",
+            "model": request.model,
+            "segmentations": segmentations,
+            "generation_time_ms": result.generation_time_ms,
+            "units": units_to_json(&units),
+            "cost_wei": cost_wei.to_string(),
+        });
+        return (StatusCode::OK, Json(body)).into_response();
+    }
+
+    let prompts = request.prompts.unwrap_or_default();
+    let prompt_count = prompts.len() as u32;
+    let result = match node
+        .segmentation_runtime
+        .segment(&request.model, bytes, prompts)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return modality_error_response(
+                &e,
+                &request.model,
+                "tenzro_loadSegmentationModel",
+                "tenzro_listSegmentationModels",
+                "segmentation",
+            );
+        }
+    };
+    // The encoder pass scales with geometry; each prompt then runs the decoder
+    // once more over the cached embedding.
+    let units = tenzro_types::model::BillableUnits::tokens(0, prompt_count.max(1))
+        .with_image_tokens(image_tokens);
+    let bytes_out: u64 = result.masks.iter().map(|m| m.mask.len() as u64).sum();
+    let masks: Vec<Value> = result
+        .masks
+        .into_iter()
+        .map(|m| {
+            serde_json::json!({
+                "width": m.width,
+                "height": m.height,
+                "score": m.score,
+                "mask_base64": base64::engine::general_purpose::STANDARD.encode(&m.mask),
+            })
+        })
+        .collect();
+    let cost_wei = record_modality_usage(
+        &node,
+        &request.model,
+        units.clone(),
+        bytes_in,
+        bytes_out,
+        result.generation_time_ms,
+    );
+    let body = serde_json::json!({
+        "object": "segmentation",
+        "model": request.model,
+        "masks": masks,
+        "generation_time_ms": result.generation_time_ms,
+        "units": units_to_json(&units),
+        "cost_wei": cost_wei.to_string(),
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Request body for `POST /v1/tenzro/video/embeddings`.
+///
+/// Separate from `/v1/embeddings` rather than another `input` part on it: a
+/// clip arrives as one artifact and returns one vector plus a frame count,
+/// where the vendor's embeddings shape returns a `data[]` list with no room to
+/// report how much of the clip was consumed.
+#[derive(Debug, Deserialize)]
+struct TenzroVideoEmbeddingsRequest {
+    model: String,
+    video_base64: String,
+    #[serde(default)]
+    normalize: Option<bool>,
+    #[serde(default)]
+    frame_stride: Option<u32>,
+}
+
+/// POST /v1/tenzro/video/embeddings — clip embedding over the loaded
+/// [`VideoRuntime`].
+async fn handle_openai_video_embeddings(
+    State(node): State<Arc<TenzroNode>>,
+    Json(request): Json<TenzroVideoEmbeddingsRequest>,
+) -> Response {
+    let bytes = match decode_inline_image("video_base64", &request.video_base64) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+    let bytes_in = bytes.len() as u64;
+    let cfg = VideoEmbedConfig {
+        normalize: request.normalize.unwrap_or(false),
+        frame_stride: request.frame_stride,
+    };
+    let result = match node.video_runtime.embed(&request.model, bytes, cfg).await {
+        Ok(r) => r,
+        Err(e) => {
+            return modality_error_response(
+                &e,
+                &request.model,
+                "tenzro_loadVideoModel",
+                "tenzro_listVideoModels",
+                "video_embedding",
+            );
+        }
+    };
+
+    // Decoding the source clip scales with its duration, embedding the sampled
+    // frames scales with how many were kept. A caller who uploads an hour and
+    // strides down to eight frames still paid for the hour of decode.
+    let units = tenzro_types::model::BillableUnits::default()
+        .with_video_ms(result.video_ms)
+        .with_frames(result.frames_consumed);
+    let cost_wei = record_modality_usage(
+        &node,
+        &request.model,
+        units.clone(),
+        bytes_in,
+        (result.embedding.len() * std::mem::size_of::<f32>()) as u64,
+        result.generation_time_ms,
+    );
+
+    let body = serde_json::json!({
+        "object": "video_embedding",
+        "model": request.model,
+        "embedding": result.embedding,
+        "dim": result.dim,
+        "frames_consumed": result.frames_consumed,
+        "generation_time_ms": result.generation_time_ms,
+        "units": units_to_json(&units),
+        "cost_wei": cost_wei.to_string(),
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Resolves the catalog entry a media-generation request names and holds it to
+/// the kind the route implies.
+///
+/// The kind comes from the route, never from the request: `/v1/images/edits`
+/// is image-to-image whatever the body says, and letting a field override that
+/// would let a caller reach a pipeline the route was not priced for.
+fn media_gen_entry_for(
+    model: &str,
+    kind: tenzro_types::MediaGenKind,
+) -> std::result::Result<tenzro_model::MediaGenModelEntry, Response> {
+    let Some(entry) = tenzro_model::get_media_gen_model_by_id(model) else {
+        return Err(json_error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "unknown model '{model}' — call tenzro_mediaGen_listCatalog for the served pipelines"
+            ),
+            "invalid_request_error",
+            "model_not_found",
+        ));
+    };
+    if !entry.kinds.contains(&kind) {
+        return Err(json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "model '{model}' does not serve {kind} (serves: {})",
+                entry
+                    .kinds
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "invalid_request_error",
+            "unsupported_media_kind",
+        ));
+    }
+    Ok(entry)
+}
+
+/// Reads a `WIDTHxHEIGHT` size string, falling back to the entry's reference
+/// resolution, and refuses a longest side the pipeline is not trained for.
+fn parse_media_size(
+    size: Option<&str>,
+    entry: &tenzro_model::MediaGenModelEntry,
+) -> std::result::Result<(u32, u32), Response> {
+    let (width, height) = match size {
+        None => (entry.default_width, entry.default_height),
+        Some(size) => {
+            let mut parts = size.split(['x', 'X']);
+            match (
+                parts.next().and_then(|s| s.trim().parse::<u32>().ok()),
+                parts.next().and_then(|s| s.trim().parse::<u32>().ok()),
+                parts.next(),
+            ) {
+                (Some(w), Some(h), None) => (w, h),
+                _ => {
+                    return Err(json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("could not read size '{size}' — expected WIDTHxHEIGHT"),
+                        "invalid_request_error",
+                        "invalid_size",
+                    ));
+                }
+            }
+        }
+    };
+    if width.max(height) > entry.max_resolution {
+        return Err(json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "{width}x{height} exceeds the longest side model '{}' is trained for ({})",
+                entry.id, entry.max_resolution
+            ),
+            "invalid_request_error",
+            "resolution_exceeded",
+        ));
+    }
+    Ok((width, height))
+}
+
+/// Reads the hex address a media-generation job's price is charged against.
+fn parse_requester_address(
+    address: &str,
+) -> std::result::Result<tenzro_types::primitives::Address, Response> {
+    tenzro_types::primitives::Address::from_hex(address).map_err(|e| {
+        json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("could not read requester_address: {e}"),
+            "invalid_request_error",
+            "invalid_requester_address",
+        )
+    })
+}
+
+/// Posts a media-generation job through the runtime that owns admission and
+/// pricing, then announces it on `tenzro/media-gen`.
+///
+/// Whether the job splits its denoising schedule across two experts is read
+/// from the catalog, never from the request — the same discipline
+/// `tenzro_mediaGen_postJob` applies. A gossip encode failure is logged rather
+/// than returned: the job is already admitted and a worker on this node can
+/// still claim it.
+async fn post_and_announce_media_gen(
+    node: &Arc<TenzroNode>,
+    spec: tenzro_types::MediaGenTaskSpec,
+) -> std::result::Result<tenzro_types::MediaGenJob, Response> {
+    let splits = tenzro_model::media_gen_model_splits(&spec.model_id);
+    let announce = spec.clone();
+    let job = match if splits {
+        node.media_gen_runtime.post_split_job(spec)
+    } else {
+        node.media_gen_runtime.post_job(spec)
+    } {
+        Ok(j) => j,
+        Err(e) => {
+            return Err(json_error_response(
+                StatusCode::BAD_REQUEST,
+                &e.to_string(),
+                "invalid_request_error",
+                "job_not_admitted",
+            ));
+        }
+    };
+
+    match tenzro_media_gen::encode_job_posted(&announce) {
+        Ok(bytes) => broadcast_media_gen(node, &job.job_id, bytes).await,
+        Err(e) => tracing::warn!(
+            job_id = %job.job_id,
+            error = %e,
+            "Failed to encode MediaGenTaskSpec for gossip"
+        ),
+    }
+    Ok(job)
+}
+
+/// Polls a posted job until it reaches a terminal status or `wait` seconds
+/// lapse.
+///
+/// A lapsed deadline is a 504 naming the `job_id`, not a 2xx: an OpenAI SDK
+/// client reads any 2xx as a finished artifact and would fail parsing a body
+/// that carries a job id instead. No work is abandoned — the caller polls
+/// `tenzro_mediaGen_getJob` and then `tenzro_mediaGen_fetchOutput`.
+async fn await_media_gen_terminal(
+    node: &Arc<TenzroNode>,
+    job_id: &str,
+    wait: u64,
+) -> std::result::Result<tenzro_types::MediaGenJob, Response> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    let interval = std::time::Duration::from_millis(IMAGES_POLL_INTERVAL_MS);
+
+    loop {
+        match node.media_gen_runtime.get_job(job_id) {
+            Some(current) => match current.status {
+                tenzro_types::MediaGenStatus::Completed => return Ok(current),
+                tenzro_types::MediaGenStatus::Failed
+                | tenzro_types::MediaGenStatus::Cancelled => {
+                    return Err(json_error_response(
+                        StatusCode::BAD_GATEWAY,
+                        &format!(
+                            "job {job_id} ended {}{}",
+                            current.status,
+                            current
+                                .error
+                                .as_deref()
+                                .map(|e| format!(": {e}"))
+                                .unwrap_or_default()
+                        ),
+                        "server_error",
+                        "job_failed",
+                    ));
+                }
+                _ => {}
+            },
+            None => {
+                return Err(json_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("job {job_id} left the queue before completing"),
+                    "server_error",
+                    "job_vanished",
+                ));
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(json_error_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                &format!(
+                    "job {job_id} is still {} after {wait}s — poll tenzro_mediaGen_getJob and then tenzro_mediaGen_fetchOutput; the render is not abandoned",
+                    node.media_gen_runtime
+                        .get_job(job_id)
+                        .map(|j| j.status.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ),
+                "server_error",
+                "render_timeout",
+            ));
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Pulls the rendered bytes a completed job's receipt points at.
+async fn fetch_media_gen_output(
+    node: &Arc<TenzroNode>,
+    job: &tenzro_types::MediaGenJob,
+) -> std::result::Result<(tenzro_types::MediaGenReceipt, bytes::Bytes), Response> {
+    let Some(receipt) = job.receipt.clone() else {
+        return Err(json_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("job {} completed without a receipt", job.job_id),
+            "server_error",
+            "receipt_missing",
+        ));
+    };
+    match node.media_gen_runtime.fetch_output(&receipt).await {
+        Ok(b) => Ok((receipt, b)),
+        Err(e) => Err(json_error_response(
+            StatusCode::BAD_GATEWAY,
+            &format!("could not fetch the output of job {}: {e}", job.job_id),
+            "server_error",
+            "output_unreachable",
+        )),
+    }
+}
+
+/// Publishes caller-supplied bytes into the content-addressed media store so a
+/// job can name them as its `input_image_hash`.
+async fn publish_media_gen_input(
+    node: &Arc<TenzroNode>,
+    bytes: Vec<u8>,
+) -> std::result::Result<tenzro_types::primitives::Hash, Response> {
+    let Some(store) = node.media_gen_output_store.as_ref() else {
+        return Err(json_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this node has no media store bound, so an input image cannot be published for a worker to read",
+            "server_error",
+            "media_store_unbound",
+        ));
+    };
+    tenzro_media_gen::MediaGenOutputStore::publish(store.as_ref(), bytes::Bytes::from(bytes))
+        .await
+        .map_err(|e| {
+            json_error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("could not publish the input image: {e}"),
+                "server_error",
+                "input_publish_failed",
+            )
+        })
+}
+
+/// OpenAI-compatible request body for `/v1/images/generations`.
+///
+/// `model` is required, unlike OpenAI's optional default: this node serves
+/// whatever generative-media pipelines its operators enrolled workers for, so
+/// there is no single model to fall back to.
+///
+/// `requester_did` / `requester_address` are Tenzro extensions and required.
+/// The media-generation queue binds every job to the identity that posted it —
+/// that identity owns the price ceiling, is the only party that can cancel the
+/// job, and is who settlement charges. Nothing on an HTTP request carries an
+/// authenticated Tenzro principal (the payment gate verifies a credential but
+/// does not export the payer), and substituting the node's own address would
+/// bill the operator for a stranger's render and leave the requester unable to
+/// cancel it.
+#[derive(Debug, Deserialize)]
+struct OpenAIImagesRequest {
+    model: String,
+    prompt: String,
+    #[serde(default)]
+    n: Option<u32>,
+    #[serde(default)]
+    size: Option<String>,
+    #[serde(default)]
+    response_format: Option<String>,
+    #[serde(default)]
+    quality: Option<String>,
+    #[serde(default)]
+    style: Option<String>,
+    #[serde(default)]
+    user: Option<String>,
+    /// Tenzro extension: DID of the identity the job is posted under.
+    requester_did: String,
+    /// Tenzro extension: address the job's price is charged against.
+    requester_address: String,
+    /// Tenzro extension: price ceiling in attoTNZO. Defaults to this node's
+    /// own quote for the resolved parameters, which is exactly the figure
+    /// admission compares against.
+    #[serde(default)]
+    max_price: Option<String>,
+    /// Tenzro extension: negative prompt, for pipelines that take one.
+    #[serde(default)]
+    negative_prompt: Option<String>,
+    /// Tenzro extension: denoising steps. Defaults to the catalog entry's
+    /// reference figure.
+    #[serde(default)]
+    steps: Option<u32>,
+    /// Tenzro extension: classifier-free guidance scale. Defaults to the
+    /// catalog entry's reference figure.
+    #[serde(default)]
+    guidance_scale: Option<f32>,
+    /// Tenzro extension: deterministic seed. Left unset, the worker picks one
+    /// and reports it back on the receipt.
+    #[serde(default)]
+    seed: Option<u64>,
+    /// Tenzro extension: how long to wait for a worker to finish before
+    /// returning the job id for polling. Capped at
+    /// [`IMAGES_MAX_WAIT_SECONDS`].
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+}
+
+/// Longest a synchronous `/v1/images/generations` call will hold a connection
+/// open waiting for a worker. A render that outruns this returns the job id so
+/// the caller can poll `tenzro_mediaGen_getJob`.
+const IMAGES_MAX_WAIT_SECONDS: u64 = 300;
+
+/// How often the images route re-reads the job status while waiting.
+const IMAGES_POLL_INTERVAL_MS: u64 = 250;
+
+/// POST /v1/images/generations — OpenAI-compatible image generation over the
+/// media-generation job queue.
+///
+/// The queue is asynchronous: this route posts a job, announces it on
+/// `tenzro/media-gen`, waits for a worker to carry it to a terminal status
+/// under a bounded deadline, then fetches the rendered bytes and returns them
+/// base64-encoded. It does not reimplement any part of admission, pricing, or
+/// provenance — the runtime that owns those is the same one
+/// `tenzro_mediaGen_postJob` calls.
+///
+/// `job_id` is left empty on the posted spec because the runtime derives it
+/// from the spec contents and rejects a caller-supplied id that does not bind
+/// them. Whether the job splits its denoising schedule across two experts is
+/// read from the catalog, never from the request, for the same reason
+/// `tenzro_mediaGen_postJob` does it that way.
+///
+/// If the deadline lapses first the response is a 504 naming the `job_id`, so
+/// no work is abandoned — the caller polls `tenzro_mediaGen_getJob` and then
+/// `tenzro_mediaGen_fetchOutput`. A 2xx would be the wrong signal there: an
+/// OpenAI SDK client reads any 2xx as a rendered image and would fail parsing
+/// a body that carries a job id instead of `data[]`.
+async fn handle_openai_images_generations(
+    State(node): State<Arc<TenzroNode>>,
+    Json(request): Json<OpenAIImagesRequest>,
+) -> Response {
+    use base64::Engine as _;
+
+    if let Some(n) = request.n
+        && n != 1
+    {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("n={n} is not served — one job renders one artifact; post {n} requests"),
+            "invalid_request_error",
+            "unsupported_n",
+        );
+    }
+    if let Some(fmt) = request.response_format.as_deref()
+        && !fmt.eq_ignore_ascii_case("b64_json")
+    {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "unsupported response_format '{fmt}' — rendered bytes live in the content-addressed media store, not behind a hosted URL, so only 'b64_json' is served"
+            ),
+            "invalid_request_error",
+            "unsupported_response_format",
+        );
+    }
+    for (field, present) in [
+        ("quality", request.quality.is_some()),
+        ("style", request.style.is_some()),
+        ("user", request.user.is_some()),
+    ] {
+        if present {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "'{field}' is not served — the diffusion pipelines take no such control; use 'steps' and 'guidance_scale'"
+                ),
+                "invalid_request_error",
+                "unsupported_image_control",
+            );
+        }
+    }
+
+    let entry = match media_gen_entry_for(&request.model, tenzro_types::MediaGenKind::Text2Image) {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
+    let (width, height) = match parse_media_size(request.size.as_deref(), &entry) {
+        Ok(wh) => wh,
+        Err(resp) => return resp,
+    };
+    let requester_address = match parse_requester_address(&request.requester_address) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+
+    let params = tenzro_types::MediaGenParams {
+        prompt: request.prompt,
+        negative_prompt: request.negative_prompt,
+        width,
+        height,
+        num_frames: None,
+        fps: None,
+        steps: request.steps.unwrap_or(entry.default_steps),
+        guidance_scale: request
+            .guidance_scale
+            .unwrap_or(entry.default_guidance_scale),
+        seed: request.seed,
+        input_image_hash: None,
+        metadata: std::collections::HashMap::new(),
+    };
+
+    let max_price = match parse_max_price(request.max_price.as_deref()) {
+        Ok(v) => v.unwrap_or_else(|| {
+            node.media_gen_runtime
+                .pricing()
+                .quote(tenzro_types::MediaGenKind::Text2Image, &params)
+        }),
+        Err(resp) => return resp,
+    };
+
+    let spec = tenzro_types::MediaGenTaskSpec {
+        job_id: String::new(),
+        requester_did: request.requester_did,
+        requester_address,
+        model_id: request.model.clone(),
+        kind: tenzro_types::MediaGenKind::Text2Image,
+        params,
+        max_price,
+        created_at: tenzro_types::primitives::Timestamp::now(),
+        metadata: std::collections::HashMap::new(),
+    };
+
+    let job = match post_and_announce_media_gen(&node, spec).await {
+        Ok(j) => j,
+        Err(resp) => return resp,
+    };
+
+    let wait = request
+        .wait_seconds
+        .unwrap_or(IMAGES_MAX_WAIT_SECONDS)
+        .min(IMAGES_MAX_WAIT_SECONDS);
+    let terminal = match await_media_gen_terminal(&node, &job.job_id, wait).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let (receipt, bytes) = match fetch_media_gen_output(&node, &terminal).await {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
+
+    let body = serde_json::json!({
+        "created": receipt.completed_at.as_secs(),
+        "data": [{
+            "b64_json": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "revised_prompt": Value::Null,
+        }],
+        "tenzro": {
+            "job_id": job.job_id,
+            "model": request.model,
+            "output_mime": receipt.output_mime,
+            "output_hash": receipt.output_hash.to_string(),
+            "seed_used": receipt.seed_used,
+            "worker_did": receipt.worker_did,
+            "generation_time_ms": receipt.generation_time_ms,
+            "price_paid": receipt.price_paid.to_string(),
+            "units": units_to_json(&media_gen_units(&receipt)),
+        },
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Text and file parts read off a `multipart/form-data` media-generation
+/// request.
+///
+/// Both `/v1/images/edits` and `/v1/videos` are multipart in the vendor
+/// specification, because each carries a reference image alongside its text
+/// fields, so the part-reading loop is shared rather than written twice.
+struct MediaGenForm {
+    text: std::collections::HashMap<String, String>,
+    files: std::collections::HashMap<String, Vec<u8>>,
+}
+
+/// Reads a multipart body, sorting parts named in `file_fields` into
+/// [`MediaGenForm::files`] and parts named in `text_fields` into
+/// [`MediaGenForm::text`].
+///
+/// A part under any other name is refused rather than dropped, so a caller is
+/// never billed for a render that ignored an instruction it was given.
+async fn read_media_gen_form(
+    mut multipart: axum::extract::Multipart,
+    file_fields: &[&str],
+    text_fields: &[&str],
+) -> std::result::Result<MediaGenForm, Response> {
+    let mut form = MediaGenForm {
+        text: std::collections::HashMap::new(),
+        files: std::collections::HashMap::new(),
+    };
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                return Err(json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("malformed multipart body: {e}"),
+                    "invalid_request_error",
+                    "malformed_multipart",
+                ));
+            }
+        };
+        let Some(name) = field.name().map(|s| s.to_string()) else {
+            continue;
+        };
+        if file_fields.contains(&name.as_str()) {
+            match field.bytes().await {
+                Ok(b) => {
+                    form.files.insert(name, b.to_vec());
+                }
+                Err(e) => {
+                    return Err(json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("could not read the '{name}' part: {e}"),
+                        "invalid_request_error",
+                        "unreadable_form_field",
+                    ));
+                }
+            }
+        } else if text_fields.contains(&name.as_str()) {
+            match field.text().await {
+                Ok(v) => {
+                    form.text.insert(name, v);
+                }
+                Err(e) => {
+                    return Err(json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("could not read the '{name}' part: {e}"),
+                        "invalid_request_error",
+                        "unreadable_form_field",
+                    ));
+                }
+            }
+        } else {
+            return Err(json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("unknown form field '{name}'"),
+                "invalid_request_error",
+                "unknown_form_field",
+            ));
+        }
+    }
+    Ok(form)
+}
+
+impl MediaGenForm {
+    /// The first non-empty file part among `names`. The vendor SDKs spell a
+    /// single reference image `image`, `image[]`, or `images[]` depending on
+    /// version, and all three mean the same part here.
+    fn file_under(&self, names: &[&str]) -> Option<&Vec<u8>> {
+        names
+            .iter()
+            .find_map(|n| self.files.get(*n))
+            .filter(|b| !b.is_empty())
+    }
+
+    /// A trimmed text part, treating an empty part as absent.
+    fn text_of(&self, name: &str) -> Option<&str> {
+        self.text
+            .get(name)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// A text part parsed as a number.
+    fn number<T: std::str::FromStr>(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Option<T>, Response> {
+        match self.text_of(name) {
+            None => Ok(None),
+            Some(v) => v.parse::<T>().map(Some).map_err(|_| {
+                json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("'{name}' must be a number, got '{v}'"),
+                    "invalid_request_error",
+                    "invalid_number",
+                )
+            }),
+        }
+    }
+
+    /// Refuses the first present field among `fields`, naming it and the reason
+    /// the pipelines have no control for it.
+    fn refuse_unsupported(&self, fields: &[(&str, &str)]) -> Option<Response> {
+        fields
+            .iter()
+            .find(|(n, _)| self.text_of(n).is_some() || self.files.contains_key(*n))
+            .map(|(n, why)| {
+                json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("'{n}' is not served — {why}"),
+                    "invalid_request_error",
+                    "unsupported_media_control",
+                )
+            })
+    }
+
+    /// Reads the `requester_did` / `requester_address` extensions the
+    /// media-generation queue binds every job to.
+    fn requester(&self) -> std::result::Result<(String, Address), Response> {
+        let Some(did) = self.text_of("requester_did") else {
+            return Err(json_error_response(
+                StatusCode::BAD_REQUEST,
+                "'requester_did' is required — the queue binds every job to the identity that posted it, which owns the price ceiling and is the only party that can cancel it",
+                "invalid_request_error",
+                "missing_requester_did",
+            ));
+        };
+        let Some(address) = self.text_of("requester_address") else {
+            return Err(json_error_response(
+                StatusCode::BAD_REQUEST,
+                "'requester_address' is required — it is the address the job's price is charged against",
+                "invalid_request_error",
+                "missing_requester_address",
+            ));
+        };
+        Ok((did.to_string(), parse_requester_address(address)?))
+    }
+
+    /// A `size` part, mapping the vendor's `auto` onto the catalog entry's
+    /// reference resolution.
+    fn media_size(&self) -> Option<&str> {
+        self.text_of("size")
+            .filter(|s| !s.eq_ignore_ascii_case("auto"))
+    }
+}
+
+/// Reads an optional price ceiling in attoTNZO.
+fn parse_max_price(raw: Option<&str>) -> std::result::Result<Option<u128>, Response> {
+    match raw {
+        None => Ok(None),
+        Some(s) => s.trim().parse::<u128>().map(Some).map_err(|_| {
+            json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("could not read max_price '{s}' — expected a decimal attoTNZO amount"),
+                "invalid_request_error",
+                "invalid_max_price",
+            )
+        }),
+    }
+}
+
+/// POST /v1/images/edits — OpenAI-compatible image-to-image over the
+/// media-generation job queue.
+///
+/// `multipart/form-data`, matching the vendor shape so an unmodified OpenAI SDK
+/// client reaches the diffusion pipelines. The reference image is published
+/// into the content-addressed media store before the job is posted and the job
+/// names it by hash, so a worker on another node fetches the bytes from the
+/// store rather than carrying them through gossip.
+///
+/// The kind is `Image2Image` because that is what this route serves; no field
+/// can move it, for the reason [`media_gen_entry_for`] documents.
+///
+/// `mask` is refused rather than ignored. Inpainting is a distinct pipeline
+/// call, and a masked request served as a whole-frame edit would return a
+/// plausible image that answered a different question.
+async fn handle_openai_images_edits(
+    State(node): State<Arc<TenzroNode>>,
+    multipart: axum::extract::Multipart,
+) -> Response {
+    use base64::Engine as _;
+
+    let form = match read_media_gen_form(
+        multipart,
+        &["image", "image[]", "images[]", "mask"],
+        &[
+            "prompt",
+            "model",
+            "n",
+            "size",
+            "response_format",
+            "quality",
+            "style",
+            "user",
+            "background",
+            "input_fidelity",
+            "output_format",
+            "output_compression",
+            "stream",
+            "partial_images",
+            "requester_did",
+            "requester_address",
+            "max_price",
+            "negative_prompt",
+            "steps",
+            "guidance_scale",
+            "seed",
+            "strength",
+            "wait_seconds",
+        ],
+    )
+    .await
+    {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+
+    if let Some(resp) = form.refuse_unsupported(&[
+        (
+            "mask",
+            "inpainting is a separate pipeline call, and serving a masked request as a whole-frame edit would answer a different question than the one asked",
+        ),
+        (
+            "background",
+            "the diffusion pipelines render opaque frames and have no alpha channel to make transparent",
+        ),
+        (
+            "input_fidelity",
+            "use 'strength' to set how far the edit may travel from the reference image",
+        ),
+        (
+            "output_format",
+            "the pipeline picks the container and reports it as output_mime on the receipt",
+        ),
+        (
+            "output_compression",
+            "the pipeline picks the container and its encoding settings",
+        ),
+        (
+            "stream",
+            "the queue reports a terminal receipt, not partial denoising steps",
+        ),
+        (
+            "partial_images",
+            "the queue reports a terminal receipt, not partial denoising steps",
+        ),
+        (
+            "quality",
+            "the diffusion pipelines take no such control; use 'steps' and 'guidance_scale'",
+        ),
+        (
+            "style",
+            "the diffusion pipelines take no such control; put the direction in the prompt",
+        ),
+        (
+            "user",
+            "the job is bound to 'requester_did', which is an authenticated identity rather than a free-form label",
+        ),
+    ]) {
+        return resp;
+    }
+
+    match form.number::<u32>("n") {
+        Ok(Some(n)) if n != 1 => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("n={n} is not served — one job renders one artifact; post {n} requests"),
+                "invalid_request_error",
+                "unsupported_n",
+            );
+        }
+        Ok(_) => {}
+        Err(resp) => return resp,
+    }
+    if let Some(fmt) = form.text_of("response_format")
+        && !fmt.eq_ignore_ascii_case("b64_json")
+    {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "unsupported response_format '{fmt}' — rendered bytes live in the content-addressed media store, not behind a hosted URL, so only 'b64_json' is served"
+            ),
+            "invalid_request_error",
+            "unsupported_response_format",
+        );
+    }
+
+    let Some(reference) = form.file_under(&["image", "image[]", "images[]"]) else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'image' is required and must carry bytes — an edit needs a frame to edit",
+            "invalid_request_error",
+            "missing_image",
+        );
+    };
+    let Some(prompt) = form.text_of("prompt") else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'prompt' is required",
+            "invalid_request_error",
+            "missing_prompt",
+        );
+    };
+    let Some(model) = form.text_of("model") else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'model' is required — this node serves whatever generative-media pipelines its operators enrolled workers for, so there is no default to fall back to",
+            "invalid_request_error",
+            "missing_model",
+        );
+    };
+    let model = model.to_string();
+
+    let entry = match media_gen_entry_for(&model, tenzro_types::MediaGenKind::Image2Image) {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
+    let (width, height) = match parse_media_size(form.media_size(), &entry) {
+        Ok(wh) => wh,
+        Err(resp) => return resp,
+    };
+    let (requester_did, requester_address) = match form.requester() {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let steps = match form.number::<u32>("steps") {
+        Ok(v) => v.unwrap_or(entry.default_steps),
+        Err(resp) => return resp,
+    };
+    let guidance_scale = match form.number::<f32>("guidance_scale") {
+        Ok(v) => v.unwrap_or(entry.default_guidance_scale),
+        Err(resp) => return resp,
+    };
+    let seed = match form.number::<u64>("seed") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let strength = match form.number::<f32>("strength") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let max_price = match parse_max_price(form.text_of("max_price")) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let wait = match form.number::<u64>("wait_seconds") {
+        Ok(v) => v.unwrap_or(IMAGES_MAX_WAIT_SECONDS).min(IMAGES_MAX_WAIT_SECONDS),
+        Err(resp) => return resp,
+    };
+
+    let input_image_hash = match publish_media_gen_input(&node, reference.clone()).await {
+        Ok(h) => h,
+        Err(resp) => return resp,
+    };
+
+    let mut metadata = std::collections::HashMap::new();
+    if let Some(strength) = strength {
+        metadata.insert("strength".to_string(), Value::from(strength));
+    }
+    let params = tenzro_types::MediaGenParams {
+        prompt: prompt.to_string(),
+        negative_prompt: form.text_of("negative_prompt").map(|s| s.to_string()),
+        width,
+        height,
+        num_frames: None,
+        fps: None,
+        steps,
+        guidance_scale,
+        seed,
+        input_image_hash: Some(input_image_hash),
+        metadata,
+    };
+    let max_price = max_price.unwrap_or_else(|| {
+        node.media_gen_runtime
+            .pricing()
+            .quote(tenzro_types::MediaGenKind::Image2Image, &params)
+    });
+
+    let spec = tenzro_types::MediaGenTaskSpec {
+        job_id: String::new(),
+        requester_did,
+        requester_address,
+        model_id: model.clone(),
+        kind: tenzro_types::MediaGenKind::Image2Image,
+        params,
+        max_price,
+        created_at: tenzro_types::primitives::Timestamp::now(),
+        metadata: std::collections::HashMap::new(),
+    };
+
+    let job = match post_and_announce_media_gen(&node, spec).await {
+        Ok(j) => j,
+        Err(resp) => return resp,
+    };
+    let terminal = match await_media_gen_terminal(&node, &job.job_id, wait).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let (receipt, bytes) = match fetch_media_gen_output(&node, &terminal).await {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
+
+    let body = serde_json::json!({
+        "created": receipt.completed_at.as_secs(),
+        "data": [{
+            "b64_json": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "revised_prompt": Value::Null,
+        }],
+        "tenzro": {
+            "job_id": job.job_id,
+            "model": model,
+            "input_image_hash": input_image_hash.to_string(),
+            "output_mime": receipt.output_mime,
+            "output_hash": receipt.output_hash.to_string(),
+            "seed_used": receipt.seed_used,
+            "worker_did": receipt.worker_did,
+            "generation_time_ms": receipt.generation_time_ms,
+            "price_paid": receipt.price_paid.to_string(),
+            "units": units_to_json(&media_gen_units(&receipt)),
+        },
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Projects a media-generation job onto the vendor's video-resource shape.
+///
+/// `progress` is a checkpoint count rather than an interpolation. A worker
+/// reports claiming a job, starting it, publishing the intermediate latent of a
+/// split schedule, and finishing — and nothing between those points — so the
+/// figure steps instead of climbing.
+///
+/// `expires_at` is omitted rather than guessed: the rendered bytes live in the
+/// content-addressed media store under their own hash and are not swept on a
+/// clock, so there is no expiry instant to report.
+fn video_resource_body(job: &tenzro_types::MediaGenJob) -> Value {
+    use tenzro_types::MediaGenStatus as Status;
+
+    let status = match job.status {
+        Status::Pending | Status::Claimed => "queued",
+        Status::Running => "in_progress",
+        Status::Completed => "completed",
+        Status::Failed | Status::Cancelled => "failed",
+    };
+    let progress = match job.status {
+        Status::Pending | Status::Claimed => 0,
+        Status::Running if !job.is_split() => 50,
+        Status::Running if job.handoff.is_some() => 75,
+        Status::Running => 25,
+        Status::Completed => 100,
+        Status::Failed | Status::Cancelled => 0,
+    };
+
+    let params = &job.task_spec.params;
+    let seconds = match (params.num_frames, params.fps) {
+        (Some(frames), Some(fps)) if fps > 0 => {
+            Value::from((f64::from(frames) / f64::from(fps)).to_string())
+        }
+        _ => Value::Null,
+    };
+
+    let mut body = serde_json::json!({
+        "id": job.job_id,
+        "object": "video",
+        "model": job.task_spec.model_id,
+        "status": status,
+        "progress": progress,
+        "created_at": job.created_at.as_secs(),
+        "prompt": params.prompt,
+        "size": format!("{}x{}", params.width, params.height),
+        "seconds": seconds,
+        "tenzro": {
+            "job_id": job.job_id,
+            "kind": job.task_spec.kind.to_string(),
+            "split": job.is_split(),
+            "last_update": job.last_update.as_secs(),
+            "max_price": job.task_spec.max_price.to_string(),
+        },
+    });
+
+    if let Some(receipt) = job.receipt.as_ref() {
+        body["completed_at"] = Value::from(receipt.completed_at.as_secs());
+        body["tenzro"]["output_mime"] = Value::from(receipt.output_mime.clone());
+        body["tenzro"]["output_hash"] = Value::from(receipt.output_hash.to_string());
+        body["tenzro"]["output_bytes"] = Value::from(receipt.output_bytes);
+        body["tenzro"]["seed_used"] = Value::from(receipt.seed_used);
+        body["tenzro"]["worker_did"] = Value::from(receipt.worker_did.clone());
+        body["tenzro"]["generation_time_ms"] = Value::from(receipt.generation_time_ms);
+        body["tenzro"]["price_paid"] = Value::from(receipt.price_paid.to_string());
+        body["tenzro"]["units"] = units_to_json(&media_gen_units(receipt));
+    }
+    if let Some(error) = job.error.as_deref() {
+        body["error"] = serde_json::json!({
+            "code": "generation_failed",
+            "message": error,
+        });
+    }
+    body
+}
+
+/// POST /v1/videos — OpenAI-compatible video generation over the
+/// media-generation job queue.
+///
+/// `multipart/form-data`, matching the vendor shape. Unlike image generation,
+/// the vendor's video surface is a job resource: this route returns the queued
+/// job immediately and the caller polls `GET /v1/videos/{video_id}`, then
+/// collects the clip from `GET /v1/videos/{video_id}/content`. A render that
+/// takes minutes has no business holding a connection open for them.
+///
+/// The route fixes the family, and the presence of an `input_reference` part
+/// selects within it: a reference frame makes the job `Image2Video`, its
+/// absence `Text2Video`. No field names the kind directly, so a caller cannot
+/// reach a pipeline the route was not priced for.
+///
+/// `seconds` is converted to a frame count against the pipeline's frame rate,
+/// because that is what a diffusion schedule is denominated in.
+async fn handle_openai_videos_create(
+    State(node): State<Arc<TenzroNode>>,
+    multipart: axum::extract::Multipart,
+) -> Response {
+    let form = match read_media_gen_form(
+        multipart,
+        &["input_reference"],
+        &[
+            "prompt",
+            "model",
+            "seconds",
+            "size",
+            "user",
+            "requester_did",
+            "requester_address",
+            "max_price",
+            "negative_prompt",
+            "steps",
+            "guidance_scale",
+            "seed",
+            "fps",
+        ],
+    )
+    .await
+    {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+
+    if let Some(resp) = form.refuse_unsupported(&[(
+        "user",
+        "the job is bound to 'requester_did', which is an authenticated identity rather than a free-form label",
+    )]) {
+        return resp;
+    }
+
+    let reference = form.file_under(&["input_reference"]).cloned();
+    let kind = if reference.is_some() {
+        tenzro_types::MediaGenKind::Image2Video
+    } else {
+        tenzro_types::MediaGenKind::Text2Video
+    };
+
+    let Some(prompt) = form.text_of("prompt") else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'prompt' is required",
+            "invalid_request_error",
+            "missing_prompt",
+        );
+    };
+    let Some(model) = form.text_of("model") else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'model' is required — this node serves whatever generative-media pipelines its operators enrolled workers for, so there is no default to fall back to",
+            "invalid_request_error",
+            "missing_model",
+        );
+    };
+    let model = model.to_string();
+
+    let entry = match media_gen_entry_for(&model, kind) {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
+    let (width, height) = match parse_media_size(form.media_size(), &entry) {
+        Ok(wh) => wh,
+        Err(resp) => return resp,
+    };
+    let (requester_did, requester_address) = match form.requester() {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    let fps = match form.number::<u32>("fps") {
+        Ok(Some(v)) => v,
+        Ok(None) => match entry.default_fps {
+            Some(v) => v,
+            None => {
+                return json_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!(
+                        "catalog entry '{model}' serves {kind} but declares no frame rate, so a duration cannot be converted to frames"
+                    ),
+                    "server_error",
+                    "catalog_entry_incomplete",
+                );
+            }
+        },
+        Err(resp) => return resp,
+    };
+    if fps == 0 {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "'fps' must be greater than zero",
+            "invalid_request_error",
+            "invalid_fps",
+        );
+    }
+    let num_frames = match form.number::<f64>("seconds") {
+        Ok(Some(seconds)) => {
+            if !seconds.is_finite() || seconds <= 0.0 {
+                return json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "'seconds' must be greater than zero",
+                    "invalid_request_error",
+                    "invalid_seconds",
+                );
+            }
+            (seconds * f64::from(fps)).round().max(1.0) as u32
+        }
+        Ok(None) => match entry.default_num_frames {
+            Some(v) => v,
+            None => {
+                return json_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!(
+                        "catalog entry '{model}' serves {kind} but declares no frame count, so a default duration cannot be resolved"
+                    ),
+                    "server_error",
+                    "catalog_entry_incomplete",
+                );
+            }
+        },
+        Err(resp) => return resp,
+    };
+
+    let steps = match form.number::<u32>("steps") {
+        Ok(v) => v.unwrap_or(entry.default_steps),
+        Err(resp) => return resp,
+    };
+    let guidance_scale = match form.number::<f32>("guidance_scale") {
+        Ok(v) => v.unwrap_or(entry.default_guidance_scale),
+        Err(resp) => return resp,
+    };
+    let seed = match form.number::<u64>("seed") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let max_price = match parse_max_price(form.text_of("max_price")) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    let input_image_hash = match reference {
+        Some(bytes) => match publish_media_gen_input(&node, bytes).await {
+            Ok(h) => Some(h),
+            Err(resp) => return resp,
+        },
+        None => None,
+    };
+
+    let params = tenzro_types::MediaGenParams {
+        prompt: prompt.to_string(),
+        negative_prompt: form.text_of("negative_prompt").map(|s| s.to_string()),
+        width,
+        height,
+        num_frames: Some(num_frames),
+        fps: Some(fps),
+        steps,
+        guidance_scale,
+        seed,
+        input_image_hash,
+        metadata: std::collections::HashMap::new(),
+    };
+    let max_price = max_price
+        .unwrap_or_else(|| node.media_gen_runtime.pricing().quote(kind, &params));
+
+    let spec = tenzro_types::MediaGenTaskSpec {
+        job_id: String::new(),
+        requester_did,
+        requester_address,
+        model_id: model,
+        kind,
+        params,
+        max_price,
+        created_at: tenzro_types::primitives::Timestamp::now(),
+        metadata: std::collections::HashMap::new(),
+    };
+
+    match post_and_announce_media_gen(&node, spec).await {
+        Ok(job) => (StatusCode::OK, Json(video_resource_body(&job))).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+/// GET /v1/videos/:video_id — read a video job's status.
+async fn handle_openai_videos_get(
+    State(node): State<Arc<TenzroNode>>,
+    Path(video_id): Path<String>,
+) -> Response {
+    match node.media_gen_runtime.get_job(&video_id) {
+        Some(job) => (StatusCode::OK, Json(video_resource_body(&job))).into_response(),
+        None => json_error_response(
+            StatusCode::NOT_FOUND,
+            &format!("no video job '{video_id}' on this node"),
+            "invalid_request_error",
+            "video_not_found",
+        ),
+    }
+}
+
+/// GET /v1/videos/:video_id/content — collect a finished clip's bytes.
+///
+/// A job that has not completed is a 409 rather than an empty 200: an SDK
+/// client writes any 2xx body straight to a file, and a zero-length clip is
+/// harder to diagnose than a status code naming what to poll.
+async fn handle_openai_videos_content(
+    State(node): State<Arc<TenzroNode>>,
+    Path(video_id): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Some(variant) = query
+        .get("variant")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        && !variant.eq_ignore_ascii_case("video")
+    {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "variant '{variant}' is not served — the pipelines render the clip itself, with no thumbnail or spritesheet derivative"
+            ),
+            "invalid_request_error",
+            "unsupported_variant",
+        );
+    }
+
+    let Some(job) = node.media_gen_runtime.get_job(&video_id) else {
+        return json_error_response(
+            StatusCode::NOT_FOUND,
+            &format!("no video job '{video_id}' on this node"),
+            "invalid_request_error",
+            "video_not_found",
+        );
+    };
+    if job.status != tenzro_types::MediaGenStatus::Completed {
+        return json_error_response(
+            StatusCode::CONFLICT,
+            &format!(
+                "job {} is {} — poll GET /v1/videos/{} until it reports completed",
+                job.job_id, job.status, job.job_id
+            ),
+            "invalid_request_error",
+            "video_not_ready",
+        );
+    }
+
+    let (receipt, bytes) = match fetch_media_gen_output(&node, &job).await {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
+
+    let extension = receipt
+        .output_mime
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("bin")
+        .to_string();
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = receipt.output_mime.parse() {
+        headers.insert(axum::http::header::CONTENT_TYPE, value);
+    }
+    // The filename comes from the runtime's own job id, which is a lowercase
+    // hex digest, rather than from the path segment the caller sent — so it
+    // cannot carry a header separator.
+    if let Ok(value) = format!("attachment; filename=\"{}.{extension}\"", job.job_id).parse() {
+        headers.insert(axum::http::header::CONTENT_DISPOSITION, value);
+    }
+    (StatusCode::OK, headers, bytes).into_response()
 }
 
 /// POST /v1/chat/completions — OpenAI-compatible chat completions with SSE streaming
@@ -29660,21 +34127,38 @@ fn openai_error_response(status: StatusCode, message: &str) -> Response {
 /// Resolve a continuation target for deterministic re-prefill failover: a
 /// provider serving `model_query` that is not `exclude` (the provider that just
 /// dropped). Prefers a registered local model service, then a network-announced
-/// provider. Returns `(chat_completions_url, provider_address)` or `None` when
-/// no alternate provider serves the model.
+/// provider. Returns `(chat_completions_url, provider_address, offer_pricing)`
+/// or `None` when no alternate provider serves the model. The continuation
+/// provider's own announced offer travels back with it so the span it serves is
+/// billed at the price *it* advertised, not the price the dropped provider did.
+///
+/// `prefs` narrows the candidate set to what the caller's provider pin admits.
+/// The caller's fallback *model* list deliberately does not reach here: the
+/// continuation replays the already-emitted prefix as an assistant turn, and a
+/// different model tokenizes that prefix differently, so a continuation must
+/// stay on the model the stream started with.
 fn resolve_failover_target(
     node: &Arc<TenzroNode>,
     model_query: &str,
     exclude: &tenzro_types::primitives::Address,
-) -> Option<(String, tenzro_types::primitives::Address)> {
+    prefs: Option<&ProviderPreferences>,
+) -> Option<(
+    String,
+    tenzro_types::primitives::Address,
+    tenzro_types::model::PricingConfig,
+)> {
     // A registered service instance for a *different* provider, if any.
     if let Some(svc) = node
         .find_model_service_excluding(model_query, exclude)
         .filter(|s| s.location == ModelLocation::Network && !s.api_endpoint.is_empty())
+        .filter(|s| {
+            prefs.is_none_or(|p| p.admits(&s.provider_address, &s.provider_name))
+        })
     {
         return Some((
             format!("{}/chat/completions", svc.api_endpoint),
             svc.provider_address,
+            svc.pricing.clone(),
         ));
     }
     // Fall back to a network-announced provider for the same model id.
@@ -29687,7 +34171,114 @@ fn resolve_failover_target(
         if &addr == exclude {
             continue;
         }
-        return Some((format!("{}/chat/completions", reg.rpc_endpoint), addr));
+        if prefs.is_some_and(|p| !p.admits(&addr, &reg.provider)) {
+            continue;
+        }
+        return Some((
+            format!("{}/chat/completions", reg.rpc_endpoint),
+            addr,
+            crate::network_catalog::announced_pricing(&reg.pricing),
+        ));
+    }
+    None
+}
+
+/// One admitted serving offer for a chat request. `service` is `None` when the
+/// model is served by this node's own runtime with no registered service row.
+struct ChatOffer {
+    service: Option<tenzro_types::model::ModelServiceInstance>,
+    /// Provider's iroh `EndpointId` for NAT-agnostic dispatch, carried
+    /// separately because `ModelServiceInstance` synthesized from a gossip
+    /// announcement is the only place it arrives.
+    iroh_endpoint_id: Option<String>,
+    is_local: bool,
+}
+
+/// Resolve a serving offer for one model id under the caller's provider pin.
+/// Prefers a registered service instance, then this node's own runtime, then a
+/// network announcement. `None` means no admitted provider serves the model,
+/// which lets a caller's fallback model list advance to its next candidate.
+fn resolve_chat_offer(
+    node: &Arc<TenzroNode>,
+    model_query: &str,
+    prefs: Option<&ProviderPreferences>,
+) -> Option<ChatOffer> {
+    if let Some(svc) = node
+        .get_model_service(model_query)
+        .or_else(|| node.find_model_service_by_model_id(model_query))
+        && prefs.is_none_or(|p| p.admits(&svc.provider_address, &svc.provider_name))
+    {
+        let is_local = svc.location == ModelLocation::Local;
+        return Some(ChatOffer {
+            iroh_endpoint_id: None,
+            is_local,
+            service: Some(svc),
+        });
+    }
+
+    // This node's own runtime. Under a pin the operator payee is the provider
+    // identity being matched — an unpinned operator cannot serve a pinned call.
+    let admits_self = prefs.is_none_or(|p| {
+        node.operator_payee()
+            .is_some_and(|a| p.admits(&a, &hex::encode(a.as_bytes())))
+    });
+    if node.served_models.contains_key(model_query) && admits_self {
+        return Some(ChatOffer {
+            service: None,
+            iroh_endpoint_id: None,
+            is_local: true,
+        });
+    }
+
+    let own_endpoint_id = node
+        .iroh_resolver
+        .as_ref()
+        .map(|r| r.endpoint_id().to_string());
+    for entry in node.network_models_snapshot() {
+        let reg = &entry.registration;
+        if reg.model_id.as_str() != model_query {
+            continue;
+        }
+        // Never resolve to our own announcement — that would dial our own
+        // loopback endpoint.
+        let is_self = own_endpoint_id
+            .as_deref()
+            .is_some_and(|own| !reg.iroh_endpoint_id.is_empty() && reg.iroh_endpoint_id == own);
+        if is_self {
+            continue;
+        }
+        let addr = tenzro_types::primitives::Address::from_hex(&reg.provider).unwrap_or_default();
+        if prefs.is_some_and(|p| !p.admits(&addr, &reg.provider)) {
+            continue;
+        }
+        return Some(ChatOffer {
+            iroh_endpoint_id: if reg.iroh_endpoint_id.is_empty() {
+                None
+            } else {
+                Some(reg.iroh_endpoint_id.clone())
+            },
+            is_local: false,
+            service: Some(tenzro_types::model::ModelServiceInstance {
+                instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
+                model_id: reg.model_id.clone(),
+                model_name: reg.name.clone(),
+                provider_address: addr,
+                provider_name: reg.provider.clone(),
+                location: tenzro_types::model::ModelLocation::Network,
+                api_endpoint: reg.rpc_endpoint.clone(),
+                mcp_endpoint: String::new(),
+                status: tenzro_types::model::ServiceStatus::Online,
+                parameters: reg.parameters.clone(),
+                pricing: crate::network_catalog::announced_pricing(&reg.pricing),
+                created_at: 0,
+                last_seen: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                load_info: None,
+                iroh_endpoint_id: reg.iroh_endpoint_id.clone(),
+            }),
+        });
     }
     None
 }
@@ -29697,8 +34288,21 @@ async fn handle_openai_chat_completions(
     headers: HeaderMap,
     Json(request): Json<OpenAIChatRequest>,
 ) -> Response {
-    let model_query = &request.model;
     let stream_requested = request.stream.unwrap_or(false);
+
+    // One completion per request. Refusing a higher count is the honest
+    // answer — returning a single choice for a request that asked for
+    // several would bill the caller for work it did not receive.
+    if let Some(n) = request.n
+        && n != 1
+    {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "Only n=1 is served",
+            "invalid_request_error",
+            "unsupported_n",
+        );
+    }
 
     // ── SSE resume short-circuit ────────────────────────────────────────
     //
@@ -29734,72 +34338,40 @@ async fn handle_openai_chat_completions(
             .into_response();
     }
 
-    // Resolve the model: try instance_id, then model_id in service registry, then served_models
-    let mut service = node.get_model_service(model_query)
-        .or_else(|| node.find_model_service_by_model_id(model_query));
-
-    // Provider's iroh EndpointId for the network path (NAT-agnostic dispatch).
-    // Populated only when the model is served by a remote peer.
-    let mut net_iroh_endpoint_id: Option<String> = None;
-    if service.is_none() && !node.served_models.contains_key(model_query) {
-        let own_endpoint_id = node
-            .iroh_resolver
-            .as_ref()
-            .map(|r| r.endpoint_id().to_string());
-        for entry in node.network_models_snapshot() {
-            let reg = &entry.registration;
-            if reg.model_id.as_str() != model_query.as_str() {
-                continue;
+    // Candidate models in caller-stated preference order: the primary `model`
+    // first, then each entry of the fallback `models` list. The first candidate
+    // with an offer the provider pin admits is served; the rest are reported in
+    // the 404 so a caller can see everything that was tried.
+    let mut candidates: Vec<String> = vec![request.model.clone()];
+    if let Some(ref fallbacks) = request.models {
+        for m in fallbacks {
+            let m = m.trim();
+            if !m.is_empty() && !candidates.iter().any(|c| c == m) {
+                candidates.push(m.to_string());
             }
-            // Never resolve to our own announcement — that would dial our
-            // own loopback endpoint.
-            let is_self = own_endpoint_id.as_deref().is_some_and(|own| {
-                !reg.iroh_endpoint_id.is_empty() && reg.iroh_endpoint_id == own
-            });
-            if is_self {
-                continue;
-            }
-            net_iroh_endpoint_id = if reg.iroh_endpoint_id.is_empty() {
-                None
-            } else {
-                Some(reg.iroh_endpoint_id.clone())
-            };
-            service = Some(tenzro_types::model::ModelServiceInstance {
-                instance_id: format!("net-{}-{}", reg.model_id, reg.provider),
-                model_id: reg.model_id.clone(),
-                model_name: reg.name.clone(),
-                provider_address: tenzro_types::primitives::Address::from_hex(&reg.provider)
-                    .unwrap_or_default(),
-                provider_name: reg.provider.clone(),
-                location: tenzro_types::model::ModelLocation::Network,
-                api_endpoint: reg.rpc_endpoint.clone(),
-                mcp_endpoint: String::new(),
-                status: tenzro_types::model::ServiceStatus::Online,
-                parameters: reg.parameters.clone(),
-                pricing: tenzro_types::model::PricingConfig {
-                    price_per_input_token: reg.pricing.per_token.unwrap_or(0),
-                    price_per_output_token: reg.pricing.per_token.unwrap_or(0),
-                    minimum_price: reg.pricing.per_request,
-                    pricing_model: tenzro_types::model::PricingModel::PerToken,
-                },
-                created_at: 0,
-                last_seen: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                load_info: None,
-                iroh_endpoint_id: reg.iroh_endpoint_id.clone(),
-            });
-            break;
         }
     }
-
-    // Determine if this is a local or network model
-    let is_local = if let Some(ref svc) = service {
-        svc.location == ModelLocation::Local
-    } else {
-        node.served_models.contains_key(model_query)
+    let prefs = request.provider.as_ref();
+    let Some((model_query, offer)) = candidates
+        .iter()
+        .find_map(|c| resolve_chat_offer(&node, c, prefs).map(|o| (c.clone(), o)))
+    else {
+        return json_error_response(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "No provider serves any of: {}. Use GET /v1/models to see available models.",
+                candidates.join(", ")
+            ),
+            "invalid_request_error",
+            "model_not_found",
+        );
     };
+    let model_query = &model_query;
+    let ChatOffer {
+        service,
+        iroh_endpoint_id: net_iroh_endpoint_id,
+        is_local,
+    } = offer;
 
     let model_id = if let Some(ref svc) = service {
         svc.model_id.clone()
@@ -29820,13 +34392,14 @@ async fn handle_openai_chat_completions(
         .is_some_and(|v| v.eq_ignore_ascii_case("required"));
 
     // Canonical request input for jurisdiction receipts: the final
-    // user-role message content.
+    // user-role message content. A parts array hashes as its JSON, so image
+    // and audio inputs are bound by the receipt alongside the text.
     let request_input_text = request
         .messages
         .iter()
         .rev()
         .find(|m| m.role == "user")
-        .map(|m| m.content.clone())
+        .map(|m| m.content.canonical_input())
         .unwrap_or_default();
 
     if is_local {
@@ -29854,6 +34427,26 @@ async fn handle_openai_chat_completions(
             );
         }
 
+        // The local serving runtime is text-only. A caller that attaches an
+        // image, audio or file part is refused rather than served a completion
+        // that silently ignored the part — routing to a peer that can render
+        // it is the caller's move, and the error names the part so they can.
+        if let Some(kind) = request
+            .messages
+            .iter()
+            .find_map(|m| m.content.unsupported_part())
+        {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "Model '{}' is served here by a text-only runtime — message content part of type '{}' cannot be rendered",
+                    model_id, kind
+                ),
+                "invalid_request_error",
+                "unsupported_content_part",
+            );
+        }
+
         // Fail-closed locality check before generation — covers both the
         // streaming and non-streaming paths. Streams carry no receipt; this
         // pre-generation refusal is the whole streaming locality contract.
@@ -29875,7 +34468,18 @@ async fn handle_openai_chat_completions(
             temperature: request.temperature.unwrap_or(0.7),
             top_p: request.top_p.unwrap_or(0.9),
             max_tokens: request.max_tokens.unwrap_or(512),
-            repeat_penalty: 1.1,
+            // `repetition_penalty` is the multiplicative knob llama.cpp's
+            // penalty stage actually takes, so a caller that sends it sets
+            // this directly; absent it, the runtime default stands.
+            repeat_penalty: request.repetition_penalty.unwrap_or(1.1),
+            frequency_penalty: request.frequency_penalty.unwrap_or(0.0),
+            presence_penalty: request.presence_penalty.unwrap_or(0.0),
+            top_k: request.top_k,
+            min_p: request.min_p,
+            stop: request.stop.clone().map(StopSequences::into_vec).unwrap_or_default(),
+            // Pin the generator so a dropped stream can be re-prefilled by a
+            // different provider from the same distribution.
+            seed: request.seed.unwrap_or(42),
             draft_n: request.draft_n.filter(|n| (1..=6).contains(n)),
             // Commitments require the buffered single-token path — the SSE
             // token channel cannot carry one, so streaming requests skip it.
@@ -29884,13 +34488,14 @@ async fn handle_openai_chat_completions(
             ..GenerationConfig::default()
         };
 
-        // Convert messages to model's ChatMessage format
+        // Convert messages to model's ChatMessage format. Every part is text
+        // by this point — the refusal above rejected anything else.
         let chat_messages: Vec<ModelChatMessage> = request
             .messages
             .iter()
             .map(|m| ModelChatMessage {
                 role: m.role.clone(),
-                content: m.content.clone(),
+                content: m.content.as_text(),
             })
             .collect();
 
@@ -29938,6 +34543,20 @@ async fn handle_openai_chat_completions(
             );
 
             let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<String>(256);
+
+            // Prompt size for the usage record, captured before the request is
+            // consumed by the generation task.
+            let usage_bytes_in = request_input_text.len() as u64;
+
+            // The trailing empty-`choices` usage chunk is emitted only when the
+            // caller asked for it. SDKs that index `choices[0]` unconditionally
+            // would fault on it, so it stays opt-in; the counts also ride on
+            // the finish chunk, which every caller receives.
+            let include_usage = request
+                .stream_options
+                .as_ref()
+                .and_then(|o| o.include_usage)
+                .unwrap_or(false);
 
             // Spawn the generation task — it feeds tokens into token_tx
             let gen_model_id = model_id.clone();
@@ -30001,9 +34620,43 @@ async fn handle_openai_chat_completions(
                 }
 
                 // Wait for the generation result to get final stats
-                let finish_reason = "stop";
                 if let Ok(Ok(result)) = gen_handle.await {
-                    // Emit the final chunk with finish_reason
+                    let (finish_reason, native_finish_reason) =
+                        local_finish_reasons(result.stop_reason);
+                    let units = tenzro_types::model::BillableUnits::tokens(
+                        result.input_tokens,
+                        result.output_tokens,
+                    );
+                    // Cost of the finished generation under the scheme this
+                    // node's card declares. The pricing guard is taken and
+                    // dropped inside the helper, so it never lives across a
+                    // yield.
+                    let cost_wei = price_local_units(
+                        &node_clone,
+                        &model_id_clone,
+                        &units,
+                        result.generation_time_ms,
+                    );
+
+                    // Account for the generation now that the counts are known.
+                    // A streamed caller most often drops the connection after
+                    // the last token rather than reading the terminal chunk, so
+                    // this is what makes the counts recoverable afterwards via
+                    // `tenzro_getGeneration`.
+                    record_local_generation(
+                        &node_clone,
+                        &model_id_clone,
+                        &completion_id,
+                        units,
+                        usage_bytes_in,
+                        result.text.len() as u64,
+                        cost_wei,
+                        result.generation_time_ms,
+                    );
+
+                    // Final chunk: `finish_reason` plus the token counts, cost
+                    // and throughput, so a caller that did not opt into the
+                    // trailing usage chunk still learns what it was billed.
                     let final_chunk = serde_json::json!({
                         "id": &completion_id,
                         "object": "chat.completion.chunk",
@@ -30013,12 +34666,16 @@ async fn handle_openai_chat_completions(
                             "index": 0,
                             "delta": {},
                             "finish_reason": finish_reason,
+                            "native_finish_reason": native_finish_reason,
                         }],
                         "usage": {
                             "prompt_tokens": result.input_tokens,
                             "completion_tokens": result.output_tokens,
                             "total_tokens": result.input_tokens + result.output_tokens,
-                        }
+                        },
+                        "cost_wei": cost_wei.to_string(),
+                        "generation_time_ms": result.generation_time_ms,
+                        "tokens_per_second": result.tokens_per_second,
                     });
                     let data = serde_json::to_string(&final_chunk).unwrap_or_default();
                     let seq = cursors.record(&cursor_rid, data.clone(), None).unwrap_or(0);
@@ -30026,21 +34683,8 @@ async fn handle_openai_chat_completions(
                         Event::default().id(format!("{}:{}", cursor_rid, seq)).data(data),
                     );
 
-                    // Emit the usage chunk with cost (wei). Shaped as an
-                    // OpenAI `chat.completion.chunk` with empty `choices` —
-                    // the `stream_options.include_usage` final-chunk shape —
-                    // so strict SDK parsers accept it; the cost/throughput
-                    // fields ride along as ignorable extensions.
-                    // Scope the RwLock guard so it doesn't live across yield
-                    let usage_data = {
-                        let pricing = node_clone.provider_pricing.read();
-                        let cost_wei = (result.input_tokens as u128)
-                            .saturating_mul(pricing.input_price_per_token_wei)
-                            .saturating_add(
-                                (result.output_tokens as u128)
-                                    .saturating_mul(pricing.output_price_per_token_wei),
-                            );
-                        serde_json::json!({
+                    if include_usage {
+                        let usage_data = serde_json::json!({
                             "id": &completion_id,
                             "object": "chat.completion.chunk",
                             "created": created,
@@ -30054,13 +34698,13 @@ async fn handle_openai_chat_completions(
                             "cost_wei": cost_wei.to_string(),
                             "generation_time_ms": result.generation_time_ms,
                             "tokens_per_second": result.tokens_per_second,
-                        })
-                    };
-                    let data = serde_json::to_string(&usage_data).unwrap_or_default();
-                    let seq = cursors.record(&cursor_rid, data.clone(), None).unwrap_or(0);
-                    yield Ok::<_, std::convert::Infallible>(
-                        Event::default().id(format!("{}:{}", cursor_rid, seq)).data(data),
-                    );
+                        });
+                        let data = serde_json::to_string(&usage_data).unwrap_or_default();
+                        let seq = cursors.record(&cursor_rid, data.clone(), None).unwrap_or(0);
+                        yield Ok::<_, std::convert::Infallible>(
+                            Event::default().id(format!("{}:{}", cursor_rid, seq)).data(data),
+                        );
+                    }
                 }
 
                 // OpenAI-compatible stream terminator. The terminator is
@@ -30095,13 +34739,12 @@ async fn handle_openai_chat_completions(
             // === NON-STREAMING for local model ===
             match model_runtime.generate_chat(&model_id, &chat_messages, &config).await {
                 Ok(result) => {
-                    let pricing = node.provider_pricing.read();
-                    let cost_wei = (result.input_tokens as u128)
-                        .saturating_mul(pricing.input_price_per_token_wei)
-                        .saturating_add(
-                            (result.output_tokens as u128)
-                                .saturating_mul(pricing.output_price_per_token_wei),
-                        );
+                    let units = tenzro_types::model::BillableUnits::tokens(
+                        result.input_tokens,
+                        result.output_tokens,
+                    );
+                    let cost_wei =
+                        price_local_units(&node, &model_id, &units, result.generation_time_ms);
 
                     let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
@@ -30140,6 +34783,20 @@ async fn handle_openai_chat_completions(
                     let commitment =
                         store_local_commitment(&node, &model_id, result.commitment.as_ref());
 
+                    let (finish_reason, native_finish_reason) =
+                        local_finish_reasons(result.stop_reason);
+
+                    record_local_generation(
+                        &node,
+                        &model_id,
+                        &completion_id,
+                        units,
+                        request_input_text.len() as u64,
+                        result.text.len() as u64,
+                        cost_wei,
+                        result.generation_time_ms,
+                    );
+
                     Json(serde_json::json!({
                         "id": completion_id,
                         "object": "chat.completion",
@@ -30154,7 +34811,8 @@ async fn handle_openai_chat_completions(
                                 "role": "assistant",
                                 "content": result.text,
                             },
-                            "finish_reason": "stop"
+                            "finish_reason": finish_reason,
+                            "native_finish_reason": native_finish_reason,
                         }],
                         "usage": {
                             "prompt_tokens": result.input_tokens,
@@ -30181,8 +34839,18 @@ async fn handle_openai_chat_completions(
                 }
             }
         }
-    } else if let Some(ref svc) = service {
+    } else {
         // === NETWORK MODEL — forward to remote provider ===
+        // Resolution reports a non-local offer only with the serving peer's
+        // instance attached, so this binding always succeeds.
+        let Some(ref svc) = service else {
+            return json_error_response(
+                StatusCode::NOT_FOUND,
+                &format!("Model '{}' has no serving offer", model_query),
+                "invalid_request_error",
+                "model_not_found",
+            );
+        };
         // A fast connect timeout means a loopback/unreachable `rpc_endpoint`
         // fails within seconds rather than pinning the caller on the default
         // (long) request timeout. No total-request timeout is set — a
@@ -30204,7 +34872,17 @@ async fn handle_openai_chat_completions(
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
             "top_p": request.top_p,
+            "top_k": request.top_k,
+            "min_p": request.min_p,
+            "frequency_penalty": request.frequency_penalty,
+            "presence_penalty": request.presence_penalty,
+            "repetition_penalty": request.repetition_penalty,
+            // Re-serialized in the shape the client sent, so a provider that
+            // only accepts one of the two forms still sees a valid request.
+            "stop": request.stop,
             "stream": stream_requested,
+            "stream_options": request.stream_options,
+            "user": request.user,
             "draft_n": request.draft_n,
             "seed": sampling_seed,
             // The remote provider persists the commitment and returns its
@@ -30287,6 +34965,13 @@ async fn handle_openai_chat_completions(
                     let failover_node = node.clone();
                     let failover_model_query = model_query.clone();
                     let failover_exclude = svc.provider_address;
+                    let failover_prefs = request.provider.clone();
+                    // Offer the provider signed, carried into the stream
+                    // closure so the peer leg is priced against what routing
+                    // scored once the served token counts arrive.
+                    let settle_node = node.clone();
+                    let settle_pricing = svc.pricing.clone();
+                    let settle_model = svc.model_id.clone();
                     // P1.3 SLO metrics handle. Captured into the stream
                     // closure; observations on first-chunk (TTFT),
                     // every subsequent chunk (intertoken), and on stream
@@ -30333,6 +35018,12 @@ async fn handle_openai_chat_completions(
                         // deliver, that's the contract violation we
                         // penalize).
                         let mut got_any_chunk = false;
+                        // Served units as reported by the provider in its
+                        // terminal usage frame, per provider that served.
+                        // `None` means the upstream reported none and the peer
+                        // leg falls back to the offer's per-request floor.
+                        let mut served_units:
+                            Option<tenzro_types::model::BillableUnits> = None;
                         let mut had_stream_error = false;
                         let mut had_stall = false;
                         let mut stall_silent_for_ms: u64 = 0;
@@ -30404,6 +35095,17 @@ async fn handle_openai_chat_completions(
                                         failover_state.record_emitted(
                                             &crate::streaming::extract_delta_content(&payload),
                                         );
+                                        if let Some(u) =
+                                            crate::streaming::extract_usage_units(&payload)
+                                        {
+                                            served_units = Some(u);
+                                        }
+                                        // Normalize the serving peer's own
+                                        // finish spelling and carry it as
+                                        // `native_finish_reason`. Recorded in
+                                        // annotated form so a resume replays
+                                        // exactly what the client saw.
+                                        let payload = annotate_finish_reason_frame(&payload);
                                         let seq = cursors
                                             .record(&proxy_rid, payload.clone(), None)
                                             .unwrap_or(0);
@@ -30461,6 +35163,10 @@ async fn handle_openai_chat_completions(
                                 failover_state.record_emitted(
                                     &crate::streaming::extract_delta_content(&leftover),
                                 );
+                                if let Some(u) = crate::streaming::extract_usage_units(&leftover) {
+                                    served_units = Some(u);
+                                }
+                                let leftover = annotate_finish_reason_frame(&leftover);
                                 let seq = cursors
                                     .record(&proxy_rid, leftover.clone(), None)
                                     .unwrap_or(0);
@@ -30509,11 +35215,13 @@ async fn handle_openai_chat_completions(
                             // continuation provider too and stop — a bounded
                             // single retry, not an unbounded chase.
                             if failover_state.has_emitted()
-                                && let Some((alt_url, alt_addr)) = resolve_failover_target(
-                                    &failover_node,
-                                    &failover_model_query,
-                                    &failover_exclude,
-                                )
+                                && let Some((alt_url, alt_addr, alt_pricing)) =
+                                    resolve_failover_target(
+                                        &failover_node,
+                                        &failover_model_query,
+                                        &failover_exclude,
+                                        failover_prefs.as_ref(),
+                                    )
                             {
                                 let cont_client = reqwest::Client::builder()
                                     .connect_timeout(std::time::Duration::from_secs(5))
@@ -30537,6 +35245,15 @@ async fn handle_openai_chat_completions(
                                     ));
                                     let mut cont_buf = String::new();
                                     let mut cont_dropped = false;
+                                    // The continuation provider served a
+                                    // distinct span of the completion, so it
+                                    // gets its own accumulator, its own clock
+                                    // and its own settlement against the same
+                                    // offer price.
+                                    let mut cont_served_units:
+                                        Option<tenzro_types::model::BillableUnits> = None;
+                                    let cont_start = std::time::Instant::now();
+                                    let mut cont_emitted = false;
                                     while let Some(cev) = cont_bs.next().await {
                                         match cev {
                                             HeartbeatedChunk::Chunk(Ok(bytes)) => {
@@ -30567,6 +35284,16 @@ async fn handle_openai_chat_completions(
                                                             &payload,
                                                         ),
                                                     );
+                                                    cont_emitted = true;
+                                                    if let Some(u) =
+                                                        crate::streaming::extract_usage_units(
+                                                            &payload,
+                                                        )
+                                                    {
+                                                        cont_served_units = Some(u);
+                                                    }
+                                                    let payload =
+                                                        annotate_finish_reason_frame(&payload);
                                                     let seq = cursors
                                                         .record(&proxy_rid, payload.clone(), None)
                                                         .unwrap_or(0);
@@ -30594,6 +35321,16 @@ async fn handle_openai_chat_completions(
                                             pm.record_success(&alt_addr, 0);
                                         }
                                     }
+                                    if cont_emitted {
+                                        settle_network_leg(
+                                            &settle_node,
+                                            alt_addr,
+                                            &alt_pricing,
+                                            &settle_model,
+                                            &cont_served_units.unwrap_or_default(),
+                                            cont_start.elapsed().as_millis() as u64,
+                                        );
+                                    }
                                 }
                             }
                         } else if got_any_chunk {
@@ -30609,6 +35346,21 @@ async fn handle_openai_chat_completions(
                                 pm.record_success(&stream_provider_addr, 0);
                             }
                             slo.record_stream_completed(&slo_provider, &slo_model, true);
+                        }
+                        // Pay the peer that served this span. A provider that
+                        // dropped after emitting still served what the client
+                        // saw, so the leg settles either way; only a stream that
+                        // produced nothing is free. An upstream that reported no
+                        // usage frame is billed the offer's per-request floor.
+                        if got_any_chunk {
+                            settle_network_leg(
+                                &settle_node,
+                                stream_provider_addr,
+                                &settle_pricing,
+                                &settle_model,
+                                &served_units.unwrap_or_default(),
+                                latency_ms,
+                            );
                         }
                         event_bus.publish(
                             tenzro_events::TenzroEvent::InferenceStreamCompleted {
@@ -30639,6 +35391,10 @@ async fn handle_openai_chat_completions(
             // === NON-STREAMING for network model ===
             // iroh-first (NAT-agnostic, addressed by the provider's advertised
             // EndpointId) with HTTP fallback to the announced `rpc_endpoint`.
+            //
+            // Timed because a per-compute-time offer prices the leg by how long
+            // the provider took, and the body carries no timing of its own.
+            let forward_start = std::time::Instant::now();
             match forward_network_chat(
                 &node,
                 net_iroh_endpoint_id.as_deref(),
@@ -30722,6 +35478,22 @@ async fn handle_openai_chat_completions(
                         }
                     }
 
+                    // Counts come from the provider that generated them. An
+                    // upstream that reports no usage block is billed the offer's
+                    // per-request floor rather than a guessed count. The body is
+                    // the OpenAI shape here, so the usage block is read through
+                    // the same parser the streaming legs use.
+                    let units = crate::streaming::usage_units(&body).unwrap_or_default();
+                    settle_network_leg(
+                        &node,
+                        svc.provider_address,
+                        &svc.pricing,
+                        &svc.model_id,
+                        &units,
+                        forward_start.elapsed().as_millis() as u64,
+                    );
+
+                    annotate_finish_reason_body(&mut body);
                     (StatusCode::OK, Json(body)).into_response()
                 }
                 Err(e) => json_error_response(
@@ -30732,14 +35504,147 @@ async fn handle_openai_chat_completions(
                 ),
             }
         }
-    } else {
-        json_error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Model '{}' not found. Use GET /v1/models to see available models.", model_query),
-            "invalid_request_error",
-            "model_not_found",
-        )
     }
+}
+
+/// Handle `POST /v1/responses`.
+///
+/// The Responses shape is served by rewriting the request into a chat body,
+/// handing it to [`handle_openai_chat_completions`], and rewriting the result
+/// back. Offer resolution, provider pinning, mid-stream failover, settlement,
+/// provenance signing, jurisdiction receipts and cursor resume therefore run
+/// exactly once, in the handler that already owns them — this endpoint adds a
+/// vocabulary, not a second execution path.
+///
+/// Every field the Responses schema does not name is forwarded to the chat
+/// body untouched, so the Tenzro chat extensions (`models`, `provider`,
+/// `seed`, `jurisdiction`, `draft_n`, `verifiable`, …) are available here
+/// without a second definition to keep in step.
+async fn handle_openai_responses(
+    State(node): State<Arc<TenzroNode>>,
+    headers: HeaderMap,
+    Json(request): Json<crate::openai_responses::ResponsesRequest>,
+) -> Response {
+    use crate::openai_responses::{drain_sse_frames, from_chat_completion, ResponseStreamFramer};
+
+    let wants_stream = request.wants_stream();
+    let model_hint = request.model_hint().to_string();
+    let echo = request.echo();
+
+    let chat_body = match request.into_chat_body() {
+        Ok(body) => body,
+        Err(e) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &e.message,
+                "invalid_request_error",
+                e.code,
+            );
+        }
+    };
+    let chat_request: OpenAIChatRequest = match serde_json::from_value(chat_body) {
+        Ok(req) => req,
+        Err(e) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid request: {}", e),
+                "invalid_request_error",
+                "invalid_request",
+            );
+        }
+    };
+
+    let upstream = handle_openai_chat_completions(State(node), headers, Json(chat_request)).await;
+    let (parts, body) = upstream.into_parts();
+    if !parts.status.is_success() {
+        // Already the OpenAI error envelope — the Responses surface uses the
+        // same one, so pass it through rather than restating it.
+        return Response::from_parts(parts, body);
+    }
+
+    if !wants_stream {
+        let bytes = match axum::body::to_bytes(body, 16 * 1024 * 1024).await {
+            Ok(b) => b,
+            Err(e) => {
+                return json_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Failed to read completion: {}", e),
+                    "server_error",
+                    "completion_unreadable",
+                );
+            }
+        };
+        let chat: Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return json_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Malformed completion: {}", e),
+                    "server_error",
+                    "completion_malformed",
+                );
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(from_chat_completion(&chat, &model_hint, echo)),
+        )
+            .into_response();
+    }
+
+    let mut framer = ResponseStreamFramer::new(&model_hint, echo);
+    let stream = async_stream::stream! {
+        use futures::StreamExt;
+        let mut data = body.into_data_stream();
+        let mut buf = String::new();
+        let mut transport_error: Option<String> = None;
+        while let Some(chunk) = data.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    buf.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
+                    for (frame_id, payload) in drain_sse_frames(&mut buf) {
+                        for ev in framer.on_payload(&payload) {
+                            yield Ok::<_, std::convert::Infallible>(
+                                responses_sse_event(&ev, frame_id.as_deref()),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    transport_error = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        // A truncated upstream still owes the client a terminal event:
+        // `close()` reports `incomplete`, `fail()` reports `failed`.
+        let tail = match transport_error {
+            Some(msg) => framer.fail(&msg, "upstream_stream_error"),
+            None => framer.close(),
+        };
+        for ev in tail {
+            yield Ok::<_, std::convert::Infallible>(responses_sse_event(&ev, None));
+        }
+    };
+
+    Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
+}
+
+/// Frame one Responses event for the wire.
+///
+/// The chat frame's SSE id is carried over when present so a client that
+/// reconnects with `Last-Event-ID` still lands on the chat cursor the id was
+/// minted from — the replayed chat frames are reframed by a fresh framer.
+fn responses_sse_event(ev: &crate::openai_responses::FramedEvent, frame_id: Option<&str>) -> Event {
+    let mut out = Event::default()
+        .event(ev.name.clone())
+        .data(serde_json::to_string(&ev.data).unwrap_or_else(|_| "{}".to_string()));
+    if let Some(id) = frame_id {
+        out = out.id(id.to_string());
+    }
+    out
 }
 
 /// Build a JSON error response matching the OpenAI error format.
@@ -30953,12 +35858,7 @@ pub async fn handle_chat_stream_rich(
                     mcp_endpoint: String::new(),
                     status: tenzro_types::model::ServiceStatus::Online,
                     parameters: reg.parameters.clone(),
-                    pricing: tenzro_types::model::PricingConfig {
-                        price_per_input_token: reg.pricing.per_token.unwrap_or(0),
-                        price_per_output_token: reg.pricing.per_token.unwrap_or(0),
-                        minimum_price: reg.pricing.per_request,
-                        pricing_model: tenzro_types::model::PricingModel::PerToken,
-                    },
+                    pricing: crate::network_catalog::announced_pricing(&reg.pricing),
                     created_at: 0,
                     last_seen: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -30996,6 +35896,30 @@ pub async fn handle_chat_stream_rich(
             "server_error",
             "stream_forward_unsupported",
         );
+    }
+
+    // A routed call pins the offer it scored. This surface only serves from
+    // local weights and bills to this node's payee, so a pin naming anyone
+    // else has to be refused rather than quietly served and settled here.
+    if let Some(pin) = params.get("provider").and_then(|v| v.as_str())
+        && !pin.trim().is_empty()
+    {
+        let honoured = tenzro_types::primitives::Address::from_hex(pin)
+            .ok()
+            .is_some_and(|p| node.operator_payee() == Some(p));
+        if !honoured {
+            return json_error_response(
+                StatusCode::CONFLICT,
+                &format!(
+                    "Provider pin '{}' cannot be served by this node — rich-shape streaming \
+                     serves local weights only. Drop the pin to stream locally, or use the \
+                     non-streaming rich shape to reach the pinned provider.",
+                    pin
+                ),
+                "invalid_request_error",
+                "provider_pin_unsupported",
+            );
+        }
     }
 
     let model_runtime = match node.model_runtime.as_ref() {
@@ -31065,7 +35989,7 @@ pub async fn handle_chat_stream_rich(
             "invalid_temperature",
         );
     }
-    let config = GenerationConfig {
+    let mut config = GenerationConfig {
         temperature,
         top_p: params.get("top_p").and_then(|v| v.as_f64()).unwrap_or(0.9),
         max_tokens,
@@ -31080,6 +36004,7 @@ pub async fn handle_chat_stream_rich(
             .filter(|n| (1..=6).contains(n)),
         ..GenerationConfig::default()
     };
+    apply_sampling_params(&mut config, &params);
 
     // Flatten rich messages for the runtime (same as non-streaming path).
     let mut chat_messages: Vec<ModelChatMessage> = Vec::new();
@@ -31110,6 +36035,15 @@ pub async fn handle_chat_stream_rich(
         .collect();
 
     let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    // The usage record is keyed on the same id the caller holds, so a client
+    // that dropped the connection after the last token can still resolve what
+    // it was billed through `tenzro_getGeneration`.
+    let record_id = message_id.clone();
+    // Prompt bytes as submitted: every block of every message, plus the system
+    // prompt the runtime prepends. Token counts come back from the runtime;
+    // this is the transport-side measure that pairs with them.
+    let prompt_bytes: u64 = messages.iter().map(|m| m.payload_len() as u64).sum::<u64>()
+        + system.as_ref().map_or(0, |s| s.as_text().len() as u64);
     let model_id_for_stream = model_id.clone();
     let node_for_stream = node.clone();
     let caller_address = params
@@ -31294,15 +36228,18 @@ pub async fn handle_chat_stream_rich(
         yield sse_event!("message_delta", delta_payload);
 
         // ── billing — same flow as the non-streaming rich path (wei) ─
-        let cost_wei: u128 = {
-            let pricing = node_for_stream.provider_pricing.read();
-            (result.input_tokens as u128)
-                .saturating_mul(pricing.input_price_per_token_wei)
-                .saturating_add(
-                    (result.output_tokens as u128)
-                        .saturating_mul(pricing.output_price_per_token_wei),
-                )
-        };
+        let units = tenzro_types::model::BillableUnits::tokens(
+            result.input_tokens,
+            result.output_tokens,
+        );
+        // The pricing guard is taken and dropped inside the helper, so it
+        // never lives across a yield.
+        let cost_wei = price_local_units(
+            &node_for_stream,
+            &model_id_for_stream,
+            &units,
+            result.generation_time_ms,
+        );
 
         // Inside the SSE closure a JsonRpcError cannot be returned — surface
         // settlement failure as a terminal `error` event instead. The unpaid
@@ -31313,6 +36250,9 @@ pub async fn handle_chat_stream_rich(
             None,
             None,
             app_for_stream.as_ref(),
+            // Streamed from this node's own runtime, so the payee is this
+            // node's payee.
+            None,
             &model_id_for_stream,
             cost_wei,
         ) {
@@ -31326,6 +36266,27 @@ pub async fn handle_chat_stream_rich(
                 }));
             }
         }
+
+        // Settling charges the caller; recording is what makes the work count
+        // toward the provider stats the reward meter reads at epoch close.
+        // Recorded after settlement either way, so a stream whose collection
+        // failed still reports the tokens it produced.
+        let bytes_out = result.text.len() as u64
+            + result
+                .tool_calls
+                .iter()
+                .map(|tc| (tc.name.len() + tc.input.to_string().len()) as u64)
+                .sum::<u64>();
+        record_local_generation(
+            &node_for_stream,
+            &model_id_for_stream,
+            &record_id,
+            units,
+            prompt_bytes,
+            bytes_out,
+            cost_wei,
+            result.generation_time_ms,
+        );
 
         node_for_stream.metrics().record_inference();
         node_for_stream.touch_local_model_service(&model_id_for_stream);
@@ -31371,12 +36332,7 @@ async fn handle_list_model_endpoints(
             mcp_endpoint: String::new(),
             status: tenzro_types::model::ServiceStatus::Online,
             parameters: reg.parameters.clone(),
-            pricing: tenzro_types::model::PricingConfig {
-                price_per_input_token: reg.pricing.per_token.unwrap_or(0),
-                price_per_output_token: reg.pricing.per_token.unwrap_or(0),
-                minimum_price: reg.pricing.per_request,
-                pricing_model: tenzro_types::model::PricingModel::PerToken,
-            },
+            pricing: crate::network_catalog::announced_pricing(&reg.pricing),
             created_at: 0,
             last_seen: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -32408,7 +37364,7 @@ async fn handle_submit_daml_command(
 
         // Mandate-required check: when the command shape is listed in
         // `requires_mandate_for`, the caller must present a signed AP2
-        // cart mandate via the `mandate` param. The mandate validation
+        // checkout mandate via the `mandate` param. The mandate validation
         // itself happens in the AP2 path; here we only enforce that one
         // was supplied.
         if !command_shape.is_empty()
@@ -32418,7 +37374,7 @@ async fn handle_submit_daml_command(
             return Err(JsonRpcError {
                 code: -32004,
                 message: format!(
-                    "Agent delegation: command `{}` requires an AP2 cart mandate. \
+                    "Agent delegation: command `{}` requires an AP2 checkout mandate. \
                      Supply the signed mandate object in the `mandate` parameter.",
                     command_shape
                 ),
@@ -32578,7 +37534,7 @@ async fn handle_allocate_party(
     }))
 }
 
-// ── Canton 3.5+ JSON Ledger API extension handlers (M11 wave) ────────
+// ── Canton 3.5+ JSON Ledger API extension handlers (M11) ─────────────
 //
 // These ten handlers expose the bridge adapter's new Canton 3.5+ methods
 // as JSON-RPC endpoints. Each is canton-scoped (requires
@@ -33074,49 +38030,38 @@ async fn handle_canton_list_api_key_analytics(
 // returns both the AP2 validation receipt and the Canton submission
 // receipt so the caller has the full audit trail in one round-trip.
 
-async fn handle_canton_submit_with_mandate(
+pub(crate) async fn handle_canton_submit_with_mandate(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
     api_key: Option<&str>,
 ) -> std::result::Result<Value, JsonRpcError> {
-    let p = params.clone().ok_or_else(|| JsonRpcError {
+    let p = params.ok_or_else(|| JsonRpcError {
         code: -32602,
         message: "Missing params".to_string(),
         data: None,
     })?;
 
-    // Pull the mandate pair out of params. We accept them inline at
-    // either `mandate.checkout` / `mandate.payment` (preferred) or top-
-    // level `checkout_vdc` / `payment_vdc` (back-compat with the
-    // existing AP2 validator wire shape).
-    let (checkout_val, payment_val) = if let Some(m) = p.get("mandate") {
-        let c = m.get("checkout").cloned().ok_or_else(|| JsonRpcError {
+    // The mandate pair rides inline under `mandate.checkout` /
+    // `mandate.payment`. Nesting keeps the authorization envelope
+    // distinct from the DAML command fields in the same params object.
+    let mandate = p.get("mandate").ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Missing mandate (expected mandate.checkout + mandate.payment)".to_string(),
+        data: None,
+    })?;
+    let checkout_val = mandate
+        .get("checkout")
+        .cloned()
+        .ok_or_else(|| JsonRpcError {
             code: -32602,
             message: "mandate.checkout missing".to_string(),
             data: None,
         })?;
-        let pay = m.get("payment").cloned().ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "mandate.payment missing".to_string(),
-            data: None,
-        })?;
-        (c, pay)
-    } else {
-        let c = p
-            .get("checkout_vdc")
-            .cloned()
-            .ok_or_else(|| JsonRpcError {
-                code: -32602,
-                message: "Missing mandate.checkout (or checkout_vdc)".to_string(),
-                data: None,
-            })?;
-        let pay = p.get("payment_vdc").cloned().ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing mandate.payment (or payment_vdc)".to_string(),
-            data: None,
-        })?;
-        (c, pay)
-    };
+    let payment_val = mandate.get("payment").cloned().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "mandate.payment missing".to_string(),
+        data: None,
+    })?;
 
     // Always enforce delegation when the mandate ships with the
     // submission — the whole point of this RPC is to bind the write
@@ -33127,26 +38072,32 @@ async fn handle_canton_submit_with_mandate(
         "payment_vdc": payment_val,
         "enforce_delegation": true,
     });
-    let ap2_receipt = crate::rpc_integrations::handle_ap2_validate_mandate_pair(
-        node,
-        Some(validate_params),
-    )
-    .await
-    .map_err(|e| JsonRpcError {
-        code: e.code,
-        message: format!("AP2 validation rejected: {}", e.message),
-        data: e.data,
-    })?;
+    let ap2_receipt =
+        crate::rpc_integrations::handle_ap2_validate_mandate_pair(node, Some(validate_params))
+            .await?;
 
-    // Validation passed. Strip the mandate fields from the submission
+    // The validator reports a rejected pair as `valid: false` in a
+    // successful response rather than as an error, so the verdict has
+    // to be read off the receipt. Anything other than an explicit
+    // `valid: true` stops the write before the participant sees it.
+    if ap2_receipt.get("valid").and_then(|v| v.as_bool()) != Some(true) {
+        let reason = ap2_receipt
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("mandate pair rejected");
+        return Err(JsonRpcError {
+            code: -32004,
+            message: format!("AP2 validation rejected: {}", reason),
+            data: Some(ap2_receipt),
+        });
+    }
+
+    // Validation passed. Strip the mandate envelope from the submission
     // params and forward to the existing DAML submit handler so we
     // don't duplicate the substantial command-encoding logic.
     let mut submit_params = p;
     if let Value::Object(obj) = &mut submit_params {
         obj.remove("mandate");
-        obj.remove("checkout_vdc");
-        obj.remove("payment_vdc");
-        obj.remove("enforce_delegation");
     }
     let canton_receipt =
         handle_submit_daml_command(node, Some(submit_params), api_key).await?;
@@ -33587,6 +38538,102 @@ async fn handle_create_api_key(
         }
     }
 
+    // Which Canton networks this key may reach. Fail-closed: an absent
+    // or empty list means the key cannot reach any Canton network, and
+    // canton-scoped methods will refuse it. A network is a distinct
+    // ledger with distinct parties and assets, so "unrestricted" is
+    // never the safe default here.
+    let canton_networks = {
+        let mut out: Vec<crate::config::CantonNetwork> = Vec::new();
+        if let Some(arr) = params.get("canton_networks").and_then(|v| v.as_array()) {
+            for v in arr {
+                let s = v.as_str().ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: "canton_networks entries must be strings".to_string(),
+                    data: None,
+                })?;
+                let net = crate::config::CantonNetwork::from_str_opt(s).ok_or_else(|| {
+                    JsonRpcError {
+                        code: -32602,
+                        message: format!(
+                            "Unknown canton network: {} (expected devnet | mainnet)",
+                            s
+                        ),
+                        data: None,
+                    }
+                })?;
+                if !out.contains(&net) {
+                    out.push(net);
+                }
+            }
+        }
+        // Refuse networks this node does not serve — the key would look
+        // authorized but every call through it would fail at dispatch.
+        let served = node.canton_networks();
+        if let Some(missing) = out.iter().find(|n| !served.contains(n)) {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!(
+                    "This node does not serve Canton network '{}' (available: {})",
+                    missing,
+                    if served.is_empty() {
+                        "none".to_string()
+                    } else {
+                        served
+                            .iter()
+                            .map(|n| n.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                ),
+                data: None,
+            });
+        }
+        out
+    };
+
+    // Service tier: per-minute request budget + write permission.
+    // Defaults to the free read-only tier when unspecified.
+    let tier_str = params.get("tier").and_then(|v| v.as_str());
+    let tier = match tier_str {
+        Some(s) => crate::api_key::ApiKeyTier::from_str_opt(s).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!(
+                "Unknown tier: {} (expected free | standard | priority)",
+                s
+            ),
+            data: None,
+        })?,
+        None => crate::api_key::ApiKeyTier::default(),
+    };
+
+    // Canton-side provisioning (party allocation, user creation, IDP
+    // registration, rights grants) binds the key to exactly one ledger:
+    // an `ApiKeyRecord` carries a single `canton_user_id` / IDP / OAuth
+    // client, and a party allocated on devnet does not exist on
+    // mainnet. Party-less reads (health, version, packages) are fine
+    // across several networks, so a multi-network key is only refused
+    // where provisioning is actually requested.
+    let canton_binding_network = match canton_networks.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    };
+    let binding_network_or_err = |what: &str| -> std::result::Result<
+        crate::config::CantonNetwork,
+        JsonRpcError,
+    > {
+        canton_binding_network.ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!(
+                "{} requires the key to authorize exactly one Canton network \
+                 (canton_networks had {}); a Canton party exists on one ledger only",
+                what,
+                canton_networks.len()
+            ),
+            data: None,
+        })
+    };
+
     // Optional Canton User Management Service user id binding —
     // forwards canton-scoped requests `actAs` this user's primary
     // party so Canton's AuthService enforces per-user CanActAs.
@@ -33667,7 +38714,8 @@ async fn handle_create_api_key(
             });
         }
 
-        let adapter = canton_adapter_or_err(node)?;
+        let provision_net = binding_network_or_err("Canton auto-provisioning")?;
+        let adapter = canton_adapter_for_network(node, provision_net)?;
 
         // 1. Check if user already exists (idempotency). The original
         // `<team>@clients` hint lives in the participant default IDP.
@@ -33696,6 +38744,7 @@ async fn handle_create_api_key(
             provisioned_party = pp.clone();
             provision_summary = Some(serde_json::json!({
                 "status": "already_exists",
+                "network": provision_net.as_str(),
                 "user_id": user_id,
                 "primary_party": pp,
             }));
@@ -33892,6 +38941,7 @@ async fn handle_create_api_key(
             provision_summary = Some(serde_json::json!({
                 "status": "provisioned",
                 "stage": stage,
+                "network": provision_net.as_str(),
                 "user_id": effective_user_id.clone(),
                 "primary_party": fq_party,
                 "party_hint": party_hint,
@@ -33979,6 +39029,8 @@ async fn handle_create_api_key(
             allowed_agent_templates: str_array("allowed_agent_templates"),
             allowed_models: str_array("allowed_models"),
             max_per_resource_tnzo,
+            canton_networks: canton_networks.clone(),
+            tier,
         }
     };
 
@@ -34022,7 +39074,8 @@ async fn handle_create_api_key(
         || !issued.record.can_read_as_parties.is_empty();
     if needs_rights {
         let user_id_for_rights = issued.record.canton_user_id.clone();
-        let canton_adapter = node.canton_adapter();
+        let rights_net = binding_network_or_err("Canton party delegation")?;
+        let canton_adapter = node.canton_adapter(rights_net);
         match (user_id_for_rights.as_deref(), canton_adapter) {
             (Some(user_id), Some(adapter)) => {
                 // Track every (party, can_act_as, can_read_as) we grant
@@ -34159,7 +39212,10 @@ async fn handle_create_api_key(
                 }
                 return Err(JsonRpcError {
                     code: -32000,
-                    message: "delegation parties named but this node has no Canton adapter configured".to_string(),
+                    message: format!(
+                        "delegation parties named but this node does not serve Canton network '{}'",
+                        rights_net
+                    ),
                     data: None,
                 });
             }
@@ -34231,6 +39287,15 @@ async fn handle_create_api_key(
         "scopes": issued.record.scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         "class": issued.record.class.as_str(),
         "created_at": issued.record.created_at,
+        // Service tier governing this key's per-minute request budget
+        // and whether it may call write methods at all.
+        "tier": issued.record.tier.as_str(),
+        "requests_per_minute": issued.record.tier.requests_per_minute(),
+        "allows_write": issued.record.tier.allows_write(),
+        // Canton networks this key may reach. Empty means canton-scoped
+        // methods refuse the key and the operator must reissue.
+        "canton_networks": issued.record.canton_networks
+            .iter().map(|n| n.as_str()).collect::<Vec<_>>(),
         "canton_user_id": issued.record.canton_user_id,
         "canton_primary_party": provisioned_party,
         "canton_identity_provider_id": provisioned_idp,
@@ -34333,11 +39398,16 @@ async fn handle_revoke_api_key(
         // even if upstream cleanup fails. The operator can re-run
         // cleanup manually via tenzro_canton_revokeUserRights if
         // needed.
+        // The parties were granted on the one network the key was bound
+        // to at issuance, so revocation targets that same network rather
+        // than the operator default — a key issued against mainnet must
+        // not have its rights revoked on devnet.
         let needs_rights_revoke = !record.can_act_as_parties.is_empty()
             || !record.can_read_as_parties.is_empty();
         if needs_rights_revoke
             && let Some(user_id) = record.canton_user_id.as_deref()
-            && let Some(adapter) = node.canton_adapter()
+            && let Some(rights_net) = record.sole_canton_network()
+            && let Some(adapter) = node.canton_adapter(rights_net)
         {
             let mut revoked: Vec<Value> = Vec::new();
             let mut errors: Vec<Value> = Vec::new();
@@ -34376,6 +39446,10 @@ async fn handle_revoke_api_key(
                 }
             }
 
+            tenant_cleanup.insert(
+                "canton_network".to_string(),
+                Value::String(rights_net.as_str().to_string()),
+            );
             tenant_cleanup.insert(
                 "canton_rights_revoked".to_string(),
                 Value::Array(revoked),
@@ -34426,6 +39500,11 @@ async fn handle_list_api_keys(
                 "label": r.label,
                 "scopes": r.scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 "class": r.class.as_str(),
+                "tier": r.tier.as_str(),
+                "requests_per_minute": r.tier.requests_per_minute(),
+                "allows_write": r.tier.allows_write(),
+                "canton_networks": r.canton_networks
+                    .iter().map(|n| n.as_str()).collect::<Vec<_>>(),
                 "created_at": r.created_at,
                 "revoked_at": r.revoked_at,
                 "active": r.is_active(),
@@ -34564,6 +39643,11 @@ async fn handle_list_my_api_keys(
                 "label": r.label,
                 "scopes": r.scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 "class": r.class.as_str(),
+                "tier": r.tier.as_str(),
+                "requests_per_minute": r.tier.requests_per_minute(),
+                "allows_write": r.tier.allows_write(),
+                "canton_networks": r.canton_networks
+                    .iter().map(|n| n.as_str()).collect::<Vec<_>>(),
                 "created_at": r.created_at,
                 "revoked_at": r.revoked_at,
                 "active": r.is_active(),
@@ -34964,8 +40048,8 @@ async fn handle_provider_stats(
         match tracker.get_provider_stats(&address) {
             Some(stats) => (
                 stats.inference_count,
-                stats.total_input_tokens,
-                stats.total_output_tokens,
+                stats.total_units.input_tokens,
+                stats.total_units.output_tokens,
                 stats.measured_tokens_per_sec(),
                 stats.total_revenue,
                 stats.last_inference.map(|t| t.as_millis()),
@@ -35040,18 +40124,16 @@ fn liquid_staking_pool(
 fn primary_wallet_address(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Address, JsonRpcError> {
-    let registry = node.identity_registry().ok_or_else(|| JsonRpcError {
+    node.identity_registry().ok_or_else(|| JsonRpcError {
         code: -32603,
         message: "Identity registry not initialized".to_string(),
         data: None,
     })?;
-    let all = registry.list_all();
-    let (_, identity) = all.first().ok_or_else(|| JsonRpcError {
+    node.operator_payee().ok_or_else(|| JsonRpcError {
         code: -32000,
         message: "No identity registered on this node".to_string(),
         data: None,
-    })?;
-    Ok(identity.wallet_address)
+    })
 }
 
 fn parse_address_param(params: &Value, key: &str) -> Option<Address> {
@@ -40408,6 +45490,22 @@ async fn handle_register_skill(
     if let Some(wallet_str) = params.get("creator_wallet").and_then(|v| v.as_str()) {
         skill.creator_wallet = Some(parse_address(wallet_str)?);
     }
+    // Publishers that ship bytes rather than only an endpoint declare the
+    // content-addressed artifact here, so callers can pin it at invocation.
+    if let Some(bundle) = params.get("bundle").filter(|v| !v.is_null()) {
+        skill.bundle = Some(
+            serde_json::from_value::<tenzro_types::SkillBundle>(bundle.clone()).map_err(|e| {
+                JsonRpcError {
+                    code: -32602,
+                    message: format!(
+                        "Invalid 'bundle' (expected {{uri, sha256, size_bytes}}): {}",
+                        e
+                    ),
+                    data: None,
+                }
+            })?,
+        );
+    }
 
     // Enforce paid-skill registration invariant: a non-zero price
     // requires a creator_wallet to receive the 95% creator share.
@@ -40475,6 +45573,12 @@ async fn handle_list_skills(
     if let Some(ref cap) = filter.capability {
         skills.retain(|s| s.required_capabilities.contains(cap));
     }
+    if let Some(ref cat) = filter.category {
+        skills.retain(|s| &s.category == cat);
+    }
+    if let Some(true) = filter.bundled_only {
+        skills.retain(|s| s.bundle.is_some());
+    }
     if let Some(max_price) = filter.max_price {
         skills.retain(|s| s.price_per_call <= max_price);
     }
@@ -40523,14 +45627,26 @@ async fn handle_search_skills(
         });
     }
 
-    if let Some(true) = filter.active_only {
-        skills.retain(|s| s.is_available());
+    // Same liveness default as tenzro_listSkills: hide Inactive/Deprecated
+    // unless the caller explicitly asks for every row.
+    match filter.active_only {
+        Some(false) => {}
+        _ => skills.retain(|s| s.is_available()),
     }
     if let Some(ref tag) = filter.tag {
         skills.retain(|s| s.tags.contains(tag));
     }
     if let Some(ref did) = filter.creator_did {
         skills.retain(|s| &s.creator_did == did);
+    }
+    if let Some(ref cap) = filter.capability {
+        skills.retain(|s| s.required_capabilities.contains(cap));
+    }
+    if let Some(ref cat) = filter.category {
+        skills.retain(|s| &s.category == cat);
+    }
+    if let Some(true) = filter.bundled_only {
+        skills.retain(|s| s.bundle.is_some());
     }
     if let Some(max_price) = filter.max_price {
         skills.retain(|s| s.price_per_call <= max_price);
@@ -40543,9 +45659,58 @@ async fn handle_search_skills(
     Ok(serde_json::to_value(&paged).unwrap_or_else(|_| serde_json::json!([])))
 }
 
+/// Check the calling agent's own authority to pay for a marketplace
+/// resource, ahead of settlement.
+///
+/// Control over an agent belongs to the identity system, not to the
+/// resource keys the agent happens to hold. A controller narrows its
+/// agent's `resource_invocation` grant to a class, a set of resource ids,
+/// and a per-call ceiling, or lists `InvokeResource` in the oversight
+/// claim's `requires_human_approval_for` so every paid invocation parks
+/// for a human. Either way the leash travels with the identity that
+/// spends, across every registry.
+///
+/// Free invocations pass: there is no spend to authorize. Requests
+/// carrying no auth headers also pass, which is what keeps the registry
+/// permissionless — with no bearer there is no controller to consult.
+async fn enforce_resource_invocation_authority(
+    node: &Arc<TenzroNode>,
+    auth_ctx: &AuthContext,
+    class: tenzro_types::ResourceClass,
+    resource_id: &str,
+    fee: u128,
+    params: &serde_json::Value,
+) -> std::result::Result<(), JsonRpcError> {
+    if fee == 0 {
+        return Ok(());
+    }
+    let intent = tenzro_auth::AuthorityRequest {
+        action: tenzro_auth::AuthorityAction::InvokeResource,
+        constraint: tenzro_auth::ResourceConstraint {
+            asset: Some(tenzro_types::AssetId::tnzo()),
+            amount: Some(fee),
+            counterparty: None,
+            // The grant restricts by class and by bare resource id, so the
+            // request qualifies its id with the class it belongs to.
+            resource_id: Some(format!("{}:{}", class.as_str(), resource_id)),
+        },
+        approval_id: params
+            .get("approval_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    };
+    // `resolve_auth_to_wallet` already maps a denial onto `-32001` and a
+    // parked approval onto `-32002` carrying the approval id.
+    match resolve_auth_to_wallet(node, auth_ctx, Some(intent)).await {
+        AuthOutcome::Authenticated { .. } | AuthOutcome::Unauthenticated => Ok(()),
+        AuthOutcome::AuthError(err) => Err(err),
+    }
+}
+
 pub(crate) async fn handle_use_skill(
     node: Arc<TenzroNode>,
     params: serde_json::Value,
+    auth_ctx: &AuthContext,
 ) -> std::result::Result<serde_json::Value, JsonRpcError> {
     use crate::commission_policy::{settle_paid_invocation, CommissionError};
 
@@ -40578,10 +45743,69 @@ pub(crate) async fn handle_use_skill(
         });
     }
 
+    // Registry admission is permissionless, so the caller's certainty comes
+    // from naming what it will run. A pin is checked before settlement: a
+    // refused invocation costs nothing. `-32006` is the same code the
+    // verify-before-load gate uses for model weights — declared content hash
+    // does not match what is on record.
+    let expected_version = params.get("expected_version").and_then(|v| v.as_str());
+    let expected_sha256 = params.get("expected_sha256").and_then(|v| v.as_str());
+    skill
+        .check_pin(expected_version, expected_sha256)
+        .map_err(|e| JsonRpcError {
+            code: -32006,
+            message: e.to_string(),
+            data: Some(serde_json::json!({
+                "skill_id": skill_id,
+                "registry_version": skill.version,
+                "registry_sha256": skill.bundle.as_ref().map(|b| b.sha256.clone()),
+                "registry_bundle_uri": skill.bundle.as_ref().map(|b| b.uri.clone()),
+            })),
+        })?;
+
+    // Resolve what will actually run before settling. A skill that ships a
+    // content-addressed bundle executes in the component sandbox: publisher
+    // code from a permissionless registry is untrusted, so the sandbox is the
+    // boundary a caller relies on. An endpoint is code the operator or the
+    // publisher hosts, reached in-process for `builtin://` and over HTTP
+    // otherwise. A row naming neither is refused here, ahead of settlement, so
+    // an unrunnable skill costs the caller nothing.
+    enum Target {
+        Bundle,
+        Builtin(String),
+        Http(String),
+    }
+    let target = if skill.bundle.is_some() {
+        Target::Bundle
+    } else if let Some(endpoint) = skill.endpoint.clone() {
+        match crate::builtin_dispatch::builtin_target(&endpoint) {
+            Some(name) => Target::Builtin(name.to_string()),
+            None => Target::Http(endpoint),
+        }
+    } else {
+        return Err(JsonRpcError {
+            code: -32603,
+            message: format!(
+                "Skill '{}' publishes neither a bundle nor an endpoint, so there is nothing to run",
+                skill_id
+            ),
+            data: None,
+        });
+    };
+
     // Settle the commission split BEFORE doing the work. If the payer
     // can't pay, the caller gets a clean rejection and no endpoint is
     // hit. Free skills (price_per_call == 0) short-circuit to None.
     let fee = skill.price_per_call;
+    enforce_resource_invocation_authority(
+        &node,
+        auth_ctx,
+        tenzro_types::ResourceClass::Skill,
+        &skill_id,
+        fee,
+        &params,
+    )
+    .await?;
     let app = resolve_app_attribution(&node, &params)?;
     let receipt = settle_paid_invocation(
         skill.creator_wallet,
@@ -40618,27 +45842,39 @@ pub(crate) async fn handle_use_skill(
         .unwrap_or_default()
         .as_secs();
 
-    let output = if let Some(ref endpoint) = skill.endpoint.clone() {
-        let client = reqwest::Client::new();
-        let resp = client.post(endpoint)
-            .json(&input)
-            .send()
-            .await
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("Skill endpoint error: {}", e),
-                data: None,
-            })?;
-        resp.json::<serde_json::Value>()
-            .await
-            .unwrap_or_else(|_| serde_json::json!({"status": "invoked"}))
-    } else {
-        serde_json::json!({
-            "status": "executed",
-            "skill_id": skill_id,
-            "invocation_id": invocation_id,
-            "note": "local skill execution — no remote endpoint configured"
-        })
+    let output = match target {
+        Target::Bundle => {
+            let caller_did = params
+                .get("caller_did")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            crate::skill_sandbox::execute_bundle(
+                &node,
+                &skill,
+                &invocation_id,
+                &input,
+                caller_did,
+            )
+            .await?
+        }
+        Target::Builtin(name) => {
+            crate::builtin_dispatch::dispatch_skill(&node, &name, &input).await?
+        }
+        Target::Http(endpoint) => {
+            let client = reqwest::Client::new();
+            let resp = client.post(&endpoint)
+                .json(&input)
+                .send()
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Skill endpoint error: {}", e),
+                    data: None,
+                })?;
+            resp.json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({"status": "invoked"}))
+        }
     };
 
     skill.invocation_count += 1;
@@ -41016,6 +46252,7 @@ pub(crate) async fn handle_use_tool(
     node: Arc<TenzroNode>,
     params: Value,
     api_key: Option<&str>,
+    auth_ctx: &AuthContext,
 ) -> std::result::Result<Value, JsonRpcError> {
     use crate::commission_policy::{settle_paid_invocation, CommissionError};
 
@@ -41042,13 +46279,15 @@ pub(crate) async fn handle_use_tool(
         return Err(JsonRpcError { code: -32602, message: format!("Tool is not available: {:?}", tool.status), data: None });
     }
 
-    // Per-tenant scope check. When the caller presents an API key
-    // that has any allow-list set, the tool_id must be in the
-    // `allowed_tools` set AND the tool's posted price must fit under
-    // any per-resource TNZO cap. This gate is fail-closed: a missing
-    // api_key + a tool with `allowed_to_subjects = Some(_)` rejects.
-    // A tool without `allowed_to_subjects` AND a missing api_key is
-    // legacy-permissive (open access — typical for the 5 built-ins).
+    // The marketplace registry is permissionless: a tool that sets no
+    // `allowed_to_subjects` is invocable by anyone, and its posted
+    // `price_per_call` in TNZO is the only admission control.
+    //
+    // `allowed_to_subjects` is the provider's own opt-in to keep an
+    // entry unlisted. When it is set, the caller must present an API
+    // key naming an allowed subject. A key presented voluntarily is
+    // also honoured as a spend guard: its per-class allow-list and
+    // per-resource TNZO cap both apply.
     if let Some(plaintext) = api_key
         && let Some(mgr) = node.api_key_manager()
     {
@@ -41098,7 +46337,20 @@ pub(crate) async fn handle_use_tool(
 
     // Settle the commission split BEFORE dispatching to the tool. Free
     // tools (price_per_call == 0) short-circuit to None.
+    //
+    // The API-key check above is the resource key's own leash. This is the
+    // agent identity's: a controller's grant travels with the agent, so it
+    // holds whichever key the agent presents.
     let fee = tool.price_per_call;
+    enforce_resource_invocation_authority(
+        &node,
+        auth_ctx,
+        tenzro_types::ResourceClass::Tool,
+        tool_id,
+        fee,
+        &params,
+    )
+    .await?;
     let app = resolve_app_attribution(&node, &params)?;
     let receipt = settle_paid_invocation(
         tool.creator_wallet,
@@ -41133,8 +46385,13 @@ pub(crate) async fn handle_use_tool(
     // The plugin host owns all three MCP transports (Streamable HTTP,
     // stdio subprocess, legacy SSE) plus the OpenAPI `api` path, and
     // injects the operator's upstream credentials from the sealed
-    // vault. Native tools are handled inline.
-    let output = if tool.tool_type == "native" {
+    // vault. Native tools are handled inline. Tools on the `builtin://`
+    // scheme run in-process and are checked ahead of the type split so a
+    // builtin declared `native` reaches its handler.
+    let output = if let Some(builtin) = crate::builtin_dispatch::builtin_target(&tool.endpoint) {
+        crate::builtin_dispatch::dispatch_tool(&node, builtin, tool_name, &tool_params, api_key)
+            .await?
+    } else if tool.tool_type == "native" {
         serde_json::json!({
             "type": "native",
             "tool_id": tool_id,
@@ -41350,6 +46607,41 @@ async fn handle_update_skill(
     if let Some(caps) = params.get("required_capabilities").and_then(|v| v.as_array()) {
         skill.required_capabilities = caps.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
     }
+    if let Some(v) = params.get("endpoint").and_then(|v| v.as_str()) { skill.endpoint = Some(v.to_string()); }
+    if let Some(v) = params.get("category").and_then(|v| v.as_str()) { skill.category = v.to_string(); }
+    if let Some(tags) = params.get("tags").and_then(|v| v.as_array()) {
+        skill.tags = tags.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+    }
+    if let Some(wallet_str) = params.get("creator_wallet").and_then(|v| v.as_str()) {
+        skill.creator_wallet = Some(parse_address(wallet_str)?);
+    }
+    // Republishing a new artifact is a version bump, not a mutation of the
+    // bytes a pinned caller already agreed to run: existing pins on the old
+    // digest now fail closed against the new row, which is the point.
+    if let Some(bundle) = params.get("bundle") {
+        skill.bundle = if bundle.is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value::<tenzro_types::SkillBundle>(bundle.clone()).map_err(
+                    |e| JsonRpcError {
+                        code: -32602,
+                        message: format!(
+                            "Invalid 'bundle' (expected {{uri, sha256, size_bytes}}): {}",
+                            e
+                        ),
+                        data: None,
+                    },
+                )?,
+            )
+        };
+    }
+
+    skill.validate_for_registration().map_err(|e| JsonRpcError {
+        code: -32602,
+        message: e.to_string(),
+        data: None,
+    })?;
 
     let key = skill.skill_id.as_bytes().to_vec();
     let value = serde_json::to_vec(&skill)
@@ -41744,6 +47036,7 @@ async fn handle_use_knowledge(
     node: Arc<TenzroNode>,
     params: Value,
     api_key: Option<&str>,
+    auth_ctx: &AuthContext,
 ) -> std::result::Result<Value, JsonRpcError> {
     use crate::commission_policy::{settle_paid_invocation, CommissionError};
 
@@ -41837,7 +47130,20 @@ async fn handle_use_knowledge(
     }
 
     // Settle BEFORE dispatching.
+    //
+    // The API-key check above is the resource key's own leash. This is the
+    // agent identity's: a controller's grant travels with the agent, so it
+    // holds whichever key the agent presents.
     let fee = rec.price_per_call;
+    enforce_resource_invocation_authority(
+        &node,
+        auth_ctx,
+        tenzro_types::ResourceClass::Knowledge,
+        knowledge_id,
+        fee,
+        &params,
+    )
+    .await?;
     let app = resolve_app_attribution(&node, &params)?;
     let receipt = settle_paid_invocation(
         rec.creator_wallet,
@@ -42211,6 +47517,71 @@ async fn handle_get_workflow_template(
     Ok(serde_json::to_value(&rec).unwrap_or_default())
 }
 
+/// Check instantiation inputs against a template's `required_inputs`
+/// schema: every entry in `required` must be present, and a value that
+/// declares a `type` or an `enum` must match it. Steps interpolate
+/// inputs directly into handler params, so a wrong JSON type surfaces
+/// deep in the run — this reports it up front instead.
+fn validate_workflow_inputs(
+    schema: &Value,
+    inputs: &Value,
+) -> std::result::Result<(), JsonRpcError> {
+    let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) else {
+        return Ok(());
+    };
+    let bad_input = |message: String| JsonRpcError {
+        code: -32602,
+        message,
+        data: None,
+    };
+
+    if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
+        for name in required.iter().filter_map(|v| v.as_str()) {
+            match inputs.get(name) {
+                None | Some(Value::Null) => {
+                    return Err(bad_input(format!("Missing required input '{name}'")));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    for (name, spec) in properties {
+        let Some(value) = inputs.get(name).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        if let Some(declared) = spec.get("type").and_then(|v| v.as_str()) {
+            let matches = match declared {
+                "string" => value.is_string(),
+                "integer" => value.is_i64() || value.is_u64(),
+                "number" => value.is_number(),
+                "boolean" => value.is_boolean(),
+                "object" => value.is_object(),
+                "array" => value.is_array(),
+                _ => true,
+            };
+            if !matches {
+                return Err(bad_input(format!(
+                    "Input '{name}' must be a JSON {declared}"
+                )));
+            }
+        }
+        if let Some(allowed) = spec.get("enum").and_then(|v| v.as_array())
+            && !allowed.contains(value)
+        {
+            let choices = allowed
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(bad_input(format!(
+                "Input '{name}' must be one of: {choices}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn handle_instantiate_workflow(
     node: Arc<TenzroNode>,
     params: Value,
@@ -42311,6 +47682,11 @@ async fn handle_instantiate_workflow(
         });
     }
 
+    // Check the inputs against the template's declared schema before
+    // charging: a run that is missing an input fails at the step that
+    // references it, so the caller should not pay for it.
+    validate_workflow_inputs(&tpl.required_inputs, &inputs)?;
+
     // Settle the instantiation fee.
     let app = resolve_app_attribution(&node, &params)?;
     let receipt = settle_paid_invocation(
@@ -42394,7 +47770,7 @@ async fn handle_instantiate_workflow(
         _ => None,
     };
 
-    let run = executor
+    executor
         .begin(
             workflow_id.clone(),
             template_id.to_string(),
@@ -42430,22 +47806,19 @@ async fn handle_instantiate_workflow(
         crate::workflow_executor::WorkflowRunStatus::AwaitingSignal => "awaiting_signal",
     };
 
-    Ok(serde_json::json!({
-        "template_id": template_id,
-        "workflow_id": workflow_id,
-        "started_at": started_at,
-        "status": status_str,
-        "settlement": settlement,
-        "run": terminal,
-        // Keep the marker fields for back-compat with the original
-        // WorkflowInstantiationResult shape.
-        "instantiation": tenzro_types::WorkflowInstantiationResult {
-            template_id: template_id.to_string(),
-            workflow_id: run.workflow_id.clone(),
-            started_at,
-            status: status_str.to_string(),
-        },
-    }))
+    let mut out = serde_json::json!(tenzro_types::WorkflowInstantiationResult {
+        template_id: template_id.to_string(),
+        workflow_id: workflow_id.clone(),
+        started_at,
+        status: status_str.to_string(),
+    });
+    if let Value::Object(obj) = &mut out {
+        obj.insert("settlement".to_string(), serde_json::json!(settlement));
+        // `run.step_outputs` is the map the caller reads results from:
+        // one entry per step `output_as` binding.
+        obj.insert("run".to_string(), serde_json::json!(terminal));
+    }
+    Ok(out)
 }
 
 // ─── Child Agent Atomic Spawn ──────────────────────────────────────────────
@@ -42463,7 +47836,8 @@ async fn handle_instantiate_workflow(
 //   4. Return the child DID + child wallet address + the registration
 //      receipt for audit.
 //
-// Failure semantics: identity registration is the load-bearing step;
+// Failure semantics: identity registration is the step everything else
+// depends on;
 // if it fails, no funds are moved and no state is touched. If funding
 // fails after identity registration, the identity remains (the
 // operator can fund later) and the response surfaces the funding
@@ -42658,7 +48032,11 @@ pub async fn handle_use_tool_external(
     params: Value,
     api_key: Option<&str>,
 ) -> std::result::Result<Value, String> {
-    handle_use_tool(node.clone(), params, api_key)
+    // A workflow step runs behind the authorization taken when the
+    // workflow was opened, not behind a live bearer token, so there is no
+    // agent identity for the invocation gate to consult. The step's own
+    // API key remains its spend guard.
+    handle_use_tool(node.clone(), params, api_key, &AuthContext::default())
         .await
         .map_err(|e| e.message)
 }
@@ -42668,7 +48046,9 @@ pub async fn handle_use_knowledge_external(
     params: Value,
     api_key: Option<&str>,
 ) -> std::result::Result<Value, String> {
-    handle_use_knowledge(node.clone(), params, api_key)
+    // Same reasoning as `handle_use_tool_external`: a workflow step has no
+    // live bearer, so its API key remains its spend guard.
+    handle_use_knowledge(node.clone(), params, api_key, &AuthContext::default())
         .await
         .map_err(|e| e.message)
 }
@@ -42973,6 +48353,7 @@ async fn handle_use_resource(
     node: Arc<TenzroNode>,
     params: Value,
     api_key: Option<&str>,
+    auth_ctx: &AuthContext,
 ) -> std::result::Result<Value, JsonRpcError> {
     let resource_id = params
         .get("resource_id")
@@ -43031,14 +48412,14 @@ async fn handle_use_resource(
                 match class {
                     tenzro_types::ResourceClass::Tool => {
                         obj.insert("tool_id".to_string(), Value::String(resource_id.to_string()));
-                        return handle_use_tool(node, p, api_key).await;
+                        return handle_use_tool(node, p, api_key, auth_ctx).await;
                     }
                     tenzro_types::ResourceClass::Knowledge => {
                         obj.insert(
                             "knowledge_id".to_string(),
                             Value::String(resource_id.to_string()),
                         );
-                        return handle_use_knowledge(node, p, api_key).await;
+                        return handle_use_knowledge(node, p, api_key, auth_ctx).await;
                     }
                     tenzro_types::ResourceClass::WorkflowTemplate => {
                         obj.insert(
@@ -43056,7 +48437,7 @@ async fn handle_use_resource(
                     }
                     tenzro_types::ResourceClass::Skill => {
                         obj.insert("skill_id".to_string(), Value::String(resource_id.to_string()));
-                        return handle_use_skill(node, p).await;
+                        return handle_use_skill(node, p, auth_ctx).await;
                     }
                     tenzro_types::ResourceClass::Model => {
                         obj.insert("model".to_string(), Value::String(resource_id.to_string()));
@@ -44320,6 +49701,10 @@ async fn handle_agent_payment_pipeline(
         ..GenerationConfig::default()
     };
 
+    // Measured from dispatch so a per-compute-time card bills the wall clock
+    // the caller actually waited on, whichever branch served the request.
+    let dispatch_start = std::time::Instant::now();
+
     let (response_text, input_tokens, output_tokens) = if is_local {
         // Local inference
         let model_runtime = node.model_runtime.as_ref().ok_or_else(|| JsonRpcError {
@@ -44410,13 +49795,13 @@ async fn handle_agent_payment_pipeline(
     };
 
     // --- 6. Calculate cost & deduct payment (wei) ---
-    let pricing = node.provider_pricing.read();
-    let cost_wei: u128 = (input_tokens as u128)
-        .saturating_mul(pricing.input_price_per_token_wei)
-        .saturating_add(
-            (output_tokens as u128).saturating_mul(pricing.output_price_per_token_wei),
-        );
-    drop(pricing);
+    let units = tenzro_types::model::BillableUnits::tokens(input_tokens, output_tokens);
+    let cost_wei = price_local_units(
+        node,
+        &model_id,
+        &units,
+        dispatch_start.elapsed().as_millis() as u64,
+    );
 
     // Enforce spending cap
     if cost_wei > max_cost_wei {
@@ -44466,7 +49851,7 @@ async fn handle_agent_payment_pipeline(
 
             // Protocol fee to treasury
             if protocol_fee_wei > 0 {
-                let treasury_addr = Address::default(); // Treasury address
+                let treasury_addr = tenzro_types::network_treasury_address();
                 let _ = token.transfer(&agent_address, &treasury_addr, protocol_fee_wei);
             }
 
@@ -45804,23 +51189,54 @@ async fn handle_bridge_tokens(
         sender.to_string(), recipient.to_string(),
     );
 
-    match router.bridge_tokens(request).await {
+    // An explicit `protocol` pins the adapter for this dispatch only. The
+    // router keeps preferences as global state, so the prior value is
+    // restored once the transfer returns.
+    let requested_protocol = params.get("protocol").and_then(|v| v.as_str()).map(str::to_string);
+    let pinned = match &requested_protocol {
+        Some(name) => {
+            let adapters = router.list_adapters().await;
+            let needle = name.to_lowercase().replace(['-', '_'], "");
+            let matched = adapters
+                .iter()
+                .find(|a| a.to_lowercase().replace(['-', '_'], "").contains(&needle))
+                .cloned()
+                .ok_or_else(|| JsonRpcError {
+                    code: -32602,
+                    message: format!("No bridge adapter matches protocol '{}'", name),
+                    data: Some(serde_json::json!({ "registered_adapters": adapters })),
+                })?;
+            let prior = router.get_preferences().await;
+            router
+                .set_preferences(tenzro_bridge::router::RoutingPreferences {
+                    strategy: tenzro_bridge::router::RoutingStrategy::PreferAdapter(matched.clone()),
+                    max_fee: prior.max_fee,
+                    max_time_secs: prior.max_time_secs,
+                })
+                .await;
+            Some((matched, prior))
+        }
+        None => None,
+    };
+
+    let outcome = router.bridge_tokens(request).await;
+    if let Some((_, prior)) = &pinned {
+        router.set_preferences(prior.clone()).await;
+    }
+
+    match outcome {
         Ok(receipt) => {
-            // Infer protocol from transfer_id prefix (set by each adapter)
-            let protocol = if receipt.transfer_id.starts_with("lz-") || receipt.transfer_id.starts_with("layerzero") {
-                "layerzero"
-            } else if receipt.transfer_id.starts_with("2/") || receipt.transfer_id.starts_with("wormhole") {
-                "wormhole"
-            } else if receipt.transfer_id.starts_with("ccip-") || receipt.transfer_id.starts_with("chainlink") {
-                "chainlink-ccip"
-            } else if receipt.transfer_id.starts_with("dln-") || receipt.transfer_id.starts_with("debridge") {
-                "debridge"
-            } else if receipt.transfer_id.starts_with("canton-") {
-                "canton"
-            } else if receipt.transfer_id.starts_with("lifi-") {
-                "lifi"
-            } else {
-                "auto"
+            // A pinned adapter names itself; otherwise infer the protocol
+            // from the transfer_id prefix each adapter sets.
+            let protocol: &str = match pinned.as_ref() {
+                Some((name, _)) => name.as_str(),
+                None if receipt.transfer_id.starts_with("lz-") || receipt.transfer_id.starts_with("layerzero") => "layerzero",
+                None if receipt.transfer_id.starts_with("2/") || receipt.transfer_id.starts_with("wormhole") => "wormhole",
+                None if receipt.transfer_id.starts_with("ccip-") || receipt.transfer_id.starts_with("chainlink") => "chainlink-ccip",
+                None if receipt.transfer_id.starts_with("dln-") || receipt.transfer_id.starts_with("debridge") => "debridge",
+                None if receipt.transfer_id.starts_with("canton-") => "canton",
+                None if receipt.transfer_id.starts_with("lifi-") => "lifi",
+                None => "auto",
             };
 
             // Persist transfer record for status lookup
@@ -49618,6 +55034,9 @@ async fn resolve_auth_to_wallet(
                     data: None,
                 });
             }
+            // A refused approval retry arrives here. The engine's message
+            // carries the approver's `deny_reason` verbatim so the agent can
+            // act on why it was refused rather than just that it was.
             Err(e) => {
                 return AuthOutcome::AuthError(JsonRpcError {
                     code: -32001,
@@ -49998,7 +55417,15 @@ fn enforce_typed_tx_spend_ceilings(
 /// Build an `AuthorityRequest` from a Tenzro `Transaction`. Maps
 /// `TransactionType` variants onto `AuthorityAction` so the auth engine
 /// can scope-check the request against the JWT's RAR envelope.
-fn intent_for_transaction(tx: &Transaction) -> Option<tenzro_auth::AuthorityRequest> {
+///
+/// `approval_id` carries an approval the caller was granted out-of-band
+/// after a prior attempt returned `RequireApproval`. The engine spends it
+/// if it authorizes this exact action, so the retry executes instead of
+/// parking a second time.
+fn intent_for_transaction(
+    tx: &Transaction,
+    approval_id: Option<String>,
+) -> Option<tenzro_auth::AuthorityRequest> {
     use tenzro_auth::{AuthorityAction, AuthorityRequest, ResourceConstraint};
     use tenzro_types::AssetId;
 
@@ -50033,7 +55460,11 @@ fn intent_for_transaction(tx: &Transaction) -> Option<tenzro_auth::AuthorityRequ
         _ => return None,
     };
 
-    Some(AuthorityRequest { action, constraint })
+    Some(AuthorityRequest {
+        action,
+        constraint,
+        approval_id,
+    })
 }
 
 async fn handle_sign_message(
@@ -50405,7 +55836,11 @@ async fn handle_sign_transaction(
     // + `DPoP: <proof>` headers. The auth engine validates them, scope-checks
     // the intent against the JWT's RAR envelope, and signs via the wallet
     // bound to the controller DID. The caller never sees a raw private key.
-    let intent = intent_for_transaction(&intent_tx);
+    let approval_id = params
+        .get("approval_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let intent = intent_for_transaction(&intent_tx, approval_id);
     let outcome = resolve_auth_to_wallet(node, auth_ctx, intent).await;
     let wallet_id = match outcome {
         AuthOutcome::Authenticated { wallet_id, .. } => wallet_id,
@@ -51937,14 +57372,14 @@ async fn handle_rotate_keys(
 ///    next epoch boundary.
 ///
 /// Cross-node propagation: the caller must broadcast the same rotation
-/// to every active validator's RPC (or to a typed transaction in a
-/// future wave) so that every node's local registry + EpochManager
+/// to every active validator's RPC (or, once it exists, to a typed
+/// transaction) so that every node's local registry + EpochManager
 /// converges on the new key tuple at the same epoch boundary. Until
 /// that broadcast lands on the full set, the rotating validator's
 /// votes after the boundary will be rejected by nodes that didn't see
 /// the rotation. Operators rotating a key SHOULD use a per-validator
 /// fan-out script (or the planned `RotateValidatorKey` typed
-/// transaction in a follow-up wave) rather than calling this RPC on a
+/// transaction, once implemented) rather than calling this RPC on a
 /// single node and assuming the network will converge.
 ///
 /// Until the epoch boundary, the validator continues to sign with its
@@ -52449,12 +57884,23 @@ async fn handle_chat_stream(
         "message": message,
         "max_tokens": max_tokens,
     });
+    // Carries the payer, the offer pin and the app attribution through to the
+    // chat handler. Rebuilding the params without them made this surface serve
+    // network inference for free and let it dispatch to an offer the caller
+    // never priced against.
     if let Some(obj) = chat_params.as_object_mut() {
-        if let Some(pin) = params.get("jurisdiction").filter(|v| !v.is_null()) {
-            obj.insert("jurisdiction".to_string(), pin.clone());
-        }
-        if let Some(req) = params.get("jurisdiction_receipt").filter(|v| !v.is_null()) {
-            obj.insert("jurisdiction_receipt".to_string(), req.clone());
+        for key in [
+            "provider",
+            "caller_address",
+            "channel_id",
+            "channel_update_sig",
+            "app_id",
+            "jurisdiction",
+            "jurisdiction_receipt",
+        ] {
+            if let Some(v) = params.get(key).filter(|v| !v.is_null()) {
+                obj.insert(key.to_string(), v.clone());
+            }
         }
     }
 
@@ -52576,7 +58022,7 @@ fn training_err(e: tenzro_training::TrainingError) -> JsonRpcError {
 ///
 /// Params: `{ task_spec: TrainingTaskSpec, syncer_did?: string, syncer_address?: hex }`
 /// The syncer DID/address default to the node's primary identity if omitted.
-async fn handle_training_post_task(
+pub(crate) async fn handle_training_post_task(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -52633,7 +58079,7 @@ async fn handle_training_post_task(
 }
 
 /// `tenzro_training_listRuns`: list all active training runs the node is syncing.
-async fn handle_training_list_runs(
+pub(crate) async fn handle_training_list_runs(
     node: &Arc<TenzroNode>,
 ) -> std::result::Result<Value, JsonRpcError> {
     let runs = node.training_runtime.list_runs();
@@ -52641,7 +58087,7 @@ async fn handle_training_list_runs(
 }
 
 /// `tenzro_training_getRun`: look up a specific run by task_id.
-async fn handle_training_get_run(
+pub(crate) async fn handle_training_get_run(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -52668,7 +58114,7 @@ async fn handle_training_get_run(
 }
 
 /// `tenzro_training_getReceipt`: look up a sealed training receipt by task_id.
-async fn handle_training_get_receipt(
+pub(crate) async fn handle_training_get_receipt(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -52702,7 +58148,7 @@ async fn handle_training_get_receipt(
 ///
 /// Params: `{ task_id, trainer_did, attestation?: TrainingAttestation,
 ///            enclave_pubkey?: hex, measurements_hex?: string }`
-async fn handle_training_enroll_trainer(
+pub(crate) async fn handle_training_enroll_trainer(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -52774,7 +58220,7 @@ async fn handle_training_enroll_trainer(
 /// current round. Caller is the trainer (or the trainer's local relay).
 ///
 /// Params: `{ gradient: OuterGradient }`
-async fn handle_training_submit_outer_gradient(
+pub(crate) async fn handle_training_submit_outer_gradient(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -52849,7 +58295,7 @@ async fn handle_training_submit_outer_gradient(
 /// trainer over its JSON-RPC bridge).
 ///
 /// Params: `{ task_id, round, post_step_hashes: { "<fragment>": "<hex>" } }`
-async fn handle_training_finalize_round(
+pub(crate) async fn handle_training_finalize_round(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -52957,7 +58403,7 @@ async fn handle_training_finalize_round(
 /// arrived, or assemble a No-Endorsement Certificate — without inspecting
 /// the raw per-fragment buffers. Slow trainers are soft-timed-out once the
 /// window elapses; their absence never stalls the run.
-async fn handle_training_decide_round(
+pub(crate) async fn handle_training_decide_round(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -53002,7 +58448,7 @@ async fn handle_training_decide_round(
 /// the Open-tier fraud-proof path where no TEE attestation exists.
 ///
 /// Params: `{ task_id, round, fragment, trainer_did, recomputed: ActivationCommitment }`
-async fn handle_training_challenge_commitment(
+pub(crate) async fn handle_training_challenge_commitment(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -53073,7 +58519,7 @@ async fn handle_training_challenge_commitment(
 /// persisted under `manifest:<task_id>` in `CF_TRAINING_RUNS`.
 ///
 /// Params: `{ manifest: SealedDatasetManifest }`
-async fn handle_training_install_sealed_manifest(
+pub(crate) async fn handle_training_install_sealed_manifest(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -53139,7 +58585,7 @@ async fn handle_training_install_sealed_manifest(
 /// manifest has been installed.
 ///
 /// Params: `{ task_id }`
-async fn handle_training_get_sealed_manifest(
+pub(crate) async fn handle_training_get_sealed_manifest(
     node: &Arc<TenzroNode>,
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
@@ -53757,6 +59203,16 @@ async fn handle_media_gen_submit_receipt(
         .submit_receipt(receipt)
         .map_err(media_gen_err)?;
 
+    // Recorded here rather than on the gossip consumer: every node sees the
+    // announcement, and a tracker that counted each observation would inflate
+    // the aggregate that reward metering reads by the size of the network.
+    record_media_gen_usage(node, &announce);
+
+    // Settled after `submit_receipt` so nothing is paid against a receipt the
+    // runtime would reject, and against `job` rather than the receipt alone
+    // because the split across experts lives on the assignments.
+    let settlement = settle_media_gen_job(node, &job, &announce)?;
+
     let locator = node
         .media_gen_output_store
         .as_ref()
@@ -53770,11 +59226,15 @@ async fn handle_media_gen_submit_receipt(
         ),
     }
 
-    serde_json::to_value(&job).map_err(|e| JsonRpcError {
+    let mut out = serde_json::to_value(&job).map_err(|e| JsonRpcError {
         code: -32603,
         message: format!("serialize job: {}", e),
         data: None,
-    })
+    })?;
+    if let (Some(obj), true) = (out.as_object_mut(), !settlement.is_null()) {
+        obj.insert("settlement".to_string(), settlement);
+    }
+    Ok(out)
 }
 
 /// `tenzro_mediaGen_getReceipt`: the sealed receipt for a completed job.

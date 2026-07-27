@@ -982,7 +982,7 @@ mod tests {
         assert_eq!(a.len(), 32);
     }
 
-    /// End-to-end 3-party round-trip:
+    /// Full 3-party round-trip:
     /// 1. Bootstrap a group via DKG (epoch 0).
     /// 2. Drive `RefreshSession` for all three parties in-process.
     /// 3. Assert all three persisted epoch-1 envelopes with:

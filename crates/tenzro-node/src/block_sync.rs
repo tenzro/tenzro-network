@@ -677,7 +677,7 @@ impl BlockSyncEngine {
                     tip_hash: latest.hash(),
                     // We are an archive node — every height since genesis is
                     // available. Pruning nodes will report a non-zero value
-                    // when pruning lands.
+                    // when pruning is implemented.
                     lowest_available: BlockHeight(0),
                 }
             }
@@ -779,7 +779,7 @@ impl BlockSyncEngine {
     fn score_peer(&mut self, peer: &PeerId, delta: i32) {
         let entry = self.peers.entry(*peer).or_default();
         // Clamp into [PEER_SCORE_HARD_BAN_THRESHOLD, PEER_SCORE_CEILING]. The
-        // floor is load-bearing for recovery: without it, a peer that merely
+        // floor is what makes recovery possible: without it, a peer that merely
         // times out repeatedly (e.g. the only node serving the one block we
         // need, while it is itself slow under load) sinks arbitrarily far
         // below the hard-ban floor. The behind-hint eligibility gate

@@ -978,58 +978,132 @@ impl std::fmt::Debug for PaymentsConfig {
     }
 }
 
-/// Canton/DAML participant configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CantonConfig {
-    /// Canton participant Ledger API host
+/// Which Canton Global Synchronizer network a participant is joined to.
+///
+/// An operator may run one participant per network. The RPC resolves the
+/// target network per request from the presenting API key
+/// (`ApiKeyRecord::canton_networks`), falling back to
+/// [`CantonConfig::default_network`] when the key authorizes exactly one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CantonNetwork {
+    Devnet,
+    Mainnet,
+}
+
+impl CantonNetwork {
+    /// Canonical wire string, as accepted by the `canton_network` RPC
+    /// parameter and stored on API key records.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Devnet => "devnet",
+            Self::Mainnet => "mainnet",
+        }
+    }
+
+    /// Parse from the canonical wire string. Case-insensitive.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "devnet" => Some(Self::Devnet),
+            "mainnet" => Some(Self::Mainnet),
+            _ => None,
+        }
+    }
+}
+
+impl Default for CantonNetwork {
+    fn default() -> Self {
+        Self::Devnet
+    }
+}
+
+impl std::fmt::Display for CantonNetwork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Connection + auth settings for one Canton participant.
+///
+/// One of these exists per network the operator serves. Auth is either an
+/// OAuth2 client-credentials grant ([`Self::oauth`]) or a long-lived bearer
+/// ([`Self::static_jwt`]); they are mutually exclusive, and `oauth` wins.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CantonNetworkConfig {
+    /// Canton participant Ledger API host.
     pub host: String,
 
-    /// Canton participant Ledger API port
+    /// Canton participant Ledger API port.
     pub port: u16,
 
-    /// Whether Canton/DAML VM is enabled
-    pub enabled: bool,
-
-    /// When `true`, the node uses the bundled devnet participant
-    /// profile (TLS:443, OAuth2 client-credentials). Overrides
-    /// `host`/`port`. Set via the `CANTON_DEVNET=true` env var.
-    #[serde(default)]
-    pub devnet: bool,
-
-    /// Upstream client_secret for the Canton devnet client-credentials
-    /// grant. Loaded from the `CANTON_DEVNET_CLIENT_SECRET` env var
-    /// when `devnet` is true. Never serialized to config files even
-    /// if set programmatically.
-    #[serde(skip_serializing, default)]
-    pub devnet_client_secret: Option<String>,
-
-    /// Use TLS when talking to the Canton Ledger API.
-    ///
-    /// Defaults to `true` when `devnet` is on. Operator-run profiles (an
-    /// RPC provider running their own Canton validator) should set this
-    /// to `true` whenever the participant is reachable over a public
-    /// network. Set via `CANTON_TLS=true|false`.
+    /// Use TLS when talking to the Ledger API. Leave `false` only when the
+    /// participant is reached over a private network path (VPC peering, a
+    /// WireGuard tunnel); anything crossing the public internet must set
+    /// this.
     #[serde(default)]
     pub tls: bool,
 
-    /// Custom OAuth2 client-credentials configuration for an operator-run
-    /// Canton validator. When set, the node uses this in place of the
-    /// bundled devnet credentials. Mutually exclusive with `static_jwt`.
+    /// Override the DAML template id the workflow dispatcher uses when
+    /// mirroring saga completions to this participant. When `None`, the
+    /// canonical `#tenzro-workflow:Tenzro.Workflow:Receipt` is used. Format
+    /// is `#<package-name>:<Module>:<Template>` so the participant resolves
+    /// the latest installed version of the package.
     ///
-    /// All four fields must be present: `token_url`, `client_id`,
-    /// `client_secret`, `audience`. `scope` is optional and defaults to
-    /// `daml_ledger_api`. Env vars: `CANTON_OAUTH_TOKEN_URL`,
-    /// `CANTON_OAUTH_CLIENT_ID`, `CANTON_OAUTH_CLIENT_SECRET`,
-    /// `CANTON_OAUTH_AUDIENCE`, `CANTON_OAUTH_SCOPE`.
+    /// Declared ahead of [`Self::oauth`] because TOML forbids scalars after
+    /// a nested table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oauth: Option<CantonOAuthConfig>,
+    pub workflow_receipt_template: Option<String>,
 
-    /// Static bearer JWT for the Canton Ledger API. Use this when the
-    /// operator's Canton participant is configured to accept a long-lived
-    /// JWT instead of an OAuth2 client-credentials grant. Mutually
-    /// exclusive with `oauth`. Env var: `CANTON_JWT_TOKEN`.
+    /// Long-lived bearer JWT for the Ledger API. Honoured only when
+    /// [`Self::oauth`] is absent.
     #[serde(skip_serializing, default)]
     pub static_jwt: Option<String>,
+
+    /// OAuth2 client-credentials grant for the Ledger API. All four of
+    /// `token_url` / `client_id` / `client_secret` / `audience` are
+    /// required; `scope` defaults to `daml_ledger_api`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<CantonOAuthConfig>,
+}
+
+impl std::fmt::Debug for CantonNetworkConfig {
+    /// Redacts `static_jwt`; `oauth` redacts its own secret.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CantonNetworkConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("tls", &self.tls)
+            .field("oauth", &self.oauth)
+            .field("static_jwt", &self.static_jwt.as_ref().map(|_| "<redacted>"))
+            .field("workflow_receipt_template", &self.workflow_receipt_template)
+            .finish()
+    }
+}
+
+/// Canton/DAML participant configuration.
+///
+/// The node fronts one participant per Canton network. Which participant a
+/// canton-scoped RPC reaches is decided by the presenting API key, never by
+/// the caller alone — see `ApiKeyRecord::canton_networks`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CantonConfig {
+    /// Whether the Canton/DAML surface is enabled at all. When `false`, no
+    /// adapter is built and every canton-scoped RPC errors.
+    pub enabled: bool,
+
+    /// Network used when a key authorizes more than one and the request
+    /// does not name one explicitly.
+    #[serde(default)]
+    pub default_network: CantonNetwork,
+
+    /// Devnet participant. `None` when this operator does not serve devnet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devnet: Option<CantonNetworkConfig>,
+
+    /// Mainnet participant. `None` when this operator does not serve
+    /// mainnet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mainnet: Option<CantonNetworkConfig>,
 
     /// Per-tenant identity-provider configuration (Stage 2). When
     /// enabled, `tenzro_createApiKey` provisions each tenant with
@@ -1045,16 +1119,6 @@ pub struct CantonConfig {
     /// model. Flip on for testnet/mainnet.
     #[serde(default)]
     pub identity_providers: CantonIdentityProvidersConfig,
-
-    /// Override the DAML template id the workflow dispatcher uses
-    /// when mirroring saga completions to Canton via the
-    /// `submitCreateCommand` path. When `None`, the node uses the
-    /// canonical Tenzro workflow receipt template
-    /// (`#tenzro-workflow:Tenzro.Workflow:Receipt`). Format must be
-    /// `#<package-name>:<Module>:<Template>` so the participant
-    /// resolves the latest installed version of the package.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_receipt_template: Option<String>,
 }
 
 /// Per-tenant IDP (Stage 2) configuration. Disabled by default —
@@ -1146,123 +1210,125 @@ fn default_oauth_scope() -> String {
 impl Default for CantonConfig {
     fn default() -> Self {
         Self {
-            host: "localhost".to_string(),
-            port: 5001,
             enabled: false,
-            devnet: false,
-            devnet_client_secret: None,
-            tls: false,
-            oauth: None,
-            static_jwt: None,
+            default_network: CantonNetwork::Devnet,
+            devnet: None,
+            mainnet: None,
             identity_providers: CantonIdentityProvidersConfig::default(),
-            workflow_receipt_template: None,
         }
+    }
+}
+
+impl CantonNetworkConfig {
+    /// Load one participant's settings from `CANTON_<NET>_*` env vars.
+    ///
+    /// Returns `None` unless `CANTON_<NET>_LEDGER_API_HOST` is set and
+    /// non-empty — the presence of a host is what declares that this
+    /// operator serves the network at all.
+    fn from_env(net: CantonNetwork) -> Option<Self> {
+        let prefix = format!("CANTON_{}", net.as_str().to_ascii_uppercase());
+        let var = |suffix: &str| {
+            std::env::var(format!("{prefix}_{suffix}"))
+                .ok()
+                .filter(|v| !v.is_empty())
+        };
+
+        let host = var("LEDGER_API_HOST")?;
+        let port = var("LEDGER_API_PORT")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(5001);
+        let tls = var("TLS").and_then(|v| v.parse().ok()).unwrap_or(false);
+
+        let oauth = match (
+            var("OAUTH_TOKEN_URL"),
+            var("OAUTH_CLIENT_ID"),
+            var("OAUTH_CLIENT_SECRET"),
+            var("OAUTH_AUDIENCE"),
+        ) {
+            (Some(token_url), Some(client_id), Some(client_secret), Some(audience)) => {
+                Some(CantonOAuthConfig {
+                    token_url,
+                    client_id,
+                    client_secret,
+                    audience,
+                    scope: var("OAUTH_SCOPE").unwrap_or_else(default_oauth_scope),
+                })
+            }
+            _ => None,
+        };
+
+        // A long-lived bearer is honoured only when no grant is configured.
+        let static_jwt = if oauth.is_none() { var("JWT_TOKEN") } else { None };
+
+        Some(Self {
+            host,
+            port,
+            tls,
+            oauth,
+            static_jwt,
+            workflow_receipt_template: var("WORKFLOW_RECEIPT_TEMPLATE"),
+        })
     }
 }
 
 impl CantonConfig {
     /// Create from environment variables, falling back to defaults.
     ///
-    /// Three profiles are supported:
+    /// `CANTON_ENABLED=true` turns the surface on. Each network is declared
+    /// by setting its host, and configured independently:
     ///
-    /// 1. **Tenzro-operated devnet** — `CANTON_DEVNET=true`. Forces
-    ///    `json.canton.example-operator.invalid:443` over TLS with the Tenzro Auth0
-    ///    issuer. Client secret from `CANTON_DEVNET_CLIENT_SECRET`.
+    /// ```text
+    /// CANTON_DEVNET_LEDGER_API_HOST     CANTON_MAINNET_LEDGER_API_HOST
+    /// CANTON_DEVNET_LEDGER_API_PORT     CANTON_MAINNET_LEDGER_API_PORT
+    /// CANTON_DEVNET_TLS                 CANTON_MAINNET_TLS
+    /// CANTON_DEVNET_OAUTH_TOKEN_URL     CANTON_MAINNET_OAUTH_TOKEN_URL
+    /// CANTON_DEVNET_OAUTH_CLIENT_ID     CANTON_MAINNET_OAUTH_CLIENT_ID
+    /// CANTON_DEVNET_OAUTH_CLIENT_SECRET CANTON_MAINNET_OAUTH_CLIENT_SECRET
+    /// CANTON_DEVNET_OAUTH_AUDIENCE      CANTON_MAINNET_OAUTH_AUDIENCE
+    /// CANTON_DEVNET_OAUTH_SCOPE         CANTON_MAINNET_OAUTH_SCOPE
+    /// CANTON_DEVNET_JWT_TOKEN           CANTON_MAINNET_JWT_TOKEN
+    /// ```
     ///
-    /// 2. **Operator-run validator** (RPC providers running their own
-    ///    Canton validator) — `CANTON_ENABLED=true` with custom host/port.
-    ///    Auth is configured via EITHER:
-    ///    - `CANTON_OAUTH_TOKEN_URL` + `CANTON_OAUTH_CLIENT_ID` +
-    ///      `CANTON_OAUTH_CLIENT_SECRET` + `CANTON_OAUTH_AUDIENCE`
-    ///      (+ optional `CANTON_OAUTH_SCOPE`), OR
-    ///    - `CANTON_JWT_TOKEN` (long-lived bearer).
-    ///
-    ///    `CANTON_TLS=true` for HTTPS upstream.
-    ///
-    /// 3. **Local unauth** — `CANTON_ENABLED=true` with no auth env vars.
-    ///    Plaintext HTTP to localhost. Dev/test only.
+    /// `CANTON_DEFAULT_NETWORK` (`devnet` | `mainnet`) picks the network
+    /// used when a request carries no `canton_network` param and no API
+    /// key to read an authorized set from — the admin-token path, and the
+    /// workflow saga mirror. A key that authorizes several networks must
+    /// name one on the request.
     pub fn from_env() -> Self {
-        let devnet = std::env::var("CANTON_DEVNET")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(false);
-
-        if devnet {
-            return Self {
-                host: "json.canton.example-operator.invalid".to_string(),
-                port: 443,
-                enabled: true,
-                devnet: true,
-                devnet_client_secret: std::env::var("CANTON_DEVNET_CLIENT_SECRET").ok(),
-                tls: true,
-                oauth: None,
-                static_jwt: None,
-                identity_providers: CantonIdentityProvidersConfig::from_env(),
-                workflow_receipt_template: std::env::var("CANTON_WORKFLOW_RECEIPT_TEMPLATE").ok(),
-            };
-        }
-
-        let host = std::env::var("CANTON_LEDGER_API_HOST")
-            .unwrap_or_else(|_| "localhost".to_string());
-        let port = std::env::var("CANTON_LEDGER_API_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(5001);
         let enabled = std::env::var("CANTON_ENABLED")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(false);
-        let tls = std::env::var("CANTON_TLS")
+
+        let default_network = std::env::var("CANTON_DEFAULT_NETWORK")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(false);
-
-        // Operator OAuth2 — all four fields required, scope optional.
-        let oauth = match (
-            std::env::var("CANTON_OAUTH_TOKEN_URL").ok(),
-            std::env::var("CANTON_OAUTH_CLIENT_ID").ok(),
-            std::env::var("CANTON_OAUTH_CLIENT_SECRET").ok(),
-            std::env::var("CANTON_OAUTH_AUDIENCE").ok(),
-        ) {
-            (Some(token_url), Some(client_id), Some(client_secret), Some(audience))
-                if !token_url.is_empty()
-                    && !client_id.is_empty()
-                    && !client_secret.is_empty()
-                    && !audience.is_empty() =>
-            {
-                Some(CantonOAuthConfig {
-                    token_url,
-                    client_id,
-                    client_secret,
-                    audience,
-                    scope: std::env::var("CANTON_OAUTH_SCOPE")
-                        .unwrap_or_else(|_| default_oauth_scope()),
-                })
-            }
-            _ => None,
-        };
-
-        // Static JWT only honored when OAuth2 is not configured.
-        let static_jwt = if oauth.is_none() {
-            std::env::var("CANTON_JWT_TOKEN")
-                .ok()
-                .filter(|v| !v.is_empty())
-        } else {
-            None
-        };
+            .and_then(|v| CantonNetwork::from_str_opt(&v))
+            .unwrap_or_default();
 
         Self {
-            host,
-            port,
             enabled,
-            devnet: false,
-            devnet_client_secret: None,
-            tls,
-            oauth,
-            static_jwt,
+            default_network,
+            devnet: CantonNetworkConfig::from_env(CantonNetwork::Devnet),
+            mainnet: CantonNetworkConfig::from_env(CantonNetwork::Mainnet),
             identity_providers: CantonIdentityProvidersConfig::from_env(),
-            workflow_receipt_template: std::env::var("CANTON_WORKFLOW_RECEIPT_TEMPLATE").ok(),
         }
+    }
+
+    /// Settings for one network, or `None` when this operator does not
+    /// serve it.
+    pub fn network(&self, net: CantonNetwork) -> Option<&CantonNetworkConfig> {
+        match net {
+            CantonNetwork::Devnet => self.devnet.as_ref(),
+            CantonNetwork::Mainnet => self.mainnet.as_ref(),
+        }
+    }
+
+    /// Every network this operator serves, in canonical order.
+    pub fn configured_networks(&self) -> Vec<CantonNetwork> {
+        [CantonNetwork::Devnet, CantonNetwork::Mainnet]
+            .into_iter()
+            .filter(|net| self.network(*net).is_some())
+            .collect()
     }
 }
 
@@ -1398,6 +1464,11 @@ pub struct NodeConfig {
     /// no subprocess cap.
     #[serde(default)]
     pub mcp_plugin_host: McpPluginHostConfig,
+
+    /// Upstreams for the `builtin://` skills and tools. Unset upstreams
+    /// keep the corresponding builtins unregistered on this node.
+    #[serde(default)]
+    pub builtins: BuiltinsConfig,
 
     /// HTTP 402 payment gate configuration for the Web API
     #[serde(default)]
@@ -1551,6 +1622,17 @@ pub struct NodeConfig {
     /// (permissive/attribution) models only.
     #[serde(default)]
     pub model_licensing: tenzro_types::model::AcceptancePolicy,
+
+    /// The USD price of one TNZO this operator lists at, in micro-USD
+    /// (1e-6 USD) — `Some(50_000)` declares $0.05. It is a commercial
+    /// declaration by the gateway operator, not an oracle reading: TNZO
+    /// stays the settlement unit, the per-token wei prices in `GET
+    /// /v1/models` remain authoritative, and this rate only derives the
+    /// USD-denominated listing prices that external aggregators ingest.
+    /// `None` (the default) omits the USD keys from the listing rather
+    /// than publishing a rate the operator never quoted.
+    #[serde(default)]
+    pub listing_tnzo_usd_micro: Option<u64>,
 }
 
 /// Application-hosting edge configuration.
@@ -1614,6 +1696,29 @@ pub struct Erc8004DamlConfig {
     /// today — Canton parties are operator-allocated, not
     /// per-machine).
     pub default_controller_party: String,
+}
+
+/// Upstreams the `builtin://` skills and tools dispatch to.
+///
+/// A builtin whose upstream is unset is not registered on this node, so
+/// callers discover only what the node can actually serve.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct BuiltinsConfig {
+    /// Base URL of a SearXNG-compatible JSON search endpoint, e.g.
+    /// `https://search.example.org`. Backs the `web-search` skill and the
+    /// `web_search` tool call on `web-search-mcp`.
+    #[serde(default)]
+    pub search_url: Option<String>,
+
+    /// Bearer token for `search_url`, when the operator's instance
+    /// requires one.
+    #[serde(default)]
+    pub search_api_key: Option<String>,
+
+    /// 1inch Developer Portal API key. Backs the `oneinch-aggregator`
+    /// skill; the operator's key, per the resource-brokerage model.
+    #[serde(default)]
+    pub oneinch_api_key: Option<String>,
 }
 
 /// Configuration for the MCP plugin host. Lets operators run custom +
@@ -1734,6 +1839,7 @@ impl NodeConfig {
             genesis: Some(GenesisConfig::default_testnet()),
             canton: CantonConfig::default(),
             mcp_plugin_host: McpPluginHostConfig::default(),
+            builtins: BuiltinsConfig::default(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -1752,6 +1858,7 @@ impl NodeConfig {
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
+            listing_tnzo_usd_micro: None,
         }
     }
 
@@ -1780,6 +1887,7 @@ impl NodeConfig {
             genesis: None,
             canton: CantonConfig::default(),
             mcp_plugin_host: McpPluginHostConfig::default(),
+            builtins: BuiltinsConfig::default(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -1798,6 +1906,7 @@ impl NodeConfig {
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
+            listing_tnzo_usd_micro: None,
         }
     }
 
@@ -1826,6 +1935,7 @@ impl NodeConfig {
             genesis: None,
             canton: CantonConfig::default(),
             mcp_plugin_host: McpPluginHostConfig::default(),
+            builtins: BuiltinsConfig::default(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -1844,6 +1954,7 @@ impl NodeConfig {
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
+            listing_tnzo_usd_micro: None,
         }
     }
 
@@ -1872,6 +1983,7 @@ impl NodeConfig {
             genesis: None,
             canton: CantonConfig::from_env(),
             mcp_plugin_host: McpPluginHostConfig::default(),
+            builtins: BuiltinsConfig::default(),
             payments: PaymentsConfig::default(),
             bridge: BridgeConfig::default(),
             cortex: CortexConfig::default(),
@@ -1890,6 +2002,7 @@ impl NodeConfig {
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
+            listing_tnzo_usd_micro: None,
         }
     }
 
@@ -2117,16 +2230,18 @@ mod tests {
         // schema is happy with; only canton matters here.
         let mut config = NodeConfig::default_validator();
         config.canton = CantonConfig {
-            host: "json.canton.example-operator.invalid".to_string(),
-            port: 443,
             enabled: true,
-            devnet: true,
-            devnet_client_secret: Some("must-not-be-saved".to_string()),
-            tls: true,
-            oauth: None,
-            static_jwt: None,
+            default_network: CantonNetwork::Devnet,
+            devnet: Some(CantonNetworkConfig {
+                host: "participant.devnet.internal".to_string(),
+                port: 7575,
+                tls: false,
+                workflow_receipt_template: None,
+                static_jwt: Some("must-not-be-saved".to_string()),
+                oauth: None,
+            }),
+            mainnet: None,
             identity_providers: CantonIdentityProvidersConfig::default(),
-            workflow_receipt_template: None,
         };
 
         // Save: the serializer must drop the secret. This is the half of the
@@ -2137,36 +2252,27 @@ mod tests {
         let on_disk = std::fs::read_to_string(&temp_file).unwrap();
         assert!(
             !on_disk.contains("must-not-be-saved"),
-            "save_to_file must not emit devnet_client_secret — \
-             #[serde(skip_serializing)] is the only defence against \
-             leaking the secret if we ever re-save a loaded config",
+            "save_to_file must not emit static_jwt — #[serde(skip_serializing)] \
+             is the only defence against leaking the secret if we ever re-save \
+             a loaded config",
         );
         assert!(
-            on_disk.contains("devnet = true"),
-            "non-secret canton fields must persist",
+            on_disk.contains("[canton.devnet]"),
+            "non-secret per-network canton fields must persist",
         );
 
-        // Now hand-edit the secret in, the way fetch-canton-config does it
-        // at boot time on validator-0.
-        let with_secret = format!(
-            "{}\ndevnet_client_secret = \"injected-by-fetch-on-boot\"\n",
-            on_disk
+        // Now hand-edit the secret in, the way the fetch-on-boot service does
+        // it on the RPC node.
+        let mut injected = on_disk.clone();
+        let header = "[canton.devnet]";
+        let after_header = on_disk
+            .find(header)
+            .expect("[canton.devnet] table must be rendered")
+            + header.len();
+        injected.insert_str(
+            after_header,
+            "\nstatic_jwt = \"injected-by-fetch-on-boot\"",
         );
-        // The secret line must land inside the [canton] table — append works
-        // because [canton] is the last table in the default_validator render
-        // (the iroh table comes after but we'll insert at the canton table
-        // explicitly instead of relying on layout).
-        let injected = if let Some(pos) = on_disk.find("[canton]") {
-            // Insert the secret right after the [canton] header so it
-            // unambiguously belongs to that table regardless of what trails it.
-            let mut s = on_disk.clone();
-            let insertion = "\ndevnet_client_secret = \"injected-by-fetch-on-boot\"";
-            let after_header = pos + "[canton]".len();
-            s.insert_str(after_header, insertion);
-            s
-        } else {
-            with_secret
-        };
         std::fs::write(&temp_file, &injected).unwrap();
 
         // Load: the deserializer must populate the secret despite the
@@ -2174,13 +2280,18 @@ mod tests {
         // makes hand-placed config work.
         let loaded = NodeConfig::load_from_file(&temp_file).unwrap();
         assert!(loaded.canton.enabled);
-        assert!(loaded.canton.devnet);
-        assert!(loaded.canton.tls);
+        assert_eq!(loaded.canton.default_network, CantonNetwork::Devnet);
         assert_eq!(
-            loaded.canton.devnet_client_secret.as_deref(),
+            loaded.canton.configured_networks(),
+            vec![CantonNetwork::Devnet],
+        );
+        let devnet = loaded.canton.network(CantonNetwork::Devnet).unwrap();
+        assert_eq!(devnet.port, 7575);
+        assert_eq!(
+            devnet.static_jwt.as_deref(),
             Some("injected-by-fetch-on-boot"),
-            "load_from_file must populate devnet_client_secret from TOML — \
-             the persistent canton config design depends on this",
+            "load_from_file must populate static_jwt from TOML — the \
+             persistent canton config design depends on this",
         );
 
         let _ = std::fs::remove_file(temp_file);

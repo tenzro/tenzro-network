@@ -173,8 +173,8 @@ impl SecondFactorPolicy {
 ///
 /// Carries the raw WebAuthn assertion, the ML-DSA-65 signature over the
 /// same UserOp hash, and the `credential.id` identifying which enrolled
-/// passkey signed. Multi-credential per account is a first-class property
-/// of the validator — every signature MUST address its credential.
+/// passkey signed. An account may enroll several credentials, so every
+/// signature MUST name the one it was produced with.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridWebAuthnSignature {
     pub assertion: WebAuthnAssertion,
@@ -984,8 +984,8 @@ mod tests {
 
     #[test]
     fn integrates_with_validator_registry() {
-        // End-to-end: install WebAuthnValidator into a ValidatorRegistry and
-        // route a UserOp through it.
+        // Install WebAuthnValidator into a ValidatorRegistry and route a
+        // UserOp through it.
         let op_hash = [0x42u8; 32];
         let (cred_id, enrollment, sig_bytes) = make_hybrid_sig(&op_hash);
 

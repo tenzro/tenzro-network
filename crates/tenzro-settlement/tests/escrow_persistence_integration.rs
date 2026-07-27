@@ -21,7 +21,7 @@
 //! 3. Multi-record fan-out: many escrows with different payer/payee
 //!    combinations are all rehydrated and indexed correctly.
 //!
-//! This is *not* the full HTTP-level end-to-end test (which exists at the VM
+//! This is *not* the full HTTP-level integration test (which exists at the VM
 //! layer in `crates/tenzro-vm/src/native/mod.rs::tests`); it is the
 //! settlement-layer-specific guarantee that the off-chain query index
 //! survives a process death — the bug class that motivated the on-chain

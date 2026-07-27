@@ -7,10 +7,22 @@
   "required_inputs": {
     "type": "object",
     "properties": {
-      "feed_id": { "type": "string" },
-      "feed_params": { "type": "object" },
-      "alert_condition": { "type": "string" },
-      "alert_tool_id": { "type": "string" },
+      "feed_id": {
+        "type": "string",
+        "description": "Registry id of the knowledge base to poll. Discover one with tenzro_listKnowledge."
+      },
+      "feed_params": {
+        "type": "object",
+        "description": "Query parameters passed to the knowledge base verbatim."
+      },
+      "alert_condition": {
+        "type": "string",
+        "description": "Plain-language condition the reading is judged against."
+      },
+      "alert_tool_id": {
+        "type": "string",
+        "description": "Registry id of a tool exposing a send_alert operation. Discover one with tenzro_listTools."
+      },
       "alert_recipient": { "type": "string" },
       "poll_interval_secs": { "type": "integer", "minimum": 30 }
     },
@@ -19,8 +31,15 @@
   "expected_outputs": {
     "type": "object",
     "properties": {
-      "polls": { "type": "integer" },
-      "alerts_fired": { "type": "integer" }
+      "reading": { "type": "object" },
+      "decision": {
+        "type": "object",
+        "properties": {
+          "fire": { "type": "boolean" },
+          "reason": { "type": "string" }
+        }
+      },
+      "alert_dispatch": { "type": "object" }
     }
   },
   "steps": [
@@ -32,9 +51,9 @@
     },
     {
       "kind": "use_model",
-      "model_id": "qwen3-7b",
+      "model_id": "qwen3-8b",
       "params": {
-        "prompt": "Reading: {{ steps.reading.output }}. Condition: {{ inputs.alert_condition }}. Reply JSON: {fire: true|false, reason}."
+        "prompt": "Reading: {{ steps.reading.output }}. Condition: {{ inputs.alert_condition }}. Reply JSON only: {\"fire\": true|false, \"reason\": \"<one sentence>\"}."
       },
       "output_as": "decision"
     },

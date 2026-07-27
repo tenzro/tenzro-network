@@ -556,7 +556,7 @@ pub trait NetworkService: Send + Sync {
     /// asynchronously; transport-level failures (peer unreachable, timeout)
     /// surface through the codec's `OutboundFailure` event and are logged
     /// by the event loop. The bridge-side session driver's per-message
-    /// receive timer is the authoritative end-to-end deadline.
+    /// receive timer is the authoritative deadline for the whole exchange.
     async fn send_mpc_relay_message(
         &self,
         message: crate::mpc_relay::MpcRelayRequest,

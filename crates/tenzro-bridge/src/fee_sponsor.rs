@@ -22,10 +22,10 @@
 //!
 //! # Status
 //!
-//! This module provides the **trait + receipt + in-memory pool primitive**.
-//! Wiring against the live `NetworkTreasury` + per-adapter solver
-//! claim path lands in a subsequent wave; this is the structural
-//! foundation.
+//! This module provides the trait, the receipt, and an in-memory pool.
+//! Pool balances are not yet drawn from the live `NetworkTreasury`, and the
+//! per-adapter solver claim path is not yet connected, so a restart resets
+//! every pool to its configured starting balance.
 
 use crate::error::{BridgeError, Result};
 use crate::fee_oracle::{BridgeAdapterId, BridgeFeeQuote};
@@ -233,7 +233,7 @@ fn compute_sponsorship_id(quote_id_hex: &str, payer_did: &str, ts_ms: u64) -> St
 }
 
 /// Wired sponsor that pairs a `BridgeFeeOracle` with a `BridgeFeeSponsor`,
-/// exposing the canonical end-to-end "quote and sponsor" flow.
+/// exposing the canonical "quote then sponsor" flow in one call.
 pub struct WiredBridgeFeeSurface {
     pub oracle: Arc<dyn crate::fee_oracle::BridgeFeeOracle>,
     pub sponsor: Arc<BridgeFeeSponsor>,

@@ -9,15 +9,33 @@
     "properties": {
       "counterparty_party_fq": { "type": "string" },
       "amulet_amount": { "type": "string" },
-      "memo": { "type": "string" }
+      "memo": { "type": "string" },
+      "checkout_vdc": {
+        "type": "object",
+        "description": "Signed AP2 CheckoutMandate VDC. Produced by the controller's wallet — a template cannot carry a signature, so it is supplied at instantiation."
+      },
+      "payment_vdc": {
+        "type": "object",
+        "description": "Signed AP2 PaymentMandate VDC, bound to checkout_vdc via checkout_hash."
+      }
     },
-    "required": ["counterparty_party_fq", "amulet_amount"]
+    "required": [
+      "counterparty_party_fq",
+      "amulet_amount",
+      "checkout_vdc",
+      "payment_vdc"
+    ]
   },
   "expected_outputs": {
     "type": "object",
     "properties": {
-      "contract_id": { "type": "string" },
-      "receipt": { "type": "object" }
+      "receipt": {
+        "type": "object",
+        "properties": {
+          "ap2_receipt": { "type": "object" },
+          "canton_receipt": { "type": "object" }
+        }
+      }
     }
   },
   "steps": [
@@ -32,6 +50,10 @@
           "to": "{{ inputs.counterparty_party_fq }}",
           "amount": "{{ inputs.amulet_amount }}",
           "memo": "{{ inputs.memo }}"
+        },
+        "mandate": {
+          "checkout": "{{ inputs.checkout_vdc }}",
+          "payment": "{{ inputs.payment_vdc }}"
         }
       },
       "output_as": "receipt"

@@ -74,7 +74,8 @@ pub use output_store::{
     MediaGenOutputStore,
 };
 pub use pricing::{
-    enforce_ceiling, pixel_steps, MediaGenPricing, DEFAULT_BASE_FEE, DEFAULT_PER_PIXEL_STEP,
+    enforce_ceiling, pixel_steps, split_payout, MediaGenPricing, DEFAULT_BASE_FEE,
+    DEFAULT_PER_PIXEL_STEP,
 };
 pub use runtime::{HydratedCounts, MediaGenRuntime};
 

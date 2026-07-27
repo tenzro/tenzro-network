@@ -22,32 +22,42 @@ The `tenzro-node` crate provides the complete node binary that integrates all Te
 
 ## Node Roles
 
+`--roles` takes a comma-separated list. A node serves any combination of
+roles under a single stake.
+
 ### Validator
 Participates in consensus and block production using HotStuff-2 BFT consensus.
 
 ```bash
-tenzro-node --role validator --data-dir ./data/validator
+tenzro-node --roles validator --data-dir ./data/validator
 ```
 
 ### ModelProvider
 Serves AI model inference requests to the network.
 
 ```bash
-tenzro-node --role model-provider --data-dir ./data/provider
+tenzro-node --roles model-provider --data-dir ./data/provider
 ```
 
 ### TeeProvider
 Provides confidential computing services with hardware-rooted attestation.
 
 ```bash
-tenzro-node --role tee-provider --data-dir ./data/tee
+tenzro-node --roles tee-provider --data-dir ./data/tee
 ```
 
 ### LightClient
 Participates in the network without providing services.
 
 ```bash
-tenzro-node --role light-client --data-dir ./data/light
+tenzro-node --roles light-client --data-dir ./data/light
+```
+
+### Combined
+A single node can validate, serve inference, and hold storage at once.
+
+```bash
+tenzro-node --roles validator,ai,storage --data-dir ./data/node
 ```
 
 ## Installation
@@ -71,7 +81,8 @@ USAGE:
 OPTIONS:
     -c, --config <FILE>         Path to configuration file
     -d, --data-dir <DIR>        Data directory
-    -r, --role <ROLE>           Node role (validator, model-provider, tee-provider, light-client)
+    -r, --roles <ROLES>         Node roles, comma-separated (validator, model-provider/ai,
+                                tee-provider/tee, storage, edge/ingress, user/light)
     -l, --listen-addr <ADDR>    Network listen address
     -b, --boot-nodes <NODES>    Bootstrap nodes (comma-separated multiaddrs)
         --log-level <LEVEL>     Log level [default: info]
@@ -170,14 +181,14 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0
 - **Governance**: listProposals, vote, getVotingPower
 - **Payments**: createPaymentChallenge, payMpp, payX402, listPaymentSessions, paymentGatewayInfo, listX402Schemes (pluggable scheme registry: `tenzro-hybrid`, `exact-eip3009`, `permit2`, `erc7710`)
 - **x402 Bazaar**: x402ProtocolInfo, x402RegisterResource, x402DiscoverResources, x402DeregisterResource, x402VerifyOffer, x402PaymentId — a discovery catalog for paid resources: sellers register listings (resource, scheme, network, asset, pay-to, max amount, tags), buyers browse before hitting a `402`, listing ids derive from `(seller_did, resource)` (re-register is idempotent), plus server-signed offer verification and deterministic `pay_<hex>` idempotency ids
-- **AP2 v0.2 (Agent Payments Protocol)**: createAp2Session, ap2SignMandate (Ed25519 sign-side for `checkout` and `payment` mandates), ap2VerifyMandate, ap2ValidateMandatePair (three-axis validation: mandate constraints + DelegationScope + SpendingPolicy)
+- **AP2 v0.2 (Agent Payments Protocol)**: ap2SignMandate (Ed25519 sign-side for `checkout` and `payment` mandates), ap2VerifyMandate, ap2ValidateMandatePair (mandate constraints + DelegationScope + SpendingPolicy + on-chain escrow + Stripe SPT usage limits), listMandates, ap2ProtocolInfo
 - **Stripe SPT**: sptIssue (TDIP cap-resolver enforces principal `DelegationScope` + runtime `SpendingPolicy`), sptVerify, with `granted_token.deactivated` webhook cascading into TDIP `apply_remote_revocation` and ERC-8004 ReputationRegistry cross-write on every settled outcome
 - **AAP (Agent Access Protocol)**: oauthDiscovery, exchangeToken, introspectToken — OAuth 2.1 + DPoP-bound JWTs (RFC 9449) + RAR (RFC 9396) over `tenzro-auth`
 - **App Registry & Developer-Signed Settlement**: registerApp, setAppStatus, getApp, listApps, settleAuthorized, getSettleAuthorizedOutcome — a permissionless registry where a developer registers an app under their own DID and settles authorized charges against a payment-provider account they alone control. The developer signs the settlement authorization; the node routes the charge and records the outcome but never holds the payment-provider secret. Distinct from **App Hosting** (which serves the app's site/function/machine): this is the payments surface for apps that collect from their own users. CLI: `tenzro app {register,set-status,get,list,settle-authorized,get-outcome}`
 - **ERC-8004 v0.6+ Trustless Agents (cross-VM trio)**: IdentityRegistry — encodeRegister (no-arg overload), encodeRegisterWithUri (`register(string)` overload), encodeRegisterWithMetadata (`register(string,(string,bytes)[])` overload), encodeGetAgent / decodeGetAgent, encodeSetAgentURI, encodeSetAgentWallet, encodeSetMetadata, encodeGetMetadata / decodeGetMetadata, encodeGetAgentURI, encodeGetAgentWallet. ReputationRegistry — encodeFeedback, encodeGetFeedback, encodeGetFeedbackCount, encodeRevokeFeedback, encodeIsFeedbackRevoked, encodeAppendResponse, encodeGetFeedbackResponses. ValidationRegistry — encodeValidationRequest, encodeValidationResponse, encodeGetValidation. All `tenzro_erc8004*`-prefixed; calldata is byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c`. `agentId` is a sequential `uint256` (1-indexed) allocated by the registry at `register*()` time — server-allocated, never derivable client-side.
   - **EVM mirror**: canonical OpenZeppelin-ERC721-upgradeable proxies deployed at genesis at `tenzro_identity::erc8004::addresses::{IDENTITY_REGISTRY, REPUTATION_REGISTRY, VALIDATION_REGISTRY}`. TDIP `register_machine_with_fee` dispatches `register(string agentURI)` via the node's `erc8004-system` secp256k1 key in a detached `tokio::spawn`; `Registered(uint256 indexed agentId, string agentURI, address indexed owner)` events flow back into the off-chain DID index in `CF_IDENTITIES` under `erc8004_did_index:` (32-byte hash → u256 agentId) via `process_erc8004_registered_logs` in `event_loop.rs`.
   - **SVM mirror**: uses QuantuLabs' Anchor implementation (`https://github.com/QuantuLabs/erc-8004-svm`). `tenzro-identity::erc8004_svm` emits Anchor-formatted instruction calldata via the `OnChainAgentSvmRegistry` trait; `NativeErc8004SvmMirror` in `crates/tenzro-node/src/erc8004_svm_mirror.rs` buffers payloads to the RocksDB pending-tx queue under `erc8004_svm_pending_tx:` and indexes DID → 32-byte Pubkey under `erc8004_svm_did_index:`. No `solana-sdk` dep is pulled into the monorepo by design — drain to a Solana RPC happens in operator-supplied infrastructure.
-  - **DAML mirror**: ships as a Canton package at `vendor/erc8004-daml/daml/Tenzro/Erc8004/{Identity,Reputation,Validation}.daml` (two-party admin+controller signatory model, no `msg.sender` equivalent). `tenzro-identity::erc8004_daml` emits Canton Ledger JSON API v2 `submit-and-wait` commands via the `OnChainAgentDamlRegistry` trait; `NativeErc8004DamlMirror` in `crates/tenzro-node/src/erc8004_daml_mirror.rs` either dispatches via an installed `DamlMirrorTransport` or buffers `serde_json::Value` payloads under `erc8004_daml_pending_tx:` and indexes DID → 8-byte LE u64 agentId under `erc8004_daml_did_index:`. Wired only when `config.erc8004_daml` is present — package ids are SHA-256 of the compiled `.dar` and must be supplied at registry construction time by the operator.
+  - **DAML mirror**: is distributed as a Canton package at `vendor/erc8004-daml/daml/Tenzro/Erc8004/{Identity,Reputation,Validation}.daml` (two-party admin+controller signatory model, no `msg.sender` equivalent). `tenzro-identity::erc8004_daml` emits Canton Ledger JSON API v2 `submit-and-wait` commands via the `OnChainAgentDamlRegistry` trait; `NativeErc8004DamlMirror` in `crates/tenzro-node/src/erc8004_daml_mirror.rs` either dispatches via an installed `DamlMirrorTransport` or buffers `serde_json::Value` payloads under `erc8004_daml_pending_tx:` and indexes DID → 8-byte LE u64 agentId under `erc8004_daml_did_index:`. Wired only when `config.erc8004_daml` is present — package ids are SHA-256 of the compiled `.dar` and must be supplied at registry construction time by the operator.
 - **Reputation & Approval**: getProviderReputation (provider score), listPendingApprovals / getApproval / decideApproval (out-of-scope agent operation queue)
 - **Disputes & Streaming**: getDispute, listDisputesByChannel, chatStream (per-token streaming with optional `channel_id` for micropayment-channel billing). When a proxied upstream provider drops mid-generation, the streaming layer records the emitted prefix and sampling state (`SamplingState` in `streaming/failover.rs`) and asks a continuation-capable provider to deterministically re-prefill the identical prefix before resuming sampling, so a mid-stream failover produces one coherent completion rather than a truncated-plus-restarted one
 - **EU AI Act §50 Provenance**: getProvenance — C2PA-style `ProvenanceManifest` keyed by `SHA-256(content_bytes)`, signed by validator block-signing keys (§50(1) chatbot disclosure via `aap_agent` claim, §50(2) provenance manifest, §50(4) deepfake labeling)
@@ -189,7 +200,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0
 - **TokenRegistry**: createToken, getToken, listTokens, crossVmTransfer, wrapTnzo, getTokenBalance, deployContract
 - **Adaptive Burn**: getBurnRateConfig, getSupplyMetrics, getBurnRateRecommendation, listAdaptiveBurnProposals — dial surface plus `AutoProposalGenerator` and EIP-1559 fee-market consumer wired through the governance executor
 - **SeedAgent Treasury**: getTreasuryEarmark, getSeedAgentCharter, listSeedAgentCharters, listSeedAgents, getNetworkActivity, getSeedAgentDaemonStatus — earmark, registry, off-chain `SeedAgentDaemon` (6h poll, monthly refill, charter-sunset pause, leader-gate), governance-executor mutation paths, and the `tenzro/seed-agents` gossipsub topic
-- **AgentBond / Insurance**: post_agent_bond / get_agent_bond / file_insurance_claim — stake-bonding for agents and insurance pool for cart-mandate fraud
+- **AgentBond / Insurance**: post_agent_bond / get_agent_bond / file_insurance_claim — stake-bonding for agents and insurance pool for payment-mandate fraud
 - **Training (Tenzro Train)**: tenzro_training_postTask, listRuns, getRun, getReceipt, enrollTrainer, submitOuterGradient, finalizeRound
 - **Storage**: storageStatus, storageStoreObject, storageOpenDeal, storageChargeEpoch, storageDeal, storageSetPricing — content-addressed storage on the iroh data plane, billed per byte-epoch and gated on a proof of retrievability; one coverage budget shared with compute rental
 - **Compute**: computeStatus, computeBookRental, computeSettleEpoch, computeGetRental, computeSetPricing — rentable compute against stake, settled per epoch on an availability proof; shares the storage coverage budget
@@ -200,7 +211,7 @@ The node exposes a JSON-RPC API on the configured RPC address (default: `0.0.0.0
 
 ### Paid Agent Marketplace
 
-The agent marketplace supports both free (community) and paid (creator-tied) templates end-to-end:
+The agent marketplace supports both free (community) and paid (creator-tied) templates, from registration through payout:
 
 - **Creator identity binding (optional):** at registration, a creator may bind a template to any TDIP identity class — human (`did:tenzro:human:{uuid}`), delegated agent (`did:tenzro:machine:{controller}:{uuid}`), or autonomous agent (`did:tenzro:machine:{uuid}`) — via `creator_did`. The binding is immutable post-registration.
 - **Creator payout wallet (mandatory for paid pricing):** any non-`Free` `pricing` requires `creator_wallet`. Registration fails if the wallet is missing. `tenzro_runAgentTemplate` routes the creator share to this address.
@@ -212,9 +223,10 @@ The agent marketplace supports both free (community) and paid (creator-tied) tem
   - `invocation_count` and `total_revenue` on the template are incremented atomically
 - **Fee-split report** returned by `tenzro_runAgentTemplate`: `{ template_id, steps_executed, steps_failed, steps_skipped_by_dry_run, fee_paid, commission_bps, network_commission, creator_share, payer_wallet, creator_wallet, treasury, invocation_count, total_revenue }`.
 - **Free templates** bypass all fee collection — no commission, no creator wallet required, `fee_paid = 0`.
+- **Controller oversight:** before a paid invocation of `tenzro_useSkill`, `tenzro_useTool`, `tenzro_useKnowledge`, or `tenzro_useResource` settles, the node checks the calling agent's own authority. A `resource_invocation` grant in the bearer's `authorization_details` caps spend per call and may narrow to one resource `class` and a set of `allowed_resource_ids`; an uncovered invocation returns `-32001`. A controller that lists `resource.invoke` in its AAP oversight claim's `requires_human_approval_for` instead parks every paid invocation, returning `-32002` with `data.approval_id`. The same check runs on the skill and tool steps a `tenzro_orchestrate` plan executes. Requests carrying no authorization headers pass — there is no bearer identity, so no controller to consult — and remain bound by the presenting API key's own allow-lists.
 
 Reference templates under `crates/tenzro-agent-kit/reference_templates/`:
-- `premium_alpha_advisor.json` — **paid** per-execution specialist (5 TNZO, 5%/95% split demonstrated end-to-end)
+- `premium_alpha_advisor.json` — **paid** per-execution specialist (5 TNZO, 5%/95% split demonstrated from invocation through payout)
 - 10 additional free reference templates covering payment routing, RWA custody, arbitrage, trade settlement, portfolio management, and yield rebalancing
 - **EVM-compat**: eth_blockNumber, eth_getBalance, eth_getTransactionCount, eth_sendRawTransaction, eth_getBlockByNumber, eth_getBlockByHash, eth_chainId, eth_getTransactionReceipt
 
@@ -389,7 +401,7 @@ cargo build -p tenzro-node
 ### Running in Development
 
 ```bash
-cargo run -p tenzro-node -- --role validator --log-level debug
+cargo run -p tenzro-node -- --roles validator --log-level debug
 ```
 
 ## Production Deployment

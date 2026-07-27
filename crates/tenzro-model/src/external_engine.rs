@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::{ModelError, Result};
-use crate::runtime::{ChatMessage, GenerationConfig, InferenceResult};
+use crate::runtime::{ChatMessage, GenerationConfig, InferenceResult, StopReason};
 
 /// Which serving engine sits behind the endpoint. Purely informational —
 /// both speak the same OpenAI wire contract — but recorded so operators and
@@ -242,6 +242,7 @@ impl ExternalEngine {
             output_tokens,
             generation_time_ms: elapsed_ms,
             tokens_per_second: tps,
+            stop_reason: stop_reason_from_choice(&v["choices"][0]),
             commitment: None,
         })
     }
@@ -280,6 +281,9 @@ impl ExternalEngine {
         let mut output_tokens: u32 = 0;
         let mut usage_prompt: Option<u32> = None;
         let mut usage_completion: Option<u32> = None;
+        // Set from whichever frame carries the terminal choice. A client that
+        // disconnects mid-stream never sees one, which leaves the default.
+        let mut stop_reason = StopReason::Eos;
 
         // SSE framing: accumulate bytes, split on `\n\n`, strip the `data: `
         // prefix, stop on `[DONE]`. A single chunk may straddle byte-stream
@@ -323,8 +327,12 @@ impl ExternalEngine {
                                 output_tokens,
                                 started,
                                 messages,
+                                stop_reason,
                             ));
                         }
+                    }
+                    if !v["choices"][0]["finish_reason"].is_null() {
+                        stop_reason = stop_reason_from_choice(&v["choices"][0]);
                     }
                     if let Some(p) = v["usage"]["prompt_tokens"].as_u64() {
                         usage_prompt = Some(p as u32);
@@ -343,7 +351,23 @@ impl ExternalEngine {
             output_tokens,
             started,
             messages,
+            stop_reason,
         ))
+    }
+}
+
+/// Termination cause reported by an OpenAI-compatible engine for one choice.
+///
+/// `finish_reason` distinguishes an exhausted budget (`length`) from a natural
+/// end, but conflates an end-of-generation token with a matched stop sequence —
+/// both are spelled `stop`. Engines that separate the two carry the matched
+/// stop string in a sibling `stop_reason`, so a non-null sibling resolves
+/// `stop` to [`StopReason::StopSequence`].
+fn stop_reason_from_choice(choice: &Value) -> StopReason {
+    match choice["finish_reason"].as_str() {
+        Some("length") => StopReason::Length,
+        Some("stop") if !choice["stop_reason"].is_null() => StopReason::StopSequence,
+        _ => StopReason::Eos,
     }
 }
 
@@ -356,6 +380,7 @@ fn finalize(
     delta_tokens: u32,
     started: Instant,
     messages: &[ChatMessage],
+    stop_reason: StopReason,
 ) -> InferenceResult {
     let input_tokens = usage_prompt.unwrap_or_else(|| {
         messages
@@ -376,6 +401,7 @@ fn finalize(
         output_tokens,
         generation_time_ms: elapsed_ms,
         tokens_per_second: tps,
+        stop_reason,
         commitment: None,
     }
 }

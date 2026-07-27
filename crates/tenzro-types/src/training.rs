@@ -123,8 +123,8 @@ impl TrainingModality {
 // ---------------------------------------------------------------------------
 
 /// Byzantine-robust aggregation rule the syncer applies over K accepted
-/// outer gradients. Phase 1 ships only `Mean`; remaining rules light up
-/// in Phase 2.
+/// outer gradients. Phase 1 implements only `Mean`; remaining rules are
+/// enabled in Phase 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AggregationRule {
     /// Plain mean. Phase 1 default. Not Byzantine-robust.
@@ -863,7 +863,7 @@ pub struct SealedShardEnvelope {
     /// The encrypted data key (wrapped to `enclave_pubkey`). Opaque bytes
     /// in the format dictated by `wrap_alg`.
     pub wrapped_data_key: Vec<u8>,
-    /// Key-wrap algorithm identifier. Phase 4 ships `"hpke-x25519-hkdf-sha256-aes-256-gcm"`
+    /// Key-wrap algorithm identifier. Phase 4 uses `"hpke-x25519-hkdf-sha256-aes-256-gcm"`
     /// (RFC 9180 base mode). Other identifiers reserved for vendor sealing
     /// (e.g. `"intel-tdx-sealing"`, `"sev-snp-sealing"`).
     pub wrap_alg: String,

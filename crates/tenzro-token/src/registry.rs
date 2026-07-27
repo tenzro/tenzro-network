@@ -359,7 +359,8 @@ impl TokenRegistry {
     ///
     /// Tempo (chain_id 42431, EIP-155 EVM, Stripe + Paradigm) hosts the canonical
     /// USDC/PYUSD/USDT issuances under TIP-20. Registering them here lets the rest
-    /// of the workspace see Tempo as a first-class settlement venue alongside EVM/SVM/DAML.
+    /// of the workspace route to Tempo as a settlement venue on the same footing
+    /// as EVM/SVM/DAML.
     pub fn register_tip20(
         &self,
         symbol: &str,

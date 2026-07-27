@@ -273,8 +273,8 @@ fn reopen_succeeds_after_sigkill_mid_write() {
     // Even tighter test: only wait for 5 synced markers, then SIGKILL. The
     // DB still must reopen — `RocksDbStore::open_default` already has the
     // auto-repair-on-corruption branch wired in via the production open
-    // path. This is the test that exercises that branch end-to-end after a
-    // real process kill, not a synthetic WAL truncation.
+    // path. This is the test that exercises that branch after an actual
+    // process kill, not a synthetic WAL truncation.
     let db_path = unique_temp_db_path("reopen-mid-write");
     let observed = run_child_until_synced(&db_path, 100, 5);
     assert!(

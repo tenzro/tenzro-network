@@ -87,7 +87,7 @@ Created → Starting → Running → Stopping → Stopped
 
 3. **TEE** (`tenzro-tee`) [Optional]
    - Detect TEE vendor (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
-   - Generate attestation with real hardware ioctl
+   - Generate attestation via the hardware ioctl interface
    - Register with TEE registry
 
 4. **VM Runtime** (`tenzro-vm`)
@@ -513,7 +513,7 @@ The node adapts its behavior based on the configured role:
 
 1. **Keystore Protection**: Validator keys stored encrypted at rest (Argon2id KDF)
 2. **Network Security**: Noise protocol for encrypted P2P communication
-3. **TEE Attestation**: Remote attestation for TEE providers with real hardware ioctl
+3. **TEE Attestation**: Remote attestation for TEE providers over the hardware ioctl interfaces
 4. **RPC Access Control**: CORS configuration, concurrency limits, body size limits
 5. **Resource Limits**: Configurable limits on memory, connections, request sizes
 6. **Equivocation Detection**: Double-vote detection with 10% stake slashing
@@ -530,7 +530,7 @@ The node adapts its behavior based on the configured role:
 - Startup/shutdown sequences
 - State transitions
 
-### End-to-End Tests
+### Full-Node Tests
 - Full node lifecycle
 - Multi-node scenarios
 - Network partition handling

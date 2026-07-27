@@ -11,6 +11,43 @@ behalf. Callers authenticate to the Tenzro node with a per-developer
 This document is the canonical reference for developers and operators
 who need to issue, use, or revoke those keys.
 
+## What API keys do *not* gate
+
+An API key gates **operator-brokered resources** — the ones where the
+operator holds an upstream credential and pays an upstream bill on the
+caller's behalf. Canton is the archetype: the operator holds the
+Auth0/JWT credential for a participant node and proxies ledger calls.
+Third-party chain RPC (Alchemy, Infura, dRPC) is the same shape.
+
+The marketplace registries are **permissionless**. Registering an
+agent, a skill, a workflow template, an MCP server, a model, or a
+knowledge source needs no API key and no operator approval:
+
+| Registry            | Register with                                          | Admission control |
+|---------------------|--------------------------------------------------------|-------------------|
+| Agents              | `tenzro_registerAgent`                                  | None — DID-signed |
+| Agent templates     | `tenzro_registerAgentTemplate`                          | None — DID-signed |
+| Skills              | `tenzro_registerSkill`                                  | None — DID-signed |
+| Tools / MCP servers | `tenzro_registerTool`                                   | None — DID-signed |
+| Workflow templates  | `tenzro_registerWorkflowTemplate`                       | None — DID-signed |
+| Knowledge sources   | `tenzro_registerKnowledge`                              | None — DID-signed |
+
+Anyone with a Tenzro DID can list a resource. The listing declares its
+own price: free, or a TNZO amount that settles to the provider's wallet
+on use, minus the protocol commission. No operator can refuse a
+listing, delist someone else's resource, or gate discovery. Consumers
+choose what to invoke; the network settles the payment.
+
+Serving a model (`tenzro_serveModel`) is likewise open. The one
+adjacent method that *is* admin-gated is `tenzro_registerProvider`,
+because it enrols **the node itself** as a provider — a decision that
+belongs to whoever runs the node, not to a remote caller.
+
+Rejection at *invocation* time is a different thing and stays available:
+a consumer's delegation scope, spending policy, or approval policy can
+refuse a call the consumer's own controller did not authorize. That is
+consumer-side control, not registry admission.
+
 ## The sovereignty model
 
 Tenzro draws a sharp line between two kinds of resources:
@@ -44,8 +81,12 @@ Tenzro Labs) can mutate it via the admin token.
 |----------------------------|------------------------------|-------------------------------------------------------------------|
 | Per-developer API key      | `X-Tenzro-Api-Key`           | Calling scoped RPCs (e.g. Canton); also self-listing / self-revoke |
 | Operator admin token       | `X-Tenzro-Admin-Token`       | Minting / listing / revoking API keys on the operator's node       |
+| Canton network selector    | `X-Canton-Network`           | Naming the target Canton ledger on the Canton MCP server           |
 
 The admin token is held by that node's operator. Developers never see it.
+
+On the JSON-RPC surface the Canton network travels as a `canton_network`
+**param** rather than a header — see [Canton networks](#canton-networks).
 
 ## Key classes
 
@@ -84,6 +125,152 @@ are *not* tied to a scope — any active key with a `subject` set is
 authorised to manage its own subject's keys. Additional scopes (`evm`,
 `svm`, `inference`, `tee`, `bridge`, `chainlink`) are variants of the
 `ApiKeyScope` enum on the node side; the wire format is unchanged.
+
+## Tiers
+
+A scope decides *which* surfaces a key reaches. A **tier** decides *how
+much* of a reachable surface it gets: a per-minute request budget, and
+whether state-mutating methods are permitted at all.
+
+| Tier       | Requests / minute | Mutating methods |
+|------------|-------------------|------------------|
+| `free`     | 60                | Refused          |
+| `standard` | 600               | Allowed          |
+| `priority` | 6,000             | Allowed          |
+
+`free` is the default when `tier` is omitted at issuance, so a key never
+silently acquires write access. The budget is a sliding 60-second window
+per key; keys do not share a pool.
+
+The mutating methods the `free` tier refuses are the ones that change
+upstream state:
+
+- Canton ledger writes — `tenzro_submitDamlCommand`,
+  `tenzro_canton_submitCommand`, `tenzro_canton_submitWithMandate`,
+  `tenzro_allocateParty`, `tenzro_canton_uploadDar`,
+  `tenzro_canton_grantUserRights`, `tenzro_canton_createIdp`,
+  `tenzro_canton_deleteIdp`, `tenzro_canton_watchParty`,
+  `tenzro_consumeDamlEvents`, `tenzro_canton_mirrorReceipt`,
+  `tenzro_mirrorWorkflowToCanton`, `tenzro_mirrorObligationToCanton`
+- Bridge-fee sponsorship — `tenzro_sponsorBridgeFee`
+- Stable-asset issuance — `tenzro_registerStableAsset`,
+  `tenzro_mintStableAsset`, `tenzro_redeemStableAsset`
+
+Reads on the same scopes (health, version, package and party listings,
+contract queries) are available at every tier.
+
+Refusals: a `free` key calling a mutating method gets `-32004`; any key
+over its budget gets `-32005` with a `retry_after_ms` field so a client
+can back off without parsing the message.
+
+## Canton networks
+
+A Canton network is a **distinct ledger** — distinct parties, distinct
+contracts, distinct assets. A key therefore names the networks it may
+reach, and a request naming more than one authorized network says which
+one it means.
+
+### At issuance
+
+`tenzro_createApiKey` takes `canton_networks`, an array of `devnet` /
+`mainnet`. It is fail-closed: **omitted or empty means the key reaches
+no Canton network**, and every canton-scoped call through it is refused.
+A network the node does not serve is refused at issuance (`-32602`)
+rather than producing a key that looks authorized and fails at dispatch.
+
+```bash
+curl -s -X POST https://rpc.tenzro.xyz \
+  -H "content-type: application/json" \
+  -H "X-Tenzro-Admin-Token: $TENZRO_ADMIN_TOKEN" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tenzro_createApiKey",
+    "params": {
+      "label": "alice-laptop",
+      "subject": "did:tenzro:human:alice",
+      "scopes": ["canton"],
+      "canton_networks": ["devnet"],
+      "tier": "standard"
+    }
+  }'
+```
+
+Canton-side provisioning (party allocation, user creation, IDP
+registration, rights grants) binds the key to exactly one ledger, so
+requesting any of it alongside multiple `canton_networks` is refused
+with `-32602`. A multi-network key is fine for party-less reads.
+
+### On the JSON-RPC surface — a param
+
+The node resolves the target network from the request params:
+
+1. an explicit `canton_network` param, if present;
+2. otherwise the key's single authorized network, if it has exactly one;
+3. otherwise the operator's default network.
+
+So a single-network key never has to say anything. A key authorizing
+both networks must name one, and the node names the authorized set in
+the error when it doesn't.
+
+```bash
+curl -s -X POST https://rpc.tenzro.xyz \
+  -H "content-type: application/json" \
+  -H "X-Tenzro-Api-Key: tnz_3v8q7s2XQYf..." \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tenzro_listDamlContracts",
+    "params": {"template_id": "...", "canton_network": "devnet"}
+  }'
+```
+
+### On the Canton MCP server — a header
+
+The Canton MCP server's gate sits above the MCP JSON-RPC envelope and
+does not read tool arguments, so the network travels as
+`X-Canton-Network: devnet` alongside `X-Tenzro-Api-Key`. Resolution
+order, refusal codes and fail-closed behaviour are otherwise identical.
+The other ecosystem MCP servers are open and take neither header.
+
+### Tenant and operator paths
+
+Both credentials reach Canton, and they reach different parts of it:
+
+| | Tenant (`X-Tenzro-Api-Key`) | Operator (`X-Tenzro-Admin-Token`) |
+|---|---|---|
+| Network choice | `canton_network` param, bounded by `canton_networks` | `canton_network` param, unbounded |
+| Party | The key's bound `primaryParty` | The participant's own parties |
+| Reads | Contracts, health, version, packages | Same, plus party and IDP listings |
+| Writes | Command submission at `standard`+ | Party allocation, DAR upload, rights grants, IDP management, receipt mirroring |
+| Refused | Anything outside `canton_networks` | Nothing Canton-side; network-wide Tenzro state still needs governance |
+
+An admin-token request skips the api-key gate entirely, so it is *not*
+bounded by any key's `canton_networks` — but it still has to name the
+network it means, because there is no key to infer one from. The CLI
+surfaces this as `--canton-network` on both paths.
+
+Operator-only canton commands take `--admin-token`; tenant commands
+take `--api-key`. Passing the wrong one returns `-32001` (admin gate)
+or `-32004` (api-key gate) rather than silently falling back.
+
+### Client configuration
+
+| Surface                | Network selector                                  |
+|------------------------|---------------------------------------------------|
+| CLI                    | `--canton-network devnet`, else `TENZRO_CANTON_NETWORK` |
+| Rust SDK               | `client.canton().on_network("devnet")`            |
+| TypeScript SDK         | `client.canton.onNetwork('devnet')`               |
+| Python clients         | `TENZRO_CANTON_NETWORK=devnet`                    |
+| Raw JSON-RPC           | `canton_network` param                            |
+| Canton MCP             | `X-Canton-Network` header                         |
+
+The Python clients (`integrations/mcp`, `integrations/a2a`,
+`integrations/agents`, the OpenClaw skill) read
+`TENZRO_CANTON_NETWORK` and merge it into the params of every
+canton-scoped JSON-RPC call. The OpenClaw skill also has an MCP client
+path, which sends the same value as `X-Canton-Network`. An explicit
+`canton_network` already in the params always wins.
 
 ## Wire format
 
@@ -169,6 +356,10 @@ Params:
 | `scopes`                       | array of strings | no       | Defaults to `["canton"]`. Unknown scopes → `-32602`.                                                                            |
 | `class`                        | string           | no       | One of `subject` (default), `operator_internal`, `operator_protected`.                                                          |
 | `confirm_operator_protected`   | bool             | yes if `class=operator_protected` | Safety interlock — must be `true`, since `operator_protected` keys cannot be revoked via RPC.                            |
+| `canton_networks`              | array of strings | no       | Which Canton ledgers the key reaches: `devnet` and/or `mainnet`. Deduped. Omitted or empty means no Canton access. A network this node does not serve → `-32602`. See [Canton networks](#canton-networks). |
+| `tier`                         | string           | no       | One of `free` (default), `standard`, `priority`. Sets the per-minute budget and whether mutating methods are allowed. See [Tiers](#tiers). |
+| `canton_user_id`               | string           | no       | Binds the key to a Canton User Management Service user id (e.g. `alice@clients`). With the `canton` scope on a Canton-enabled node this also allocates the party, creates the user, and grants `CanActAs` in one call. Requires exactly one entry in `canton_networks`. |
+| `auto_provision_canton`        | bool             | no       | Defaults to `true`. Set `false` when the Canton user is already provisioned out of band.                                        |
 
 ### `tenzro_listApiKeys`
 
@@ -309,8 +500,17 @@ tenzro admin api-key revoke --key-id a1b2c3d4e5f60718
 | `-32004` | `no active key with that key_id belongs to your subject`                                             | Subject-gated revoke targeted a non-existent or different-subject key                                  |
 | `-32004` | `key is not subject-revokable (operator-internal or operator-protected class)`                       | Subject-gated revoke targeted a non-subject class                                                      |
 | `-32004` | `operator-protected key cannot be revoked via RPC (rotate the operator secret + restart the node)`   | Admin attempted to revoke an `operator_protected` key                                                  |
+| `-32004` | `Unauthorized: tier '...' is read-only; ... requires tier standard or higher`                        | A `free` key called a mutating method                                                                  |
+| `-32004` | `Unauthorized: this API key authorizes no Canton network; ask the operator to reissue it naming canton_networks` | Canton-scoped RPC with a key whose `canton_networks` is empty                                |
+| `-32004` | `Unauthorized: this API key does not authorize Canton network '...' (authorized: ...)`               | Explicit `canton_network` outside what the key authorizes                                               |
+| `-32005` | `Rate limit exceeded: tier '...' allows N requests per minute; retry after M ms`                     | Key over its per-minute budget. `data` carries `retry_after_ms`, `requests_per_minute`, `tier`.          |
 | `-32602` | `Unknown scope: ...`                                                                                 | `createApiKey` called with a scope the node doesn't know                                               |
-| `-32602` | `class=operator_protected requires confirm_operator_protected:true ...`                              | Safety interlock — confirm the class is intended                                                       |
+| `-32602` | `Unknown tier: ... (expected free \| standard \| priority)`                                          | `createApiKey` called with an unknown `tier`                                                            |
+| `-32602` | `Unknown canton network: ... (expected devnet \| mainnet)`                                           | `createApiKey` called with an unknown entry in `canton_networks`                                        |
+| `-32602` | `This node does not serve Canton network '...' (available: ...)`                                     | `createApiKey` named a network this node has no Canton config for                                       |
+| `-32602` | `... requires the key to authorize exactly one Canton network ...`                                   | Canton-side provisioning requested with a multi-network key — a party exists on one ledger only          |
+| `-32602` | `Unknown canton_network: ... (expected devnet \| mainnet)`                                           | A request passed an unknown `canton_network` param                                                      |
+| `-32602` | `This API key authorizes N Canton networks; name the target with the canton_network param (authorized: ...)` | Multi-network key called a Canton RPC without naming the network               |
 | `-32603` | `API key manager is not initialized`                                                                 | Node started without admin token (admin-only feature off)                                              |
 
 ## Rotation
@@ -337,8 +537,10 @@ node, the canton-network Secret Manager rotation procedure applies.
 
 ## Operational notes
 
-- **Per-key rate limiting is not yet enforced.** A noisy key currently
-  affects all callers sharing the upstream. Tracked.
+- **Rate limiting is per key, not per upstream.** Every api-key-gated
+  request counts against that key's own sliding 60-second window, so a
+  noisy key exhausts its own budget rather than a shared one. The
+  budget comes from the key's [tier](#tiers).
 - **Per-request audit (which `key_id` made which call) is not yet
   surfaced** in node logs. Tracked.
 - **Self-service issuance is not exposed.** There is no public portal

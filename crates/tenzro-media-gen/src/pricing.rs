@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use tenzro_types::media_gen::{MediaGenKind, MediaGenParams};
+use tenzro_types::media_gen::{MediaGenAssignment, MediaGenKind, MediaGenParams};
 
 use crate::error::{MediaGenError, Result};
 
@@ -74,6 +74,34 @@ pub fn pixel_steps(kind: MediaGenKind, params: &MediaGenParams) -> u128 {
         .saturating_mul(frames)
 }
 
+/// Divide a job's worker payout across its assignments by the `share_bps` the
+/// runtime fixed at completion.
+///
+/// Returns one amount per assignment, in the order given. Integer division
+/// leaves up to `assignments.len() - 1` attoTNZO unallocated; that dust goes to
+/// the last assignment, so the amounts always sum to `total` exactly. On a job
+/// served whole that is the single worker taking all of it; on a split job it is
+/// the two experts in proportion to the steps each ran, with the low-noise
+/// worker — which the runtime already rounds toward — absorbing the remainder.
+pub fn split_payout(total: u128, assignments: &[MediaGenAssignment]) -> Vec<u128> {
+    if assignments.is_empty() {
+        return Vec::new();
+    }
+    let last = assignments.len() - 1;
+    let mut allocated: u128 = 0;
+    let mut amounts = Vec::with_capacity(assignments.len());
+    for (i, a) in assignments.iter().enumerate() {
+        let amount = if i == last {
+            total.saturating_sub(allocated)
+        } else {
+            total.saturating_mul(u128::from(a.share_bps)) / 10_000
+        };
+        allocated = allocated.saturating_add(amount);
+        amounts.push(amount);
+    }
+    amounts
+}
+
 /// Reject a charge above the ceiling the requester posted.
 pub fn enforce_ceiling(job_id: &str, charged: u128, max: u128) -> Result<()> {
     if charged > max {
@@ -90,6 +118,9 @@ pub fn enforce_ceiling(job_id: &str, charged: u128, max: u128) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    use tenzro_types::media_gen::MediaGenExpertRole;
+    use tenzro_types::primitives::{Address, Timestamp};
 
     fn image_params() -> MediaGenParams {
         MediaGenParams {
@@ -157,6 +188,70 @@ mod tests {
             pricing.quote(MediaGenKind::Text2Video, &video_params())
                 > pricing.quote(MediaGenKind::Text2Image, &image_params())
         );
+    }
+
+    fn assignment(role: Option<MediaGenExpertRole>, share_bps: u32) -> MediaGenAssignment {
+        MediaGenAssignment {
+            worker_did: format!(
+                "did:tenzro:machine:{}",
+                role.map(|r| r.to_string()).unwrap_or_else(|| "whole".into())
+            ),
+            worker_address: Address::new([share_bps as u8; 32]),
+            role,
+            claimed_at: Timestamp::now(),
+            share_bps,
+        }
+    }
+
+    #[test]
+    fn a_whole_job_pays_its_single_worker_everything() {
+        let a = vec![assignment(None, 10_000)];
+        assert_eq!(split_payout(1_000_000, &a), vec![1_000_000]);
+    }
+
+    #[test]
+    fn a_split_job_pays_each_expert_its_share() {
+        let a = vec![
+            assignment(Some(MediaGenExpertRole::HighNoise), 8_666),
+            assignment(Some(MediaGenExpertRole::LowNoise), 1_334),
+        ];
+        let paid = split_payout(10_000, &a);
+        assert_eq!(paid, vec![8_666, 1_334]);
+    }
+
+    #[test]
+    fn the_dust_of_an_uneven_split_lands_on_the_last_assignment() {
+        let a = vec![
+            assignment(Some(MediaGenExpertRole::HighNoise), 3_333),
+            assignment(Some(MediaGenExpertRole::LowNoise), 6_667),
+        ];
+        // 7 * 3333 / 10000 truncates to 2; the remainder must not vanish.
+        let paid = split_payout(7, &a);
+        assert_eq!(paid, vec![2, 5]);
+        assert_eq!(paid.iter().sum::<u128>(), 7);
+    }
+
+    #[test]
+    fn every_split_sums_to_the_total_it_was_given() {
+        for high in [0u32, 1, 4_999, 5_000, 8_666, 9_999, 10_000] {
+            let a = vec![
+                assignment(Some(MediaGenExpertRole::HighNoise), high),
+                assignment(Some(MediaGenExpertRole::LowNoise), 10_000 - high),
+            ];
+            for total in [0u128, 1, 7, 999_999_999_999_999_999] {
+                let paid = split_payout(total, &a);
+                assert_eq!(
+                    paid.iter().sum::<u128>(),
+                    total,
+                    "high={high} total={total}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_paid_when_there_is_nobody_to_pay() {
+        assert!(split_payout(1_000, &[]).is_empty());
     }
 
     #[test]

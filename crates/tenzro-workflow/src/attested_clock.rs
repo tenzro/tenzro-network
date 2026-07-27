@@ -29,7 +29,7 @@
 //!
 //! - Workflow step deadlines (`step_deadline_ms` becomes
 //!   `AttestedTimestamp`)
-//! - AP2 mandate expiry (cart mandate `valid_until` carried as attested)
+//! - AP2 mandate expiry (checkout mandate `expires_at` carried as attested)
 //! - Parametric-insurance trigger windows
 //! - Margin-call grace periods (mark the wall-time the call was issued)
 //! - DvP settlement windows (T+0 / T+1 enforcement)

@@ -62,7 +62,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Enroll a passkey-bound smart account",
                     "Add a guardian to my account",
                     "Initiate a recovery ceremony to rotate my passkey",
-                    "Grant a session key to my trading agent for 30 days",
+                    "Grant a smart account session key to my trading agent for 30 days",
                     "Install my Ledger as a hardware signer",
                     "Show my smart account's installed validators",
                 ],
@@ -97,8 +97,13 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "routing: state a use case (chat/code/reasoning/summarize/"
                     "extract/embed) plus budget and quality floor in metadata "
                     "to have the network select a model instead of naming one. "
+                    "Selection also accounts for how hard the prompt is, "
+                    "returning the difficulty cluster it landed in and the "
+                    "chosen model's observed error rate there; report an "
+                    "escalation back so those rates reflect what happened, and "
+                    "read the cluster map as an operator diagnostic. "
                     "Model weights are content-addressed: download is peer-first "
-                    "over iroh blobs (BLAKE3-verified end-to-end on transfer), "
+                    "over iroh blobs (BLAKE3-verified as it transfers), "
                     "falling back to HuggingFace, and the weights are checked "
                     "against the canonical hash record before load. Read that "
                     "record (BLAKE3 + SHA-256 + per-file manifest hash, recorder "
@@ -107,13 +112,15 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 ),
                 "tags": [
                     "ai", "inference", "models", "intent-routing",
-                    "content-addressed", "blake3",
+                    "difficulty-aware", "content-addressed", "blake3",
                 ],
                 "examples": [
                     "List available AI models",
                     "Run inference on model X",
                     "Route by intent for a reasoning use case",
                     "Chat by intent with budget 1000000000000000000",
+                    "Record the outcome escalated for model_id=… cluster=3",
+                    "Show the route difficulty stats for model qwen3-4b",
                     "Get the content hash for model qwen3-4b",
                     "List every recorded model hash",
                     "Download model qwen3-4b (peer-first, BLAKE3-verified)",
@@ -162,7 +169,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "examples": [
                     "Check settlement status",
                     "Open a micropayment channel",
-                    "Pre-fund a streaming storage or compute rental",
+                    "Pre-fund a prepaid settlement balance for a streaming service",
                     "Check a prepaid streaming balance",
                 ],
                 "inputModes": ["text/plain"],
@@ -318,6 +325,36 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "outputModes": ["application/json"],
             },
             {
+                "id": "capability_registry",
+                "name": "Capability Registry",
+                "description": (
+                    "Discover registered agent capabilities and inspect signed/TEE-backed "
+                    "attestations supporting capability claims. List all capabilities with "
+                    "agent and attestation counts, fetch attestation envelopes for a specific "
+                    "capability, fetch all attestations issued for a given agent ID, and pick "
+                    "the best (TEE-backed-preferred) agent for a capability. Every stored "
+                    "attestation has already passed canonical signing-data cryptographic checks."
+                ),
+                "tags": [
+                    "capabilities",
+                    "attestations",
+                    "discovery",
+                    "trust",
+                    "tee",
+                    "ed25519",
+                    "agentic",
+                ],
+                "examples": [
+                    "List all registered capabilities on this node",
+                    "Show attestations for the 'nlp' capability",
+                    "Show attestations issued for agent agent-id-123",
+                    "Pick the best agent for 'code' generation",
+                    "Find a TEE-backed agent for 'vision'",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
                 "id": "lifecycle",
                 "name": "Agent Lifecycle Kill-Switch",
                 "description": (
@@ -424,9 +461,9 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "examples": [
                     "AP2 protocol info",
                     "Create AP2 session (metadata.agent_did, provider_did, max_amount)",
-                    "Authorize 100 TNZO on session <id>",
-                    "Execute session <id> (metadata.authorization_id)",
-                    "Cancel session <id>",
+                    "Authorize 100 TNZO on AP2 session <id>",
+                    "Execute AP2 session <id> (metadata.authorization_id)",
+                    "Cancel AP2 session <id>",
                     "Verify AP2 mandate (metadata.vdc)",
                     "Validate AP2 checkout/payment pair (metadata.checkout_vdc, payment_vdc)",
                     "List AP2 mandates (metadata.controller_did)",
@@ -437,6 +474,41 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "x402 deregister resource (metadata: listingId, sellerDid)",
                     "x402 verify offer (metadata: requirement)",
                     "x402 payment id (metadata: payerDid, requirement|offerCommitment)",
+                ],
+                "inputModes": ["text/plain", "application/json"],
+                "outputModes": ["application/json"],
+            },
+            {
+                "id": "stripe-spt",
+                "name": "Stripe SharedPaymentToken",
+                "description": (
+                    "Stripe's SharedPaymentToken lets a principal authorize a "
+                    "merchant to confirm a PaymentIntent without handing the "
+                    "agent a real PaymentMethod. A confirm clears four "
+                    "ceilings: the TDIP DelegationScope, the runtime "
+                    "SpendingPolicy, the token's own usage_limits, and the "
+                    "AP2 cart total when the payment is wrapped in a mandate. "
+                    "Read the protocol description, or dispatch a verified "
+                    "webhook payload: a settlement event writes reputation "
+                    "feedback for the agent's ERC-8004 agentId, and a "
+                    "granted-token deactivation revokes the DID's credential "
+                    "across the mesh. Both dispatches sign as the local "
+                    "validator, so a non-validator node refuses them."
+                ),
+                "tags": [
+                    "payments", "stripe", "spt", "shared-payment-token",
+                    "agentic", "erc8004", "reputation", "revocation",
+                    "webhook",
+                ],
+                "examples": [
+                    "Stripe SPT protocol info",
+                    "Stripe SPT settlement outcome (metadata: machine_did, "
+                    "granted_token_id, event_type=payment_intent.succeeded)",
+                    "Stripe SPT dispute closed (metadata: machine_did, "
+                    "granted_token_id, event_type=charge.dispute.closed, "
+                    "dispute_status=won)",
+                    "Stripe SPT granted token deactivated (metadata: "
+                    "machine_did, granted_token_id)",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
@@ -486,7 +558,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Quote CCIP fee from ethereum to arbitrum",
                     "Track CCIP message 0xabc... on arbitrum",
                     "List CCIP lanes for mainnet",
-                    "Get CCT pool rate limits on base for arbitrum",
+                    "Get CCIP rate limits on base for arbitrum",
                     "Bridge 100 TNZO from ethereum to arbitrum via CCIP",
                 ],
                 "inputModes": ["text/plain", "application/json"],
@@ -509,7 +581,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Wormhole chain id for ethereum",
                     "Wormhole chain id for solana",
                     "Parse VAA 2/0x00000000000000000000.../12345",
-                    "Bridge 100 TNZO from ethereum to solana (metadata.sender/recipient)",
+                    "Bridge 100 TNZO from ethereum to solana over wormhole (metadata.sender/recipient)",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
@@ -567,16 +639,24 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "id": "approval",
                 "name": "Auth-Engine Approval Workflow",
                 "description": (
-                    "Asynchronous request -> review -> decide loop for sensitive "
-                    "actions that need out-of-band human (or higher-privilege "
-                    "machine) signoff. List pending approval requests for an "
-                    "approver DID, fetch a single approval record by id, or "
-                    "apply a final decision (approved / denied). Lazy expiry "
-                    "runs on every read path so callers never see stale "
-                    "pending records. When approver_did is supplied on decide, "
-                    "the engine refuses to apply the decision unless the "
-                    "record's approver_did matches (cross-approver tampering "
-                    "defence -- mismatch returns JSON-RPC -32001 forbidden)."
+                    "Asynchronous request -> review -> decide -> retry loop for "
+                    "sensitive actions that need out-of-band human (or "
+                    "higher-privilege machine) signoff. An agent's first "
+                    "attempt at an always-ask action returns JSON-RPC -32002 "
+                    "carrying data.approval_id. The approver lists pending "
+                    "requests for their DID, inspects one by id, then decides "
+                    "(approved / denied). On approval the agent retries the "
+                    "same action passing approval_id and it executes -- "
+                    "approvals are single-use and are checked for action "
+                    "parity, so one granted for 10 TNZO cannot be redeemed "
+                    "against 9000. On denial the retry returns -32001 carrying "
+                    "the approver's deny_reason, so the agent learns why and "
+                    "can adapt. Lazy expiry runs on every read path so callers "
+                    "never see stale pending records. When approver_did is "
+                    "supplied on decide, the engine refuses to apply the "
+                    "decision unless the record's approver_did matches "
+                    "(cross-approver tampering defence -- mismatch returns "
+                    "JSON-RPC -32001 forbidden)."
                 ),
                 "tags": [
                     "approval", "auth-engine", "out-of-band", "human-in-the-loop",
@@ -586,7 +666,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "List pending approvals for did:tenzro:human:alice",
                     "Fetch approval record by id (metadata.approval_id)",
                     "Approve request (metadata.approval_id, decision=approved, approver_did)",
-                    "Deny request (metadata.approval_id, decision=denied, approver_did)",
+                    "Deny request (metadata.approval_id, decision=denied, approver_did, deny_reason)",
                 ],
                 "inputModes": ["text/plain", "application/json"],
                 "outputModes": ["application/json"],
@@ -604,7 +684,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "tags": ["join", "onboarding", "micronode", "identity", "wallet"],
                 "examples": [
                     "Join the Tenzro Network as Alice",
-                    "Create a new identity on Tenzro",
+                    "Join the network and create a new identity",
                     "Onboard to Tenzro with username Bob",
                     "Join as a MicroNode",
                 ],
@@ -825,8 +905,8 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "name": "Video Embeddings",
                 "description": (
                     "Video embedding via Tenzro-served encoders. The native "
-                    "video catalog is empty (no permissive ONNX-shippable "
-                    "encoder available); the runtime ships a "
+                    "video catalog is empty (no permissive ONNX-distributable "
+                    "encoder available); the runtime provides a "
                     "VisionFallbackVideoEncoder that samples frames via ffmpeg, "
                     "embeds each through a registered vision encoder "
                     "(DINOv3 / SigLIP2 / CLIP), and mean-pools the result."
@@ -865,7 +945,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Submit a solver bid against intent_id=0x…",
                     "Auto-assign intent_id=0x… by reputation + price + eta",
                     "Execute leg {venue, asset_id, side, quantity, unit_price}",
-                    "Submit a reserve attestation for asset_id=0x… (source=custody)",
+                    "Submit a reserve attestation for asset_id=0x… (source=custodian)",
                     "Get current reserve for asset_id=0x…",
                 ],
                 "inputModes": ["text/plain", "application/json"],
@@ -906,7 +986,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "List workflows in status awaiting_signatures",
                     "Get the lifecycle history for workflow 0x…",
                     "Get obligation 0x… (kind, amount, status, discharge_proof)",
-                    "Get approval request 0x… (decisions collected, threshold progress)",
+                    "Get approval gate 0x… (decisions collected, threshold progress)",
                     "List receipts for workflow 0x… max=100",
                     "List all fee routes",
                     "Compute payouts for fee route 0x… given gross_wei=50000000",
@@ -1012,9 +1092,14 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "DecreaseBurnPct / AlarmHighInflation / "
                     "AlarmHighDeflation with magnitude bps capped at the "
                     "normal / alarm ceiling). The dial moves only via "
-                    "on-chain governance proposals; the auto-proposal "
-                    "generator + EIP-1559 fee-market consumer wiring "
-                    "lands in a follow-up wave."
+                    "on-chain governance proposals. Nodes run an "
+                    "AutoProposalGenerator that polls the recommendation on "
+                    "the epoch boundary and drafts an "
+                    "AdaptiveBurnConfigUpdate proposal when metrics drift "
+                    "above the proposal floor or trip an alarm, debounced so "
+                    "governance is not flooded; the EIP-1559 fee market reads "
+                    "the current config to split each base fee between burn "
+                    "and treasury. List the pending proposals here."
                 ),
                 "tags": [
                     "adaptive-burn", "governance", "tokenomics",
@@ -1472,7 +1557,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 "tags": ["attested-clock", "tee", "workflow", "deadline"],
                 "examples": [
                     "Return the current AttestedTimestamp envelope",
-                    "Anchor an AP2 mandate expiry to a hardware-signed timestamp",
+                    "Anchor a mandate expiry to a hardware-signed timestamp",
                     "Bind a margin-call grace deadline to an attested wall_ms",
                 ],
                 "inputModes": ["application/json"],
@@ -1685,7 +1770,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                 ],
                 "examples": [
                     "List the generative-media catalog",
-                    "Quote a 1328x1328 image at 50 steps",
+                    "Quote a 1328x1328 image at 50 denoise steps",
                     "Post a text-to-video job and follow it",
                     "Read the receipt for a completed render",
                 ],
@@ -1771,7 +1856,7 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "Deploy a wasi:http function 'edge-fn' from wasm blob 0x… with a 1s deadline",
                     "Fetch this node's machine sealing key",
                     "Deploy a TEE-sealed microVM 'api-vm' from artifact caid… on internal port 8080",
-                    "Show the live status of machine machine-xyz",
+                    "Show the live machine status for machine-xyz",
                     "List the placement leases bound to app site-abc123",
                 ],
                 "inputModes": ["text/plain", "application/json"],

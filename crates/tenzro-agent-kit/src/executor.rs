@@ -1696,7 +1696,18 @@ impl Executor {
             return Ok(());
         }
 
-        match self.registry.use_skill(&skill.skill_id, input_value).await {
+        // Pin what discovery resolved: a republish between discovery and
+        // invocation should fail the step, not silently run different bytes.
+        match self
+            .registry
+            .use_skill(
+                &skill.skill_id,
+                input_value,
+                Some(&skill.version),
+                skill.bundle.as_ref().map(|b| b.sha256.as_str()),
+            )
+            .await
+        {
             Ok(output) => {
                 ctx.bind_output(format!("skill_{skill_tag}"), output.clone());
                 report.push(

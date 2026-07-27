@@ -52,6 +52,8 @@ pub struct SendTransactionParams {
     pub pq_public_key: Option<String>,
     #[schemars(description = "Transaction timestamp in ms since Unix epoch — MUST match the timestamp used when computing the signed hash (required if pre-signing)")]
     pub timestamp: Option<u64>,
+    #[schemars(description = "An approval granted out-of-band after a prior attempt returned -32002 with data.approval_id. Pass it back to execute the approved transfer; a denial returns the approver's reason.")]
+    pub approval_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -265,6 +267,57 @@ pub struct RouteByIntentParams {
     pub payer_did: Option<String>,
     #[schemars(description = "Payer wallet address (hex). When set, the payer's on-chain TNZO balance is a hard ceiling: unaffordable models are dropped. Optional")]
     pub payer_address: Option<String>,
+    #[schemars(description = "The text the model would answer. Used only to place the request in a difficulty cluster so selection accounts for how hard the prompt is; it is not sent to any provider. Without it the decision rests on declared metadata alone. Optional")]
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ChatByIntentParams {
+    #[schemars(description = "Use case: 'chat', 'code', 'reasoning', 'research', 'summarize', 'extract', or 'embed'. Maps to a modality and biases quality tiering")]
+    pub use_case: String,
+    #[schemars(description = "The user message (simple single-turn shape). Provide this or 'messages'")]
+    pub message: Option<String>,
+    #[schemars(description = "Chat turns as [{role, content}] (rich multi-turn shape). The last user turn is what difficulty scoring reads. Provide this or 'message'")]
+    pub messages: Option<Vec<serde_json::Value>>,
+    #[schemars(description = "Per-request cost cap in smallest TNZO unit. Accepts number or decimal string. Absent = no per-request cap. Optional", with = "Option<String>")]
+    #[serde(default, with = "tenzro_types::primitives::u128_serde_opt")]
+    pub budget: Option<u128>,
+    #[schemars(description = "Cost-quality knob in [0.0, 1.0]: 0.0 = cheapest acceptable, 1.0 = strongest. Optional")]
+    pub optimize: Option<f64>,
+    #[schemars(description = "Reject any model below this tier: 'cheap' or 'strong'. Optional")]
+    pub quality_floor: Option<String>,
+    #[schemars(description = "Estimated input tokens for cost estimation. Optional")]
+    pub est_input_tokens: Option<u64>,
+    #[schemars(description = "Estimated output tokens for cost estimation. Optional")]
+    pub est_output_tokens: Option<u64>,
+    #[schemars(description = "Payer DID. When set, the per-DID rolling-window budget gate is enforced. Optional")]
+    pub payer_did: Option<String>,
+    #[schemars(description = "Payer wallet address (hex). When set, the payer's on-chain TNZO balance is a hard ceiling and the call bills to it. Optional")]
+    pub payer_address: Option<String>,
+    #[schemars(description = "Temperature (0.0-2.0). Optional")]
+    pub temperature: Option<f64>,
+    #[schemars(description = "Maximum tokens to generate. Optional")]
+    pub max_tokens: Option<u32>,
+    #[schemars(description = "Comma-separated jurisdiction pin: ISO 3166-1 alpha-2 country codes and/or bloc tokens (e.g. 'DE,EU'), case-insensitive. The serving node must declare a matching attestation-bound locality claim or the request is refused. Optional")]
+    pub jurisdiction: Option<String>,
+    #[schemars(description = "Set to 'required' to fail the request unless the response carries a verifiable signed jurisdiction receipt. Optional")]
+    pub jurisdiction_receipt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RecordRouteOutcomeParams {
+    #[schemars(description = "The model that served the call. Take it from the routing decision's model_id")]
+    pub model_id: String,
+    #[schemars(description = "The difficulty cluster the request landed in. Take it from the routing decision's 'cluster'")]
+    pub cluster: u32,
+    #[schemars(description = "How the call turned out: 'resolved' (answered acceptably), 'escalated' (you took the answer to a stronger model), or 'failed' (no usable answer)")]
+    pub outcome: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RouteDifficultyStatsParams {
+    #[schemars(description = "Model to report per-cluster outcome counters and error rate for. Omit for the cluster map alone. Optional")]
+    pub model_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1187,6 +1240,26 @@ pub struct SetProviderPricingParams {
     pub input_price_per_token_wei: String,
     #[schemars(description = "Wei per output token (decimal string; 1 TNZO = 10^18 wei)")]
     pub output_price_per_token_wei: String,
+    #[schemars(description = "Wei per request, charged as a floor on a metered quote and as the whole quote under per-request pricing. Omit to keep the current rate.")]
+    pub price_per_request_wei: Option<u64>,
+    #[schemars(description = "Wei per millisecond of compute, read under per-compute-time pricing. Omit to keep the current rate.")]
+    pub price_per_compute_ms_wei: Option<u64>,
+    #[schemars(description = "Wei per prompt token served from cache, normally well under a fresh input token. Omit to keep the current rate.")]
+    pub price_per_cached_read_token_wei: Option<u64>,
+    #[schemars(description = "Wei per prompt token written into cache, charged on top of the fresh prefill. Omit to keep the current rate.")]
+    pub price_per_cached_write_token_wei: Option<u64>,
+    #[schemars(description = "Wei per reasoning loop on a recurrent-depth model. Omit to keep the current rate.")]
+    pub price_per_reasoning_loop_wei: Option<u64>,
+    #[schemars(description = "Wei per image token derived from image geometry. Omit to keep the current rate.")]
+    pub price_per_image_token_wei: Option<u64>,
+    #[schemars(description = "Wei per second of audio transcribed or generated. Omit to keep the current rate.")]
+    pub price_per_audio_second_wei: Option<u64>,
+    #[schemars(description = "Wei per second of video. Omit to keep the current rate.")]
+    pub price_per_video_second_wei: Option<u64>,
+    #[schemars(description = "Wei per pixel-step of denoising work, where a pixel-step is width x height x steps x frames. Prices frames the provider generates. Omit to keep the current rate.")]
+    pub price_per_pixel_step_wei: Option<u64>,
+    #[schemars(description = "Wei per frame the provider consumes, as when sampling a clip for embedding. Omit to keep the current rate.")]
+    pub price_per_frame_wei: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2233,6 +2306,8 @@ pub struct DecideApprovalParams {
     pub decision: String,
     #[schemars(description = "Optional but recommended: the deciding approver's DID. When supplied, the engine refuses the decision unless the record's approver_did matches (cross-approver tampering defence). Mismatch returns -32001 (forbidden).")]
     pub approver_did: Option<String>,
+    #[schemars(description = "Why the request was refused. Recorded on a 'denied' decision and returned to the requesting agent when it retries, so the agent can act on the reason ('wrong counterparty, use the escrow address') rather than just the refusal. Ignored for 'approved'.")]
+    pub deny_reason: Option<String>,
 }
 
 // ─── Escrow + Dispute inspection Params ───
@@ -3160,7 +3235,7 @@ pub struct SegmentParams {
     pub model_id: String,
     #[schemars(description = "Base64-encoded image bytes")]
     pub image_base64: String,
-    #[schemars(description = "Prompts: array of `{type:'point', x, y, label}` or `{type:'box', x0, y0, x1, y1}` objects")]
+    #[schemars(description = "Prompts: array of `{type:'point', x, y, is_foreground}` (is_foreground true marks a point inside the object, false marks background) or `{type:'box', x0, y0, x1, y1}` objects. Coordinates are original-image pixels.")]
     pub prompts: serde_json::Value,
 }
 
@@ -3190,13 +3265,15 @@ pub struct TranscribeParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct VideoEmbedParams {
-    #[schemars(description = "Registered video encoder id. The V-JEPA 2 family (vjepa2-vitl-256, vjepa2-vith-256, vjepa2-vitg-384) is advertised in the catalog; loading is gated until per-model ONNX exports land.")]
+    #[schemars(description = "Registered video encoder id — the id passed to load_video_model, not a catalog id.")]
     pub model_id: String,
     #[schemars(description = "Base64-encoded video bytes")]
     pub video_base64: String,
     #[schemars(description = "L2-normalize the pooled embedding (default false)")]
     pub normalize: Option<bool>,
-    #[schemars(description = "Sub-sample frames at this stride (default model-defined)")]
+    #[schemars(
+        description = "Keep every Nth decoded frame instead of spreading the samples evenly across the clip. Still capped at the frame budget the clip encoder was registered with."
+    )]
     pub frame_stride: Option<u32>,
 }
 
@@ -3208,10 +3285,12 @@ pub struct LoadForecastModelParams {
     pub model_id: String,
     #[schemars(description = "Filesystem path to the ONNX file")]
     pub path: String,
-    #[schemars(description = "Context length (number of input timesteps the encoder accepts)")]
-    pub context_length: u32,
-    #[schemars(description = "Maximum forecast horizon supported by this export")]
-    pub max_horizon: u32,
+    #[schemars(description = "Optional catalog id (e.g. 'tirex-35m'). If set, context_length/max_horizon/output_name/batch_size are read from the catalog, the explicit params below may be omitted, and the entry's license tier is enforced.")]
+    pub catalog_id: Option<String>,
+    #[schemars(description = "Context length (number of input timesteps the encoder accepts). Required if catalog_id is not provided.")]
+    pub context_length: Option<u32>,
+    #[schemars(description = "Maximum forecast horizon supported by this export. Required if catalog_id is not provided.")]
+    pub max_horizon: Option<u32>,
     #[schemars(description = "Optional explicit prediction output tensor name. Required for multi-output ONNX graphs where the first output is not the forecast (e.g. TimesFM transformers export).")]
     pub output_name: Option<String>,
     #[schemars(description = "Optional fixed leading batch dim. Defaults to 1. TimesFM 2.5 transformers ONNX requires 2 (flip-invariance averaging).")]
@@ -3236,12 +3315,20 @@ pub struct LoadVisionModelParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LoadTextEmbeddingModelParams {
-    #[schemars(description = "Model id to register under")]
+    #[schemars(description = "Model id to register under. When `path` is omitted and this names a catalog entry (e.g. 'qwen3-embedding-0.6b'), the node fetches the ONNX graph and tokenizer from HuggingFace onto its models directory and registers the encoder under this same id.")]
     pub model_id: String,
-    #[schemars(description = "Filesystem path to the ONNX file")]
-    pub path: String,
-    #[schemars(description = "Optional catalog id (e.g. 'qwen3-embedding-0.6b'). RPC stub: returns -32004 until the ONNX loader is wired.")]
+    #[schemars(description = "Filesystem path to the ONNX file on the node. Omit to take the catalog-download path described under model_id.")]
+    pub path: Option<String>,
+    #[schemars(description = "Filesystem path to tokenizer.json. Required whenever `path` is set.")]
+    pub tokenizer_path: Option<String>,
+    #[schemars(description = "Pooling family: 'qwen3', 'cls', 'mean', or 'sentence_embedding'. Required whenever `path` is set.")]
+    pub family: Option<String>,
+    #[schemars(description = "Optional catalog id (e.g. 'embeddinggemma-300m'). With `path` set, this supplies embedding_dim and max_sequence_length from the catalog and enforces the entry's license tier (-32010 when the node operator has not accepted it).")]
     pub catalog_id: Option<String>,
+    #[schemars(description = "Native output embedding dimension. Required when `path` is set and catalog_id is not.")]
+    pub embedding_dim: Option<u32>,
+    #[schemars(description = "Maximum token sequence length the encoder accepts. Required when `path` is set and catalog_id is not.")]
+    pub max_sequence_length: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3252,9 +3339,11 @@ pub struct LoadSegmentationModelParams {
     pub encoder_path: String,
     #[schemars(description = "Path to the decoder ONNX")]
     pub decoder_path: String,
-    #[schemars(description = "SAM family: 'sam1' or 'sam2'")]
+    #[schemars(description = "SAM family: 'sam1' (EdgeSAM, MobileSAM — 6-input decoder) or 'sam2' (7-input decoder with high-res feature taps). Required if catalog_id is not provided.")]
     pub family: Option<String>,
-    #[schemars(description = "Optional catalog id. RPC stub: returns -32004 until the ONNX loader is wired.")]
+    #[schemars(description = "Image input edge in pixels (square). Required if catalog_id is not provided.")]
+    pub input_size: Option<u32>,
+    #[schemars(description = "Optional catalog id (e.g. 'sam2-base'). If set, family and input_size are read from the catalog and the entry's license tier is enforced (-32010 when the node operator has not accepted it).")]
     pub catalog_id: Option<String>,
 }
 
@@ -3278,9 +3367,13 @@ pub struct LoadDetectionModelParams {
     pub model_id: String,
     #[schemars(description = "Filesystem path to the ONNX file")]
     pub path: String,
-    #[schemars(description = "Detector family: 'rf-detr' or 'd-fine'")]
+    #[schemars(description = "Detector family: 'rf_detr' or 'd_fine'. Required if catalog_id is not provided.")]
     pub family: Option<String>,
-    #[schemars(description = "Optional catalog id. RPC stub: returns -32004 until the ONNX loader is wired.")]
+    #[schemars(description = "Image input edge in pixels (square). Required if catalog_id is not provided.")]
+    pub input_size: Option<u32>,
+    #[schemars(description = "Class count of the label head — 90 for RF-DETR (COCO indexing with gaps), 80 for D-FINE. Required if catalog_id is not provided.")]
+    pub num_classes: Option<u32>,
+    #[schemars(description = "Optional catalog id (e.g. 'rf-detr-base'). If set, family, input_size and num_classes are read from the catalog and the entry's license tier is enforced (-32010 when the node operator has not accepted it).")]
     pub catalog_id: Option<String>,
 }
 
@@ -3292,9 +3385,13 @@ pub struct LoadAudioModelParams {
     pub encoder_path: String,
     #[schemars(description = "Filesystem path to the decoder ONNX (decoder_model_merged.onnx for KV-cache)")]
     pub decoder_path: String,
-    #[schemars(description = "Filesystem path to the tokenizer (tokenizer.json)")]
-    pub tokenizer_path: String,
-    #[schemars(description = "Optional catalog id. If set, family / max_audio_seconds / whisper_variant are read from the catalog.")]
+    #[schemars(description = "Filesystem path to the tokenizer (tokenizer.json). Required for family 'moonshine' and 'whisper'.")]
+    pub tokenizer_path: Option<String>,
+    #[schemars(description = "Filesystem path to the mel-spectrogram preprocessor ONNX. Required for family 'parakeet' and 'canary'.")]
+    pub preprocessor_path: Option<String>,
+    #[schemars(description = "Filesystem path to the vocabulary file. Required for family 'parakeet' and 'canary'.")]
+    pub vocab_path: Option<String>,
+    #[schemars(description = "Optional catalog id. If set, family / max_audio_seconds / whisper_variant are read from the catalog and the entry's license tier is enforced (-32010 when the node operator has not accepted it).")]
     pub catalog_id: Option<String>,
     #[schemars(description = "Required if catalog_id is not provided. One of: 'moonshine', 'whisper', 'parakeet', 'canary'")]
     pub family: Option<String>,
@@ -3302,16 +3399,20 @@ pub struct LoadAudioModelParams {
     pub max_audio_seconds: Option<u32>,
     #[schemars(description = "Required for family='whisper'. One of: 'distil-en', 'distil-large-v3', 'large-v3-turbo'")]
     pub whisper_variant: Option<String>,
+    #[schemars(description = "Source language for family='canary', used to build the decoder prefix. Defaults to 'en'. One of: en, de, es, fr.")]
+    pub source_lang: Option<String>,
+    #[schemars(description = "Target language for family='canary' — set it different from source_lang to translate rather than transcribe. Defaults to 'en'. One of: en, de, es, fr.")]
+    pub target_lang: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LoadVideoModelParams {
-    #[schemars(description = "Model id to register under")]
+    #[schemars(description = "Model id to register the clip-level encoder under")]
     pub model_id: String,
-    #[schemars(description = "Filesystem path to the ONNX file")]
-    pub path: String,
-    #[schemars(description = "Optional catalog id (e.g. 'vjepa2-vitl-256'). Returns -32004 until the V-JEPA 2 ONNX export pipeline lands (tools/video-export).")]
-    pub catalog_id: Option<String>,
+    #[schemars(description = "Id of an image encoder already loaded via load_vision_model. Video embedding is frame-based: the node extracts frames, embeds each through this encoder, and mean-pools. An unloaded id is refused with -32004.")]
+    pub vision_model_id: String,
+    #[schemars(description = "Frames to extract per clip, evenly spaced (default 8, clamped to 1..128)")]
+    pub num_frames: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -4872,7 +4973,7 @@ impl TenzroMcpServer {
 
     // ─── Transactions ───
 
-    #[tool(description = "Send a TNZO transfer transaction on the Tenzro ledger. Two supported paths: (a) ambient OAuth/DPoP (server-custodial) — omit the signature fields; the server looks up the wallet bound to the bearer DID and signs; (b) self-custody / pre-signed — the caller signs both legs locally and supplies signature (Ed25519) + public_key (Ed25519) + pq_signature (ML-DSA-65) + pq_public_key (ML-DSA-65 verifying key) + timestamp matching the signed Transaction::hash(). The node verifies both legs and rejects a raw send that omits either.")]
+    #[tool(description = "Send a TNZO transfer transaction on the Tenzro ledger. Two supported paths: (a) ambient OAuth/DPoP (server-custodial) — omit the signature fields; the server looks up the wallet bound to the bearer DID and signs; (b) self-custody / pre-signed — the caller signs both legs locally and supplies signature (Ed25519) + public_key (Ed25519) + pq_signature (ML-DSA-65) + pq_public_key (ML-DSA-65 verifying key) + timestamp matching the signed Transaction::hash(). The node verifies both legs and rejects a raw send that omits either. On the ambient path, when the controller has put transfers on the always-ask list the first call returns -32002 with data.approval_id; once the controller approves it, retry the same transfer with approval_id set and it executes. A denial returns -32001 carrying the approver's reason.")]
     async fn send_transaction(
         &self,
         Parameters(params): Parameters<SendTransactionParams>,
@@ -4891,7 +4992,7 @@ impl TenzroMcpServer {
             let tx_type = serde_json::json!({
                 "Transfer": { "amount": params.amount.to_string() }
             });
-            let send_params = serde_json::json!({
+            let mut send_params = serde_json::json!({
                 "from": params.from,
                 "to": params.to,
                 "value": 0u64,
@@ -4901,6 +5002,9 @@ impl TenzroMcpServer {
                 "chain_id": chain_id,
                 "tx_type": tx_type,
             });
+            if let Some(id) = params.approval_id {
+                send_params["approval_id"] = serde_json::Value::String(id);
+            }
             let result = rpc_dispatch(&self.node, "tenzro_signAndSendTransaction", send_params)
                 .await
                 .map_err(|e| err_internal(format!("signAndSendTransaction failed: {}", e)))?;
@@ -5806,7 +5910,8 @@ impl TenzroMcpServer {
             "dpop_signing_alg_values_supported": ["EdDSA"],
             "authorization_details_types_supported": [
                 "transfer", "create_escrow", "discharge_escrow", "inference",
-                "stake", "vote", "contract", "register_identity"
+                "stake", "vote", "contract", "register_identity",
+                "resource_invocation"
             ],
             "aap_claims_supported": [
                 "aap_agent", "aap_task", "aap_capabilities",
@@ -6814,7 +6919,7 @@ impl TenzroMcpServer {
         json_result(value)
     }
 
-    #[tool(description = "Send a chat completion request to a served AI model on the Tenzro network. Use list_models or list_model_endpoints to discover available models")]
+    #[tool(description = "Send a chat completion request to a named AI model served on the Tenzro network. Use list_models or list_model_endpoints to discover available models. Omitting 'model' and giving 'use_case' selects one, but the offer is resolved at dispatch rather than pinned to the scored price — chat_by_intent is the path that pins price and payee")]
     async fn chat_completion(
         &self,
         Parameters(params): Parameters<ChatCompletionParams>,
@@ -6876,7 +6981,7 @@ impl TenzroMcpServer {
                     message: Cow::from("MetaRouter not initialized on this node"),
                     data: None,
                 })?;
-                match meta.route(&intent) {
+                match meta.route_intent(&intent).await {
                     Ok(decision) => decision.model_id,
                     Err(e) => {
                         return text_result(format!("No model matched the intent: {e}"));
@@ -7086,84 +7191,79 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Discover the best model for an intent (use case + budget + quality floor + cost-quality knob) without naming a model. Returns the selected model_id, tier, estimated cost, and a fallback chain. Discovery only — dispatches nothing and records no spend. Feed the returned model_id into chat_completion to run it")]
+    #[tool(description = "Discover the best model for an intent (use case + budget + quality floor + cost-quality knob) without naming a model. Returns the selected model_id, tier, estimated cost, fallback chain, the difficulty cluster the prompt landed in, that model's observed error rate in the cluster, and the winning provider's address and endpoint when the offer came from another operator. Discovery only — dispatches nothing and records no spend, though the per-DID budget gate and the wallet-balance ceiling still apply, so an unaffordable request is refused here. Use chat_by_intent to select and run in one call")]
     async fn route_by_intent(
         &self,
-        Parameters(params): Parameters<RouteByIntentParams>,
+        Parameters(p): Parameters<RouteByIntentParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        use tenzro_model::meta_router::{Budget, QualityTier, RouteIntent, UseCase};
+        let mut params = serde_json::json!({ "use_case": p.use_case });
+        if let Some(v) = p.budget { params["budget"] = serde_json::json!(v.to_string()); }
+        if let Some(v) = p.optimize { params["optimize"] = serde_json::json!(v); }
+        if let Some(v) = p.quality_floor { params["quality_floor"] = serde_json::json!(v); }
+        if let Some(v) = p.est_input_tokens { params["est_input_tokens"] = serde_json::json!(v); }
+        if let Some(v) = p.est_output_tokens { params["est_output_tokens"] = serde_json::json!(v); }
+        if let Some(v) = p.payer_did { params["payer_did"] = serde_json::json!(v); }
+        if let Some(v) = p.payer_address { params["payer_address"] = serde_json::json!(v); }
+        if let Some(v) = p.prompt { params["prompt"] = serde_json::json!(v); }
+        dispatch_rpc(&self.node, "tenzro_routeIntent", params).await
+    }
 
-        let use_case = UseCase::parse(&params.use_case).ok_or_else(|| ErrorData {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!(
-                "Unknown use_case '{}' (expected one of {})",
-                params.use_case,
-                UseCase::ALL.join("|")
-            )),
-            data: None,
-        })?;
-
-        let budget = match params.budget {
-            Some(cap) => Budget::PerRequestTnzo(cap),
-            None => Budget::None,
-        };
-
-        let mut intent = RouteIntent::new(use_case, budget);
-
-        if let Some(o) = params.optimize {
-            intent = intent.with_optimize(o as f32);
+    #[tool(description = "Resolve an intent to a model and run the chat in one call. Selection walks the cross-model fallback chain, so the intent resolves as long as any model that satisfies it has a live offer, and dispatch is pinned to the offer that was scored — the price quoted is the price settled and the provider share goes to the address that offer named. The chosen decision is attached to the response under 'route'. Difficulty feedback for resolved and failed calls is recorded from the dispatch itself; report an escalation with record_route_outcome")]
+    async fn chat_by_intent(
+        &self,
+        Parameters(p): Parameters<ChatByIntentParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        if p.message.is_none() && p.messages.is_none() {
+            return Err(ErrorData {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("Provide 'message' (simple shape) or 'messages' (rich shape)"),
+                data: None,
+            });
         }
-
-        if let Some(floor_str) = params.quality_floor.as_deref() {
-            let floor = match floor_str.trim().to_lowercase().as_str() {
-                "cheap" => QualityTier::Cheap,
-                "strong" => QualityTier::Strong,
-                other => {
-                    return Err(ErrorData {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(format!(
-                            "Unknown quality_floor '{other}' (expected cheap|strong)"
-                        )),
-                        data: None,
-                    });
-                }
-            };
-            intent = intent.with_quality_floor(floor);
+        let mut params = serde_json::json!({ "use_case": p.use_case });
+        if let Some(v) = p.message { params["message"] = serde_json::json!(v); }
+        if let Some(v) = p.messages { params["messages"] = serde_json::json!(v); }
+        if let Some(v) = p.budget { params["budget"] = serde_json::json!(v.to_string()); }
+        if let Some(v) = p.optimize { params["optimize"] = serde_json::json!(v); }
+        if let Some(v) = p.quality_floor { params["quality_floor"] = serde_json::json!(v); }
+        if let Some(v) = p.est_input_tokens { params["est_input_tokens"] = serde_json::json!(v); }
+        if let Some(v) = p.est_output_tokens { params["est_output_tokens"] = serde_json::json!(v); }
+        if let Some(v) = p.payer_did { params["payer_did"] = serde_json::json!(v); }
+        if let Some(v) = p.payer_address { params["payer_address"] = serde_json::json!(v); }
+        if let Some(v) = p.temperature { params["temperature"] = serde_json::json!(v); }
+        if let Some(v) = p.max_tokens { params["max_tokens"] = serde_json::json!(v); }
+        if let Some(v) = p.jurisdiction { params["jurisdiction"] = serde_json::json!(v); }
+        if let Some(v) = p.jurisdiction_receipt {
+            params["jurisdiction_receipt"] = serde_json::json!(v);
         }
+        dispatch_rpc(&self.node, "tenzro_chatByIntent", params).await
+    }
 
-        if params.est_input_tokens.is_some() || params.est_output_tokens.is_some() {
-            let cur_in = intent.est_input_tokens;
-            let cur_out = intent.est_output_tokens;
-            intent = intent.with_tokens(
-                params.est_input_tokens.unwrap_or(cur_in),
-                params.est_output_tokens.unwrap_or(cur_out),
-            );
-        }
+    #[tool(description = "Report how a routed call turned out so per-cluster error rates reflect what happened rather than only what the catalog declares. In practice this carries 'escalated' — the outcome only the caller knows, because it means you took the answer to a stronger model; 'resolved' and 'failed' are already recorded by chat_by_intent from the dispatch itself. Reporting is advisory: retained=false means the node has no difficulty index wired, so the feedback was accepted and discarded")]
+    async fn record_route_outcome(
+        &self,
+        Parameters(p): Parameters<RecordRouteOutcomeParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        dispatch_rpc(
+            &self.node,
+            "tenzro_recordRouteOutcome",
+            serde_json::json!({
+                "model_id": p.model_id,
+                "cluster": p.cluster,
+                "outcome": p.outcome,
+            }),
+        )
+        .await
+    }
 
-        if let Some(did) = params.payer_did {
-            intent = intent.with_payer_did(did);
-        }
-
-        if let Some(addr_str) = params.payer_address.as_deref() {
-            intent = intent.with_payer_address(parse_address(addr_str)?);
-        }
-
-        let meta = self.node.meta_router().ok_or_else(|| ErrorData {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from("MetaRouter not initialized on this node"),
-            data: None,
-        })?;
-
-        match meta.route(&intent) {
-            Ok(decision) => json_result(serde_json::json!({
-                "model_id": decision.model_id,
-                "tier": format!("{:?}", decision.tier).to_lowercase(),
-                "estimated_cost": decision.estimated_cost.to_string(),
-                "fallback_chain": decision.fallback_chain,
-                "reason": decision.reason,
-            })),
-            Err(e) => text_result(format!("No model matched the intent: {e}")),
-        }
+    #[tool(description = "Read the node's difficulty index: how many prompt clusters it has discovered and how many prompts landed in each. With model_id, also returns that model's per-cluster outcome counters and error rate. An operator diagnostic — routing does not depend on it. enabled=false means the node has no embedding model loaded and routes on declared metadata alone")]
+    async fn route_difficulty_stats(
+        &self,
+        Parameters(p): Parameters<RouteDifficultyStatsParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let mut params = serde_json::json!({});
+        if let Some(v) = p.model_id { params["model_id"] = serde_json::json!(v); }
+        dispatch_rpc(&self.node, "tenzro_routeDifficultyStats", params).await
     }
 
     #[tool(description = "Satisfy a natural-language intent by planning and running an ordered set of capabilities — models, registered skills, registered tools, and agent/swarm delegation. One layer above route_by_intent: that resolves a single model, this composes models with the skill/tool registries and the swarm runtime. The plan's aggregate estimated cost is checked against the payer's wallet balance before any step runs. Returns the plan, per-step outputs, aggregate estimated cost, and the number of re-plan iterations")]
@@ -7210,7 +7310,13 @@ impl TenzroMcpServer {
         }
 
         let catalog = crate::orchestrator_bridge::build_catalog_snapshot(&self.node);
-        let orchestrator = crate::orchestrator_bridge::build_orchestrator(self.node.clone());
+        // A plan spends on the caller's behalf, so the caller's own bearer
+        // identity travels into the skill and tool steps the plan runs.
+        let h = current_request_headers();
+        let auth_ctx =
+            crate::rpc::AuthContext::from_mcp(h.authorization, h.dpop, h.http_method, h.http_uri);
+        let orchestrator =
+            crate::orchestrator_bridge::build_orchestrator(self.node.clone(), auth_ctx);
 
         match orchestrator.execute(&request, &catalog).await {
             Ok(outcome) => {
@@ -9665,7 +9771,7 @@ impl TenzroMcpServer {
 
     // ─── Model Lifecycle Tools ───
 
-    #[tool(description = "Download a model to this node's local storage. Fetch is peer-first: content-addressed weights are pulled from Tenzro peers over iroh blobs (BLAKE3-verified end-to-end on transfer), falling back to HuggingFace Hub when no peer holds them. Computes the weights' BLAKE3 and checks it against the canonical hash record (see get_model_hash) before load. Returns download status and progress.")]
+    #[tool(description = "Download a model to this node's local storage. Fetch is peer-first: content-addressed weights are pulled from Tenzro peers over iroh blobs (BLAKE3-verified over the whole transfer), falling back to HuggingFace Hub when no peer holds them. Computes the weights' BLAKE3 and checks it against the canonical hash record (see get_model_hash) before load. Returns download status and progress.")]
     async fn download_model(
         &self,
         Parameters(params): Parameters<DownloadModelParams>,
@@ -9929,7 +10035,7 @@ impl TenzroMcpServer {
             .map_err(|e| err_internal(format!("Serialization failed: {}", e)))?)
     }
 
-    #[tool(description = "Set the per-token pricing configuration for a provider node. Prices are wei per token (1 TNZO = 10^18 wei). Returns the updated pricing config.")]
+    #[tool(description = "Set the pricing configuration for a provider node. Token prices are wei per token (1 TNZO = 10^18 wei); the optional rates cover cached tokens, reasoning loops, image tokens, audio and video seconds, denoising pixel-steps and consumed frames. Every rate is held at or below the network per-unit ceiling. Returns the updated pricing config.")]
     async fn set_provider_pricing(
         &self,
         Parameters(params): Parameters<SetProviderPricingParams>,
@@ -9951,15 +10057,55 @@ impl TenzroMcpServer {
         let mut pricing = self.node.provider_pricing.write();
         pricing.input_price_per_token_wei = input_wei;
         pricing.output_price_per_token_wei = output_wei;
-        json_result(serde_json::json!({
-            "success": true,
-            "message": "Provider pricing updated",
-            "input_price_per_token_wei": input_wei.to_string(),
-            "output_price_per_token_wei": output_wei.to_string(),
-        }))
+
+        // Each non-token rate is optional so an operator can adjust one
+        // dimension without restating the card; an omitted rate keeps whatever
+        // is already set rather than resetting to the default.
+        let rates = &mut pricing.modality_rates;
+        for (slot, supplied) in [
+            (&mut rates.price_per_request, params.price_per_request_wei),
+            (&mut rates.price_per_compute_ms, params.price_per_compute_ms_wei),
+            (
+                &mut rates.price_per_cached_read_token,
+                params.price_per_cached_read_token_wei,
+            ),
+            (
+                &mut rates.price_per_cached_write_token,
+                params.price_per_cached_write_token_wei,
+            ),
+            (
+                &mut rates.price_per_reasoning_loop,
+                params.price_per_reasoning_loop_wei,
+            ),
+            (&mut rates.price_per_image_token, params.price_per_image_token_wei),
+            (
+                &mut rates.price_per_audio_second,
+                params.price_per_audio_second_wei,
+            ),
+            (
+                &mut rates.price_per_video_second,
+                params.price_per_video_second_wei,
+            ),
+            (&mut rates.price_per_pixel_step, params.price_per_pixel_step_wei),
+            (&mut rates.price_per_frame, params.price_per_frame_wei),
+        ] {
+            if let Some(value) = supplied {
+                *slot = value;
+            }
+        }
+
+        // The same ceiling the JSON-RPC path enforces: an operator reaching the
+        // node over MCP must not be able to advertise a rate the network will
+        // not honour.
+        pricing.clamp_to_network_maximums();
+
+        json_result(
+            serde_json::to_value(&*pricing)
+                .map_err(|e| err_internal(format!("Serialization failed: {}", e)))?,
+        )
     }
 
-    #[tool(description = "Get the current pricing configuration for a provider node. Returns the price per 1k tokens, minimum charge, and last updated timestamp.")]
+    #[tool(description = "Get the current pricing configuration for a provider node. Returns the per-token rates, the per-unit rates for every other billable dimension, and the network ceilings.")]
     async fn get_provider_pricing(
         &self,
         Parameters(params): Parameters<GetProviderPricingParams>,
@@ -13866,7 +14012,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Decide a pending approval — `decision` is 'approved' or 'denied'. When `approver_did` is supplied, the engine refuses to apply the decision unless the record's approver_did matches (cross-approver tampering defence). Mismatch returns JSON-RPC -32001 (forbidden). Returns the updated approval record. Requires AuthEngine to be initialised on the node.")]
+    #[tool(description = "Decide a pending approval — `decision` is 'approved' or 'denied'. When `approver_did` is supplied, the engine refuses to apply the decision unless the record's approver_did matches (cross-approver tampering defence). Mismatch returns JSON-RPC -32001 (forbidden). `deny_reason` is recorded on a denial and surfaced to the requesting agent on retry. Returns the updated approval record. Requires AuthEngine to be initialised on the node.")]
     async fn decide_approval(
         &self,
         Parameters(params): Parameters<DecideApprovalParams>,
@@ -13877,6 +14023,9 @@ impl TenzroMcpServer {
         });
         if let Some(did) = params.approver_did {
             req["approver_did"] = serde_json::Value::String(did);
+        }
+        if let Some(reason) = params.deny_reason {
+            req["deny_reason"] = serde_json::Value::String(reason);
         }
         let result = rpc_dispatch(&self.node, "tenzro_decideApproval", req)
             .await
@@ -15112,7 +15261,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a forecast (timeseries) ONNX model into the node's runtime. The file at `path` must be a valid ONNX export. Pass `context_length` and `max_horizon` to match the export. For multi-output graphs (TimesFM 2.5 transformers export), set `output_name` to select the prediction tensor and `batch_size=2` to satisfy the export's flip-invariance averaging.")]
+    #[tool(description = "Load a forecast (timeseries) ONNX model into the node's runtime. The file at `path` must be a valid ONNX export. Either pass `catalog_id` to inherit context_length/max_horizon/output_name/batch_size from the curated catalog and enforce its license tier, or set them explicitly. For multi-output graphs (TimesFM 2.5 transformers export), `output_name` selects the prediction tensor and `batch_size=2` satisfies the export's flip-invariance averaging.")]
     async fn load_forecast_model(
         &self,
         Parameters(params): Parameters<LoadForecastModelParams>,
@@ -15120,9 +15269,16 @@ impl TenzroMcpServer {
         let mut payload = serde_json::json!({
             "model_id": params.model_id,
             "path": params.path,
-            "context_length": params.context_length,
-            "max_horizon": params.max_horizon,
         });
+        if let Some(c) = params.catalog_id {
+            payload["catalog_id"] = serde_json::json!(c);
+        }
+        if let Some(c) = params.context_length {
+            payload["context_length"] = serde_json::json!(c);
+        }
+        if let Some(h) = params.max_horizon {
+            payload["max_horizon"] = serde_json::json!(h);
+        }
         if let Some(o) = params.output_name {
             payload["output_name"] = serde_json::json!(o);
         }
@@ -15286,7 +15442,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX text-embedding catalog: Qwen3-Embedding (0.6B/4B/8B), EmbeddingGemma-300M, BGE-M3, Snowflake Arctic-Embed. Each entry carries embedding_dim, supported Matryoshka truncations, and license tier.")]
+    #[tool(description = "Browse the curated ONNX text-embedding catalog: Qwen3-Embedding (0.6B/4B/8B), EmbeddingGemma-300M, BGE-M3, ModernBERT-embed (base/large). Each entry carries embedding_dim, supported Matryoshka truncations, and license tier.")]
     async fn list_text_embedding_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15301,17 +15457,29 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a text-embedding ONNX model. The underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality is wired. Exposed for surface symmetry; agents should branch on the catalog rather than calling this blind.")]
+    #[tool(description = "Load a text-embedding ONNX model. Two paths: pass a catalog id as `model_id` with no `path` and the node fetches the ONNX graph and tokenizer from HuggingFace onto its models directory, or pass `path` + `tokenizer_path` + `family` for files already on the node, with `catalog_id` supplying embedding_dim and max_sequence_length. This is the one modality with a fetch path — every other loader needs the artifact on the node's filesystem first.")]
     async fn load_text_embedding_model(
         &self,
         Parameters(params): Parameters<LoadTextEmbeddingModelParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let mut payload = serde_json::json!({
-            "model_id": params.model_id,
-            "path": params.path,
-        });
+        let mut payload = serde_json::json!({ "model_id": params.model_id });
+        if let Some(p) = params.path {
+            payload["path"] = serde_json::json!(p);
+        }
+        if let Some(t) = params.tokenizer_path {
+            payload["tokenizer_path"] = serde_json::json!(t);
+        }
+        if let Some(f) = params.family {
+            payload["family"] = serde_json::json!(f);
+        }
         if let Some(c) = params.catalog_id {
             payload["catalog_id"] = serde_json::json!(c);
+        }
+        if let Some(d) = params.embedding_dim {
+            payload["embedding_dim"] = serde_json::json!(d);
+        }
+        if let Some(m) = params.max_sequence_length {
+            payload["max_sequence_length"] = serde_json::json!(m);
         }
         let result = rpc_dispatch(&self.node, "tenzro_loadTextEmbeddingModel", payload)
             .await
@@ -15385,7 +15553,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a segmenter ONNX (SAM 2 base/large, EdgeSAM, MobileSAM). The underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality is wired. Exposed for surface symmetry — agents should branch on the catalog status before calling.")]
+    #[tool(description = "Load a segmenter (SAM 2 base/large, EdgeSAM, MobileSAM) from an encoder ONNX plus a decoder ONNX already on the node's filesystem. `catalog_id` supplies the family and input resolution from the catalog and enforces the entry's license tier; otherwise set `family` and `input_size` yourself.")]
     async fn load_segmentation_model(
         &self,
         Parameters(params): Parameters<LoadSegmentationModelParams>,
@@ -15397,6 +15565,9 @@ impl TenzroMcpServer {
         });
         if let Some(f) = params.family {
             payload["family"] = serde_json::json!(f);
+        }
+        if let Some(s) = params.input_size {
+            payload["input_size"] = serde_json::json!(s);
         }
         if let Some(c) = params.catalog_id {
             payload["catalog_id"] = serde_json::json!(c);
@@ -15422,7 +15593,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Run prompt-driven image segmentation. `prompts` is an array of `{type:'point', x, y, label}` (label=1 foreground / 0 background) or `{type:'box', x0, y0, x1, y1}` objects. Returns one mask per prompt with confidence scores.")]
+    #[tool(description = "Run prompt-driven image segmentation. `prompts` is an array of `{type:'point', x, y, is_foreground}` (is_foreground true for a point inside the object, false for background) or `{type:'box', x0, y0, x1, y1}` objects, in original-image pixels. Returns mask data with IOU scores. The encoder caches the per-image embedding, so repeated prompts against the same image only re-run the decoder.")]
     async fn segment(
         &self,
         Parameters(params): Parameters<SegmentParams>,
@@ -15554,7 +15725,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a detector ONNX (RF-DETR, D-FINE). The underlying RPC handler returns JSON-RPC -32004 until the ONNX loader for this modality is wired. Exposed for surface symmetry.")]
+    #[tool(description = "Load a detector (RF-DETR, D-FINE) from an ONNX file already on the node's filesystem. `catalog_id` supplies the family, input resolution and class count from the catalog and enforces the entry's license tier; otherwise set `family`, `input_size` and `num_classes` yourself.")]
     async fn load_detection_model(
         &self,
         Parameters(params): Parameters<LoadDetectionModelParams>,
@@ -15565,6 +15736,12 @@ impl TenzroMcpServer {
         });
         if let Some(f) = params.family {
             payload["family"] = serde_json::json!(f);
+        }
+        if let Some(s) = params.input_size {
+            payload["input_size"] = serde_json::json!(s);
+        }
+        if let Some(n) = params.num_classes {
+            payload["num_classes"] = serde_json::json!(n);
         }
         if let Some(c) = params.catalog_id {
             payload["catalog_id"] = serde_json::json!(c);
@@ -15632,7 +15809,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load an ASR ONNX model (Moonshine, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT-v3, Canary-1B-Flash). Either pass `catalog_id` to inherit `family` / `max_audio_seconds` / `whisper_variant` from the catalog, or set them explicitly. The ORT-backed transcribers ship behind an audio feature flag; default node builds return ProviderNotAvailable until built with that feature.")]
+    #[tool(description = "Load an ASR ONNX model (Moonshine, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT-v3, Canary-1B-Flash) from files already on the node's filesystem. Either pass `catalog_id` to inherit `family` / `max_audio_seconds` / `whisper_variant` from the catalog and enforce its license tier, or set them explicitly. Which auxiliary paths are required depends on the family: 'moonshine' and 'whisper' need `tokenizer_path`, 'parakeet' and 'canary' need `preprocessor_path` + `vocab_path`. The ORT-backed transcribers ship behind an audio feature flag; default node builds return ProviderNotAvailable until built with that feature.")]
     async fn load_audio_model(
         &self,
         Parameters(params): Parameters<LoadAudioModelParams>,
@@ -15641,8 +15818,16 @@ impl TenzroMcpServer {
             "model_id": params.model_id,
             "encoder_path": params.encoder_path,
             "decoder_path": params.decoder_path,
-            "tokenizer_path": params.tokenizer_path,
         });
+        if let Some(t) = params.tokenizer_path {
+            payload["tokenizer_path"] = serde_json::json!(t);
+        }
+        if let Some(p) = params.preprocessor_path {
+            payload["preprocessor_path"] = serde_json::json!(p);
+        }
+        if let Some(v) = params.vocab_path {
+            payload["vocab_path"] = serde_json::json!(v);
+        }
         if let Some(c) = params.catalog_id {
             payload["catalog_id"] = serde_json::json!(c);
         }
@@ -15654,6 +15839,12 @@ impl TenzroMcpServer {
         }
         if let Some(w) = params.whisper_variant {
             payload["whisper_variant"] = serde_json::json!(w);
+        }
+        if let Some(s) = params.source_lang {
+            payload["source_lang"] = serde_json::json!(s);
+        }
+        if let Some(t) = params.target_lang {
+            payload["target_lang"] = serde_json::json!(t);
         }
         let result = rpc_dispatch(&self.node, "tenzro_loadAudioModel", payload)
             .await
@@ -15700,7 +15891,7 @@ impl TenzroMcpServer {
 
     // ─── Multi-modal: Video encoders ───
 
-    #[tool(description = "List video encoder models currently loaded on this node. The V-JEPA 2 family (ViT-L / ViT-H / ViT-g) is advertised in the catalog; loading is gated on per-model ONNX export.")]
+    #[tool(description = "List clip-level video encoders currently loaded on this node, each wrapping an image encoder with a frame count. Use list_video_catalog to browse the curated catalog.")]
     async fn list_video_models(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15711,7 +15902,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Browse the curated ONNX video encoder catalog. Advertises the V-JEPA 2 family (vjepa2-vitl-256, vjepa2-vith-256, vjepa2-vitg-384 — Meta AI, MIT / Apache-2.0). Loading is gated on per-model ONNX export until each entry has a published `model.onnx` artifact.")]
+    #[tool(description = "Browse the curated video encoder catalog: the V-JEPA 2 family (vjepa2-vitl-256, vjepa2-vith-256, vjepa2-vitg-384 — Meta AI). Serving is frame-based rather than native — load_video_model composes a clip encoder over an already-loaded image encoder and mean-pools the per-frame embeddings.")]
     async fn list_video_catalog(
         &self,
         Parameters(_): Parameters<EmptyParams>,
@@ -15722,17 +15913,17 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Load a video encoder ONNX. The V-JEPA 2 catalog entries (vjepa2-vitl-256 / vith-256 / vitg-384) are licensed permissively but ship as safetensors upstream; until per-model `model.onnx` exports land, the RPC handler returns JSON-RPC -32004. Until then, agents should pool per-frame vision_embed.")]
+    #[tool(description = "Register a clip-level video encoder over an already-loaded image encoder. Video embedding is frame-based: the node extracts `num_frames` evenly-spaced frames, embeds each through the encoder named by `vision_model_id`, and mean-pools. Load that image encoder first with load_vision_model — an unloaded `vision_model_id` is refused with JSON-RPC -32004.")]
     async fn load_video_model(
         &self,
         Parameters(params): Parameters<LoadVideoModelParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let mut payload = serde_json::json!({
             "model_id": params.model_id,
-            "path": params.path,
+            "vision_model_id": params.vision_model_id,
         });
-        if let Some(c) = params.catalog_id {
-            payload["catalog_id"] = serde_json::json!(c);
+        if let Some(n) = params.num_frames {
+            payload["num_frames"] = serde_json::json!(n);
         }
         let result = rpc_dispatch(&self.node, "tenzro_loadVideoModel", payload)
             .await
@@ -15755,7 +15946,7 @@ impl TenzroMcpServer {
         json_result(result)
     }
 
-    #[tool(description = "Produce a clip-level embedding from a short video (base64-encoded). Until a V-JEPA 2 ONNX export lands, agents can fall back to per-frame vision_embed pooling.")]
+    #[tool(description = "Produce a clip-level embedding from a short video (base64-encoded). The node extracts evenly-spaced frames, embeds each through the image encoder the clip encoder was registered over, and mean-pools. `frame_stride` overrides the even spacing with a fixed stride. Billing covers both the decode, which scales with clip duration, and the embedding, which scales with frames kept.")]
     async fn video_embed(
         &self,
         Parameters(params): Parameters<VideoEmbedParams>,
@@ -17225,10 +17416,10 @@ impl ServerHandler for TenzroMcpServer {
              • load_audio_model — Register an ASR ONNX (encoder+decoder+tokenizer)\n\
              • unload_audio_model — Drop an ASR model\n\n\
              Multi-modal AI — Video:\n\
-             • video_embed — Clip-level video embedding (V-JEPA 2 family advertised; loader gated on ONNX export)\n\
+             • video_embed — Clip-level video embedding (frames extracted, embedded, mean-pooled)\n\
              • list_video_models — List loaded video encoders\n\
              • list_video_catalog — Browse curated video catalog (V-JEPA 2 ViT-L / ViT-H / ViT-g)\n\
-             • load_video_model — Register a video encoder ONNX (returns -32004 until per-model export lands)\n\
+             • load_video_model — Compose a clip encoder over an already-loaded image encoder\n\
              • unload_video_model — Drop a video encoder\n\n\
              Agent Memory:\n\
              • memory_grant — Add a memory (vector + BM25 indexed) for an agent\n\
@@ -17290,7 +17481,7 @@ impl ServerHandler for TenzroMcpServer {
              Provider Config:\n\
              • set_provider_schedule — Set a provider's availability schedule\n\
              • get_provider_schedule — Get a provider's current schedule\n\
-             • set_provider_pricing — Set per-token pricing for a provider\n\
+             • set_provider_pricing — Set token and per-unit pricing for a provider\n\
              • get_provider_pricing — Get current pricing config for a provider\n\n\
              Governance:\n\
              • list_proposals — List governance proposals (filter by status)\n\

@@ -26,7 +26,7 @@ scope.
 | `tenzro-vm` | EVM/SVM/DAML execution, precompiles, ERC-4337/7579/7702, Permit2, secure-mint | Contract bytecode, UserOperations, calldata |
 | `tenzro-crypto` | All signature verification, MPC, BLS, VRF, envelope encryption | Signatures, public keys, proofs |
 | `tenzro-wallet` | MPC key shares, keystore encryption, transaction building | Keystore files, sign requests |
-| `tenzro-types` | Canonical transaction hashing, ERC-7683 primitives — every signature binds to these | JSON/bincode from every surface |
+| `tenzro-types` | Canonical transaction hashing, ERC-7683 primitives — every signature binds to these | JSON/bincode from RPC, MCP, A2A, the web API, and peer gossip |
 
 ### Tier 2 — authorization and identity (audit targeted)
 

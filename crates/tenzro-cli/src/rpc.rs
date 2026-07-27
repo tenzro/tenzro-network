@@ -18,6 +18,23 @@ pub struct RpcClient {
     /// Required for admin RPCs (`tenzro_createApiKey`, `tenzro_revokeApiKey`,
     /// `tenzro_listApiKeys`, `tenzro_resetCircuitBreaker`).
     admin_token_override: Option<String>,
+    /// Target Canton network for canton-scoped methods. Merged into the
+    /// request params as `canton_network` — the node reads it from the
+    /// params rather than a header, so a caller can name one of several
+    /// networks its key authorizes. Omitted means "the operator default".
+    canton_network: Option<String>,
+}
+
+/// Whether a method routes to Canton, matching how the node decides which
+/// requests carry a Canton scope: any `tenzro_` method naming Canton or
+/// DAML, in either the CamelCase (`tenzro_listCantonDomains`) or
+/// snake-case (`tenzro_canton_health`) form.
+fn is_canton_method(method: &str) -> bool {
+    method.starts_with("tenzro_")
+        && (method.contains("Canton")
+            || method.contains("canton")
+            || method.contains("Daml")
+            || method.contains("daml"))
 }
 
 #[derive(Serialize)]
@@ -87,6 +104,7 @@ impl RpcClient {
             request_id: std::sync::atomic::AtomicU64::new(1),
             api_key_override: None,
             admin_token_override: None,
+            canton_network: None,
         }
     }
 
@@ -117,6 +135,19 @@ impl RpcClient {
         self
     }
 
+    /// Name the Canton network canton-scoped calls should target. Merged
+    /// into the params of every canton-scoped method as `canton_network`.
+    /// A key authorizing exactly one network does not need this; a key
+    /// authorizing several does, and the node answers `-32602` naming the
+    /// authorized set when it is missing. Empty strings are ignored.
+    pub fn with_canton_network(mut self, network: impl Into<String>) -> Self {
+        let network = network.into();
+        if !network.is_empty() {
+            self.canton_network = Some(network);
+        }
+        self
+    }
+
     /// Make a JSON-RPC call.
     ///
     /// Forwards `Authorization: DPoP <jwt>` and `DPoP: <proof>` headers
@@ -129,6 +160,17 @@ impl RpcClient {
     /// node mediates on the caller's behalf.
     pub async fn call<T: serde::de::DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
         let id = self.request_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Canton network selection travels in the params, not a header. A
+        // network already named by the caller wins over the client-wide one.
+        let params = match (&self.canton_network, params) {
+            (Some(network), Value::Object(mut map))
+                if is_canton_method(method) && !map.contains_key("canton_network") =>
+            {
+                map.insert("canton_network".to_string(), Value::String(network.clone()));
+                Value::Object(map)
+            }
+            (_, params) => params,
+        };
         let request = JsonRpcRequest {
             jsonrpc: "2.0",
             method,

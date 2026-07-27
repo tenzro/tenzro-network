@@ -62,7 +62,7 @@ use tenzro_agent_kit::{
 use tenzro_auth::{
     AapOverrides, AuthEngine, AuthorizationDetail, AuthorizationDetails,
 };
-use tenzro_types::AssetId;
+use tenzro_types::{AssetId, ResourceClass};
 
 /// Canonical [`AuthIssuer`] adapter. Holds an `Arc<AuthEngine>` and mints
 /// per-agent DPoP-bound credentials by delegating to the engine.
@@ -322,6 +322,27 @@ fn project_to_rar(req: &AgentAuthRequest) -> Result<AuthorizationDetails, AgentK
             // Spawning child identities (autonomous agent forks helpers).
             "register_identity" | "spawn" | "fork_agent" => {
                 AuthorizationDetail::RegisterIdentity { max_children: None }
+            }
+
+            // Paid marketplace resource invocations. The narrower labels
+            // pin a single registry so a template that only needs skills
+            // cannot also spend on tools.
+            "use_skill" | "skill" => AuthorizationDetail::ResourceInvocation {
+                max_amount_per_call: max_amount,
+                class: Some(ResourceClass::Skill.as_str().to_string()),
+                allowed_resource_ids: None,
+            },
+            "use_tool" | "tool" => AuthorizationDetail::ResourceInvocation {
+                max_amount_per_call: max_amount,
+                class: Some(ResourceClass::Tool.as_str().to_string()),
+                allowed_resource_ids: None,
+            },
+            "use_resource" | "resource" | "marketplace" => {
+                AuthorizationDetail::ResourceInvocation {
+                    max_amount_per_call: max_amount,
+                    class: None,
+                    allowed_resource_ids: None,
+                }
             }
 
             other => {

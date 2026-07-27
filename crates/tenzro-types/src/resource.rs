@@ -1,7 +1,7 @@
 //! Unified resource discovery + invocation type.
 //!
 //! Tenzro Network's resource registries (tools, skills, knowledge,
-//! workflow templates, agent templates, models) are each first-class
+//! workflow templates, agent templates, models) are each separate
 //! catalogs with their own type model. The discovery layer collapses
 //! them into a single shape so an agent can ask "what resources match
 //! this filter?" once and pick from a single result set.
