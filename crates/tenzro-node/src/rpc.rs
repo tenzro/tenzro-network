@@ -31907,7 +31907,11 @@ async fn handle_openai_embeddings(
                 // resizes to its own input size and the caller is billed on what
                 // they submitted.
                 let geometry = tenzro_model::image_dimensions(&bytes);
-                match node.vision_runtime.embed(&request.model, bytes, cfg).await {
+                match node
+                    .vision_runtime
+                    .embed(&request.model, bytes, cfg.clone())
+                    .await
+                {
                     Ok(r) => {
                         dim = r.dim;
                         embeddings.push(r.embedding);
@@ -58636,6 +58640,7 @@ fn media_gen_err(e: tenzro_media_gen::MediaGenError) -> JsonRpcError {
         | ME::RoleAlreadyClaimed { .. }
         | ME::HandoffMissing { .. }
         | ME::HandoffAlreadyRecorded { .. }
+        | ME::InputImageMissing { .. }
         | ME::HandoffStepsOutOfRange { .. }
         | ME::PriceCeilingExceeded { .. }
         | ME::ReceiptSpecMismatch { .. }
