@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+  "llama-cpp-sys-2",
+  "llama-cpp-2",
+  "examples/embeddings",
+  "examples/simple",
+  "examples/reranker",
+  "examples/mtmd",
+  "examples/server",
+]
+
+[workspace.dependencies]
+# core library deps
+thiserror = "2"
+tracing = "0.1"
+tracing-core = "0.1"
+
+# examples and benchmarks
+hf-hub = { version = "0.5.0" }
+criterion = "0.5.1"
+pprof = "0.13.0"
+bindgen = "0.72.1"
+cc = "1.2.61"
+anyhow = "1.0.102"
+clap = "4.6.0"
+encoding_rs = "0.8.35"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+[workspace.lints.rust]
+missing_docs = { level = "warn" }
+missing_debug_implementations = { level = "warn" }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn" }
