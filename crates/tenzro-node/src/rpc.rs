@@ -38728,8 +38728,9 @@ async fn handle_create_api_key(
         // Canton user this flow creates is `<minted_client_id>@clients` —
         // always fresh — so a default-IDP user matching the raw hint must
         // NOT short-circuit provisioning. The raw hint only seeds the
-        // party hint; collisions there surface as a clean allocate_party
-        // error and the operator retries with a fresh hint.
+        // party hint, and a party already carrying that hint is reused
+        // rather than re-allocated, so reissuing a key for a tenant whose
+        // party exists binds the new user to the same party.
         let stage2b_active = stage2_enabled && node.tenant_idp_provisioner().is_some();
         let existing = if stage2b_active {
             None

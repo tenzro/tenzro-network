@@ -370,6 +370,21 @@ impl CantonAdapter {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
+
+            // Canton rejects a second allocation of the same hint with
+            // INVALID_ARGUMENT / errorCategory 8 and a cause naming the
+            // already-allocated party. The caller asked for a party with
+            // this hint and one exists, so resolve it and return it rather
+            // than failing a re-run of the same provisioning step.
+            if Self::is_party_already_exists(&error_text) {
+                let existing = self.find_local_party_by_hint(party_id_hint).await?;
+                info!(
+                    "Canton: Party already allocated for hint={}, reusing party_id={}",
+                    party_id_hint, existing
+                );
+                return Ok(existing);
+            }
+
             let sanitized = Self::sanitize_canton_http_error(status, error_text.len());
             error!("Canton party allocation error: {}", sanitized);
             return Err(BridgeError::AdapterError(sanitized));
@@ -400,6 +415,103 @@ impl CantonAdapter {
 
         info!("Canton: Party allocated successfully, party_id={}", party_id);
         Ok(party_id)
+    }
+
+    /// Recognises Canton's "party already allocated on this node" rejection
+    /// from a `POST /v2/parties` error body. The body carries
+    /// `code: INVALID_ARGUMENT` with `errorCategory: 8` and a `cause` naming
+    /// the party; the id in the cause is elided, so only the classification
+    /// is usable — the canonical id has to come from a party lookup.
+    fn is_party_already_exists(error_body: &str) -> bool {
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(error_body) else {
+            return false;
+        };
+        let invalid_argument = parsed.get("code").and_then(|v| v.as_str()) == Some("INVALID_ARGUMENT");
+        let cause_matches = parsed
+            .get("cause")
+            .and_then(|v| v.as_str())
+            .map(|c| c.contains("Party already exists"))
+            .unwrap_or(false);
+        invalid_argument && cause_matches
+    }
+
+    /// Resolves the canonical id of a party hosted on this participant from
+    /// its hint. Canton's canonical form is `<hint>::<namespace-hash>`, so
+    /// the hint is a prefix match; `isLocal` narrows the result to parties
+    /// this participant hosts rather than ones it has merely observed.
+    ///
+    /// Reads `GET /v2/parties` rather than `/v2/parties/known` — the latter
+    /// returns an empty `partyDetails` array under the `daml_ledger_api`
+    /// scope even when the participant hosts parties.
+    async fn find_local_party_by_hint(&self, party_id_hint: &str) -> Result<String> {
+        let prefix = format!("{}::", party_id_hint);
+        let mut page_token: Option<String> = None;
+
+        loop {
+            let mut request = self.build_request(reqwest::Method::GET, "/parties").await?;
+            if let Some(token) = &page_token {
+                request = request.query(&[("pageToken", token.as_str())]);
+            }
+
+            let response = request.send().await.map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton party lookup failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(BridgeError::AdapterError(format!(
+                    "Canton party lookup HTTP {}: {}",
+                    status,
+                    Self::sanitize_canton_http_error(status, body.len())
+                )));
+            }
+
+            let page: serde_json::Value = response.json().await.map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Invalid Canton party lookup response: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
+
+            let entries = page
+                .get("partyDetails")
+                .and_then(|v| v.as_array())
+                .or_else(|| page.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            for entry in &entries {
+                let Some(party) = entry.get("party").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let is_local = entry
+                    .get("isLocal")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if is_local && party.starts_with(&prefix) {
+                    return Ok(party.to_string());
+                }
+            }
+
+            page_token = page
+                .get("nextPageToken")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_string());
+
+            if page_token.is_none() || entries.is_empty() {
+                break;
+            }
+        }
+
+        Err(BridgeError::AdapterError(format!(
+            "Canton reported party hint '{}' as already allocated but no local party with that hint is visible",
+            party_id_hint
+        )))
     }
 
     /// Uploads a DAR (DAML Archive) to the participant via the Canton 3.4+
@@ -3542,6 +3654,35 @@ pub struct JsonApiContract {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the "party already allocated" classifier to the body a live
+    /// Canton 3.5 participant returns from `POST /v2/parties` when the hint
+    /// has already been used. Re-running tenant provisioning must resolve
+    /// the existing party rather than fail.
+    #[test]
+    fn party_already_exists_is_recognised() {
+        let body = r#"{
+            "code": "INVALID_ARGUMENT",
+            "cause": "PARTY_ALREADY_EXISTS(8,0): Party already exists: party rivier::12201c72ce3a is already allocated on this node",
+            "errorCategory": 8,
+            "grpcCodeValue": 3
+        }"#;
+        assert!(CantonAdapter::is_party_already_exists(body));
+    }
+
+    /// Any other rejection must stay an error — a malformed hint or a
+    /// permission failure has to surface, not be silently reinterpreted as
+    /// an existing party.
+    #[test]
+    fn unrelated_invalid_argument_is_not_treated_as_existing_party() {
+        let body = r#"{
+            "code": "INVALID_ARGUMENT",
+            "cause": "INVALID_FIELD(8,0): The submitted request has a field with invalid value: partyIdHint",
+            "errorCategory": 8
+        }"#;
+        assert!(!CantonAdapter::is_party_already_exists(body));
+        assert!(!CantonAdapter::is_party_already_exists("not json at all"));
+    }
 
     /// Pins the `submit-and-wait-for-transaction` request body to the
     /// shape a live Canton 3.5 participant accepts: `JsCommands`
