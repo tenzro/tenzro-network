@@ -586,8 +586,9 @@ restart the node. There is no RPC path. The node's wrapper script
 secret on boot.
 
 Rotating the **admin token** is a node-level operation: update the
-operator secret store and restart the node. On the live testnet RPC
-node, the canton-network Secret Manager rotation procedure applies.
+operator secret store and restart the node. Whatever secret-manager
+procedure the operator uses for the node's other boot secrets applies
+unchanged.
 
 ## Operational notes
 

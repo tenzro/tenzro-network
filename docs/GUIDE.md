@@ -427,7 +427,7 @@ network counts as served only when its `LEDGER_API_HOST` is set:
 | `CANTON_ENABLED=true` | Master switch. Unset or `false` and the Canton surface stays off. |
 | `CANTON_DEFAULT_NETWORK=devnet` | Which network a request resolves to when the caller names none. |
 | `CANTON_<NET>_LEDGER_API_HOST` | JSON Ledger API hostname. Its presence declares you serve that network. |
-| `CANTON_<NET>_LEDGER_API_PORT` | Defaults to `5001`. Use `443` for a TLS-fronted participant. |
+| `CANTON_<NET>_LEDGER_API_PORT` | The JSON Ledger API port serving `/v2/...`, not the gRPC Ledger API port. Defaults to `7575`. Use `443` for a TLS-fronted participant. |
 | `CANTON_<NET>_TLS` | `true` to dial over TLS. Defaults to `false`. |
 | `CANTON_<NET>_OAUTH_TOKEN_URL` | OAuth2 client-credentials token endpoint. |
 | `CANTON_<NET>_OAUTH_CLIENT_ID` | OAuth2 client id. |
