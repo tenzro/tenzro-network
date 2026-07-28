@@ -38,7 +38,7 @@ The `tenzro-bridge` crate provides a unified interface for cross-chain interoper
 - **Security**: Privacy-preserving cross-domain synchronization
 - **Patterns**: Multi-party workflows, DvP settlements
 - **Best for**: Regulated enterprise use cases (tokenization, trade finance)
-- **Fee Quoting**: Live HTTP call to Canton Admin API `/admin/synchronizer/{id}/fee-schedule` with static fallback
+- **Fee Quoting**: Live read of the Splice `AmuletRules` active contract over the JSON Ledger API, with static fallback
 - **Workflow receipt mirror**: `tenzro-workflow` emits `Tenzro.Workflow.Receipt` Daml contracts through the co-located participant Ledger API for every `WorkflowReceipt` produced by the workflow runtime. See `docs/SPECIFICATION.md` §14.7.3 and `crates/tenzro-workflow/`.
 
 ### Wormhole
@@ -309,7 +309,7 @@ All adapters support live fee quoting with static fallback:
 - **LayerZero**: `eth_call` to `EndpointV2.quote(uint32 _dstEid, bytes calldata _message, bytes calldata _options, bool _payInLzToken)` → returns `(uint256 nativeFee, uint256 lzTokenFee)`
 - **Chainlink CCIP**: `eth_call` to `Router.getFee(uint64 destinationChainSelector, EVM2AnyMessage memory message)` → returns `uint256 fee`
 - **deBridge**: HTTP POST to deBridge order-creation API → returns order quote with fees
-- **Canton**: HTTP GET to Canton Admin API `/admin/synchronizer/{id}/fee-schedule` → returns fee schedule
+- **Canton**: JSON Ledger API query for the `Splice.AmuletRules:AmuletRules` active contract → `transferConfig.createFee` + `transferConfig.lockHolderFee`, converted to micro-USD
 
 All fee queries fall back to static estimates if the live RPC call fails.
 

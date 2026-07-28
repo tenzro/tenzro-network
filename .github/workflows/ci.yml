@@ -19,7 +19,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check compilation
-        run: cargo check --workspace --exclude tenzro-desktop
+        run: cargo check --workspace --exclude tenzro-desktop --features tenzro-device-key/pq-companion
 
   test:
     name: Test
@@ -34,7 +34,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libclang-dev
       - name: Run tests
-        run: cargo test --workspace --exclude tenzro-desktop -- --nocapture
+        run: cargo test --workspace --exclude tenzro-desktop --features tenzro-device-key/pq-companion -- --nocapture
 
   benches:
     name: Bench compile-check
@@ -103,7 +103,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy
-        run: cargo clippy --workspace --exclude tenzro-desktop -- -D warnings
+        run: cargo clippy --workspace --exclude tenzro-desktop --features tenzro-device-key/pq-companion -- -D warnings
 
   fmt:
     name: Format

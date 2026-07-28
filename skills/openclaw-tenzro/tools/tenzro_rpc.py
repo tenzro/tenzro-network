@@ -955,6 +955,13 @@ def list_my_api_keys() -> dict:
     """List every API key belonging to the caller's own subject.
 
     Subject-gated. Requires TENZRO_API_KEY in the environment.
+
+    This is the entitlement self-read: each row carries the scopes, tier
+    ceiling, canton_networks, canton_user_id, and party-delegation arrays
+    the node enforces. A row with a non-empty canton_networks but a null
+    canton_user_id has node access without ledger access — it
+    authenticates but is bound to no Canton party, so command submission
+    is refused.
     """
     return _rpc("tenzro_listMyApiKeys")
 

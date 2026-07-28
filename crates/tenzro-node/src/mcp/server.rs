@@ -16237,7 +16237,7 @@ impl TenzroMcpServer {
     }
 
     #[tool(
-        description = "Subject-gated. List every API key belonging to the caller's own subject. Requires the caller's MCP request to carry an `X-Tenzro-Api-Key` header identifying the subject."
+        description = "Subject-gated. List every API key belonging to the caller's own subject, and the entitlement behind each: scopes, tier ceiling, `canton_networks`, `canton_user_id`, and party-delegation arrays. A row with a non-empty `canton_networks` but a null `canton_user_id` has node access without ledger access — it authenticates but is bound to no Canton party, so command submission is refused. Requires the caller's MCP request to carry an `X-Tenzro-Api-Key` header identifying the subject."
     )]
     async fn list_my_api_keys(
         &self,

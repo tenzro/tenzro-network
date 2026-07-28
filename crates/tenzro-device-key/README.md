@@ -36,6 +36,15 @@ let unlocker = Arc::new(SecureEnclaveUnlocker::under_data_dir(&node_config.data_
 let handle = tenzro_node::spawn_in_background_with_unlocker(node_config, unlocker).await?;
 ```
 
+## Cargo features
+
+The default build depends only on the platform keychain, so an embedder that
+wants a device-local enclave key gets exactly that and nothing else.
+
+| Feature | Default | Adds |
+|---|---|---|
+| `pq-companion` | off | `PqCompanion`, an ML-DSA-65 (FIPS-204) key whose seed is ECIES-wrapped to the enclave key, for the post-quantum leg of hybrid passkey custody. Pulls in `tenzro-crypto` and its elliptic-curve + post-quantum dependency graph. |
+
 ## Persistence
 
 Cross-restart unlock works on a plain Developer-ID build with no extra

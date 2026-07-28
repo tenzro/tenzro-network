@@ -413,6 +413,60 @@ curl -s -X POST https://rpc.tenzro.xyz \
 Returns every active and revoked key issued to *your* subject (resolved
 from the presented key). Other subjects' keys are never exposed.
 
+This is also the entitlement self-read: each row carries everything the
+node will enforce against the key, so you can determine what you may do
+without asking the operator.
+
+```json
+{
+  "keys": [
+    {
+      "key_id": "a1b2c3d4e5f60718",
+      "subject": "did:tenzro:machine:acme",
+      "label": "acme-prod",
+      "scopes": ["canton"],
+      "class": "subject",
+      "tier": "standard",
+      "requests_per_minute": 600,
+      "allows_write": true,
+      "canton_networks": ["mainnet"],
+      "canton_user_id": "acme@clients",
+      "canton_identity_provider_id": null,
+      "can_act_as_parties": [],
+      "can_read_as_parties": [],
+      "allowed_templates": [],
+      "allowed_commands": [],
+      "created_at": 1769000000,
+      "revoked_at": null,
+      "active": true
+    }
+  ],
+  "subject": "did:tenzro:machine:acme"
+}
+```
+
+Reading the row:
+
+| Field | Meaning |
+|---|---|
+| `scopes` | Which resource classes the key may reach at all. |
+| `tier` / `requests_per_minute` / `allows_write` | Rate ceiling, and whether write methods are permitted (`free` is read-only). |
+| `canton_networks` | Which Canton ledgers the key may name in `canton_network`. Empty means no Canton access. A key authorizing more than one network must pass `canton_network` explicitly on every Canton call. |
+| `canton_user_id` | The Canton User Management Service user bound to the key. |
+| `canton_identity_provider_id` | Which identity provider that user resolves in. `null` means the participant's default. |
+| `can_act_as_parties` / `can_read_as_parties` | Parties the key may submit or read as, beyond the bound user's primary party. |
+| `allowed_templates` / `allowed_commands` | Restrictions on what DAML work the key may do. Empty means unrestricted. |
+
+**`canton_user_id: null` with a non-empty `canton_networks` means node
+access without ledger access.** The key authenticates and can call the
+node, but it is bound to no Canton party, so command submission is
+refused. Two ways forward: ask the operator to reissue the key with a
+`canton_user_id` — the node then mints the tenant JWT server-side — or
+present your own JWT from your own issuer in the `X-Canton-Auth` header.
+
+The OAuth client material behind a Stage 2 tenant binding is never
+returned by this RPC.
+
 ### `tenzro_revokeMyApiKey`
 
 ```bash

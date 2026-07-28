@@ -296,7 +296,15 @@ impl ApiKeyListCmd {
         }
 
         let headers = vec![
-            "Key ID", "Label", "Subject", "Scopes", "Class", "Tier", "Networks", "Active",
+            "Key ID",
+            "Label",
+            "Subject",
+            "Scopes",
+            "Class",
+            "Tier",
+            "Networks",
+            "Canton User",
+            "Active",
             "Created",
         ];
         let mut rows = Vec::new();
@@ -348,6 +356,13 @@ impl ApiKeyListCmd {
                 } else {
                     networks
                 },
+                // A key with Canton networks but no bound user reaches the
+                // node without reaching the ledger — it authenticates but
+                // acts as no party, so command submission is refused.
+                key.get("canton_user_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-")
+                    .to_string(),
                 key.get("active")
                     .and_then(|v| v.as_bool())
                     .map(|b| if b { "yes" } else { "no" })

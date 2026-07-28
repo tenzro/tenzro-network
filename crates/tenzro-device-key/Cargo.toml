@@ -13,17 +13,31 @@ readme = "README.md"
 keywords = ["tenzro", "secure-enclave", "passkey", "ecies", "keystore"]
 categories = ["cryptography", "authentication", "hardware-support"]
 
+[features]
+# The Secure Enclave key itself — `create` / `open` / `delete`, signing,
+# ECIES secret-wrapping, and `SecureEnclaveUnlocker` — needs no asymmetric
+# software crypto, so the default build depends only on the platform keychain.
+default = []
+
+# `pq-companion` — the ML-DSA-65 key that rides alongside the enclave P-256
+# passkey for hybrid custody. This is the only part of the crate that needs
+# `tenzro-crypto`, and pulling it in drags the whole elliptic-curve and
+# post-quantum dependency graph along with it. An embedder that only wants a
+# device-local enclave key should leave this off.
+pq-companion = ["dep:tenzro-crypto"]
+
 [dependencies]
 tenzro-keystore-unlock = { path = "../tenzro-keystore-unlock", version = "0.1.0" }
 # ML-DSA-65 (FIPS-204) keygen/sign for the post-quantum companion key that
 # rides alongside the Secure Enclave P-256 passkey. The seed is sealed at rest
 # by ECIES-wrapping it to the SE key (same primitive as `SecureEnclaveUnlocker`).
-tenzro-crypto = { path = "../tenzro-crypto", version = "0.1.0" }
+tenzro-crypto = { path = "../tenzro-crypto", version = "0.1.0", optional = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
+sha2 = { workspace = true }
 
 # OSX_10_15 gates the `Location` API used to persist the Secure-Enclave key in
 # the legacy file (login) keychain via `Location::DefaultFileKeychain`. That

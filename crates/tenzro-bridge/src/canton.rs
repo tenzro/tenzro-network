@@ -2852,14 +2852,14 @@ impl BridgeAdapter for CantonAdapter {
             return Err(BridgeError::ChainNotSupported(dest_chain.to_string()));
         }
 
-        // Try querying the Canton participant's Admin API for the synchronizer
-        // fee schedule. Canton denominates fees in USD paid by burning CC; the
-        // Admin API exposes the per-synchronizer schedule at
-        // `GET /admin/synchronizer/{id}/fee-schedule`.
-        match self.query_synchronizer_fee_schedule(synchronizer_id, payload_size).await {
-            Ok(fee) => {
+        // Canton denominates fees in USD paid by burning CC. The live rates
+        // live in the Splice `AmuletRules` active contract, read over the
+        // JSON Ledger API — the same port every other ledger operation uses.
+        match self.query_amulet_transfer_fee().await {
+            Ok(amulet_fee) => {
+                let fee = amulet_fee + Self::traffic_cost(payload_size);
                 debug!(
-                    "Canton: Live fee schedule for {} bytes to synchronizer {}: {} units",
+                    "Canton: AmuletRules fee for {} bytes to synchronizer {}: {} micro-USD",
                     payload_size, synchronizer_id, fee
                 );
                 Ok(fee)
@@ -2867,7 +2867,7 @@ impl BridgeAdapter for CantonAdapter {
             Err(e) => {
                 let fallback = Self::estimate_fee_static(payload_size);
                 warn!(
-                    "Canton: Fee schedule query failed ({}), using static fallback = {} units",
+                    "Canton: AmuletRules fee query failed ({}), using static fallback = {} micro-USD",
                     e, fallback
                 );
                 Ok(fallback)
@@ -2877,80 +2877,100 @@ impl BridgeAdapter for CantonAdapter {
 }
 
 impl CantonAdapter {
-    /// Offline fee estimate used as fallback when the Canton Admin API is unreachable.
-    ///
-    /// Numbers reflect typical Canton Network synchronizer costs denominated in
-    /// the synchronizer's smallest fee unit.
-    fn estimate_fee_static(payload_size: usize) -> u128 {
-        const BASE_FEE: u128 = 1000;
-        const PER_BYTE_FEE: u128 = 10;
-        BASE_FEE + (payload_size as u128 * PER_BYTE_FEE)
+    /// Flat per-transfer fee applied when `AmuletRules` is unreachable or
+    /// invisible to the acting party, in micro-USD.
+    const STATIC_AMULET_FEE_MICRO_USD: u128 = 1000;
+
+    /// Sequencer traffic charge per payload byte, in micro-USD. The
+    /// synchronizer's traffic-control parameters are an Admin Console gRPC
+    /// operation, not something the JSON Ledger API exposes, so this rate is
+    /// a fixed approximation on both the live and fallback paths.
+    const TRAFFIC_MICRO_USD_PER_BYTE: u128 = 10;
+
+    /// Traffic component of a Canton quote for a payload of the given size.
+    fn traffic_cost(payload_size: usize) -> u128 {
+        payload_size as u128 * Self::TRAFFIC_MICRO_USD_PER_BYTE
     }
 
-    /// Queries the Canton participant Admin API for the live fee schedule of
-    /// the given synchronizer and computes `base_fee + size * per_byte_fee`.
-    async fn query_synchronizer_fee_schedule(
-        &self,
-        synchronizer_id: &str,
-        payload_size: usize,
-    ) -> Result<u128> {
-        let scheme = if self.config.tls_enabled { "https" } else { "http" };
-        let url = format!(
-            "{}://{}:{}/admin/synchronizer/{}/fee-schedule",
-            scheme,
-            self.config.participant_host,
-            self.config.admin_api_port,
-            synchronizer_id
-        );
+    /// Offline fee estimate used as fallback when `AmuletRules` is unreachable.
+    fn estimate_fee_static(payload_size: usize) -> u128 {
+        Self::STATIC_AMULET_FEE_MICRO_USD + Self::traffic_cost(payload_size)
+    }
 
-        let mut builder = self.http_client.get(&url);
-        if let Some(ref token) = self.config.jwt_token {
-            builder = builder.bearer_auth(token);
-        }
+    /// Reads the live per-transfer amulet fee from the Splice `AmuletRules`
+    /// active contract and returns it in micro-USD.
+    ///
+    /// `transferConfig` denominates `createFee` and `lockHolderFee` as USD
+    /// Decimal strings; both are charged on a transfer that locks an output,
+    /// so the quote sums them.
+    async fn query_amulet_transfer_fee(&self) -> Result<u128> {
+        let contracts = self
+            .query_active_contracts(
+                vec!["#splice-amulet:Splice.AmuletRules:AmuletRules".to_string()],
+                serde_json::Value::Null,
+            )
+            .await?;
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| {
-                let cls = Self::classify_reqwest_error(&e);
-                BridgeError::AdapterError(format!("Canton Admin API GET failed: {}", cls))
+        let payload = contracts
+            .first()
+            .map(|c| &c.payload)
+            .ok_or_else(|| {
+                BridgeError::AdapterError(
+                    "no AmuletRules contract visible to this party".to_string(),
+                )
             })?;
 
-        if !response.status().is_success() {
-            return Err(BridgeError::AdapterError(format!(
-                "Canton Admin API returned HTTP {}",
-                response.status().as_u16()
-            )));
+        let transfer_config = payload
+            .pointer("/configSchedule/initialValue/transferConfig")
+            .or_else(|| payload.pointer("/transferConfig"))
+            .ok_or_else(|| {
+                BridgeError::AdapterError(
+                    "AmuletRules payload has no transferConfig".to_string(),
+                )
+            })?;
+
+        let create_fee = transfer_config
+            .pointer("/createFee/fee")
+            .and_then(|v| v.as_str())
+            .and_then(Self::usd_decimal_to_micro)
+            .ok_or_else(|| {
+                BridgeError::AdapterError(
+                    "AmuletRules transferConfig has no createFee.fee".to_string(),
+                )
+            })?;
+
+        let lock_holder_fee = transfer_config
+            .pointer("/lockHolderFee/fee")
+            .and_then(|v| v.as_str())
+            .and_then(Self::usd_decimal_to_micro)
+            .unwrap_or(0);
+
+        Ok(create_fee + lock_holder_fee)
+    }
+
+    /// Converts a Daml `Decimal` USD amount to micro-USD, truncating below
+    /// six fractional digits. Returns `None` for anything that is not a
+    /// non-negative decimal literal.
+    fn usd_decimal_to_micro(value: &str) -> Option<u128> {
+        let value = value.trim();
+        let (whole, frac) = match value.split_once('.') {
+            Some((w, f)) => (w, f),
+            None => (value, ""),
+        };
+        if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
         }
-
-        let json: serde_json::Value = response.json().await.map_err(|e| {
-            let cls = Self::classify_reqwest_error(&e);
-            BridgeError::AdapterError(format!("Canton Admin API returned invalid JSON: {}", cls))
-        })?;
-
-        // The Admin API fee-schedule is expected to contain a base fee and a
-        // per-byte fee, both expressed in the smallest unit (e.g. microUSD).
-        let base_fee = json
-            .get("base_fee")
-            .or_else(|| json.get("baseFee"))
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| {
-                BridgeError::AdapterError(
-                    "Canton Admin API fee-schedule missing base_fee".to_string(),
-                )
-            })? as u128;
-
-        let per_byte_fee = json
-            .get("per_byte_fee")
-            .or_else(|| json.get("perByteFee"))
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| {
-                BridgeError::AdapterError(
-                    "Canton Admin API fee-schedule missing per_byte_fee".to_string(),
-                )
-            })? as u128;
-
-        Ok(base_fee + (payload_size as u128 * per_byte_fee))
+        if !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let mut micro = frac.to_string();
+        micro.truncate(6);
+        while micro.len() < 6 {
+            micro.push('0');
+        }
+        let whole: u128 = whole.parse().ok()?;
+        let micro: u128 = micro.parse().ok()?;
+        whole.checked_mul(1_000_000)?.checked_add(micro)
     }
 }
 
@@ -2962,9 +2982,10 @@ impl CantonAdapter {
 /// ## Production Integration Notes
 ///
 /// Real Canton integration requires:
-/// - **JSON API**: HTTP REST API for contract operations (default port 7575)
-/// - **Ledger API**: gRPC API for transaction streaming (default port 5001)
-/// - **Admin API**: HTTP REST API for participant management (default port 5002)
+/// - **JSON Ledger API**: HTTP API for contract, party, and package
+///   operations, mounted at `/v2` (default port 7575). This adapter speaks
+///   only this API — neither the participant's gRPC Ledger API nor its Admin
+///   API is dialed, so `json_api_port` is the only port it needs reachable.
 /// - **JWT Authentication**: Configure `jwt_token` for authenticated access
 /// - **TLS Configuration**: Enable `tls_enabled` for production deployments
 /// - **Global Synchronizer**: Connect to Canton Network's Global Synchronizer for cross-domain transfers
@@ -2974,12 +2995,10 @@ impl CantonAdapter {
 pub struct CantonConfig {
     /// Canton participant host (co-located, typically localhost)
     pub participant_host: String,
-    /// Canton participant JSON API port (default: 7575 in Canton 3.x)
+    /// Canton participant JSON Ledger API port (default: 7575 in Canton 3.x).
+    /// Every ledger operation this adapter performs is JSON over HTTP, so
+    /// this is the only port it dials for contract and party work.
     pub json_api_port: u16,
-    /// Canton participant Ledger API port (default: 5001 in Canton 3.x)
-    pub participant_port: u16,
-    /// Canton participant Admin API port (default: 5002 in Canton 3.x)
-    pub admin_api_port: u16,
     /// Enable TLS for participant connection
     pub tls_enabled: bool,
     /// JWT token for JSON API authentication (optional)
@@ -2996,16 +3015,14 @@ impl CantonConfig {
     /// Creates a new Canton configuration
     pub fn new(
         participant_host: impl Into<String>,
-        participant_port: u16,
+        json_api_port: u16,
         synchronizer_ids: Vec<String>,
         act_as_party: impl Into<String>,
         application_id: impl Into<String>,
     ) -> Self {
         Self {
             participant_host: participant_host.into(),
-            json_api_port: 7575,
-            participant_port,
-            admin_api_port: 5002,
+            json_api_port,
             tls_enabled: false,
             jwt_token: None,
             synchronizer_ids,
@@ -3025,36 +3042,6 @@ impl CantonConfig {
         self.jwt_token = Some(token.into());
         self
     }
-
-    /// Sets the JSON API port
-    pub fn with_json_api_port(mut self, port: u16) -> Self {
-        self.json_api_port = port;
-        self
-    }
-
-    /// Sets the Admin API port
-    pub fn with_admin_port(mut self, port: u16) -> Self {
-        self.admin_api_port = port;
-        self
-    }
-
-    /// Returns the bundled devnet profile. Intended for the Tenzro
-    /// node's runtime configuration; external clients authenticate to
-    /// the Tenzro node via the API key surface, not directly to
-    /// Canton.
-    pub fn devnet() -> Self {
-        Self {
-            participant_host: "json.canton.example-operator.invalid".to_string(),
-            json_api_port: 443,
-            participant_port: 5001,
-            admin_api_port: 5002,
-            tls_enabled: true,
-            jwt_token: None,
-            synchronizer_ids: vec!["global-domain".to_string()],
-            act_as_party: "example-party".to_string(),
-            application_id: "tenzro-network".to_string(),
-        }
-    }
 }
 
 impl Default for CantonConfig {
@@ -3062,8 +3049,6 @@ impl Default for CantonConfig {
         Self {
             participant_host: "localhost".to_string(),
             json_api_port: 7575,
-            participant_port: 5001,
-            admin_api_port: 5002,
             tls_enabled: false,
             jwt_token: None,
             synchronizer_ids: vec![],
@@ -3701,7 +3686,7 @@ mod tests {
     async fn test_canton_adapter_creation() {
         let config = CantonConfig::new(
             "localhost",
-            5001,
+            7575,
             vec!["sync1".to_string(), "sync2".to_string()],
             "alice::abc123",
             "tenzro-bridge-test",
@@ -3716,22 +3701,36 @@ mod tests {
     async fn test_estimate_fee() {
         let config = CantonConfig::new(
             "localhost",
-            5001,
+            7575,
             vec!["sync1".to_string()],
             "alice::abc123",
             "tenzro-bridge-test",
         );
 
         let adapter = CantonAdapter::new(config);
+        // No participant is listening, so the quote falls back to the static
+        // amulet fee plus the traffic component for 100 bytes.
         let fee = adapter.estimate_fee("canton-sync1", 100).await.unwrap();
-        assert_eq!(fee, 1000 + (100 * 10)); // base_fee + (100 * per_byte_fee)
+        assert_eq!(fee, 1000 + (100 * 10));
+    }
+
+    #[test]
+    fn test_usd_decimal_to_micro() {
+        assert_eq!(CantonAdapter::usd_decimal_to_micro("0.03"), Some(30_000));
+        assert_eq!(CantonAdapter::usd_decimal_to_micro("1"), Some(1_000_000));
+        assert_eq!(CantonAdapter::usd_decimal_to_micro(" 2.5 "), Some(2_500_000));
+        // Below micro-USD precision truncates rather than rounding.
+        assert_eq!(CantonAdapter::usd_decimal_to_micro("0.0000048225"), Some(4));
+        assert_eq!(CantonAdapter::usd_decimal_to_micro("-1.0"), None);
+        assert_eq!(CantonAdapter::usd_decimal_to_micro("abc"), None);
+        assert_eq!(CantonAdapter::usd_decimal_to_micro(""), None);
     }
 
     #[tokio::test]
     async fn test_unsupported_chain() {
         let config = CantonConfig::new(
             "localhost",
-            5001,
+            7575,
             vec!["sync1".to_string()],
             "alice::abc123",
             "tenzro-bridge-test",
@@ -3746,7 +3745,7 @@ mod tests {
     async fn test_json_api_url_construction() {
         let config = CantonConfig::new(
             "localhost",
-            5001,
+            7575,
             vec!["sync1".to_string()],
             "alice::abc123",
             "tenzro-bridge-test",
@@ -3761,7 +3760,7 @@ mod tests {
     async fn test_json_api_url_with_tls() {
         let config = CantonConfig::new(
             "participant.canton.network",
-            5001,
+            7575,
             vec!["sync1".to_string()],
             "alice::abc123",
             "tenzro-bridge-test",
@@ -3788,19 +3787,16 @@ mod tests {
     async fn test_config_builder() {
         let config = CantonConfig::new(
             "localhost",
-            5001,
+            8080,
             vec!["sync1".to_string()],
             "alice::abc123",
             "tenzro-bridge-test",
         )
         .with_tls(true)
-        .with_jwt_token("test-token-123")
-        .with_json_api_port(8080)
-        .with_admin_port(8081);
+        .with_jwt_token("test-token-123");
 
         assert_eq!(config.participant_host, "localhost");
         assert_eq!(config.json_api_port, 8080);
-        assert_eq!(config.admin_api_port, 8081);
         assert!(config.tls_enabled);
         assert_eq!(config.jwt_token, Some("test-token-123".to_string()));
     }

@@ -1059,6 +1059,44 @@ changing the operator secret and restarting, and pass
 All three commands read `TENZRO_ADMIN_TOKEN` when `--admin-token` is
 omitted, and target `http://127.0.0.1:8545` unless `--rpc` says otherwise.
 
+### Developer API Key Self-Service
+
+`tenzro key` is the developer half. It authenticates with the `tnz_...`
+key itself (`--api-key` or `TENZRO_API_KEY`), needs no admin token, and
+never exposes another subject's keys.
+
+```bash
+# What am I entitled to?
+tenzro key list-mine
+
+# Revoke one of your own keys by its non-secret key_id
+tenzro key revoke-mine --key-id <key_id>
+```
+
+`list-mine` is the entitlement self-read. Each row carries the scopes,
+tier ceiling, Canton networks, and Canton party binding the node
+enforces, so you can answer "what may I do here" without asking the
+operator:
+
+```
+Key ID            Label       Scopes  Class    Canton Networks  Canton User            Active
+a1b2c3d4e5f60718  acme-prod   canton  subject  mainnet          acme@clients           yes
+c8f90338f6a167b7  acme-probe  canton  subject  mainnet          — (no ledger access)   yes
+```
+
+A `Canton User` of `— (no ledger access)` alongside a non-empty
+`Canton Networks` is the important case: the key authenticates and can
+call the node, but it is bound to no Canton party, so command submission
+is refused. Two ways forward — ask the operator to reissue the key with
+`--canton-user-id`, after which the node mints the tenant JWT
+server-side, or present your own JWT from your own issuer in the
+`X-Canton-Auth` header.
+
+Only `subject`-class keys are self-revokable. `operator_internal` and
+`operator_protected` keys return `-32004`. The error for "no such key"
+and "not your key" is deliberately identical so ownership of keys you
+don't hold cannot be probed.
+
 ### Canton Integration (Canton 3.5+ JSON Ledger API)
 
 All `tenzro canton ...` subcommands route through the local Tenzro node,

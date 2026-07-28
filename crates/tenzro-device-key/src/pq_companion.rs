@@ -40,14 +40,6 @@ use crate::{DeviceKeyError, Result};
 /// from the keystore-unlock label so the two ciphertexts bind to separate keys.
 pub const DEFAULT_PQ_LABEL: &str = "tenzro-pq-companion";
 
-/// Deterministic credential id for a passkey: the SHA-256 of its device-key
-/// label. Stable across runs so `signWithPasskey` can locate the credential
-/// without persisting an extra identifier. Re-exported so embedders don't need
-/// a direct `tenzro-crypto` dependency just to compute it.
-pub fn credential_id_for_label(label: &str) -> [u8; 32] {
-    tenzro_crypto::sha256(label.as_bytes()).to_bytes()
-}
-
 /// An ML-DSA-65 companion key whose seed is sealed to a Secure Enclave key.
 pub struct PqCompanion {
     label: String,

@@ -1030,10 +1030,12 @@ impl std::fmt::Display for CantonNetwork {
 /// ([`Self::static_jwt`]); they are mutually exclusive, and `oauth` wins.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CantonNetworkConfig {
-    /// Canton participant Ledger API host.
+    /// Canton participant JSON Ledger API host.
     pub host: String,
 
-    /// Canton participant Ledger API port.
+    /// Canton participant JSON Ledger API port — the HTTP port serving
+    /// `/v2/...`, not the gRPC Ledger API port. Every call this node makes
+    /// to Canton is JSON over HTTP.
     pub port: u16,
 
     /// Use TLS when talking to the Ledger API. Leave `false` only when the
@@ -1236,7 +1238,7 @@ impl CantonNetworkConfig {
         let host = var("LEDGER_API_HOST")?;
         let port = var("LEDGER_API_PORT")
             .and_then(|p| p.parse().ok())
-            .unwrap_or(5001);
+            .unwrap_or(7575);
         let tls = var("TLS").and_then(|v| v.parse().ok()).unwrap_or(false);
 
         let oauth = match (

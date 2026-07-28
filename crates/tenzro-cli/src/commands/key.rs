@@ -79,19 +79,44 @@ impl KeyListMineCmd {
             return Ok(());
         }
 
-        let headers = vec!["Key ID", "Label", "Scopes", "Class", "Active", "Created"];
+        let headers = vec![
+            "Key ID",
+            "Label",
+            "Scopes",
+            "Class",
+            "Canton Networks",
+            "Canton User",
+            "Active",
+            "Created",
+        ];
         let mut rows = Vec::new();
         for key in keys {
-            let scopes = key
-                .get("scopes")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
-                .unwrap_or_default();
+            let join_strs = |field: &str| -> String {
+                key.get(field)
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default()
+            };
+            let scopes = join_strs("scopes");
+            let networks = join_strs("canton_networks");
+            let networks = if networks.is_empty() {
+                "—".to_string()
+            } else {
+                networks
+            };
+            // A key with Canton networks but no bound user reaches the
+            // node without reaching the ledger — it can authenticate but
+            // acts as no party, so command submission is refused.
+            let canton_user = key
+                .get("canton_user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("— (no ledger access)")
+                .to_string();
             rows.push(vec![
                 key.get("key_id")
                     .and_then(|v| v.as_str())
@@ -106,6 +131,8 @@ impl KeyListMineCmd {
                     .and_then(|v| v.as_str())
                     .unwrap_or("subject")
                     .to_string(),
+                networks,
+                canton_user,
                 key.get("active")
                     .and_then(|v| v.as_bool())
                     .map(|b| if b { "yes" } else { "no" })

@@ -102,10 +102,22 @@ pub fn delete(label: &str) -> Result<()> {
     backend::delete(label)
 }
 
+/// Deterministic credential id for a passkey: the SHA-256 of its device-key
+/// label. Stable across runs so `signWithPasskey` can locate the credential
+/// without persisting an extra identifier.
+pub fn credential_id_for_label(label: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.finalize().into()
+}
+
 mod unlocker;
 pub use unlocker::SecureEnclaveUnlocker;
 
+#[cfg(feature = "pq-companion")]
 pub mod pq_companion;
+#[cfg(feature = "pq-companion")]
 pub use pq_companion::PqCompanion;
 
 // ---- Backend dispatch ------------------------------------------------------

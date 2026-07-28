@@ -17,6 +17,11 @@ WORKDIR /build
 ENV CC=clang
 ENV CXX=clang++
 
+# ggml defaults to -march=native, which would pin the binary to whatever CPU
+# the build host happens to have. The fleet is heterogeneous, so build for the
+# baseline instruction set instead.
+ENV CMAKE_ARGS="-DGGML_NATIVE=OFF"
+
 # Copy workspace files
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
