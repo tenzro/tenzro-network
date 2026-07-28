@@ -955,6 +955,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
         seed: 42,
         draft_n: cmd.draft_n,
         commitment_k: None,
+        ..Default::default()
     };
 
     loop {

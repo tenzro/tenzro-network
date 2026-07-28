@@ -973,7 +973,7 @@ async fn main() -> Result<()> {
         };
         let scheme = if net_cfg.tls { "https" } else { "http" };
         let token_provider = net_cfg.oauth.as_ref().map(|oauth| {
-            std::sync::Arc::new(tenzro_bridge::canton_auth::CantonTokenProvider::new(
+            tenzro_bridge::canton_auth::CantonTokenProvider::new(
                 tenzro_bridge::canton_auth::CantonAuthConfig {
                     token_url: oauth.token_url.clone(),
                     client_id: oauth.client_id.clone(),
@@ -981,7 +981,7 @@ async fn main() -> Result<()> {
                     audience: oauth.audience.clone(),
                     scope: oauth.scope.clone(),
                 },
-            ))
+            )
         });
         // Static JWT only takes effect if no OAuth2 provider is set.
         let jwt_token = if token_provider.is_none() {

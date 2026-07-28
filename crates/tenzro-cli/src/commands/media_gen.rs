@@ -238,7 +238,7 @@ impl MediaGenPostJobCmd {
         output::print_header("Post Media Gen Job");
         let spinner = output::create_spinner("Submitting...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
+        let result: Result<serde_json::Value> = rpc
             .call(
                 "tenzro_mediaGen_postJob",
                 serde_json::json!({ "task_spec": spec }),
@@ -750,7 +750,7 @@ impl MediaGenPublishOutputCmd {
 
         let spinner = output::create_spinner("Publishing...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
+        let result: Result<serde_json::Value> = rpc
             .call(
                 "tenzro_mediaGen_publishOutput",
                 serde_json::json!({ "bytes": encoded }),
@@ -911,7 +911,7 @@ impl MediaGenFetchOutputCmd {
 
         let spinner = output::create_spinner("Fetching...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
+        let result: Result<serde_json::Value> = rpc
             .call(
                 "tenzro_mediaGen_fetchOutput",
                 serde_json::json!({ "job_id": self.job_id }),
@@ -983,7 +983,7 @@ impl MediaGenFetchLatentCmd {
 
         let spinner = output::create_spinner("Fetching latent...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
+        let result: Result<serde_json::Value> = rpc
             .call(
                 "tenzro_mediaGen_fetchLatent",
                 serde_json::json!({ "job_id": self.job_id }),
@@ -1027,7 +1027,7 @@ impl MediaGenFetchInputCmd {
 
         let spinner = output::create_spinner("Fetching input image...");
         let rpc = RpcClient::new(&self.rpc);
-        let result: serde_json::Value = rpc
+        let result: Result<serde_json::Value> = rpc
             .call(
                 "tenzro_mediaGen_fetchInput",
                 serde_json::json!({ "job_id": self.job_id }),
