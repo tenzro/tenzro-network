@@ -36,7 +36,7 @@ use crate::web::handlers::WebState;
 /// Shared state for the A2A server
 pub struct A2aState {
     pub node: Arc<TenzroNode>,
-    pub _web_state: Arc<WebState>,
+    pub web_state: Arc<WebState>,
     pub task_manager: TaskManager,
     pub agent_card: AgentCard,
     /// Verifies x402 payment payloads attached via [`crate::a2a::x402_extension`].
@@ -1372,13 +1372,16 @@ fn handle_identity_query(state: &A2aState, text: &str) -> String {
     }
 }
 
-fn handle_faucet_info(_state: &A2aState) -> String {
-    "Tenzro Testnet Faucet:\n\
-     - Dispenses 100 TNZO per request\n\
-     - Cooldown: 24 hours per address\n\
-     - Use the Web API: POST /faucet with {\"address\": \"0x...\"}\n\
-     - Or use the MCP tool: request_faucet"
-        .to_string()
+fn handle_faucet_info(state: &A2aState) -> String {
+    format!(
+        "Tenzro Testnet Faucet:\n\
+         - Dispenses {} TNZO per request\n\
+         - Cooldown: {} hours per address\n\
+         - Use the Web API: POST /faucet with {{\"address\": \"0x...\"}}\n\
+         - Or use the MCP tool: request_faucet",
+        state.web_state.faucet_amount,
+        state.web_state.faucet_cooldown_secs / 3600,
+    )
 }
 
 fn handle_model_query(state: &A2aState) -> String {
@@ -1518,17 +1521,39 @@ fn handle_provider_query(state: &A2aState) -> String {
         "N/A".to_string()
     };
 
+    let bond_info = if let Some(manager) = state.node.compute_bond_manager() {
+        let bonds = manager.list();
+        let active = bonds.iter().filter(|b| b.is_eligible()).count();
+        format!(
+            "- Compute bond minimum: {:.6} TNZO\n\
+             - Withdrawal cooldown: {} ms\n\
+             - Bonds posted on this node: {} ({} eligible)\n",
+            manager.min_bond() as f64 / 1e18,
+            manager.cooldown_ms(),
+            bonds.len(),
+            active,
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         "Provider Stats:\n\
          - Models served: {}\n\
          - Total inferences: {}\n\
          - Total staked: {}\n\
-         - Roles: {}\n\n\
-         To register: Use MCP tool `register_provider` or RPC `tenzro_registerProvider`",
+         - Roles: {}\n\
+         {}\n\
+         To register: Use MCP tool `register_provider` or RPC `tenzro_registerProvider`. \
+         Registration is refused unless the provider has posted a compute bond of at least \
+         the minimum above; the operative requirement is the higher of that minimum and the \
+         target role's own bond. Read bonds with MCP tool `get_compute_bond` or RPC \
+         `tenzro_getComputeBond` / `tenzro_computeBondParams`.",
         models_served,
         total_inferences,
         staking_info,
         state.node.config().roles,
+        bond_info,
     )
 }
 
@@ -2506,7 +2531,7 @@ pub fn build_a2a_state(
 
     Arc::new(A2aState {
         node,
-        _web_state: web_state,
+        web_state,
         task_manager: TaskManager::new(),
         agent_card,
         payment_verifier: Arc::new(x402_extension::UnimplementedSchemeVerifier::new()),

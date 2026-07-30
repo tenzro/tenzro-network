@@ -1846,10 +1846,13 @@ pub struct TenzroNode {
     bond_manager: Option<Arc<tenzro_token::bond::BondManager>>,
     /// ComputeBond surety primitive (Phase A #153). Single source of
     /// truth for provider compute-bond state. Consulted by
-    /// `handle_register_provider` to enforce minimum-bond admission, and
-    /// by the bond RPCs (`tenzro_postComputeBond`, `tenzro_getComputeBond`,
-    /// `tenzro_listComputeBonds`, `tenzro_increaseComputeBond`,
-    /// `tenzro_withdrawComputeBond`). Persists to CF_PROVIDERS via
+    /// `handle_register_provider` to enforce minimum-bond admission, read by
+    /// the bond RPCs (`tenzro_getComputeBond`, `tenzro_listComputeBonds`,
+    /// `tenzro_computeBondParams`), and mutated by the post-block scan over
+    /// the `PostComputeBond` / `IncreaseComputeBond` / `WithdrawComputeBond` /
+    /// `FinalizeComputeBondWithdrawal` transaction types so the vault
+    /// transfer and the bond state change land in the same block. Persists
+    /// to CF_PROVIDERS via
     /// `ComputeBondManager::with_storage`.
     compute_bond_manager: Option<Arc<tenzro_token::compute_bond::ComputeBondManager>>,
     /// Verifiable-inference commitment store + challenge lifecycle
@@ -10644,6 +10647,17 @@ impl TenzroNode {
         // that lane resolution and Spec-5 receipt envelopes consult.
         let event_loop = if let Some(ref bond_manager) = self.bond_manager {
             event_loop.with_bond_manager(bond_manager.clone())
+        } else {
+            event_loop
+        };
+
+        // Wire the compute-bond manager so the post-execute scan can mirror
+        // ComputeBondPosted/Increased/WithdrawInitiated logs into the
+        // off-chain ComputeBondManager. Without this the VM locks provider
+        // collateral in the vault but `tenzro_registerProvider` never sees
+        // the bond, so provider admission stays closed.
+        let event_loop = if let Some(ref cbm) = self.compute_bond_manager {
+            event_loop.with_compute_bond_manager(cbm.clone())
         } else {
             event_loop
         };

@@ -1766,16 +1766,15 @@ async fn dispatch_request(
         // before a `PayInsuranceClaim` transaction is submitted).
         "tenzro_getAgentBond" => handle_get_agent_bond(node, request.params).await,
         "tenzro_listAgentBondsByController" => handle_list_agent_bonds_by_controller(node, request.params).await,
-        // ComputeBond surety RPCs (Phase A #153). Direct write RPCs —
-        // unlike AgentBond, ComputeBond mutations bypass
-        // `tenzro_signAndSendTransaction` and operate against the
-        // ComputeBondManager + node-level wallet flows. The provider
-        // must own a wallet that can fund the bond vault.
-        "tenzro_postComputeBond" => handle_post_compute_bond(node, request.params).await,
+        // ComputeBond surety reads. Bond mutations are consensus-mediated
+        // native-VM transactions (`PostComputeBond` / `IncreaseComputeBond` /
+        // `WithdrawComputeBond` / `FinalizeComputeBondWithdrawal`) submitted
+        // through `tenzro_signAndSendTransaction` or `eth_sendRawTransaction`:
+        // the VM debits the payer and credits the bond vault, and the
+        // post-execute log scan reflects the result here.
         "tenzro_getComputeBond" => handle_get_compute_bond(node, request.params).await,
         "tenzro_listComputeBonds" => handle_list_compute_bonds(node).await,
-        "tenzro_increaseComputeBond" => handle_increase_compute_bond(node, request.params).await,
-        "tenzro_withdrawComputeBond" => handle_withdraw_compute_bond(node, request.params).await,
+        "tenzro_computeBondParams" => handle_compute_bond_params(node).await,
         // SLA fault detector (Phase B Thread 5). Validator-only writes
         // (issue_probe broadcasts a VRF-stamped challenge over `tenzro/sla`);
         // read-only reflectors for outstanding probes + manager parameters.
@@ -11209,12 +11208,15 @@ async fn handle_get_insurance_pool_balance(
 // AgentBond lifecycle (Active → Cooldown → Returned) with a 7-day
 // unbonding period, but are simpler: there is no insurance pool, no
 // slashing math, and no claim flow — the bond is purely a sybil-resistance
-// gate on provider registration. Writes are authorized at the JSON-RPC
-// dispatch layer (no transaction envelope) per the task spec.
+// gate on provider registration. Every mutation is a signed native-VM
+// transaction; the handlers below are the read model the VM's lifecycle
+// logs feed.
 
 /// Project a `ComputeBondState` into a JSON envelope. Used by every
 /// ComputeBond read/write RPC handler to keep the wire format consistent.
-fn compute_bond_state_to_json(state: &tenzro_token::compute_bond::ComputeBondState) -> Value {
+pub(crate) fn compute_bond_state_to_json(
+    state: &tenzro_token::compute_bond::ComputeBondState,
+) -> Value {
     serde_json::json!({
         "provider_did": state.provider_did,
         "provider_address": format!("{}", state.provider_address),
@@ -11226,69 +11228,6 @@ fn compute_bond_state_to_json(state: &tenzro_token::compute_bond::ComputeBondSta
         "is_eligible": state.is_eligible(),
         "effective_amount": state.effective_amount().to_string(),
     })
-}
-
-/// `tenzro_postComputeBond` — register a new admission bond for a provider.
-///
-/// Params: `{ "provider_did": "did:tenzro:...", "provider_address": "0x...",
-/// "amount": "100000000000000000000" }` (amount in wei, decimal string).
-async fn handle_post_compute_bond(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = params.ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let params = if let Some(arr) = params.as_array() {
-        arr.first().cloned().unwrap_or(params)
-    } else {
-        params
-    };
-
-    let provider_did = params
-        .get("provider_did")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing provider_did".to_string(),
-            data: None,
-        })?;
-    let address_str = params
-        .get("provider_address")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing provider_address".to_string(),
-            data: None,
-        })?;
-    let provider_address = parse_address(address_str)?;
-    let amount = parse_u128_amount(&params, "amount").ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing or invalid amount (wei)".to_string(),
-        data: None,
-    })?;
-
-    let manager = node
-        .compute_bond_manager()
-        .ok_or_else(|| JsonRpcError {
-            code: -32000,
-            message: "ComputeBondManager not initialized".to_string(),
-            data: None,
-        })?
-        .clone();
-
-    let block_height = node.chain_tip_height();
-    let state = manager
-        .post(provider_did, provider_address, amount, block_height)
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("post compute bond failed: {}", e),
-            data: None,
-        })?;
-
-    Ok(compute_bond_state_to_json(&state))
 }
 
 /// `tenzro_getComputeBond` — fetch a single provider's compute bond.
@@ -11343,6 +11282,25 @@ async fn handle_list_compute_bonds(
     Ok(serde_json::json!({
         "count": bonds.len(),
         "bonds": bonds.iter().map(compute_bond_state_to_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `tenzro_computeBondParams` — the admission dials a provider needs before
+/// it posts. `min_bond_wei` is the floor `tenzro_registerProvider` enforces;
+/// `cooldown_ms` is how long a `WithdrawComputeBond` sits in Cooldown before
+/// `FinalizeComputeBondWithdrawal` will release the vault.
+async fn handle_compute_bond_params(
+    node: &Arc<TenzroNode>,
+) -> std::result::Result<Value, JsonRpcError> {
+    let manager = node.compute_bond_manager().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "ComputeBondManager not initialized".to_string(),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({
+        "min_bond_wei": manager.min_bond().to_string(),
+        "cooldown_ms": manager.cooldown_ms(),
     }))
 }
 
@@ -11495,126 +11453,6 @@ async fn handle_sla_get_params(
         "slash_amount_wei": manager.slash_amount().to_string(),
         "vrf_pubkey": format!("0x{}", hex::encode(manager.vrf_public_key().0)),
     }))
-}
-
-/// `tenzro_increaseComputeBond` — top up an Active compute bond.
-///
-/// Params: `{ "provider_did": "...", "amount": "..." }`.
-async fn handle_increase_compute_bond(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = params.ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let params = if let Some(arr) = params.as_array() {
-        arr.first().cloned().unwrap_or(params)
-    } else {
-        params
-    };
-
-    let provider_did = params
-        .get("provider_did")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing provider_did".to_string(),
-            data: None,
-        })?;
-    let amount = parse_u128_amount(&params, "amount").ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing or invalid amount (wei)".to_string(),
-        data: None,
-    })?;
-
-    let manager = node
-        .compute_bond_manager()
-        .ok_or_else(|| JsonRpcError {
-            code: -32000,
-            message: "ComputeBondManager not initialized".to_string(),
-            data: None,
-        })?
-        .clone();
-
-    let block_height = node.chain_tip_height();
-    let state = manager
-        .increase(provider_did, amount, block_height)
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("increase compute bond failed: {}", e),
-            data: None,
-        })?;
-
-    Ok(compute_bond_state_to_json(&state))
-}
-
-/// `tenzro_withdrawComputeBond` — initiate withdrawal on an Active bond.
-/// Bond enters 7-day cooldown; finalize via `finalize_withdrawal` once
-/// cooldown elapses (currently triggered by a follow-up call to this RPC
-/// after the cooldown timer is past).
-///
-/// Params: `{ "provider_did": "..." }`.
-async fn handle_withdraw_compute_bond(
-    node: &Arc<TenzroNode>,
-    params: Option<Value>,
-) -> std::result::Result<Value, JsonRpcError> {
-    let params = params.ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Missing params".to_string(),
-        data: None,
-    })?;
-    let params = if let Some(arr) = params.as_array() {
-        arr.first().cloned().unwrap_or(params)
-    } else {
-        params
-    };
-
-    let provider_did = params
-        .get("provider_did")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Missing provider_did".to_string(),
-            data: None,
-        })?;
-
-    let manager = node
-        .compute_bond_manager()
-        .ok_or_else(|| JsonRpcError {
-            code: -32000,
-            message: "ComputeBondManager not initialized".to_string(),
-            data: None,
-        })?
-        .clone();
-
-    let block_height = node.chain_tip_height();
-
-    // If the bond is already in Cooldown and the timer has elapsed,
-    // promote to Returned in this same call. Otherwise, kick off the
-    // Active → Cooldown transition.
-    let existing = manager.get(provider_did);
-    let state = match existing {
-        Some(s) if matches!(s.status, tenzro_token::compute_bond::ComputeBondStatus::Cooldown) => {
-            manager
-                .finalize_withdrawal(provider_did, block_height)
-                .map_err(|e| JsonRpcError {
-                    code: -32000,
-                    message: format!("finalize compute bond withdrawal failed: {}", e),
-                    data: None,
-                })?
-        }
-        _ => manager
-            .withdraw(provider_did, block_height)
-            .map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("withdraw compute bond failed: {}", e),
-                data: None,
-            })?,
-    };
-
-    Ok(compute_bond_state_to_json(&state))
 }
 
 /// Render a `ValidatorRegistryEntry` as JSON (consumed by all three read RPCs).
@@ -40230,7 +40068,7 @@ async fn handle_register_provider(
             return Err(JsonRpcError {
                 code: -32003,
                 message: format!(
-                    "compute bond below admission minimum for {} (have {} wei, need {} wei) — post via tenzro_postComputeBond",
+                    "compute bond below admission minimum for {} (have {} wei, need {} wei) — submit a PostComputeBond transaction via tenzro_signAndSendTransaction",
                     provider_type.as_str(),
                     effective,
                     required,
@@ -55451,6 +55289,12 @@ fn tx_type_selector(tx_type: &TransactionType) -> [u8; 4] {
         TransactionType::IncreaseAgentBond { .. } => "IncreaseAgentBond",
         TransactionType::WithdrawAgentBond { .. } => "WithdrawAgentBond",
         TransactionType::PayInsuranceClaim { .. } => "PayInsuranceClaim",
+        TransactionType::PostComputeBond { .. } => "PostComputeBond",
+        TransactionType::IncreaseComputeBond { .. } => "IncreaseComputeBond",
+        TransactionType::WithdrawComputeBond { .. } => "WithdrawComputeBond",
+        TransactionType::FinalizeComputeBondWithdrawal { .. } => {
+            "FinalizeComputeBondWithdrawal"
+        }
         TransactionType::X402Settle { .. } => "X402Settle",
         TransactionType::RegisterValidator { .. } => "RegisterValidator",
         TransactionType::UpdateValidatorMetadata { .. } => "UpdateValidatorMetadata",
@@ -55704,6 +55548,18 @@ fn enforce_typed_tx_spend_ceilings(
         tenzro_types::TransactionType::PostAgentBond { amount, .. } => ("post_bond", *amount),
         tenzro_types::TransactionType::IncreaseAgentBond { amount, .. } => ("increase_bond", *amount),
         tenzro_types::TransactionType::WithdrawAgentBond { .. } => ("withdraw_bond", 0u128),
+        tenzro_types::TransactionType::PostComputeBond { amount, .. } => {
+            ("post_compute_bond", *amount)
+        }
+        tenzro_types::TransactionType::IncreaseComputeBond { amount, .. } => {
+            ("increase_compute_bond", *amount)
+        }
+        tenzro_types::TransactionType::WithdrawComputeBond { .. } => {
+            ("withdraw_compute_bond", 0u128)
+        }
+        tenzro_types::TransactionType::FinalizeComputeBondWithdrawal { .. } => {
+            ("finalize_compute_bond_withdrawal", 0u128)
+        }
         tenzro_types::TransactionType::PayInsuranceClaim { amount, .. } => ("insurance_claim", *amount),
         // Lifecycle ops (kill-switch family) are authorized through a
         // separate controller-DID check, not the spend axis.

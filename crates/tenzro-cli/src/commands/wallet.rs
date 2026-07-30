@@ -730,12 +730,18 @@ impl WalletFaucetCmd {
 
         spinner.finish_and_clear();
 
-        output::print_success("Tokens received!");
+        output::print_success("Faucet transaction submitted");
         output::print_field("Address", &self.address);
-        output::print_field("Amount", result.get("amount").and_then(|v| v.as_str()).unwrap_or("100 TNZO"));
-        if let Some(tx) = result.get("transaction_hash").and_then(|v| v.as_str()) {
+        if let Some(amount) = crate::rpc::faucet_amount(&result) {
+            output::print_field("Amount", &crate::rpc::format_tnzo(amount));
+        }
+        if let Some(tx) = result.get("tx_hash").and_then(|v| v.as_str()) {
             output::print_field("Transaction", tx);
         }
+        output::print_info(&format!(
+            "Queued for consensus. Run `tenzro wallet balance --address {}` to confirm it landed.",
+            self.address
+        ));
 
         Ok(())
     }

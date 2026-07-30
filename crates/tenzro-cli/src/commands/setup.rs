@@ -293,7 +293,7 @@ impl SetupCmd {
             g.push_str("balance = 1000000\n");
             g.push_str("\n[faucet]\n");
             g.push_str(&format!("address = \"{}\"\n", FAUCET_SENTINEL_ADDRESS));
-            g.push_str("amount_per_request = 100\ncooldown_seconds = 86400\nenabled = true\n");
+            g.push_str("amount_per_request = 2000\ncooldown_seconds = 86400\nenabled = true\n");
             std::fs::write(&genesis_path, g)
                 .map_err(|e| anyhow!("write {}: {}", genesis_path.display(), e))?;
             wiz_done(&format!("Genesis written to {}", genesis_path.display()));

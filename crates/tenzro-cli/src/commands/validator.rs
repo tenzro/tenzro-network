@@ -192,8 +192,7 @@ impl ValidatorRegisterCmd {
 
         // The Address / Vec<u8> fields serde-derive to JSON arrays of numbers.
         let tx_type = serde_json::json!({
-            "type": "RegisterValidator",
-            "data": {
+            "RegisterValidator": {
                 "consensus_pubkey": consensus_bytes.to_vec(),
                 "pq_pubkey": pq_bytes,
                 "bls_pubkey": bls_bytes,
@@ -264,7 +263,8 @@ impl ValidatorExitCmd {
         spinner.set_message("Signing ExitValidator transaction...");
 
         // ExitValidator is a unit variant — `data` field omitted entirely.
-        let tx_type = serde_json::json!({ "type": "ExitValidator" });
+        // Unit variant — externally-tagged serde renders it as a bare string.
+        let tx_type = serde_json::json!("ExitValidator");
 
         let result: serde_json::Value = rpc.call(
             "tenzro_signAndSendTransaction",
@@ -359,8 +359,7 @@ impl ValidatorUpdateMetadataCmd {
         };
 
         let tx_type = serde_json::json!({
-            "type": "UpdateValidatorMetadata",
-            "data": serde_json::Value::Object(data),
+            "UpdateValidatorMetadata": serde_json::Value::Object(data),
         });
 
         let result: serde_json::Value = rpc.call(

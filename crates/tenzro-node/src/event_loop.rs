@@ -27,6 +27,7 @@ use tenzro_storage::{RocksDbStore, KvStore, BlockStoreImpl, WriteOp, CF_MODELS, 
 use tenzro_storage::traits::BlockStore;
 use tenzro_token::StakingManager;
 use tenzro_token::bond::BondManager;
+use tenzro_token::compute_bond::ComputeBondManager;
 use tenzro_types::kill_switch::{KillSwitchAction, KillSwitchReceipt};
 use tenzro_vm::{MultiVmRuntime, StateAdapter, VmTransaction, VmType};
 use tenzro_types::block::Block;
@@ -564,6 +565,13 @@ pub struct EventLoop {
     /// marker; this manager is the authoritative read model that lane
     /// resolution and receipt envelopes consult.
     bond_manager: Option<Arc<BondManager>>,
+    /// Compute-bond manager. Wired so the post-execute scan can reflect
+    /// VM-emitted `ComputeBondPosted` / `ComputeBondIncreased` /
+    /// `ComputeBondWithdrawInitiated` / `ComputeBondReturned` logs into the off-chain
+    /// `ComputeBondManager` cache + RocksDB write-through. The VM owns the
+    /// vault balance and the on-chain marker; this manager is the read
+    /// model that `tenzro_registerProvider` admission consults.
+    compute_bond_manager: Option<Arc<ComputeBondManager>>,
     /// On-chain escrow query index. Wired so the post-execute scan can
     /// reflect VM-emitted `EscrowCreated` / `EscrowReleased` / `EscrowRefunded`
     /// logs into the off-chain `EscrowManager`. The Native VM is the source
@@ -783,6 +791,7 @@ impl EventLoop {
             staking: None,
             identity_registry: None,
             bond_manager: None,
+            compute_bond_manager: None,
             escrow_manager: None,
             validator_registry: None,
             workflow_runtime: None,
@@ -954,6 +963,19 @@ impl EventLoop {
     /// posted bonds never promote their agents into Bonded lanes.
     pub fn with_bond_manager(mut self, bond_manager: Arc<BondManager>) -> Self {
         self.bond_manager = Some(bond_manager);
+        self
+    }
+
+    /// Wires the compute-bond manager. Required for the post-execute log
+    /// scan to mirror VM-emitted compute-bond events into the off-chain
+    /// manager state. Without this, the VM locks provider collateral in
+    /// the vault but `tenzro_registerProvider` never sees the bond, so
+    /// admission stays closed.
+    pub fn with_compute_bond_manager(
+        mut self,
+        compute_bond_manager: Arc<ComputeBondManager>,
+    ) -> Self {
+        self.compute_bond_manager = Some(compute_bond_manager);
         self
     }
 
@@ -4270,6 +4292,16 @@ impl EventLoop {
                         // committed by the VM at this point.
                         self.process_bond_logs(&result, block_height).await;
 
+                        // Post-execute compute-bond scan: reflects the
+                        // VM-emitted `ComputeBondPosted` /
+                        // `ComputeBondIncreased` /
+                        // `ComputeBondWithdrawInitiated` /
+                        // `ComputeBondReturned` logs into the
+                        // off-chain `ComputeBondManager`, which is the read
+                        // model `tenzro_registerProvider` consults for
+                        // provider admission.
+                        self.process_compute_bond_logs(&result, block_height).await;
+
                         // Post-execute ERC-8004 `Registered` scan: reflects
                         // the canonical `IdentityRegistry` proxy's
                         // `Registered(uint256,string,address)` event into
@@ -5353,6 +5385,126 @@ impl EventLoop {
         }
     }
 
+    /// Reflect VM-emitted compute-bond lifecycle logs into the off-chain
+    /// `ComputeBondManager`.
+    ///
+    /// The VM owns the money (payer debit, vault credit, and the
+    /// `compute_bond:<provider_did>` storage marker); this scan is the read
+    /// model that `tenzro_registerProvider` admission consults.
+    ///
+    /// Log layout for `ComputeBondPosted` / `ComputeBondIncreased` /
+    /// `ComputeBondWithdrawInitiated` / `ComputeBondReturned` (mirror of
+    /// `tenzro_vm::native::encode_compute_bond_log_data`):
+    /// `provider_did_len_le(4) || provider_did || addr_len_le(4) ||
+    ///  provider_address || amount_le(16) || op_tag(1) ||
+    ///  cooldown_until_ms_le(8)`.
+    ///
+    /// Cheap early-exit if no relevant log is present in this tx.
+    async fn process_compute_bond_logs(
+        &self,
+        result: &tenzro_vm::ExecutionResult,
+        block_height: BlockHeight,
+    ) {
+        let any_compute_bond = result.logs.iter().any(|l| {
+            l.topics
+                .first()
+                .map(|t| {
+                    let s = t.as_slice();
+                    s == b"ComputeBondPosted"
+                        || s == b"ComputeBondIncreased"
+                        || s == b"ComputeBondWithdrawInitiated"
+                        || s == b"ComputeBondReturned"
+                })
+                .unwrap_or(false)
+        });
+        if !any_compute_bond {
+            return;
+        }
+
+        let compute_bond_manager = match self.compute_bond_manager.as_ref() {
+            Some(m) => m.clone(),
+            None => {
+                debug!(
+                    block_height = block_height.0,
+                    "Compute-bond log observed but ComputeBondManager not wired; \
+                     provider admission will not see this bond"
+                );
+                return;
+            }
+        };
+        let block_height_u64 = block_height.0;
+
+        for log in &result.logs {
+            let topic = match log.topics.first() {
+                Some(t) => t.as_slice(),
+                None => continue,
+            };
+            if !matches!(
+                topic,
+                b"ComputeBondPosted"
+                    | b"ComputeBondIncreased"
+                    | b"ComputeBondWithdrawInitiated"
+                    | b"ComputeBondReturned"
+            ) {
+                continue;
+            }
+
+            let (provider_did, provider_address, amount, op_tag, cooldown_until_ms) =
+                match decode_compute_bond_lifecycle_log(&log.data) {
+                    Some(v) => v,
+                    None => {
+                        warn!(
+                            topic = %String::from_utf8_lossy(topic),
+                            data_len = log.data.len(),
+                            "Malformed compute-bond log payload, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+            let outcome = match op_tag {
+                0 => compute_bond_manager
+                    .post(&provider_did, provider_address, amount, block_height_u64)
+                    .map(|_| ()),
+                1 => compute_bond_manager
+                    .increase(&provider_did, amount, block_height_u64)
+                    .map(|_| ()),
+                2 => compute_bond_manager
+                    .withdraw(&provider_did, cooldown_until_ms, block_height_u64)
+                    .map(|_| ()),
+                3 => compute_bond_manager
+                    .finalize_withdrawal(&provider_did, block_height_u64)
+                    .map(|_| ()),
+                other => {
+                    warn!(
+                        op_tag = other,
+                        provider = %provider_did,
+                        "Unknown compute-bond op_tag in log payload"
+                    );
+                    continue;
+                }
+            };
+
+            if let Err(e) = outcome {
+                warn!(
+                    topic = %String::from_utf8_lossy(topic),
+                    provider = %provider_did,
+                    amount,
+                    error = %e,
+                    "ComputeBondManager rejected reflected log; on-chain marker and \
+                     off-chain state may have diverged"
+                );
+            } else {
+                debug!(
+                    topic = %String::from_utf8_lossy(topic),
+                    provider = %provider_did,
+                    amount,
+                    "ComputeBondManager reflected compute-bond lifecycle log"
+                );
+            }
+        }
+    }
+
     /// Reflect the canonical ERC-8004 `Registered(uint256 indexed
     /// agentId, string agentURI, address indexed owner)` event emitted
     /// by the on-chain `IdentityRegistry` proxy at
@@ -6207,6 +6359,14 @@ impl EventLoop {
             tenzro_types::TransactionType::PostAgentBond { amount, .. } => ("post_bond", *amount),
             tenzro_types::TransactionType::IncreaseAgentBond { amount, .. } => ("increase_bond", *amount),
             tenzro_types::TransactionType::WithdrawAgentBond { .. } => ("withdraw_bond", 0),
+            tenzro_types::TransactionType::PostComputeBond { amount, .. } => ("post_compute_bond", *amount),
+            tenzro_types::TransactionType::IncreaseComputeBond { amount, .. } => {
+                ("increase_compute_bond", *amount)
+            }
+            tenzro_types::TransactionType::WithdrawComputeBond { .. } => ("withdraw_compute_bond", 0),
+            tenzro_types::TransactionType::FinalizeComputeBondWithdrawal { .. } => {
+                ("finalize_compute_bond_withdrawal", 0)
+            }
             tenzro_types::TransactionType::PayInsuranceClaim { amount, .. } => ("insurance_claim", *amount),
             tenzro_types::TransactionType::PauseAgent { .. }
             | tenzro_types::TransactionType::QuarantineAgent { .. }
@@ -6352,6 +6512,43 @@ fn decode_bond_lifecycle_log(data: &[u8]) -> Option<(String, String, u128, u8)> 
     let amount = u128::from_le_bytes(data[after_ctrl..after_ctrl + 16].try_into().ok()?);
     let op_tag = data[after_ctrl + 16];
     Some((agent_did, controller_did, amount, op_tag))
+}
+
+/// Decode a compute-bond lifecycle log.
+///
+/// Layout (mirror of `tenzro_vm::native::encode_compute_bond_log_data`):
+/// `provider_did_len_le(4) || provider_did || addr_len_le(4) ||
+///  provider_address || amount_le(16) || op_tag(1) || cooldown_until_ms_le(8)`.
+///
+/// The second field is the raw 32-byte payout address, not a DID.
+///
+/// Returns `(provider_did, provider_address, amount, op_tag,
+/// cooldown_until_ms)` where
+/// `op_tag ∈ {0=Posted, 1=Increased, 2=WithdrawInitiated, 3=Returned}`.
+/// `cooldown_until_ms` is the block-timestamp-derived withdrawal deadline the
+/// VM wrote on the marker, and is 0 for every op other than WithdrawInitiated.
+fn decode_compute_bond_lifecycle_log(data: &[u8]) -> Option<(String, Address, u128, u8, i64)> {
+    if data.len() < 4 {
+        return None;
+    }
+    let did_len = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
+    let after_did = 4usize.checked_add(did_len)?;
+    if data.len() < after_did + 4 {
+        return None;
+    }
+    let provider_did = std::str::from_utf8(&data[4..after_did]).ok()?.to_string();
+    let addr_len = u32::from_le_bytes(data[after_did..after_did + 4].try_into().ok()?) as usize;
+    let after_addr = after_did.checked_add(4)?.checked_add(addr_len)?;
+    if data.len() < after_addr + 16 + 1 + 8 {
+        return None;
+    }
+    let provider_address = Address::from_bytes(&data[after_did + 4..after_addr])?;
+    let amount = u128::from_le_bytes(data[after_addr..after_addr + 16].try_into().ok()?);
+    let op_tag = data[after_addr + 16];
+    let cooldown_start = after_addr + 17;
+    let cooldown_until_ms =
+        i64::from_le_bytes(data[cooldown_start..cooldown_start + 8].try_into().ok()?);
+    Some((provider_did, provider_address, amount, op_tag, cooldown_until_ms))
 }
 
 /// Decode a `BondSlashed` log.
@@ -6623,6 +6820,8 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
         SELECTOR_KILLSWITCH_TERMINATE,
         SELECTOR_POST_AGENT_BOND, SELECTOR_INCREASE_AGENT_BOND,
         SELECTOR_WITHDRAW_AGENT_BOND, SELECTOR_PAY_INSURANCE_CLAIM,
+        SELECTOR_POST_COMPUTE_BOND, SELECTOR_INCREASE_COMPUTE_BOND,
+        SELECTOR_WITHDRAW_COMPUTE_BOND, SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL,
         SELECTOR_X402_SETTLE,
         SELECTOR_VALIDATOR_REGISTER, SELECTOR_VALIDATOR_EXIT,
         SELECTOR_VALIDATOR_UPDATE_METADATA,
@@ -6823,6 +7022,71 @@ fn convert_transaction(signed_tx: &SignedTransaction) -> VmTransaction {
             data.extend_from_slice(
                 &serde_json::to_vec(&payload)
                     .expect("WithdrawAgentBond payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        // ---- Compute bond (provider admission, native VM dispatch) ----
+        // Payload field names MUST match the VM-side
+        // `PostComputeBondPayload`, `IncreaseComputeBondPayload`,
+        // `WithdrawComputeBondPayload`, `FinalizeComputeBondWithdrawalPayload`
+        // structs in `tenzro-vm/src/native/mod.rs`.
+        TransactionType::PostComputeBond { provider_did, amount } => {
+            #[derive(serde::Serialize)]
+            struct PostComputeBondPayload<'a> {
+                provider_did: &'a str,
+                amount: u128,
+            }
+            let payload = PostComputeBondPayload {
+                provider_did,
+                amount: *amount,
+            };
+            let mut data = SELECTOR_POST_COMPUTE_BOND.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("PostComputeBond payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::IncreaseComputeBond { provider_did, amount } => {
+            #[derive(serde::Serialize)]
+            struct IncreaseComputeBondPayload<'a> {
+                provider_did: &'a str,
+                amount: u128,
+            }
+            let payload = IncreaseComputeBondPayload {
+                provider_did,
+                amount: *amount,
+            };
+            let mut data = SELECTOR_INCREASE_COMPUTE_BOND.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("IncreaseComputeBond payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::WithdrawComputeBond { provider_did } => {
+            #[derive(serde::Serialize)]
+            struct WithdrawComputeBondPayload<'a> {
+                provider_did: &'a str,
+            }
+            let payload = WithdrawComputeBondPayload { provider_did };
+            let mut data = SELECTOR_WITHDRAW_COMPUTE_BOND.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("WithdrawComputeBond payload is JSON-safe"),
+            );
+            (0, data, VmType::Tenzro)
+        }
+        TransactionType::FinalizeComputeBondWithdrawal { provider_did } => {
+            #[derive(serde::Serialize)]
+            struct FinalizeComputeBondWithdrawalPayload<'a> {
+                provider_did: &'a str,
+            }
+            let payload = FinalizeComputeBondWithdrawalPayload { provider_did };
+            let mut data = SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL.to_vec();
+            data.extend_from_slice(
+                &serde_json::to_vec(&payload)
+                    .expect("FinalizeComputeBondWithdrawal payload is JSON-safe"),
             );
             (0, data, VmType::Tenzro)
         }

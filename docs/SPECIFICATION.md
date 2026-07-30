@@ -3045,7 +3045,7 @@ Tenzro Labs operates the initial public endpoints on `tenzro.xyz` with PQ-hybrid
 
 **Testnet configuration:**
 - Chain ID: 1337
-- Faucet: 100 TNZO per request, 24-hour cooldown per address
+- Faucet: 2,000 TNZO per request, 24-hour cooldown per address
 - Docker image: `<your-registry>/tenzro-node:<tag>` (build from the repo `Dockerfile`)
 
 ---

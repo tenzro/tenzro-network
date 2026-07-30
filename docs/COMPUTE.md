@@ -20,7 +20,7 @@ This document describes the rental lifecycle, the availability-proof gate, the s
 
 Three properties shape the compute surface:
 
-1. **One stake, many roles.** A provider stakes once. The same stake underwrites serving a model, renting out compute, and holding data. There is no per-service bond. A single `ProviderObligations` tracker and a single balance map account for every obligation the provider has taken on, all measured against that one stake.
+1. **One stake, many roles.** A provider stakes once. The same stake underwrites serving a model, renting out compute, and holding data. There is no per-service bond. A single `ProviderObligations` tracker and a single balance map account for every obligation the provider has taken on, all measured against that one stake. Separate from coverage, a provider posts a one-time compute bond at admission — see section 1.1.
 
 2. **Availability is proven, not asserted.** A rental settles per epoch only when the provider supplies a valid availability proof for that epoch. A missed proof does not silently drain the consumer — the epoch is recorded as missed and the consumer is made whole for that slice. Repeated misses cross a threshold and close the rental.
 
@@ -31,6 +31,30 @@ The crates that implement this:
 - `tenzro-settlement` — `RentalManager`, `RentalAgreement`, `EpochOutcome`, `ProviderObligations` (the shared coverage tracker)
 - `tenzro-node` — `compute_rental_runtime`, which wires a provider's identity, stake ledger, obligations, and pricing policy into a `RentalManager`
 - `tenzro-types` — `RoleSet` with `serves_ai()` / `serves_storage()`
+- `tenzro-token` — `ComputeBondManager`, `ComputeBondState` (the admission bond below)
+
+### 1.1 The admission bond
+
+Before a provider can register, it posts a compute bond. The bond sits in a
+vault derived deterministically from the provider DID — nobody holds its key.
+It is admission collateral, distinct from the coverage a rental consumes: the
+bond is posted once and stays put, while coverage rises and falls with the
+obligations the provider has taken on.
+
+The node enforces a governance-tunable floor, and each role carries its own
+bond. The operative requirement is the higher of the two, so a model provider
+posts 1,000 TNZO. `tenzro_computeBondParams` reports the floor and the
+withdrawal cooldown.
+
+Recovering the bond is two-phase. `withdraw` moves it from `Active` to
+`Cooldown`; `finalize` moves it from `Cooldown` to `Returned` once the cooldown
+has elapsed. The bond stays slashable throughout the cooldown, which is what
+keeps a provider from exiting ahead of a dispute filed against work it has
+already served. A slashed bond moves to `Slashed` and is never returned.
+
+All four mutations — `PostComputeBond`, `IncreaseComputeBond`,
+`WithdrawComputeBond`, `FinalizeComputeBondWithdrawal` — are native transaction
+types, so the vault transfer and the bond state change land in the same block.
 
 ---
 
@@ -116,6 +140,12 @@ Before a rental streams, the renter funds a prepaid balance: TNZO is locked out 
 - `tenzro_computeSetPricing` — switch between fixed and network-dynamic pricing
 - `tenzro_computeStatus` — whether this node is a compute provider, its effective rate, and its active rentals
 - `tenzro_prepaidDeposit` / `tenzro_prepaidWithdraw` / `tenzro_prepaidBalance` — fund, refund, and read the prepaid streaming balance
+- `tenzro_computeBondParams` — the node's minimum bond and withdrawal cooldown
+- `tenzro_getComputeBond` — one provider's bond, or `null` when it has never posted one
+- `tenzro_listComputeBonds` — every bond this node knows about
+
+Bond mutations are native transactions rather than RPCs — submit them through
+`tenzro_signAndSendTransaction` or the CLI below.
 
 ### CLI
 
@@ -128,11 +158,25 @@ tenzro node compute set-pricing --mode <fixed|dynamic>
 tenzro escrow prepaid-deposit --renter <addr> --amount <wei>
 tenzro escrow prepaid-balance --renter <addr>
 tenzro escrow prepaid-withdraw --renter <addr> --amount <wei>
+
+tenzro provider bond params
+tenzro provider bond post --did <provider-did> --address <addr> --amount 1000
+tenzro provider bond increase --did <provider-did> --address <addr> --amount 500
+tenzro provider bond get --did <provider-did>
+tenzro provider bond list
+tenzro provider bond withdraw --did <provider-did> --address <addr>
+tenzro provider bond finalize --did <provider-did> --address <addr>
 ```
+
+`--amount` on `bond post` and `bond increase` is whole TNZO.
 
 ### SDKs
 
-Both the Rust and TypeScript SDKs expose a `compute` client with `book_rental`, `settle_epoch`, `get_rental`, `set_dynamic_pricing`, and `status`. Prepaid balances are managed through the `settlement` client (`prepaid_deposit` / `prepaid_withdraw` / `prepaid_balance`).
+Both the Rust and TypeScript SDKs expose a `compute` client with `book_rental`, `settle_epoch`, `get_rental`, `set_dynamic_pricing`, and `status`. Prepaid balances are managed through the `settlement` client (`prepaid_deposit` / `prepaid_withdraw` / `prepaid_balance`). Bonds are read through the `provider` client (`compute_bond_params` / `get_compute_bond` / `list_compute_bonds` in Rust, `computeBondParams` / `getComputeBond` / `listComputeBonds` in TypeScript).
+
+### MCP and A2A
+
+The MCP tool `get_compute_bond` reads one bond or lists them all, and returns the node's minimum bond and cooldown on every call. Over A2A, the `staking` skill reports the same figures alongside provider stats.
 
 ---
 

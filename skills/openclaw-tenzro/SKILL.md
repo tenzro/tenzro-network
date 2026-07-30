@@ -1219,7 +1219,7 @@ curl https://api.tenzro.xyz/health
 
 ### Request Testnet Tokens
 
-Request 100 TNZO from the faucet (rate-limited to one request per address every 24 hours).
+Request TNZO from the faucet (rate-limited to one request per address every 24 hours). The node sets the per-request amount and reports it as `amount_wei`.
 
 ```bash
 curl -X POST https://api.tenzro.xyz/faucet \
@@ -1948,7 +1948,7 @@ The fastest way to get started on the Tenzro Network — no prior setup required
 
 1. Call `tenzro_joinAsMicroNode` with a display name
 2. Receive a TDIP DID, MPC wallet address, 10 network capabilities, and chain ID
-3. Optionally call `POST /faucet` to get 100 testnet TNZO
+3. Optionally call `POST /faucet` to get testnet TNZO
 4. Start using all network features immediately
 
 ```python
@@ -1970,7 +1970,7 @@ Falls back to `tenzro_participate` on older nodes.
 
 1. Call `tenzro_createWallet` to provision a 2-of-3 MPC wallet (returns
    `wallet_id` + 32-byte hex `address` + base58 `display_address`)
-2. Call `POST /faucet` with the 32-byte hex `address` to get 100 TNZO
+2. Call `POST /faucet` with the 32-byte hex `address` to get testnet TNZO
 3. Call `tenzro_getBalance` (or `eth_getBalance`) to confirm the balance
 
 ### 2. Register identity and send payment
@@ -2084,7 +2084,7 @@ If the Tenzro node has MCP enabled (port 3001), you can use the Model Context Pr
 - `create_wallet` — Provision a self-custody Tenzro 2-of-3 MPC wallet (32-byte address)
 - `send_transaction` — Send a TNZO transfer (server-custodial path)
 - `send_self_custody_transaction` — Submit a self-custody transfer: the caller signs both legs (Ed25519 + ML-DSA-65) locally and passes the pre-signed hex material (`signature`, `public_key`, `pq_signature`, `pq_public_key`, `timestamp`); the tool forwards to `eth_sendRawTransaction` and the node never holds the secret
-- `request_faucet` — Request testnet tokens (100 TNZO, 24h cooldown)
+- `request_faucet` — Request testnet tokens (24h cooldown; the node sets the amount)
 - `get_block` — Get block by height from storage
 - `get_block_range` — Batch-fetch a contiguous range of blocks for catch-up sync (max 256/call; returns `nextHeight` + `moreAvailable` for pagination across pruning gaps)
 - `get_transaction` — Look up transaction by hash

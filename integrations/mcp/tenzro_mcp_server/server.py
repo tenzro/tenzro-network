@@ -8,6 +8,7 @@ coordinate agent swarms, and more.
 
 from fastmcp import FastMCP
 from .rpc_client import rpc_call, api_call
+from typing import Any
 import json
 
 mcp = FastMCP("Tenzro Network")
@@ -165,7 +166,11 @@ async def send_self_custody_transaction(
 
 @mcp.tool
 async def request_faucet(address: str) -> dict:
-    """Request 100 testnet TNZO tokens from the faucet (24h cooldown per address)."""
+    """Request testnet TNZO from the faucet (24h cooldown per address).
+
+    The per-request amount comes from the node's genesis faucet config and is
+    reported back as ``amount_wei``.
+    """
     result = await rpc_call("tenzro_faucet", {"address": address})
     return result
 
@@ -961,21 +966,21 @@ async def settle_payment(
     return result
 
 
-def _release_conditions_payload(release_conditions: str) -> dict:
+def _release_conditions_payload(release_conditions: str) -> Any:
     """Map a release-condition keyword to the typed payload expected by the VM."""
     key = release_conditions.lower()
     if key in ("timeout",):
-        return {"type": "Timeout"}
+        return "Timeout"
     if key in ("provider", "provider_signature"):
-        return {"type": "ProviderSignature"}
+        return "ProviderSignature"
     if key in ("consumer", "consumer_signature"):
-        return {"type": "ConsumerSignature"}
+        return "ConsumerSignature"
     if key in ("both", "both_signatures"):
-        return {"type": "BothSignatures"}
+        return "BothSignatures"
     if key in ("verifier", "verifier_signature"):
-        return {"type": "VerifierSignature"}
+        return "VerifierSignature"
     if key == "custom":
-        return {"type": "Custom", "data": ""}
+        return {"Custom": {"condition": ""}}
     raise ValueError(
         f"unsupported release condition '{release_conditions}': use "
         "timeout|provider|consumer|both|verifier|custom"
@@ -1024,14 +1029,13 @@ async def create_escrow(
     conditions = _release_conditions_payload(release_conditions)
     nonce, chain_id = await _fetch_nonce_and_chain_id(payer)
     tx_type = {
-        "type": "CreateEscrow",
-        "data": {
+        "CreateEscrow": {
             "payee": payee,
             "amount": str(amount),
             "asset_id": asset,
             "expires_at": int(expires_at),
             "release_conditions": conditions,
-        },
+        }
     }
     result = await rpc_call(
         "tenzro_signAndSendTransaction",
@@ -1067,13 +1071,13 @@ async def release_escrow(
         proof_bytes = list(bytes.fromhex(clean))
     nonce, chain_id = await _fetch_nonce_and_chain_id(payer)
     tx_type = {
-        "type": "ReleaseEscrow",
-        "data": {
+        "ReleaseEscrow": {
             "escrow_id": escrow_id_bytes,
             "proof": {
-                "proof_type": "Timeout",
+                "proof_type": "Cryptographic",
                 "proof_data": proof_bytes,
                 "signatures": [],
+                "attestation": None,
             },
         },
     }
@@ -1103,10 +1107,7 @@ async def refund_escrow(payer: str, escrow_id: str) -> dict:
     """
     escrow_id_bytes = _parse_escrow_id(escrow_id)
     nonce, chain_id = await _fetch_nonce_and_chain_id(payer)
-    tx_type = {
-        "type": "RefundEscrow",
-        "data": {"escrow_id": escrow_id_bytes},
-    }
+    tx_type = {"RefundEscrow": {"escrow_id": escrow_id_bytes}}
     result = await rpc_call(
         "tenzro_signAndSendTransaction",
         {

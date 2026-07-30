@@ -792,19 +792,18 @@ async fn execute_faucet(cmd: FaucetCmd) -> Result<()> {
     match result {
         Ok(resp) => {
             println!();
-            output::print_success("Tokens received!");
+            output::print_success("Faucet transaction submitted");
             output::print_field("Address", &cmd.address);
-            if let Some(amount) = resp.get("amount").and_then(|v| v.as_str()) {
-                output::print_field("Amount", &format!("{} TNZO", amount));
-            } else {
-                output::print_field("Amount", "100 TNZO");
+            if let Some(amount) = rpc::faucet_amount(&resp) {
+                output::print_field("Amount", &rpc::format_tnzo(amount));
             }
-            if let Some(tx) = resp.get("transaction_hash").and_then(|v| v.as_str()) {
+            if let Some(tx) = resp.get("tx_hash").and_then(|v| v.as_str()) {
                 output::print_field("Transaction", tx);
             }
-            if let Some(cooldown) = resp.get("next_available").and_then(|v| v.as_str()) {
-                output::print_field("Next Available", cooldown);
-            }
+            output::print_info(&format!(
+                "Queued for consensus. Run `tenzro wallet balance --address {}` to confirm it landed.",
+                cmd.address
+            ));
         }
         Err(e) => output::print_error(&format!("Faucet request failed: {}", e)),
     }
@@ -1652,8 +1651,13 @@ async fn wallet_menu(rpc: &rpc::RpcClient) -> Result<()> {
         3 => {
             let addr: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Address").interact_text()?;
             let result: serde_json::Value = rpc.call("tenzro_faucet", serde_json::json!({ "address": addr })).await?;
-            output::print_success("Tokens received!");
-            output::print_field("Amount", result.get("amount").and_then(|v| v.as_str()).unwrap_or("100 TNZO"));
+            output::print_success("Faucet transaction submitted");
+            if let Some(amount) = rpc::faucet_amount(&result) {
+                output::print_field("Amount", &rpc::format_tnzo(amount));
+            }
+            if let Some(tx) = result.get("tx_hash").and_then(|v| v.as_str()) {
+                output::print_field("Transaction", tx);
+            }
         }
         4 => {
             let accounts: Vec<serde_json::Value> = rpc.call("tenzro_listAccounts", serde_json::json!([])).await.unwrap_or_default();

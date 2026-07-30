@@ -259,7 +259,7 @@ fn main() -> Result<()> {
          balance = 1000000\n\n\
          [faucet]\n\
          address = \"0000000000000000000000000000000000000000000000000000000000ffffff\"\n\
-         amount_per_request = 100\n\
+         amount_per_request = 2000\n\
          cooldown_seconds = 86400\n\
          enabled = true\n",
     );

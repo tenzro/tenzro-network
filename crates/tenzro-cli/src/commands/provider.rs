@@ -43,7 +43,12 @@ impl ProviderCommand {
 ///
 /// Providers must post a compute bond before they can register via
 /// `tenzro provider register`. The bond is held in a deterministic vault
-/// derived from the provider DID and is returnable after a 7-day cooldown.
+/// derived from the provider DID and is returnable after a cooldown; run
+/// `tenzro provider bond params` for the node's minimum and cooldown length.
+///
+/// `post` / `increase` / `withdraw` / `finalize` submit native transactions —
+/// the vault transfer and the on-chain marker land in the same block. `get` /
+/// `list` / `params` read the off-chain model the admission check consults.
 #[derive(Debug, Subcommand)]
 pub enum BondCommand {
     /// Post a new compute bond
@@ -54,8 +59,12 @@ pub enum BondCommand {
     Get(BondGetCmd),
     /// List all compute bonds on the node
     List(BondListCmd),
-    /// Initiate withdrawal (or finalize once cooldown elapses)
+    /// Initiate withdrawal, starting the cooldown
     Withdraw(BondWithdrawCmd),
+    /// Release the vault back to the provider once the cooldown has elapsed
+    Finalize(BondFinalizeCmd),
+    /// Show the admission dials: minimum bond and cooldown length
+    Params(BondParamsCmd),
 }
 
 impl BondCommand {
@@ -66,8 +75,74 @@ impl BondCommand {
             Self::Get(cmd) => cmd.execute().await,
             Self::List(cmd) => cmd.execute().await,
             Self::Withdraw(cmd) => cmd.execute().await,
+            Self::Finalize(cmd) => cmd.execute().await,
+            Self::Params(cmd) => cmd.execute().await,
         }
     }
+}
+
+const BOND_POST_GAS: u64 = 80_000;
+const BOND_INCREASE_GAS: u64 = 60_000;
+const BOND_WITHDRAW_GAS: u64 = 50_000;
+const BOND_FINALIZE_GAS: u64 = 60_000;
+
+/// Native transactions carry their payload in `tx_type`, so `to` is unused.
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Query nonce + chain_id for the sender.
+async fn fetch_nonce_and_chain_id(rpc: &crate::rpc::RpcClient, address: &str) -> (u64, u64) {
+    let nonce = rpc
+        .call::<serde_json::Value>("eth_getTransactionCount", serde_json::json!([address, "latest"]))
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(crate::rpc::parse_hex_u64))
+        .unwrap_or(0);
+    let chain_id = rpc
+        .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(crate::rpc::parse_hex_u64))
+        .unwrap_or(1337);
+    (nonce, chain_id)
+}
+
+fn extract_tx_hash(result: &serde_json::Value) -> String {
+    result
+        .get("tx_hash")
+        .or_else(|| result.get("transaction_hash"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| result.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+/// Sign and submit a compute-bond transaction from `address`.
+///
+/// The bond RPCs are read-only; every mutation goes through consensus so the
+/// vault transfer and the on-chain marker land in the same block.
+async fn submit_bond_tx(
+    rpc: &crate::rpc::RpcClient,
+    address: &str,
+    gas_limit: u64,
+    tx_type: serde_json::Value,
+) -> Result<String> {
+    let (nonce, chain_id) = fetch_nonce_and_chain_id(rpc, address).await;
+    let result: serde_json::Value = rpc
+        .call(
+            "tenzro_signAndSendTransaction",
+            serde_json::json!({
+                "from": address,
+                "to": ZERO_ADDRESS,
+                "value": 0u64,
+                "gas_limit": gas_limit,
+                "gas_price": 1_000_000_000u64,
+                "nonce": nonce,
+                "chain_id": chain_id,
+                "tx_type": tx_type,
+            }),
+        )
+        .await?;
+    Ok(extract_tx_hash(&result))
 }
 
 fn print_compute_bond_state(state: &serde_json::Value) {
@@ -128,20 +203,23 @@ impl BondPostCmd {
 
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let spinner = output::create_spinner("Posting compute bond...");
-        let state: serde_json::Value = rpc
-            .call(
-                "tenzro_postComputeBond",
-                serde_json::json!([{
+        let tx_hash = submit_bond_tx(
+            &rpc,
+            &self.address,
+            BOND_POST_GAS,
+            serde_json::json!({
+                "PostComputeBond": {
                     "provider_did": self.did,
-                    "provider_address": self.address,
                     "amount": amount_wei,
-                }]),
-            )
-            .await?;
+                }
+            }),
+        )
+        .await?;
         spinner.finish_and_clear();
-        output::print_success("Compute bond posted");
+        output::print_success("PostComputeBond transaction submitted");
         println!();
-        print_compute_bond_state(&state);
+        output::print_field("Transaction Hash", &tx_hash);
+        output::print_info("Run `tenzro provider bond get` once the block finalizes to see the bond state.");
         Ok(())
     }
 }
@@ -151,6 +229,10 @@ pub struct BondIncreaseCmd {
     /// Provider DID
     #[arg(long)]
     did: String,
+
+    /// Provider wallet address (32-byte hex; must match the bond's payout address)
+    #[arg(long)]
+    address: String,
 
     /// Additional amount in TNZO
     #[arg(long)]
@@ -171,19 +253,22 @@ impl BondIncreaseCmd {
 
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let spinner = output::create_spinner("Increasing compute bond...");
-        let state: serde_json::Value = rpc
-            .call(
-                "tenzro_increaseComputeBond",
-                serde_json::json!([{
+        let tx_hash = submit_bond_tx(
+            &rpc,
+            &self.address,
+            BOND_INCREASE_GAS,
+            serde_json::json!({
+                "IncreaseComputeBond": {
                     "provider_did": self.did,
                     "amount": amount_wei,
-                }]),
-            )
-            .await?;
+                }
+            }),
+        )
+        .await?;
         spinner.finish_and_clear();
-        output::print_success("Compute bond increased");
+        output::print_success("IncreaseComputeBond transaction submitted");
         println!();
-        print_compute_bond_state(&state);
+        output::print_field("Transaction Hash", &tx_hash);
         Ok(())
     }
 }
@@ -269,6 +354,10 @@ pub struct BondWithdrawCmd {
     #[arg(long)]
     did: String,
 
+    /// Provider wallet address (32-byte hex; must match the bond's payout address)
+    #[arg(long)]
+    address: String,
+
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc: String,
@@ -277,26 +366,91 @@ pub struct BondWithdrawCmd {
 impl BondWithdrawCmd {
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Withdraw Compute Bond");
-        output::print_info("Active → Cooldown initiates a 7-day unbonding window. Re-run after the cooldown elapses to finalize and reclaim funds.");
+        output::print_info("Active → Cooldown starts the unbonding window. The vault stays funded — and stays slashable — until the cooldown elapses.");
         println!();
 
         let rpc = crate::rpc::RpcClient::new(&self.rpc);
         let spinner = output::create_spinner("Submitting withdrawal...");
-        let state: serde_json::Value = rpc
-            .call(
-                "tenzro_withdrawComputeBond",
-                serde_json::json!([{ "provider_did": self.did }]),
-            )
+        let tx_hash = submit_bond_tx(
+            &rpc,
+            &self.address,
+            BOND_WITHDRAW_GAS,
+            serde_json::json!({
+                "WithdrawComputeBond": { "provider_did": self.did }
+            }),
+        )
+        .await?;
+        spinner.finish_and_clear();
+        output::print_success("WithdrawComputeBond transaction submitted");
+        println!();
+        output::print_field("Transaction Hash", &tx_hash);
+        output::print_info("Run `tenzro provider bond finalize` once the cooldown deadline passes to reclaim the vault.");
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct BondParamsCmd {
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl BondParamsCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Compute Bond Parameters");
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Fetching bond parameters...");
+        let params: serde_json::Value = rpc
+            .call("tenzro_computeBondParams", serde_json::json!([]))
             .await?;
         spinner.finish_and_clear();
-        let status = state.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-        match status {
-            "Cooldown" => output::print_success("Withdrawal initiated — bond is in 7-day cooldown"),
-            "Returned" => output::print_success("Bond returned to provider"),
-            other => output::print_warning(&format!("Unexpected post-withdraw status: {}", other)),
+        if let Some(v) = params.get("min_bond_wei").and_then(|v| v.as_str()) {
+            output::print_field("Minimum Bond (wei)", v);
         }
+        if let Some(v) = params.get("cooldown_ms").and_then(|v| v.as_u64()) {
+            output::print_field("Cooldown", &format!("{} ms ({:.1} days)", v, v as f64 / 86_400_000.0));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+pub struct BondFinalizeCmd {
+    /// Provider DID
+    #[arg(long)]
+    did: String,
+
+    /// Provider wallet address (32-byte hex; must match the bond's payout address)
+    #[arg(long)]
+    address: String,
+
+    /// RPC endpoint
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    rpc: String,
+}
+
+impl BondFinalizeCmd {
+    pub async fn execute(&self) -> Result<()> {
+        output::print_header("Finalize Compute Bond Withdrawal");
+        output::print_info("Releases the vault balance back to the provider wallet. The cooldown deadline is checked against the block timestamp.");
         println!();
-        print_compute_bond_state(&state);
+
+        let rpc = crate::rpc::RpcClient::new(&self.rpc);
+        let spinner = output::create_spinner("Submitting finalization...");
+        let tx_hash = submit_bond_tx(
+            &rpc,
+            &self.address,
+            BOND_FINALIZE_GAS,
+            serde_json::json!({
+                "FinalizeComputeBondWithdrawal": { "provider_did": self.did }
+            }),
+        )
+        .await?;
+        spinner.finish_and_clear();
+        output::print_success("FinalizeComputeBondWithdrawal transaction submitted");
+        println!();
+        output::print_field("Transaction Hash", &tx_hash);
         Ok(())
     }
 }

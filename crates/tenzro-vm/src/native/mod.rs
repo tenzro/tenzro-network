@@ -106,6 +106,18 @@ pub const SELECTOR_PAY_INSURANCE_CLAIM: [u8; 4] = [0x01, 0x00, 0x00, 0x23];
 // `pub` so the node-side encoder in `convert_transaction` can synthesise the
 // dispatch payload from `SignedTransaction::X402Settle`.
 pub const SELECTOR_X402_SETTLE: [u8; 4] = [0x01, 0x00, 0x00, 0x24];
+// Compute-bond selectors. Every non-validator provider rung — model, compute,
+// TEE, storage, RPC — admits registration only against an Active bond whose
+// amount meets `ProviderType::required_stake` for the declared capacity. The
+// bond is real locked TNZO in a derived vault, on the same consensus path as
+// AgentBond. Exposed `pub` so the node-side encoder in `convert_transaction`
+// can synthesise dispatch payloads from
+// `SignedTransaction::{PostComputeBond,IncreaseComputeBond,WithdrawComputeBond,
+// FinalizeComputeBondWithdrawal}`.
+pub const SELECTOR_POST_COMPUTE_BOND: [u8; 4] = [0x01, 0x00, 0x00, 0x25];
+pub const SELECTOR_INCREASE_COMPUTE_BOND: [u8; 4] = [0x01, 0x00, 0x00, 0x26];
+pub const SELECTOR_WITHDRAW_COMPUTE_BOND: [u8; 4] = [0x01, 0x00, 0x00, 0x27];
+pub const SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL: [u8; 4] = [0x01, 0x00, 0x00, 0x28];
 // Dynamic validator-set selectors. Permissionless join / voluntary exit /
 // metadata update. Authorization, churn caps, and state-machine transitions
 // live in `tenzro_token::ValidatorRegistry` (the on-chain source of truth);
@@ -161,6 +173,17 @@ const GAS_KILLSWITCH_TERMINATE: u64 = 120_000;
 const GAS_BOND_POST: u64 = 80_000;
 const GAS_BOND_INCREASE: u64 = 50_000;
 const GAS_BOND_WITHDRAW: u64 = 60_000;
+// Compute-bond gas costs — same shape and same state footprint as the
+// AgentBond writes, so the same prices apply.
+const GAS_COMPUTE_BOND_POST: u64 = 80_000;
+const GAS_COMPUTE_BOND_INCREASE: u64 = 50_000;
+const GAS_COMPUTE_BOND_WITHDRAW: u64 = 60_000;
+// Finalizing a withdrawal moves the vault balance back to the provider and
+// clears the marker — one extra balance write over the withdraw path.
+const GAS_COMPUTE_BOND_FINALIZE: u64 = 70_000;
+// Cooldown between initiating a compute-bond withdrawal and being able to
+// finalize it. Must match `tenzro_token::compute_bond::DEFAULT_COMPUTE_BOND_COOLDOWN_MS`.
+const COMPUTE_BOND_COOLDOWN_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 // InsurancePool payouts: governance-approved, settled on-chain. Heavier than
 // bond ops because they cross from singleton pool vault into a user wallet
 // and persist a per-claim marker to make double-pay impossible.
@@ -211,6 +234,10 @@ const KILLSWITCH_RECEIPT_DOMAIN: &[u8] = b"tenzro/killswitch/receipt";
 // Domain-separated hash prefix for AgentBond vault address derivation.
 // Must match `tenzro_token::bond::derive_bond_vault_address`.
 const AGENT_BOND_VAULT_DOMAIN: &[u8] = b"tenzro/agent-bond/vault";
+
+// Domain-separated hash prefix for compute-bond vault address derivation.
+// Must match `tenzro_token::compute_bond::derive_compute_bond_vault_address`.
+const COMPUTE_BOND_VAULT_DOMAIN: &[u8] = b"tenzro/compute-bond/vault";
 
 // Domain-separated hash prefix for the singleton InsurancePool vault address.
 // Must match `tenzro_token::bond::derive_insurance_pool_address`.
@@ -2042,6 +2069,527 @@ impl NativeExecutor {
         ))
     }
 
+    // ---- Compute-bond handlers ---------------------------------------------
+
+    /// Handle a `PostComputeBond` native transaction.
+    ///
+    /// Decodes a JSON-encoded `PostComputeBondPayload`. Verifies the
+    /// provider wallet (`tx.from`) holds enough TNZO, debits gas + bond
+    /// amount, credits the deterministic per-provider vault, persists a
+    /// marker at `SYSTEM_ADDRESS/compute_bond:<provider_did>`, and emits a
+    /// `ComputeBondPosted` log so the node-side post-execute scan can
+    /// update its `ComputeBondManager`.
+    ///
+    /// `tx.from` becomes the bond's payout address — the wallet that
+    /// receives the funds back when a withdrawal finalises.
+    async fn execute_post_compute_bond(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_COMPUTE_BOND_POST)?;
+
+        let payload: PostComputeBondPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid PostComputeBond payload: {}", e))
+            })?;
+
+        validate_compute_bond_provider_did(&payload.provider_did)?;
+        if payload.amount == 0 {
+            return Err(VmError::InvalidTransaction(
+                "compute bond amount must be > 0".to_string(),
+            ));
+        }
+
+        // Reject if a non-terminal bond marker already exists.
+        let storage_key = compute_bond_storage_key(&payload.provider_did);
+        if state
+            .get_storage(&SYSTEM_ADDRESS, storage_key.as_bytes())
+            .is_some()
+        {
+            return Err(VmError::InvalidTransaction(format!(
+                "provider {} already has a compute bond — use IncreaseComputeBond",
+                payload.provider_did
+            )));
+        }
+
+        let gas_cost = tx.gas_price.saturating_mul(GAS_COMPUTE_BOND_POST as u128);
+        let total_cost = payload
+            .amount
+            .checked_add(gas_cost)
+            .ok_or_else(|| VmError::Internal("compute bond post cost overflow".to_string()))?;
+
+        let payer_balance = state.get_balance(&tx.from);
+        if payer_balance < total_cost {
+            return Err(VmError::InsufficientBalance {
+                required: total_cost,
+                available: payer_balance,
+            });
+        }
+        let new_payer_balance = payer_balance.saturating_sub(total_cost);
+        state.set_balance(&tx.from, new_payer_balance);
+
+        // Privileged credit to the bond vault.
+        let vault_addr = derive_compute_bond_vault_address(&payload.provider_did);
+        let vault_bytes = vault_addr.as_bytes().to_vec();
+        let old_vault_balance = state.get_balance(&vault_bytes);
+        let new_vault_balance = old_vault_balance
+            .checked_add(payload.amount)
+            .ok_or_else(|| VmError::Internal("compute bond vault overflow".to_string()))?;
+        state.set_balance(&vault_bytes, new_vault_balance);
+
+        let marker = serde_json::json!({
+            "provider_did": payload.provider_did,
+            "provider_address": hex::encode(&tx.from),
+            "amount": payload.amount.to_string(),
+            "vault": hex::encode(vault_addr.as_bytes()),
+            "op": "Posted",
+        });
+        let marker_blob = serde_json::to_vec(&marker)
+            .map_err(|e| VmError::Internal(format!("encode compute bond marker: {}", e)))?;
+        state.set_storage(&SYSTEM_ADDRESS, storage_key.as_bytes(), marker_blob.clone());
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(payer_balance.to_le_bytes().to_vec()),
+                Some(new_payer_balance.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                vault_bytes,
+                b"balance".to_vec(),
+                Some(old_vault_balance.to_le_bytes().to_vec()),
+                Some(new_vault_balance.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                storage_key.as_bytes().to_vec(),
+                None,
+                Some(marker_blob),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(old_nonce.to_le_bytes().to_vec()),
+                Some((old_nonce + 1).to_le_bytes().to_vec()),
+            ),
+        ];
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"ComputeBondPosted".to_vec()],
+            encode_compute_bond_log_data(
+                &payload.provider_did,
+                &tx.from,
+                payload.amount,
+                /*op_tag=Posted=*/ 0,
+                /*cooldown_until_ms=*/ 0,
+            ),
+        );
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            vault_addr.as_bytes().to_vec(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
+    /// Handle an `IncreaseComputeBond` native transaction. Top up an
+    /// existing Active bond. The marker stays at the same key; only the
+    /// `amount` field is rewritten (and the vault credited).
+    ///
+    /// Authorization: `tx.from` MUST equal the `provider_address` recorded
+    /// when the bond was posted — a third party cannot mutate the bond.
+    async fn execute_increase_compute_bond(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_COMPUTE_BOND_INCREASE)?;
+
+        let payload: IncreaseComputeBondPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid IncreaseComputeBond payload: {}", e))
+            })?;
+
+        validate_compute_bond_provider_did(&payload.provider_did)?;
+        if payload.amount == 0 {
+            return Err(VmError::InvalidTransaction(
+                "compute bond increase amount must be > 0".to_string(),
+            ));
+        }
+
+        let storage_key = compute_bond_storage_key(&payload.provider_did);
+        let prior_blob = state
+            .get_storage(&SYSTEM_ADDRESS, storage_key.as_bytes())
+            .ok_or_else(|| {
+                VmError::InvalidTransaction(format!(
+                    "no compute bond exists for provider {}",
+                    payload.provider_did
+                ))
+            })?;
+        let mut marker: serde_json::Value = serde_json::from_slice(&prior_blob)
+            .map_err(|e| VmError::Internal(format!("decode compute bond marker: {}", e)))?;
+
+        require_compute_bond_owner(&marker, &tx.from)?;
+
+        let prior_amount: u128 = marker
+            .get("amount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u128>().ok())
+            .ok_or_else(|| VmError::Internal("compute bond marker missing amount".to_string()))?;
+        let new_amount = prior_amount
+            .checked_add(payload.amount)
+            .ok_or_else(|| VmError::Internal("compute bond amount overflow".to_string()))?;
+
+        let gas_cost = tx
+            .gas_price
+            .saturating_mul(GAS_COMPUTE_BOND_INCREASE as u128);
+        let total_cost = payload
+            .amount
+            .checked_add(gas_cost)
+            .ok_or_else(|| VmError::Internal("compute bond increase cost overflow".to_string()))?;
+        let payer_balance = state.get_balance(&tx.from);
+        if payer_balance < total_cost {
+            return Err(VmError::InsufficientBalance {
+                required: total_cost,
+                available: payer_balance,
+            });
+        }
+        let new_payer_balance = payer_balance.saturating_sub(total_cost);
+        state.set_balance(&tx.from, new_payer_balance);
+
+        let vault_addr = derive_compute_bond_vault_address(&payload.provider_did);
+        let vault_bytes = vault_addr.as_bytes().to_vec();
+        let old_vault_balance = state.get_balance(&vault_bytes);
+        let new_vault_balance = old_vault_balance
+            .checked_add(payload.amount)
+            .ok_or_else(|| VmError::Internal("compute bond vault overflow".to_string()))?;
+        state.set_balance(&vault_bytes, new_vault_balance);
+
+        marker["amount"] = serde_json::Value::String(new_amount.to_string());
+        marker["op"] = serde_json::Value::String("Increased".to_string());
+        let marker_blob = serde_json::to_vec(&marker)
+            .map_err(|e| VmError::Internal(format!("encode compute bond marker: {}", e)))?;
+        state.set_storage(&SYSTEM_ADDRESS, storage_key.as_bytes(), marker_blob.clone());
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(payer_balance.to_le_bytes().to_vec()),
+                Some(new_payer_balance.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                vault_bytes,
+                b"balance".to_vec(),
+                Some(old_vault_balance.to_le_bytes().to_vec()),
+                Some(new_vault_balance.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                storage_key.as_bytes().to_vec(),
+                Some(prior_blob),
+                Some(marker_blob),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(old_nonce.to_le_bytes().to_vec()),
+                Some((old_nonce + 1).to_le_bytes().to_vec()),
+            ),
+        ];
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"ComputeBondIncreased".to_vec()],
+            encode_compute_bond_log_data(
+                &payload.provider_did,
+                &tx.from,
+                payload.amount,
+                /*op_tag=Increased=*/ 1,
+                /*cooldown_until_ms=*/ 0,
+            ),
+        );
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            new_amount.to_le_bytes().to_vec(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
+    /// Handle a `WithdrawComputeBond` native transaction. Initiates the
+    /// cooldown timer and records the deadline on the marker. The vault
+    /// stays funded (and slashable) for the whole cooldown; the transfer
+    /// back to the provider wallet happens in a separate
+    /// `FinalizeComputeBondWithdrawal` transaction once the deadline passes.
+    ///
+    /// Authorization: `tx.from` MUST equal the recorded `provider_address`.
+    async fn execute_withdraw_compute_bond(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_COMPUTE_BOND_WITHDRAW)?;
+
+        let payload: WithdrawComputeBondPayload =
+            serde_json::from_slice(&tx.data[4..]).map_err(|e| {
+                VmError::InvalidTransaction(format!("Invalid WithdrawComputeBond payload: {}", e))
+            })?;
+
+        validate_compute_bond_provider_did(&payload.provider_did)?;
+
+        let storage_key = compute_bond_storage_key(&payload.provider_did);
+        let prior_blob = state
+            .get_storage(&SYSTEM_ADDRESS, storage_key.as_bytes())
+            .ok_or_else(|| {
+                VmError::InvalidTransaction(format!(
+                    "no compute bond exists for provider {}",
+                    payload.provider_did
+                ))
+            })?;
+        let mut marker: serde_json::Value = serde_json::from_slice(&prior_blob)
+            .map_err(|e| VmError::Internal(format!("decode compute bond marker: {}", e)))?;
+
+        require_compute_bond_owner(&marker, &tx.from)?;
+
+        let prior_op = marker.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        if !matches!(prior_op, "Posted" | "Increased") {
+            return Err(VmError::InvalidTransaction(format!(
+                "cannot withdraw compute bond in {} state",
+                prior_op
+            )));
+        }
+
+        // Pay gas only — the bond stays in the vault until the cooldown
+        // elapses and the node-side ComputeBondManager releases it.
+        let gas_cost = tx
+            .gas_price
+            .saturating_mul(GAS_COMPUTE_BOND_WITHDRAW as u128);
+        let payer_balance = state.get_balance(&tx.from);
+        if payer_balance < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: payer_balance,
+            });
+        }
+        let new_payer_balance = payer_balance.saturating_sub(gas_cost);
+        state.set_balance(&tx.from, new_payer_balance);
+
+        // The deadline is derived from the block timestamp so every
+        // replica computes the same value; `FinalizeComputeBondWithdrawal`
+        // reads it back rather than consulting a local clock.
+        let cooldown_until_ms =
+            deterministic_now_ms(tx).saturating_add(COMPUTE_BOND_COOLDOWN_MS);
+        marker["op"] = serde_json::Value::String("WithdrawInitiated".to_string());
+        marker["cooldown_until_ms"] = serde_json::Value::String(cooldown_until_ms.to_string());
+        let marker_blob = serde_json::to_vec(&marker)
+            .map_err(|e| VmError::Internal(format!("encode compute bond marker: {}", e)))?;
+        state.set_storage(&SYSTEM_ADDRESS, storage_key.as_bytes(), marker_blob.clone());
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let amount: u128 = marker
+            .get("amount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u128>().ok())
+            .unwrap_or(0);
+
+        let state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(payer_balance.to_le_bytes().to_vec()),
+                Some(new_payer_balance.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                storage_key.as_bytes().to_vec(),
+                Some(prior_blob),
+                Some(marker_blob),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(old_nonce.to_le_bytes().to_vec()),
+                Some((old_nonce + 1).to_le_bytes().to_vec()),
+            ),
+        ];
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"ComputeBondWithdrawInitiated".to_vec()],
+            encode_compute_bond_log_data(
+                &payload.provider_did,
+                &tx.from,
+                amount,
+                /*op_tag=WithdrawInitiated=*/ 2,
+                cooldown_until_ms,
+            ),
+        );
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            payload.provider_did.as_bytes().to_vec(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
+    /// Handle a `FinalizeComputeBondWithdrawal` native transaction. Pays
+    /// the vault balance back to the provider once the cooldown deadline
+    /// recorded by `WithdrawComputeBond` has passed.
+    ///
+    /// Authorization: `tx.from` MUST equal the recorded `provider_address`.
+    async fn execute_finalize_compute_bond_withdrawal(
+        &self,
+        tx: &VmTransaction,
+        state: &mut dyn VmState,
+        gas_meter: &mut GasMeter,
+    ) -> Result<ExecutionResult> {
+        gas_meter.consume(GAS_COMPUTE_BOND_FINALIZE)?;
+
+        let payload: FinalizeComputeBondWithdrawalPayload = serde_json::from_slice(&tx.data[4..])
+            .map_err(|e| {
+                VmError::InvalidTransaction(format!(
+                    "Invalid FinalizeComputeBondWithdrawal payload: {}",
+                    e
+                ))
+            })?;
+
+        validate_compute_bond_provider_did(&payload.provider_did)?;
+
+        let storage_key = compute_bond_storage_key(&payload.provider_did);
+        let prior_blob = state
+            .get_storage(&SYSTEM_ADDRESS, storage_key.as_bytes())
+            .ok_or_else(|| {
+                VmError::InvalidTransaction(format!(
+                    "no compute bond exists for provider {}",
+                    payload.provider_did
+                ))
+            })?;
+        let mut marker: serde_json::Value = serde_json::from_slice(&prior_blob)
+            .map_err(|e| VmError::Internal(format!("decode compute bond marker: {}", e)))?;
+
+        require_compute_bond_owner(&marker, &tx.from)?;
+
+        let prior_op = marker.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        if prior_op != "WithdrawInitiated" {
+            return Err(VmError::InvalidTransaction(format!(
+                "cannot finalize compute bond withdrawal in {} state",
+                prior_op
+            )));
+        }
+
+        let cooldown_until_ms: i64 = marker
+            .get("cooldown_until_ms")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i64>().ok())
+            .ok_or_else(|| {
+                VmError::Internal(
+                    "compute bond marker is missing cooldown_until_ms".to_string(),
+                )
+            })?;
+        let now_ms = deterministic_now_ms(tx);
+        if now_ms < cooldown_until_ms {
+            return Err(VmError::InvalidTransaction(format!(
+                "compute bond cooldown has not elapsed ({} ms remaining)",
+                cooldown_until_ms.saturating_sub(now_ms)
+            )));
+        }
+
+        let vault_addr = derive_compute_bond_vault_address(&payload.provider_did);
+        let vault_bytes = vault_addr.as_bytes().to_vec();
+        let vault_balance = state.get_balance(&vault_bytes);
+
+        let gas_cost = tx
+            .gas_price
+            .saturating_mul(GAS_COMPUTE_BOND_FINALIZE as u128);
+        let payer_balance = state.get_balance(&tx.from);
+        if payer_balance < gas_cost {
+            return Err(VmError::InsufficientBalance {
+                required: gas_cost,
+                available: payer_balance,
+            });
+        }
+
+        // Gas out, vault balance in — both land on the provider address.
+        let new_payer_balance = payer_balance
+            .saturating_sub(gas_cost)
+            .saturating_add(vault_balance);
+        state.set_balance(&tx.from, new_payer_balance);
+        state.set_balance(&vault_bytes, 0);
+
+        marker["op"] = serde_json::Value::String("Returned".to_string());
+        marker["amount"] = serde_json::Value::String("0".to_string());
+        let marker_blob = serde_json::to_vec(&marker)
+            .map_err(|e| VmError::Internal(format!("encode compute bond marker: {}", e)))?;
+        state.set_storage(&SYSTEM_ADDRESS, storage_key.as_bytes(), marker_blob.clone());
+
+        let old_nonce = state.get_nonce(&tx.from);
+        state.set_nonce(&tx.from, old_nonce + 1);
+
+        let state_changes = vec![
+            StateChange::new(
+                tx.from.clone(),
+                b"balance".to_vec(),
+                Some(payer_balance.to_le_bytes().to_vec()),
+                Some(new_payer_balance.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                vault_bytes,
+                b"balance".to_vec(),
+                Some(vault_balance.to_le_bytes().to_vec()),
+                Some(0u128.to_le_bytes().to_vec()),
+            ),
+            StateChange::new(
+                SYSTEM_ADDRESS.to_vec(),
+                storage_key.as_bytes().to_vec(),
+                Some(prior_blob),
+                Some(marker_blob),
+            ),
+            StateChange::new(
+                tx.from.clone(),
+                b"nonce".to_vec(),
+                Some(old_nonce.to_le_bytes().to_vec()),
+                Some((old_nonce + 1).to_le_bytes().to_vec()),
+            ),
+        ];
+
+        let log = Log::new(
+            SYSTEM_ADDRESS.to_vec(),
+            vec![b"ComputeBondReturned".to_vec()],
+            encode_compute_bond_log_data(
+                &payload.provider_did,
+                &tx.from,
+                vault_balance,
+                /*op_tag=Returned=*/ 3,
+                cooldown_until_ms,
+            ),
+        );
+
+        Ok(ExecutionResult::success(
+            gas_meter.final_used(),
+            vault_balance.to_le_bytes().to_vec(),
+            vec![log],
+            state_changes,
+        ))
+    }
+
     /// Handle a `PayInsuranceClaim` native transaction. Debits the
     /// singleton InsurancePool vault and credits the claimant address.
     ///
@@ -3216,6 +3764,42 @@ struct WithdrawAgentBondPayload {
     agent_did: String,
 }
 
+// ---- Compute-bond payloads --------------------------------------------------
+
+/// JSON payload decoded from `tx.data[4..]` for `PostComputeBond`.
+///
+/// `tx.from` is the payer and becomes the bond's payout address, so the
+/// wire payload carries no provider address to disagree with it.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PostComputeBondPayload {
+    provider_did: String,
+    amount: u128,
+}
+
+/// JSON payload decoded from `tx.data[4..]` for `IncreaseComputeBond`.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct IncreaseComputeBondPayload {
+    provider_did: String,
+    amount: u128,
+}
+
+/// JSON payload decoded from `tx.data[4..]` for `WithdrawComputeBond`.
+/// Starts the cooldown timer; the funds stay in the vault (and stay
+/// slashable) until `ComputeBondManager::finalize_withdrawal` releases them.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct WithdrawComputeBondPayload {
+    provider_did: String,
+}
+
+/// JSON payload decoded from `tx.data[4..]` for
+/// `FinalizeComputeBondWithdrawal`. Releases the vault balance back to the
+/// provider once the cooldown deadline recorded by `WithdrawComputeBond`
+/// has passed.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct FinalizeComputeBondWithdrawalPayload {
+    provider_did: String,
+}
+
 /// JSON payload decoded from `tx.data[4..]` for `PayInsuranceClaim`.
 ///
 /// Settles an `Approved` insurance claim on-chain. The off-chain
@@ -3350,6 +3934,101 @@ fn derive_bond_vault_address(agent_did: &str) -> Address {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     Address::new(out)
+}
+
+/// Storage key for a compute-bond marker under `SYSTEM_ADDRESS`:
+/// `compute_bond:<provider_did>`. The node-side `ComputeBondManager` reads
+/// these markers post-block to update its cache + RocksDB write-through.
+fn compute_bond_storage_key(provider_did: &str) -> String {
+    format!("compute_bond:{}", provider_did)
+}
+
+/// Encode the data field of a compute-bond `Log`:
+/// `provider_did_len_le(4) || provider_did_bytes || addr_len_le(4) ||
+///  provider_address_bytes || amount_le(16) || op_tag(1) ||
+///  cooldown_until_ms_le(8)` where
+/// `op_tag ∈ {0=Posted, 1=Increased, 2=WithdrawInitiated, 3=Returned}`.
+///
+/// The second field is the raw payout address (`tx.from`), not a DID.
+///
+/// `cooldown_until_ms` is the block-timestamp-derived deadline written on the
+/// marker by `WithdrawComputeBond`, and is 0 for every other op. The node-side
+/// read model adopts this value verbatim rather than deriving one from a local
+/// clock, so a replica with clock skew still reports the deadline the chain
+/// will enforce.
+fn encode_compute_bond_log_data(
+    provider_did: &str,
+    provider_address: &[u8],
+    amount: u128,
+    op_tag: u8,
+    cooldown_until_ms: i64,
+) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(4 + provider_did.len() + 4 + provider_address.len() + 16 + 1 + 8);
+    out.extend_from_slice(&(provider_did.len() as u32).to_le_bytes());
+    out.extend_from_slice(provider_did.as_bytes());
+    out.extend_from_slice(&(provider_address.len() as u32).to_le_bytes());
+    out.extend_from_slice(provider_address);
+    out.extend_from_slice(&amount.to_le_bytes());
+    out.push(op_tag);
+    out.extend_from_slice(&cooldown_until_ms.to_le_bytes());
+    out
+}
+
+/// Validate a `provider_did` for compute-bond ops.
+fn validate_compute_bond_provider_did(provider_did: &str) -> Result<()> {
+    if provider_did.is_empty() {
+        return Err(VmError::InvalidTransaction(
+            "compute bond provider_did must not be empty".to_string(),
+        ));
+    }
+    if provider_did.len() > 256 {
+        return Err(VmError::InvalidTransaction(format!(
+            "compute bond provider_did too long: {} bytes (max 256)",
+            provider_did.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Derive the deterministic vault address for a compute bond:
+/// `Address(SHA-256("tenzro/compute-bond/vault" || provider_did))`.
+///
+/// MUST match `tenzro_token::compute_bond::derive_compute_bond_vault_address`
+/// byte-for-byte — the ComputeBondManager and the VM handlers cooperate on
+/// the same vault.
+fn derive_compute_bond_vault_address(provider_did: &str) -> Address {
+    let mut hasher = Sha256::new();
+    hasher.update(COMPUTE_BOND_VAULT_DOMAIN);
+    hasher.update(provider_did.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    Address::new(out)
+}
+
+/// Enforce that `from` is the payout address recorded on the bond marker.
+///
+/// Increase and withdraw are authorized on-chain rather than deferred to the
+/// node-side encoder: the marker records the payer that funded the vault, and
+/// only that address may add to it or start its cooldown.
+fn require_compute_bond_owner(marker: &serde_json::Value, from: &[u8]) -> Result<()> {
+    let owner = marker
+        .get("provider_address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            VmError::InvalidTransaction(
+                "compute bond marker is missing provider_address".to_string(),
+            )
+        })?;
+    let caller = hex::encode(from);
+    if !owner.eq_ignore_ascii_case(&caller) {
+        return Err(VmError::InvalidTransaction(format!(
+            "compute bond is owned by 0x{} — 0x{} may not modify it",
+            owner, caller
+        )));
+    }
+    Ok(())
 }
 
 /// Derive the deterministic singleton InsurancePool vault address:
@@ -3624,6 +4303,19 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_WITHDRAW_AGENT_BOND => {
                 self.execute_withdraw_agent_bond(tx, state, &mut gas_meter).await
             }
+            SELECTOR_POST_COMPUTE_BOND => {
+                self.execute_post_compute_bond(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_INCREASE_COMPUTE_BOND => {
+                self.execute_increase_compute_bond(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_WITHDRAW_COMPUTE_BOND => {
+                self.execute_withdraw_compute_bond(tx, state, &mut gas_meter).await
+            }
+            SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL => {
+                self.execute_finalize_compute_bond_withdrawal(tx, state, &mut gas_meter)
+                    .await
+            }
             SELECTOR_PAY_INSURANCE_CLAIM => {
                 self.execute_pay_insurance_claim(tx, state, &mut gas_meter).await
             }
@@ -3728,6 +4420,10 @@ impl VmExecutor for NativeExecutor {
             SELECTOR_POST_AGENT_BOND => GAS_BOND_POST,
             SELECTOR_INCREASE_AGENT_BOND => GAS_BOND_INCREASE,
             SELECTOR_WITHDRAW_AGENT_BOND => GAS_BOND_WITHDRAW,
+            SELECTOR_POST_COMPUTE_BOND => GAS_COMPUTE_BOND_POST,
+            SELECTOR_INCREASE_COMPUTE_BOND => GAS_COMPUTE_BOND_INCREASE,
+            SELECTOR_WITHDRAW_COMPUTE_BOND => GAS_COMPUTE_BOND_WITHDRAW,
+            SELECTOR_FINALIZE_COMPUTE_BOND_WITHDRAWAL => GAS_COMPUTE_BOND_FINALIZE,
             SELECTOR_PAY_INSURANCE_CLAIM => GAS_PAY_INSURANCE_CLAIM,
             SELECTOR_X402_SETTLE => GAS_X402_SETTLE,
             SELECTOR_VALIDATOR_REGISTER => GAS_VALIDATOR_REGISTER,

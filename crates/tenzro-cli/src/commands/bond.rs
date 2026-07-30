@@ -124,8 +124,7 @@ impl BondPostCmd {
         spinner.set_message("Signing PostAgentBond transaction...");
 
         let tx_type = serde_json::json!({
-            "type": "PostAgentBond",
-            "data": {
+            "PostAgentBond": {
                 "agent_did": self.agent_did,
                 "controller_did": self.controller_did,
                 "amount": self.amount.to_string(),
@@ -191,8 +190,7 @@ impl BondIncreaseCmd {
         spinner.set_message("Signing IncreaseAgentBond transaction...");
 
         let tx_type = serde_json::json!({
-            "type": "IncreaseAgentBond",
-            "data": {
+            "IncreaseAgentBond": {
                 "agent_did": self.agent_did,
                 "amount": self.amount.to_string(),
             }
@@ -252,8 +250,7 @@ impl BondWithdrawCmd {
         spinner.set_message("Signing WithdrawAgentBond transaction...");
 
         let tx_type = serde_json::json!({
-            "type": "WithdrawAgentBond",
-            "data": {
+            "WithdrawAgentBond": {
                 "agent_did": self.agent_did,
             }
         });

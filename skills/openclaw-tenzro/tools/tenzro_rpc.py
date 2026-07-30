@@ -664,7 +664,10 @@ def send_self_custody_transaction(from_addr: str, to_addr: str, value: int,
 
 
 def request_faucet(address: str) -> dict:
-    """Request testnet TNZO from the faucet (100 TNZO, 24h cooldown).
+    """Request testnet TNZO from the faucet (24h cooldown per address).
+
+    The per-request amount is set by the node's genesis faucet config and comes
+    back as ``amount_wei``.
 
     Use the hex public key (from create_wallet 'address' field) as the address.
     """
@@ -3816,21 +3819,21 @@ def get_settlement(settlement_id: str) -> dict:
     return _rpc("tenzro_getSettlement", {"settlement_id": settlement_id})
 
 
-def _release_conditions_payload(kind: str) -> dict:
+def _release_conditions_payload(kind: str) -> Any:
     """Map a short release-condition keyword to the on-chain ReleaseConditions enum payload."""
     k = (kind or "timeout").lower()
     if k == "timeout":
-        return {"type": "Timeout"}
+        return "Timeout"
     if k in ("provider", "provider_signature"):
-        return {"type": "ProviderSignature"}
+        return "ProviderSignature"
     if k in ("consumer", "consumer_signature"):
-        return {"type": "ConsumerSignature"}
+        return "ConsumerSignature"
     if k in ("both", "both_signatures"):
-        return {"type": "BothSignatures"}
+        return "BothSignatures"
     if k in ("verifier", "verifier_signature"):
-        return {"type": "VerifierSignature"}
+        return "VerifierSignature"
     if k == "custom":
-        return {"type": "Custom", "data": ""}
+        return {"Custom": {"condition": ""}}
     raise ValueError(
         f"unsupported release condition '{kind}': use timeout|provider|consumer|both|verifier|custom"
     )
@@ -3876,14 +3879,13 @@ def create_escrow(payer: str, payee: str, amount_wei: int,
     """
     nonce, chain_id = _fetch_nonce_and_chain_id(payer)
     tx_type = {
-        "type": "CreateEscrow",
-        "data": {
+        "CreateEscrow": {
             "payee": payee,
             "amount": str(amount_wei),
             "asset_id": asset_id,
             "expires_at": expires_at_ms,
             "release_conditions": _release_conditions_payload(release_conditions),
-        },
+        }
     }
     params = {
         "from": payer,
@@ -3916,15 +3918,15 @@ def release_escrow(payer: str, escrow_id_hex: str,
 
     nonce, chain_id = _fetch_nonce_and_chain_id(payer)
     tx_type = {
-        "type": "ReleaseEscrow",
-        "data": {
+        "ReleaseEscrow": {
             "escrow_id": escrow_id_bytes,
             "proof": {
-                "proof_type": "Timeout",
+                "proof_type": "Cryptographic",
                 "proof_data": proof_bytes,
                 "signatures": [],
+                "attestation": None,
             },
-        },
+        }
     }
     params = {
         "from": payer,
@@ -3950,10 +3952,7 @@ def refund_escrow(payer: str, escrow_id_hex: str) -> dict:
         raise ValueError(f"escrow_id must be 32 bytes, got {len(escrow_id_bytes)}")
 
     nonce, chain_id = _fetch_nonce_and_chain_id(payer)
-    tx_type = {
-        "type": "RefundEscrow",
-        "data": {"escrow_id": escrow_id_bytes},
-    }
+    tx_type = {"RefundEscrow": {"escrow_id": escrow_id_bytes}}
     params = {
         "from": payer,
         "to": "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -7415,12 +7414,11 @@ def post_agent_bond(controller_address: str, agent_did: str,
     """
     nonce, chain_id = _fetch_nonce_and_chain_id(controller_address)
     tx_type = {
-        "type": "PostAgentBond",
-        "data": {
+        "PostAgentBond": {
             "agent_did": agent_did,
             "controller_did": controller_did,
             "amount": str(amount_wei),
-        },
+        }
     }
     params = {
         "from": controller_address,
@@ -7445,11 +7443,10 @@ def increase_agent_bond(controller_address: str, agent_did: str,
     """
     nonce, chain_id = _fetch_nonce_and_chain_id(controller_address)
     tx_type = {
-        "type": "IncreaseAgentBond",
-        "data": {
+        "IncreaseAgentBond": {
             "agent_did": agent_did,
             "amount": str(amount_wei),
-        },
+        }
     }
     params = {
         "from": controller_address,
@@ -7472,10 +7469,7 @@ def withdraw_agent_bond(controller_address: str, agent_did: str) -> dict:
     OAuth/DPoP auth — `controller_address` must equal the bond's controller.
     """
     nonce, chain_id = _fetch_nonce_and_chain_id(controller_address)
-    tx_type = {
-        "type": "WithdrawAgentBond",
-        "data": {"agent_did": agent_did},
-    }
+    tx_type = {"WithdrawAgentBond": {"agent_did": agent_did}}
     params = {
         "from": controller_address,
         "to": "0x0000000000000000000000000000000000000000000000000000000000000000",

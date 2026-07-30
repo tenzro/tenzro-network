@@ -263,17 +263,22 @@ pub fn build_agent_card(a2a_addr: &str, node_role: &str) -> AgentCard {
                 id: "staking".to_string(),
                 name: "Staking & Provider Management".to_string(),
                 description: "Stake TNZO tokens, manage validator/provider registration, \
-                              and query provider performance statistics."
+                              and query provider performance statistics. Provider registration \
+                              is gated on a compute bond — admission collateral held in a vault \
+                              derived from the provider DID — so the provider view also reports \
+                              the node's minimum bond and withdrawal cooldown."
                     .to_string(),
                 tags: vec![
                     "staking".to_string(),
                     "provider".to_string(),
                     "validator".to_string(),
+                    "compute-bond".to_string(),
                 ],
                 examples: vec![
                     "How much TNZO is staked?".to_string(),
                     "Register as a model provider".to_string(),
                     "Get provider statistics".to_string(),
+                    "What compute bond does this node require?".to_string(),
                 ],
                 input_modes: vec!["text/plain".to_string()],
                 output_modes: vec!["text/plain".to_string(), "application/json".to_string()],

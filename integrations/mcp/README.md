@@ -132,7 +132,7 @@ The RAR types the authorization server accepts are `transfer`, `create_escrow`, 
 - `create_wallet` — Provision a chain-agnostic 2-of-3 FROST-Ed25519 (RFC 9591) threshold wallet (no seed phrase). Tenzro wallets are not per-chain — a single wallet projects into EVM, SVM, and Canton via the pointer-token model, so there is no `chain` parameter. Use `cross_vm_transfer` / `wrap_tnzo` for VM-specific operations and the bridge tools (`bridge_tokens`, deBridge, Wormhole, Li.Fi) for sends to external chains.
 - `send_transaction` — Send TNZO transfer via server-side `tenzro_signAndSendTransaction` (live nonce + gas-price lookup; accepts `value` or `amount` alias; rejects self-sends with `cannot transfer to self`)
 - `send_self_custody_transaction` — Submit a transaction the caller signed itself. The node never sees the private key; it verifies the supplied signature against the transaction hash and broadcasts.
-- `request_faucet` — Request 100 testnet TNZO (24h cooldown)
+- `request_faucet` — Request testnet TNZO (24h cooldown). The amount is set by the node's genesis faucet config and reported in the response.
 - `token_balance` — Get TNZO balance via token subsystem
 - `total_supply` — Get total TNZO supply
 

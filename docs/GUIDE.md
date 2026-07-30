@@ -264,7 +264,7 @@ tenzro join --provider
 
 Against the running local node this provisions an identity and wallet,
 detects your hardware (CPU, RAM, GPUs, TEE), funds the wallet from the
-testnet faucet if needed, posts the 100 TNZO compute bond, registers you as
+testnet faucet if needed, posts the 1,000 TNZO compute bond, registers you as
 a model provider with default per-token pricing, and downloads + serves the
 largest catalog model that fits the machine. Your node advertises its
 capacity on the provider gossip topic automatically; inference demand routes

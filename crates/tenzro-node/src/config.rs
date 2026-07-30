@@ -109,7 +109,7 @@ impl GenesisConfig {
             accounts: Vec::new(),
             faucet: Some(FaucetConfig {
                 address: "0".repeat(64),
-                amount_per_request: 100,
+                amount_per_request: 2_000,
                 cooldown_seconds: 86400,
                 enabled: true,
             }),

@@ -129,14 +129,15 @@ against the DPoP-bound bearer JWT) or build + sign locally and submit via
 ```rust
 // Ambient auth: caller sets TENZRO_BEARER_JWT + TENZRO_DPOP_PROOF before
 // invoking the SDK; the node resolves the signer from the JWT's FROST-Ed25519 threshold wallet.
+// `tx_type` uses serde's externally-tagged enum form — the variant name is the
+// key. Unit variants such as `ReleaseConditions::Timeout` are bare strings.
 let tx_type = serde_json::json!({
-    "type": "CreateEscrow",
-    "data": {
+    "CreateEscrow": {
         "payee": payee_address,
         "amount": amount.to_string(),
         "asset_id": "TNZO",
         "expires_at": expires_at_ms,
-        "release_conditions": { "type": "Timeout" },
+        "release_conditions": "Timeout",
     },
 });
 

@@ -490,12 +490,12 @@ impl EscrowCreateCmd {
         output::print_header("Create Escrow");
 
         let release_conditions = match self.release.to_lowercase().as_str() {
-            "timeout" => serde_json::json!({ "type": "Timeout" }),
-            "provider" => serde_json::json!({ "type": "ProviderSignature" }),
-            "consumer" => serde_json::json!({ "type": "ConsumerSignature" }),
-            "both" => serde_json::json!({ "type": "BothSignatures" }),
-            "verifier" => serde_json::json!({ "type": "VerifierSignature" }),
-            "custom" => serde_json::json!({ "type": "Custom", "data": "" }),
+            "timeout" => serde_json::json!("Timeout"),
+            "provider" => serde_json::json!("ProviderSignature"),
+            "consumer" => serde_json::json!("ConsumerSignature"),
+            "both" => serde_json::json!("BothSignatures"),
+            "verifier" => serde_json::json!("VerifierSignature"),
+            "custom" => serde_json::json!({ "Custom": { "condition": "" } }),
             other => anyhow::bail!(
                 "unsupported release condition kind '{}': use timeout|provider|consumer|both|verifier|custom",
                 other
@@ -510,8 +510,7 @@ impl EscrowCreateCmd {
 
         // The `tx_type` field is parsed server-side as `TransactionType::CreateEscrow`.
         let tx_type = serde_json::json!({
-            "type": "CreateEscrow",
-            "data": {
+            "CreateEscrow": {
                 "payee": self.payee,
                 "amount": self.amount.to_string(),
                 "asset_id": self.asset,
@@ -606,13 +605,13 @@ impl EscrowReleaseCmd {
         spinner.set_message("Signing ReleaseEscrow transaction...");
 
         let tx_type = serde_json::json!({
-            "type": "ReleaseEscrow",
-            "data": {
+            "ReleaseEscrow": {
                 "escrow_id": escrow_id_bytes.to_vec(),
                 "proof": {
-                    "proof_type": "Timeout",
+                    "proof_type": "Cryptographic",
                     "proof_data": proof_data,
-                    "signatures": []
+                    "signatures": [],
+                    "attestation": null
                 }
             }
         });
@@ -680,8 +679,7 @@ impl EscrowRefundCmd {
         spinner.set_message("Signing RefundEscrow transaction...");
 
         let tx_type = serde_json::json!({
-            "type": "RefundEscrow",
-            "data": { "escrow_id": escrow_id_bytes.to_vec() }
+            "RefundEscrow": { "escrow_id": escrow_id_bytes.to_vec() }
         });
 
         let result: serde_json::Value = rpc.call(

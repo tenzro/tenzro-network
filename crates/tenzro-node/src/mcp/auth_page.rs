@@ -2,11 +2,13 @@
 //! Matches the Tenzro website design language: olive monochromatic OKLCH palette,
 //! Inter font, sharp borders (no radius), minimal and geometric.
 
-/// Renders the OAuth authorization page.
+/// Renders the OAuth authorization page. `seed_tnzo` is the whole-TNZO grant a
+/// newly provisioned identity receives, read from the node's faucet config.
 pub fn render_authorize_page(
     client_name: &str,
     scope: &str,
     session_token: &str,
+    seed_tnzo: u128,
 ) -> String {
     let scope_tags: String = scope
         .split_whitespace()
@@ -174,7 +176,7 @@ pub fn render_authorize_page(
             <div class="info-box">
                 A Tenzro identity and wallet will be provisioned for you
                 automatically if you don't have one yet. You'll receive
-                100 testnet TNZO to get started.
+                {seed_tnzo} testnet TNZO to get started.
             </div>
 
             <div class="detail">

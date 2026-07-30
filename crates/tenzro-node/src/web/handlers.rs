@@ -79,7 +79,7 @@ impl WebState {
             faucet_rate_limit: Mutex::new(HashMap::new()),
             faucet_ip_rate_limit: Mutex::new(HashMap::new()),
             faucet_address: None,
-            faucet_amount: 100,
+            faucet_amount: 2_000,
             faucet_cooldown_secs: 86400, // 24 hours
             frost_coordinator: super::wallet_frost::FrostCoordinator::new(),
             share_escrow: super::wallet_share::ShareEscrow::new(),

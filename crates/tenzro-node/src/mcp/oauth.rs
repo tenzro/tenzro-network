@@ -441,7 +441,12 @@ pub async fn authorize_handler(
             .insert(format!("state:{}", session_token), s.clone());
     }
 
-    let html = auth_page::render_authorize_page(&client_name, scope, &session_token);
+    let html = auth_page::render_authorize_page(
+        &client_name,
+        scope,
+        &session_token,
+        state.web_state.faucet_amount,
+    );
     Html(html).into_response()
 }
 
@@ -663,7 +668,12 @@ async fn handle_auth_code_grant(state: Arc<OAuthState>, req: TokenRequest) -> Re
         return oauth_error("invalid_grant", "PKCE verification failed");
     }
 
-    let (did, address) = match provision_or_retrieve_identity(&state.node, &session.client_id).await
+    let (did, address) = match provision_or_retrieve_identity(
+        &state.node,
+        &session.client_id,
+        state.web_state.faucet_amount,
+    )
+    .await
     {
         Ok(r) => r,
         Err(e) => {
@@ -1062,9 +1072,14 @@ fn render_scope(details: &AuthorizationDetails) -> String {
 
 // ─── Identity Provisioning ───────────────────────────────────────────────────
 
+/// Provision (or look up) the TDIP identity behind an OAuth client, seeding a
+/// fresh one with `seed_tnzo` whole TNZO from the genesis faucet account so the
+/// user can pay gas on their first call. The seed tracks the node's configured
+/// faucet grant rather than a figure of its own.
 async fn provision_or_retrieve_identity(
     node: &TenzroNode,
     client_id: &str,
+    seed_tnzo: u128,
 ) -> std::result::Result<(String, String), NodeError> {
     let storage = node
         .storage()
@@ -1115,9 +1130,9 @@ async fn provision_or_retrieve_identity(
         if let Ok(Some(faucet_bytes)) = storage.get("metadata", faucet_key)
             && let Ok(faucet_hex) = String::from_utf8(faucet_bytes)
                 && let Ok(faucet_addr) = tenzro_types::primitives::Address::from_hex(&faucet_hex) {
-                    let amount = 100u128 * 10u128.pow(18);
+                    let amount = seed_tnzo.saturating_mul(10u128.pow(18));
                     match token.transfer(&faucet_addr, &identity.wallet_address, amount) {
-                        Ok(_) => tracing::info!(did = %did, "Funded new OAuth user with 100 TNZO"),
+                        Ok(_) => tracing::info!(did = %did, tnzo = seed_tnzo, "Funded new OAuth user"),
                         Err(e) => {
                             tracing::warn!(error = %e, "Failed to fund new OAuth user from faucet")
                         }

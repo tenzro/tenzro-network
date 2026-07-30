@@ -749,6 +749,12 @@ pub struct GetProviderStatsParams {
     pub address: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetComputeBondParams {
+    #[schemars(description = "Provider DID the bond is posted against (e.g. did:tenzro:machine:...). If omitted, lists every compute bond on the node")]
+    pub provider_did: Option<String>,
+}
+
 // ─── Task Marketplace Params ───
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -960,7 +966,8 @@ pub struct GetAgentTemplateStatsParams {
 ///     get_model_hash, list_model_hashes, download_model
 ///   - Payments: create_payment_challenge, verify_payment, list_payment_protocols
 ///   - Bridge: bridge_tokens, get_bridge_routes, list_bridge_adapters
-///   - Staking & Providers: stake_tokens, unstake_tokens, register_provider, get_provider_stats
+///   - Staking & Providers: stake_tokens, unstake_tokens, register_provider, get_provider_stats,
+///     get_compute_bond
 ///   - Network: get_node_status, get_block, get_block_range, get_transaction, get_fee_market, get_svm_cross_vm_program_info
 ///   - Verification: verify_zk_proof
 ///   - Agent Spawning & Swarms: spawn_agent, run_agent_task, create_swarm, get_swarm_status, terminate_swarm
@@ -5145,7 +5152,7 @@ impl TenzroMcpServer {
         Ok(Json(SendTransactionOutput { result }))
     }
 
-    #[tool(description = "Request testnet TNZO tokens from the faucet (100 TNZO per request, 24-hour cooldown per address)")]
+    #[tool(description = "Request testnet TNZO tokens from the faucet. The per-request amount and cooldown come from the node's genesis faucet config; the response reports the amount dispensed.")]
     async fn request_faucet(
         &self,
         Parameters(params): Parameters<RequestFaucetParams>,
@@ -8683,6 +8690,37 @@ impl TenzroMcpServer {
         }))
     }
 
+    #[tool(description = "Read compute bonds — the admission collateral a provider must post before register_provider will accept it. Pass provider_did for one bond, or omit it to list every bond on the node. Always returns the node's minimum bond and withdrawal cooldown so a caller can see what admission requires.")]
+    async fn get_compute_bond(
+        &self,
+        Parameters(params): Parameters<GetComputeBondParams>,
+    ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
+        let manager = self
+            .node
+            .compute_bond_manager()
+            .ok_or_else(|| err_internal("ComputeBondManager not initialized"))?;
+
+        let bonds = match params.provider_did {
+            Some(did) => manager
+                .get(&did)
+                .iter()
+                .map(crate::rpc::compute_bond_state_to_json)
+                .collect::<Vec<_>>(),
+            None => manager
+                .list()
+                .iter()
+                .map(crate::rpc::compute_bond_state_to_json)
+                .collect::<Vec<_>>(),
+        };
+
+        json_result(serde_json::json!({
+            "count": bonds.len(),
+            "bonds": bonds,
+            "min_bond_wei": manager.min_bond().to_string(),
+            "cooldown_ms": manager.cooldown_ms(),
+        }))
+    }
+
     // ─── Task Marketplace ───
 
     #[tool(description = "Post a new task to the Tenzro Network task marketplace. Returns the created task with its UUID. Tasks can request AI inference, code review, data analysis, content generation, agent execution, translation, or research.")]
@@ -9681,12 +9719,12 @@ impl TenzroMcpServer {
             "amount_wei must be a wei decimal string (1 TNZO = 10^18 wei)"
         ))?;
         let release_conditions = match params.release_condition.to_lowercase().as_str() {
-            "timeout" => serde_json::json!({ "type": "Timeout" }),
-            "provider" | "provider_signature" => serde_json::json!({ "type": "ProviderSignature" }),
-            "consumer" | "consumer_signature" => serde_json::json!({ "type": "ConsumerSignature" }),
-            "both" | "both_signatures" => serde_json::json!({ "type": "BothSignatures" }),
-            "verifier" | "verifier_signature" => serde_json::json!({ "type": "VerifierSignature" }),
-            "custom" => serde_json::json!({ "type": "Custom", "data": "" }),
+            "timeout" => serde_json::json!("Timeout"),
+            "provider" | "provider_signature" => serde_json::json!("ProviderSignature"),
+            "consumer" | "consumer_signature" => serde_json::json!("ConsumerSignature"),
+            "both" | "both_signatures" => serde_json::json!("BothSignatures"),
+            "verifier" | "verifier_signature" => serde_json::json!("VerifierSignature"),
+            "custom" => serde_json::json!({ "Custom": { "condition": "" } }),
             other => return Err(err_internal(format!(
                 "unsupported release_condition '{}'", other
             ))),
@@ -9709,8 +9747,7 @@ impl TenzroMcpServer {
             .unwrap_or(1337);
 
         let tx_type = serde_json::json!({
-            "type": "CreateEscrow",
-            "data": {
+            "CreateEscrow": {
                 "payee": params.payee,
                 "amount": amount_atto.to_string(),
                 "asset_id": "TNZO",
@@ -9775,13 +9812,13 @@ impl TenzroMcpServer {
             .unwrap_or(1337);
 
         let tx_type = serde_json::json!({
-            "type": "ReleaseEscrow",
-            "data": {
+            "ReleaseEscrow": {
                 "escrow_id": escrow_id_bytes,
                 "proof": {
-                    "proof_type": "Timeout",
+                    "proof_type": "Cryptographic",
                     "proof_data": proof_bytes,
-                    "signatures": []
+                    "signatures": [],
+                    "attestation": null
                 }
             }
         });
@@ -9833,8 +9870,7 @@ impl TenzroMcpServer {
             .unwrap_or(1337);
 
         let tx_type = serde_json::json!({
-            "type": "RefundEscrow",
-            "data": { "escrow_id": escrow_id_bytes }
+            "RefundEscrow": { "escrow_id": escrow_id_bytes }
         });
         let send_params = serde_json::json!({
             "from": params.payer,
@@ -17508,7 +17544,7 @@ impl ServerHandler for TenzroMcpServer {
              • get_balance — Query TNZO token balance\n\n\
              Transactions:\n\
              • send_transaction — Send TNZO transfer\n\
-             • request_faucet — Get 100 testnet TNZO\n\n\
+             • request_faucet — Get testnet TNZO\n\n\
              Identity (TDIP):\n\
              • register_identity — Register human or machine DID\n\
              • resolve_did — Resolve DID to identity data\n\
@@ -17640,7 +17676,8 @@ impl ServerHandler for TenzroMcpServer {
              • stake_tokens — Stake TNZO to earn rewards\n\
              • unstake_tokens — Unstake TNZO (7-day unbonding)\n\
              • register_provider — Register as AI/TEE/storage provider\n\
-             • get_provider_stats — Get provider performance metrics\n\n\
+             • get_provider_stats — Get provider performance metrics\n\
+             • get_compute_bond — Read compute bonds and the admission minimum\n\n\
              Provider Config:\n\
              • set_provider_schedule — Set a provider's availability schedule\n\
              • get_provider_schedule — Get a provider's current schedule\n\

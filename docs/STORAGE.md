@@ -8,7 +8,7 @@
 
 A node with spare disk can hold data for the network. Tenzro Storage is the protocol surface that turns that disk into a paid service: a consumer opens a deal for an object, the provider proves each epoch that it can still return the data, and TNZO moves one byte-epoch slice at a time from the consumer to the provider.
 
-Storage is a role a node takes on, not a separate network. A node that serves AI can hold data at the same time, and the one stake that backs serving a model also backs the storage it offers. There is no second bond. Storage shares the same coverage budget as compute rental — one stake, one set of obligations.
+Storage is a role a node takes on, not a separate network. A node that serves AI can hold data at the same time, and the one stake that backs serving a model also backs the storage it offers. There is no second coverage budget — storage shares the compute rental one, one stake, one set of obligations. A storage provider does post the same one-time admission bond every non-validator provider posts; see [`docs/COMPUTE.md`](COMPUTE.md) section 1.1.
 
 This document describes the object model, the deal lifecycle, the proof-of-retrievability gate, redundancy, the shared coverage budget, and the RPC / CLI / SDK surfaces.
 

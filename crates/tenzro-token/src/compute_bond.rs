@@ -157,7 +157,12 @@ pub struct ComputeBondManager {
     /// Optional persistence backend. When set, every mutation calls
     /// `write_batch_sync` for fsync durability.
     storage: Option<Arc<dyn KvStore>>,
-    /// Cooldown duration in milliseconds (governance-tunable).
+    /// Cooldown duration in milliseconds, advertised through
+    /// `tenzro_computeBondParams` so a provider knows how long a withdrawal
+    /// will sit before it can be finalized. The deadline actually enforced is
+    /// the one the VM derives from the block timestamp and writes onto the
+    /// on-chain marker, so this value must track
+    /// `COMPUTE_BOND_COOLDOWN_MS` in the native-VM handler.
     cooldown_ms: i64,
     /// Minimum bond required for a `register_provider` call. The
     /// `register_provider` RPC enforces this against the bonded amount.
@@ -343,13 +348,16 @@ impl ComputeBondManager {
         Ok(snapshot)
     }
 
-    /// Initiate withdrawal. Active → Cooldown. Cooldown timer set to
-    /// `now + cooldown_ms`. Caller must invoke `finalize_withdrawal`
-    /// once the cooldown timer expires to mark the bond Returned and
-    /// trigger the VM-layer credit back to the provider.
+    /// Initiate withdrawal. Active → Cooldown.
+    ///
+    /// `cooldown_until_ms` is the deadline the VM derived from the block
+    /// timestamp and wrote onto the on-chain marker. It is adopted verbatim so
+    /// this read model reports the deadline the chain will actually enforce,
+    /// regardless of local clock skew.
     pub fn withdraw(
         &self,
         provider_did: &str,
+        cooldown_until_ms: i64,
         block_height: u64,
     ) -> Result<ComputeBondState> {
         let mut bond_ref = self
@@ -363,7 +371,7 @@ impl ComputeBondManager {
             )));
         }
         let now = Timestamp::now();
-        let cooldown_until = Timestamp::new(now.0.saturating_add(self.cooldown_ms));
+        let cooldown_until = Timestamp::new(cooldown_until_ms);
         bond_ref.status = ComputeBondStatus::Cooldown;
         bond_ref.cooldown_until = Some(cooldown_until);
         bond_ref.last_modified_block = block_height;
@@ -382,9 +390,13 @@ impl ComputeBondManager {
         Ok(snapshot)
     }
 
-    /// Mark a Cooldown bond as Returned once cooldown has elapsed. The
-    /// VM-layer credit back to the provider's wallet is the caller's
-    /// responsibility (transactional with this call).
+    /// Mark a Cooldown bond as Returned.
+    ///
+    /// The cooldown deadline is enforced by the VM against the block timestamp
+    /// before the `ComputeBondReturned` log this reflects is ever emitted, so
+    /// there is no clock check here — re-checking against a node-local clock
+    /// would let a skewed replica reject a transition the chain has already
+    /// made and diverge this read model from state.
     pub fn finalize_withdrawal(
         &self,
         provider_did: &str,
@@ -398,17 +410,6 @@ impl ComputeBondManager {
             return Err(TokenError::InvalidParameter(format!(
                 "cannot finalize compute bond withdrawal: status is {}",
                 bond_ref.status.as_str()
-            )));
-        }
-        let cooldown_until = bond_ref.cooldown_until.ok_or_else(|| {
-            TokenError::InvalidParameter(
-                "cooldown compute bond missing cooldown_until".to_string(),
-            )
-        })?;
-        if Timestamp::now() < cooldown_until {
-            return Err(TokenError::InvalidParameter(format!(
-                "cooldown not yet elapsed (until {:?})",
-                cooldown_until
             )));
         }
         bond_ref.status = ComputeBondStatus::Returned;
@@ -579,10 +580,9 @@ mod tests {
     fn post_after_returned_succeeds() {
         // After a Returned terminal state, a fresh post is allowed —
         // mirror semantics for re-registration after a complete unbond.
-        let m = ComputeBondManager::new().with_governance(0, 0);
+        let m = ComputeBondManager::new();
         m.post("p1", addr(1), 100, 1).unwrap();
-        m.withdraw("p1", 2).unwrap();
-        // Cooldown is 0ms so finalize is immediate.
+        m.withdraw("p1", 0, 2).unwrap();
         m.finalize_withdrawal("p1", 3).unwrap();
         assert!(m.post("p1", addr(1), 200, 4).is_ok());
         assert_eq!(m.get("p1").unwrap().amount, 200);
@@ -594,7 +594,7 @@ mod tests {
         m.post("p1", addr(1), 100, 1).unwrap();
         m.increase("p1", 50, 2).unwrap();
         assert_eq!(m.get("p1").unwrap().amount, 150);
-        m.withdraw("p1", 3).unwrap();
+        m.withdraw("p1", 0, 3).unwrap();
         assert!(m.increase("p1", 50, 4).is_err());
     }
 
@@ -603,17 +603,35 @@ mod tests {
         let m = ComputeBondManager::new();
         m.post("p1", addr(1), 100, 1).unwrap();
         assert_eq!(m.effective_for_registration("p1"), 100);
-        m.withdraw("p1", 2).unwrap();
+        m.withdraw("p1", 0, 2).unwrap();
         assert_eq!(m.effective_for_registration("p1"), 0);
     }
 
     #[test]
-    fn finalize_rejects_before_cooldown_elapsed() {
+    fn finalize_requires_cooldown_status() {
+        // The cooldown deadline is enforced on-chain, so the only rejection
+        // left here is a bond that never entered Cooldown.
         let m = ComputeBondManager::new();
         m.post("p1", addr(1), 100, 1).unwrap();
-        m.withdraw("p1", 2).unwrap();
-        // Default cooldown is 7 days — finalize should reject.
-        assert!(m.finalize_withdrawal("p1", 3).is_err());
+        assert!(m.finalize_withdrawal("p1", 2).is_err());
+        m.withdraw("p1", 0, 3).unwrap();
+        m.finalize_withdrawal("p1", 4).unwrap();
+        // Returned is terminal — a second finalize rejects.
+        assert!(m.finalize_withdrawal("p1", 5).is_err());
+    }
+
+    #[test]
+    fn withdraw_adopts_chain_supplied_deadline() {
+        // The deadline comes from the VM's block-timestamp derivation, not
+        // from a node-local clock.
+        let m = ComputeBondManager::new();
+        m.post("p1", addr(1), 100, 1).unwrap();
+        let snap = m.withdraw("p1", 1_700_000_000_000, 2).unwrap();
+        assert_eq!(snap.status, ComputeBondStatus::Cooldown);
+        assert_eq!(
+            snap.cooldown_until.map(|t| t.as_millis()),
+            Some(1_700_000_000_000)
+        );
     }
 
     #[test]
@@ -672,9 +690,9 @@ mod tests {
 
     #[test]
     fn slash_rejects_cooldown_and_returned() {
-        let m = ComputeBondManager::new().with_governance(0, 0);
+        let m = ComputeBondManager::new();
         m.post("p1", addr(1), 100, 1).unwrap();
-        m.withdraw("p1", 2).unwrap();
+        m.withdraw("p1", 0, 2).unwrap();
         assert!(m.slash("p1", 10, "sla:probe_timeout", 3).is_err());
         m.finalize_withdrawal("p1", 4).unwrap();
         assert!(m.slash("p1", 10, "sla:probe_timeout", 5).is_err());

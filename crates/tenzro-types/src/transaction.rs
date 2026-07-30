@@ -358,6 +358,53 @@ pub enum TransactionType {
         /// DID of the agent whose bond is being withdrawn
         agent_did: String,
     },
+    /// Post a fresh compute bond for `provider_did`.
+    ///
+    /// Locks `amount` TNZO from `tx.from` (the provider wallet) into the
+    /// bond vault derived as
+    /// `Address(SHA-256("tenzro/compute-bond/vault" || provider_did))`.
+    /// Every non-validator provider rung — model, compute, TEE, storage,
+    /// RPC — admits registration only against an Active bond that meets
+    /// `ProviderType::required_stake` for the declared capacity.
+    ///
+    /// Authorization: `tx.from` is the provider wallet and becomes the
+    /// bond's payout address. The VM enforces that `provider_did` either
+    /// has no prior bond or its prior bond is in a terminal state.
+    PostComputeBond {
+        /// DID of the provider being bonded
+        provider_did: String,
+        /// Amount of TNZO to lock in the bond vault
+        amount: u128,
+    },
+    /// Top up an existing Active compute bond by `amount`.
+    ///
+    /// Authorization: `tx.from` MUST equal the bond's provider address.
+    IncreaseComputeBond {
+        /// DID of the provider whose bond is being increased
+        provider_did: String,
+        /// Additional TNZO to lock
+        amount: u128,
+    },
+    /// Initiate the cooldown timer on an Active compute bond. The vault stays
+    /// funded — and stays slashable — for the whole cooldown; the transfer back
+    /// to the provider wallet happens in a separate
+    /// `FinalizeComputeBondWithdrawal` transaction once the deadline passes.
+    ///
+    /// Authorization: `tx.from` MUST equal the bond's provider address.
+    WithdrawComputeBond {
+        /// DID of the provider whose bond is being withdrawn
+        provider_did: String,
+    },
+    /// Release a withdrawing compute bond's vault balance back to the provider
+    /// once the cooldown deadline recorded by `WithdrawComputeBond` has passed.
+    /// The deadline is compared against the block timestamp, so every replica
+    /// reaches the same decision.
+    ///
+    /// Authorization: `tx.from` MUST equal the bond's provider address.
+    FinalizeComputeBondWithdrawal {
+        /// DID of the provider whose bond is being released
+        provider_did: String,
+    },
     /// Pay out an `Approved` insurance claim from the insurance pool
     /// vault to the claimant. The off-chain `BondManager` has already
     /// validated the claim and reserved funds; this transaction performs

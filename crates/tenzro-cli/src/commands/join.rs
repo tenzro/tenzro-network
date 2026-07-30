@@ -292,11 +292,34 @@ impl JoinCmd {
     }
 }
 
-/// Compute bond for the model-provider rung: 1,000 TNZO in wei (matches
-/// `tenzro_types::constants::MIN_MODEL_PROVIDER_STAKE`, which
-/// `tenzro_registerProvider` gates admission on). `join --provider`
-/// registers as a model provider, so it posts that rung's bond.
-const COMPUTE_BOND_MIN_WEI: u128 = 1_000 * 1_000_000_000_000_000_000u128;
+/// Compute bond for the model-provider rung. `tenzro_registerProvider` gates
+/// admission on `ProviderType::required_stake`, which resolves to this
+/// constant for a model provider; `join --provider` registers as one, so it
+/// posts that rung's bond.
+const COMPUTE_BOND_MIN_WEI: u128 = tenzro_types::constants::MIN_MODEL_PROVIDER_STAKE;
+
+/// Gas budget for a `PostComputeBond` transaction.
+const COMPUTE_BOND_POST_GAS: u64 = 80_000;
+
+/// Native transactions carry their payload in `tx_type`, so `to` is unused.
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Query nonce + chain_id for the sender.
+async fn fetch_nonce_and_chain_id(rpc: &RpcClient, address: &str) -> (u64, u64) {
+    let nonce = rpc
+        .call::<serde_json::Value>("eth_getTransactionCount", serde_json::json!([address, "latest"]))
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(crate::rpc::parse_hex_u64))
+        .unwrap_or(0);
+    let chain_id = rpc
+        .call::<serde_json::Value>("eth_chainId", serde_json::json!([]))
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(crate::rpc::parse_hex_u64))
+        .unwrap_or(1337);
+    (nonce, chain_id)
+}
 
 /// Automatic provider provisioning against the node at `rpc`.
 ///
@@ -384,11 +407,22 @@ async fn run_provider_flow(
             "Posting compute bond ({})...",
             crate::rpc::format_tnzo(COMPUTE_BOND_MIN_WEI)
         ));
-        rpc.call::<serde_json::Value>("tenzro_postComputeBond", serde_json::json!([{
-            "provider_did": did,
-            "provider_address": wallet_address,
-            "amount": COMPUTE_BOND_MIN_WEI.to_string(),
-        }])).await
+        let (nonce, chain_id) = fetch_nonce_and_chain_id(rpc, wallet_address).await;
+        rpc.call::<serde_json::Value>("tenzro_signAndSendTransaction", serde_json::json!({
+            "from": wallet_address,
+            "to": ZERO_ADDRESS,
+            "value": 0u64,
+            "gas_limit": COMPUTE_BOND_POST_GAS,
+            "gas_price": 1_000_000_000u64,
+            "nonce": nonce,
+            "chain_id": chain_id,
+            "tx_type": {
+                "PostComputeBond": {
+                    "provider_did": did,
+                    "amount": COMPUTE_BOND_MIN_WEI.to_string(),
+                }
+            },
+        })).await
             .map_err(|e| anyhow::anyhow!("Compute bond failed: {}", e))?;
         spinner.finish_and_clear();
         output::print_success(&format!(

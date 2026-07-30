@@ -1139,8 +1139,7 @@ impl AgentPauseCmd {
         spinner.set_message("Signing PauseAgent transaction...");
 
         let tx_type = serde_json::json!({
-            "type": "PauseAgent",
-            "data": {
+            "PauseAgent": {
                 "agent_did": self.agent_did,
                 "controller_did": self.controller_did,
                 "reason_code": self.reason_code,
@@ -1233,8 +1232,7 @@ impl AgentQuarantineCmd {
         spinner.set_message("Signing QuarantineAgent transaction...");
 
         let tx_type = serde_json::json!({
-            "type": "QuarantineAgent",
-            "data": {
+            "QuarantineAgent": {
                 "agent_did": self.agent_did,
                 "controller_did": self.controller_did,
                 "reason_code": self.reason_code,
@@ -1317,8 +1315,7 @@ impl AgentTerminateCmd {
         spinner.set_message("Signing TerminateAgent transaction...");
 
         let tx_type = serde_json::json!({
-            "type": "TerminateAgent",
-            "data": {
+            "TerminateAgent": {
                 "agent_did": self.agent_did,
                 "controller_did": self.controller_did,
                 "reason_code": self.reason_code,

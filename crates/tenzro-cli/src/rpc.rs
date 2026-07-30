@@ -245,6 +245,16 @@ pub fn parse_hex_u64(hex: &str) -> u64 {
     u64::from_str_radix(hex, 16).unwrap_or(0)
 }
 
+/// Read the dispensed amount out of a `tenzro_faucet` response.
+///
+/// The node reports `amount_wei` as a decimal string; the amount is set by
+/// the genesis faucet config, so the client never assumes a figure of its own.
+pub fn faucet_amount(resp: &serde_json::Value) -> Option<u128> {
+    resp.get("amount_wei")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u128>().ok())
+}
+
 /// Format wei to TNZO (18 decimals)
 pub fn format_tnzo(wei: u128) -> String {
     let tnzo = wei as f64 / 1e18;
