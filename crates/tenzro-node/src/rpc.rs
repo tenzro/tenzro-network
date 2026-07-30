@@ -37457,6 +37457,26 @@ async fn handle_submit_daml_command(
 
     let adapter = canton_adapter_or_err(node)?;
 
+    // A participant with no connected synchronizer cannot sequence anything,
+    // and it reports that only as a generic submit failure — which reads to a
+    // caller exactly like a transient fault, so clients retry into a wall. Say
+    // so directly instead, reusing the `-32005` + `retry_after_ms` backoff
+    // convention the per-key budget uses so one SDK backoff path covers both.
+    if !adapter.ensure_synchronizer_connected().await {
+        return Err(JsonRpcError {
+            code: -32005,
+            message: format!(
+                "Canton participant has no connected synchronizer; \
+                 commands cannot be sequenced. Retry after {} ms",
+                tenzro_bridge::canton::SYNCHRONIZER_REPROBE_INTERVAL_MS
+            ),
+            data: Some(serde_json::json!({
+                "retry_after_ms": tenzro_bridge::canton::SYNCHRONIZER_REPROBE_INTERVAL_MS,
+                "reason": "no_connected_synchronizer",
+            })),
+        });
+    }
+
     // Resolve the `actAs` party for this submission. Precedence:
     //   1. Explicit `act_as` param (per-call override; used by
     //      per-agent spawning so contracts name the agent's allocated

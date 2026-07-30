@@ -98,7 +98,23 @@ pub struct CantonAdapter {
     /// answer. `config.synchronizer_ids` stays available as an optional
     /// pin that narrows the discovered set.
     discovered_synchronizer_ids: Arc<parking_lot::RwLock<Vec<String>>>,
+    /// Unix-millis of the last `/v2/state/connected-synchronizers` probe
+    /// issued by [`CantonAdapter::ensure_synchronizer_connected`]. Bounds
+    /// re-probing so a caller retrying against a disconnected participant
+    /// costs one Canton round-trip per
+    /// [`SYNCHRONIZER_REPROBE_INTERVAL_MS`], not one per request.
+    last_synchronizer_probe_ms: Arc<std::sync::atomic::AtomicI64>,
 }
+
+/// How often [`CantonAdapter::ensure_synchronizer_connected`] re-probes the
+/// participant once it has been observed with no connected synchronizer.
+///
+/// A participant that has lost its subscriptions retries them on its own, but
+/// it only recovers once whatever broke the path to the sequencers is repaired
+/// — which is operator work measured in minutes at best. Probing faster than
+/// this buys nothing while letting a retrying client turn each of its attempts
+/// into a Canton round-trip.
+pub const SYNCHRONIZER_REPROBE_INTERVAL_MS: i64 = 15_000;
 
 /// Decoded `TenzroBridge:Message` payload delivered via
 /// [`CantonAdapter::receive_message`].
@@ -149,6 +165,7 @@ impl CantonAdapter {
             resolved_act_as_party_fq: Arc::new(RwLock::new(None)),
             inbound_tx: Arc::new(RwLock::new(None)),
             discovered_synchronizer_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            last_synchronizer_probe_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         }
     }
 
@@ -184,6 +201,7 @@ impl CantonAdapter {
             resolved_act_as_party_fq: Arc::clone(&self.resolved_act_as_party_fq),
             inbound_tx: Arc::clone(&self.inbound_tx),
             discovered_synchronizer_ids: Arc::clone(&self.discovered_synchronizer_ids),
+            last_synchronizer_probe_ms: Arc::clone(&self.last_synchronizer_probe_ms),
         }
     }
 
@@ -228,6 +246,55 @@ impl CantonAdapter {
             .unwrap_or_default();
         *self.discovered_synchronizer_ids.write() = ids.clone();
         Ok(ids)
+    }
+
+    /// Reports whether the participant currently has at least one connected
+    /// synchronizer, i.e. whether a Daml command submitted now has any
+    /// chance of being sequenced.
+    ///
+    /// A participant with no connected synchronizer accepts the HTTP request
+    /// and then fails the command, so callers that only see the submit error
+    /// cannot tell a transient fault from a participant that will refuse
+    /// every command until an operator runs `synchronizers.reconnect_all()`.
+    /// Checking first lets the caller answer with that distinction instead of
+    /// a generic submit failure.
+    ///
+    /// Reads the discovered set rather than
+    /// [`Self::effective_synchronizer_ids`]: `config.synchronizer_ids` is a
+    /// filter that narrows what the participant reports, so an operator pin
+    /// says nothing about whether the participant is connected.
+    ///
+    /// The cached set is trusted while it is non-empty. Once it is empty the
+    /// participant is re-probed at most once per
+    /// [`SYNCHRONIZER_REPROBE_INTERVAL_MS`], so an operator-side reconnect is
+    /// picked up without a node restart and without letting a retrying
+    /// client turn every attempt into a Canton round-trip. A failed probe
+    /// reports "not connected" — the participant is unreachable either way.
+    pub async fn ensure_synchronizer_connected(&self) -> bool {
+        // Bind the result so the read guard is released before the probe
+        // below takes the write guard.
+        let already_connected = !self.discovered_synchronizer_ids.read().is_empty();
+        if already_connected {
+            return true;
+        }
+
+        let now_ms = Utc::now().timestamp_millis();
+        let last = self
+            .last_synchronizer_probe_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now_ms - last < SYNCHRONIZER_REPROBE_INTERVAL_MS {
+            return false;
+        }
+        self.last_synchronizer_probe_ms
+            .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+
+        match self.discover_synchronizers().await {
+            Ok(ids) => !ids.is_empty(),
+            Err(e) => {
+                warn!("Canton connected-synchronizer probe failed: {}", e);
+                false
+            }
+        }
     }
 
     /// Returns the reachable Canton synchronizers as `ChainInfo` records.
