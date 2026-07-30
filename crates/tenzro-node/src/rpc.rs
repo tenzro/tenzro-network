@@ -6828,23 +6828,27 @@ async fn handle_faucet(
             data: None,
         })?;
 
-    // Default 10,000 TNZO (= 10_000 * 10^18 wei); caller may request up
-    // to the same amount. This is the testnet starter-allotment so every
-    // new wallet has enough TNZO to actually use the network — chat with
-    // model providers, deposit for validation, contribute to training —
-    // without immediately running into a low-balance wall. Bumped from
-    // the historical 100/1000 defaults when Tenzro Studio's onboarding
-    // started auto-faucet'ing new wallets on creation. Per-address 24h
-    // cooldown (below) still rate-limits abuse.
+    // The grant is operator policy, resolved once from the same place the
+    // web `/faucet` endpoint reads it so the two surfaces cannot disagree.
+    // A caller may ask for less, never more. Per-address 24h cooldown
+    // (below) rate-limits repeat requests.
     //
-    // `amount_wei` accepts a u64 number (small values) or a decimal
-    // string (large values, since 10_000 TNZO = 10^22 wei overflows u64).
-    const DEFAULT_FAUCET_WEI: u128 = 10_000 * 1_000_000_000_000_000_000u128;
-    const MAX_FAUCET_WEI: u128 = 10_000 * 1_000_000_000_000_000_000u128;
+    // `amount_wei` accepts a u64 number (small values) or a decimal string
+    // (large values, since 1,000 TNZO = 10^21 wei overflows u64).
+    let grant_tnzo = crate::genesis::resolve_faucet_grant_tnzo(
+        node.config()
+            .genesis
+            .as_ref()
+            .and_then(|g| g.faucet.as_ref())
+            .map(|f| f.amount_per_request)
+            .unwrap_or(crate::genesis::FAUCET_MIN_GRANT_TNZO),
+    );
+    let max_faucet_wei: u128 = grant_tnzo * 1_000_000_000_000_000_000u128;
+    let default_faucet_wei: u128 = max_faucet_wei;
     let amount_wei: u128 = match params.get("amount_wei") {
         Some(v) => {
             if let Some(n) = v.as_u64() {
-                (n as u128).min(MAX_FAUCET_WEI)
+                (n as u128).min(max_faucet_wei)
             } else if let Some(s) = v.as_str() {
                 s.parse::<u128>()
                     .map_err(|_| JsonRpcError {
@@ -6852,7 +6856,7 @@ async fn handle_faucet(
                         message: format!("Invalid amount_wei: '{}' is not a valid u128", s),
                         data: None,
                     })?
-                    .min(MAX_FAUCET_WEI)
+                    .min(max_faucet_wei)
             } else {
                 return Err(JsonRpcError {
                     code: -32602,
@@ -6861,7 +6865,7 @@ async fn handle_faucet(
                 });
             }
         }
-        None => DEFAULT_FAUCET_WEI,
+        None => default_faucet_wei,
     };
 
     // Parse recipient address

@@ -57,6 +57,51 @@ pub const FAUCET_PQ_SIGNING_SEED: &[u8] = b"faucet_pq_signing_seed";
 /// Metadata key for the faucet's ML-DSA-65 verifying key (1952 bytes, hex).
 pub const FAUCET_PQ_VERIFYING_KEY: &[u8] = b"faucet_pq_verifying_key";
 
+/// Environment variable holding the operator's faucet grant, in whole TNZO.
+pub const FAUCET_GRANT_ENV: &str = "TENZRO_FAUCET_DISPENSE_AMOUNT";
+/// Smallest grant a request may hand out, in whole TNZO.
+pub const FAUCET_MIN_GRANT_TNZO: u128 = 100;
+/// Largest grant a request may hand out, in whole TNZO.
+///
+/// A testnet faucet exists to get a new participant to their first real
+/// action — a provider posting the 1,000 TNZO admission bond is the largest
+/// of those — not to hand out a balance worth farming.
+pub const FAUCET_MAX_GRANT_TNZO: u128 = 1_000;
+
+/// Resolve how much TNZO one faucet request hands out, in whole TNZO.
+///
+/// `genesis.faucet.amount_per_request` is hashed into the genesis state root,
+/// so it is frozen for the life of the chain — editing it makes every
+/// validator refuse to start on the chain-compatibility check. How much the
+/// operator actually hands out is not chain state, so it is read from the
+/// environment, falling back to the committed value. Either way the result is
+/// clamped to `[FAUCET_MIN_GRANT_TNZO, FAUCET_MAX_GRANT_TNZO]`.
+pub fn resolve_faucet_grant_tnzo(genesis_committed: u128) -> u128 {
+    let requested = match std::env::var(FAUCET_GRANT_ENV) {
+        Ok(raw) => match raw.trim().parse::<u128>() {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                warn!(
+                    "{}={:?} is not a whole number of TNZO ({}); using the \
+                     genesis-committed {} TNZO instead",
+                    FAUCET_GRANT_ENV, raw, e, genesis_committed
+                );
+                genesis_committed
+            }
+        },
+        Err(_) => genesis_committed,
+    };
+    let granted = requested.clamp(FAUCET_MIN_GRANT_TNZO, FAUCET_MAX_GRANT_TNZO);
+    if granted != requested {
+        warn!(
+            "Faucet grant of {} TNZO is outside the permitted {}–{} TNZO range; \
+             dispensing {} TNZO",
+            requested, FAUCET_MIN_GRANT_TNZO, FAUCET_MAX_GRANT_TNZO, granted
+        );
+    }
+    granted
+}
+
 /// Genesis protocol version for the PQ-hybrid era.
 ///
 /// Under the hybrid PQ migration, every signed transaction carries a mandatory
@@ -1119,6 +1164,13 @@ fn migrate_faucet_balance(
 mod tests {
     use super::*;
     use tenzro_storage::StorageConfig;
+
+    #[test]
+    fn faucet_grant_is_clamped_to_the_permitted_range() {
+        assert_eq!(resolve_faucet_grant_tnzo(500), 500);
+        assert_eq!(resolve_faucet_grant_tnzo(1), FAUCET_MIN_GRANT_TNZO);
+        assert_eq!(resolve_faucet_grant_tnzo(10_000), FAUCET_MAX_GRANT_TNZO);
+    }
 
     #[tokio::test]
     async fn test_genesis_creation() {

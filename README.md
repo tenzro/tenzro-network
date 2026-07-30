@@ -415,7 +415,7 @@ The workflow runtime is its own state machine. It runs alongside (not inside) th
 
 **Infrastructure**: The public endpoints on `tenzro.xyz` are operated by Tenzro Labs, the first reference RPC provider on the network. The RPC provider role is open — any operator that meets the validator bond can register their own endpoint and serve the same protocol surface. TLS at the edge is PQ-hybrid X25519MLKEM768. The repository is the reference implementation — anyone can run a node and join.
 
-**Genesis**: 1,000,000,000 TNZO total supply. Faucet: 2,000 TNZO per request, 24h cooldown — enough to cover the 1,000 TNZO model-provider bond plus gas.
+**Genesis**: 1,000,000,000 TNZO total supply. Faucet: 1,000 TNZO per request, 24h cooldown.
 
 ## Development
 

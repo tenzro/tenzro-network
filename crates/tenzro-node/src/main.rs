@@ -746,9 +746,12 @@ async fn main() -> Result<()> {
                         );
                         faucet.address.clone()
                     });
+                let dispense_amount =
+                    genesis::resolve_faucet_grant_tnzo(faucet.amount_per_request);
+                info!("Faucet dispensing {} TNZO per request", dispense_amount);
                 web_state = web_state.with_faucet(
                     runtime_faucet_address,
-                    faucet.amount_per_request,
+                    dispense_amount,
                     faucet.cooldown_seconds,
                 );
             }
