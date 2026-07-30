@@ -53,9 +53,12 @@ Usage:
     python tenzro_rpc.py cross_vm_transfer TNZO 1000000000000000000 evm svm 0xfrom 0xto
     python tenzro_rpc.py deploy_contract evm 0xbytecode 0xdeployer
     python tenzro_rpc.py bridge_tokens tenzro ethereum TNZO 1000000000000000000 0xsender 0xrecipient
-    python tenzro_rpc.py stake 1000000000000000000 Validator
+    python tenzro_rpc.py stake 1000000000000000000 validator
+    python tenzro_rpc.py stake 1000000000000000000 compute consumer,datacentre
     python tenzro_rpc.py unstake 1000000000000000000
-    python tenzro_rpc.py register_provider model-provider
+    python tenzro_rpc.py register_provider model
+    python tenzro_rpc.py register_provider storage "" 40
+    python tenzro_rpc.py register_provider cloud "" "" machines
     python tenzro_rpc.py provider_stats
     python tenzro_rpc.py list_skills
     python tenzro_rpc.py list_skills web search
@@ -1811,16 +1814,28 @@ def bridge_tokens(source_chain: str, dest_chain: str, asset: str,
 
 
 def stake_tokens(amount_wei: int,
-                 provider_type: str = "validator") -> dict:
+                 provider_type: str = "validator",
+                 accelerators: Optional[List[str]] = None,
+                 terabytes: Optional[int] = None,
+                 cloud_tier: Optional[str] = None) -> dict:
     """Stake TNZO tokens.
 
     amount_wei: amount in wei (10^-18 TNZO). Sent as decimal string
     to preserve full u128 precision over JSON.
-    provider_type: validator | model_provider | tee_provider | storage_provider
+    provider_type: validator | rpc | tee | model | compute | storage |
+                   cloud | trainer | syncer
+    accelerators: classes pledged by a compute provider —
+                  integrated | consumer | workstation | datacentre
+    terabytes: whole terabytes pledged by a storage provider
+    cloud_tier: highest class offered by a cloud operator —
+                functions | databases | machines
     """
     return _rpc("tenzro_stake", {
         "amount": str(amount_wei),
         "provider_type": provider_type,
+        "accelerators": accelerators or [],
+        "terabytes": terabytes,
+        "cloud_tier": cloud_tier,
     })
 
 
@@ -1832,10 +1847,23 @@ def unstake_tokens(amount_wei: int) -> dict:
     return _rpc("tenzro_unstake", {"amount": str(amount_wei)})
 
 
-def register_provider(provider_type: str) -> dict:
-    """Register as a provider (model-provider or tee-provider)."""
+def register_provider(provider_type: str,
+                      accelerators: Optional[List[str]] = None,
+                      terabytes: Optional[int] = None,
+                      cloud_tier: Optional[str] = None) -> dict:
+    """Register for a role on the network.
+
+    provider_type: validator | rpc | tee | model | compute | storage |
+                   cloud | trainer | syncer
+
+    Compute, storage and cloud bonds scale with the capacity pledged;
+    every other role takes the flat bond for its rung.
+    """
     return _rpc("tenzro_registerProvider", {
         "provider_type": provider_type,
+        "accelerators": accelerators or [],
+        "terabytes": terabytes,
+        "cloud_tier": cloud_tier,
     })
 
 
@@ -9124,10 +9152,19 @@ COMMANDS = {
     ),
     # Staking & Providers
     "stake": lambda args: stake_tokens(
-        int(args[0]), args[1] if len(args) > 1 else "Validator",
+        int(args[0]),
+        args[1] if len(args) > 1 else "validator",
+        args[2].split(",") if len(args) > 2 and args[2] else None,
+        int(args[3]) if len(args) > 3 and args[3] else None,
+        args[4] if len(args) > 4 and args[4] else None,
     ),
     "unstake": lambda args: unstake_tokens(int(args[0])),
-    "register_provider": lambda args: register_provider(args[0]),
+    "register_provider": lambda args: register_provider(
+        args[0],
+        args[1].split(",") if len(args) > 1 and args[1] else None,
+        int(args[2]) if len(args) > 2 and args[2] else None,
+        args[3] if len(args) > 3 and args[3] else None,
+    ),
     "provider_stats": lambda args: provider_stats(),
     # NFT Collections
     "create_nft_collection": lambda args: create_nft_collection(

@@ -217,6 +217,16 @@ pub struct ChatCompletionParams {
     pub model: Option<String>,
     #[schemars(description = "The user message to send")]
     pub message: String,
+    /// Base64 image payloads to send alongside `message`. Only accepted by a
+    /// model whose catalog entry declares a multimodal projector — check
+    /// `accepts_media` on `list_model_endpoints` first. Each entry is bound to
+    /// the corresponding `<__media__>` marker in `message`; a message with no
+    /// markers gets one prepended per image.
+    #[serde(default)]
+    #[schemars(
+        description = "Base64-encoded images to send with the message (PNG/JPEG/WebP). Requires a model with accepts_media=true on list_model_endpoints. Optional"
+    )]
+    pub images: Option<Vec<String>>,
     #[schemars(description = "Temperature (0.0-2.0, default 0.7)")]
     pub temperature: Option<f64>,
     #[schemars(description = "Maximum tokens to generate (default 512)")]
@@ -699,8 +709,14 @@ pub struct CreateWalletParams {
 pub struct StakeTokensParams {
     #[schemars(description = "Amount to stake in wei as a decimal string (1 TNZO = 10^18 wei). Example: '1000000000000000000000' for 1000 TNZO.")]
     pub amount: String,
-    #[schemars(description = "Provider type to stake for: 'validator', 'model_provider', 'tee_provider', or 'storage_provider'")]
+    #[schemars(description = "Provider type to stake for: 'validator', 'rpc', 'tee', 'model', 'compute', 'storage', 'cloud', 'trainer', or 'syncer'")]
     pub provider_type: String,
+    #[schemars(description = "Accelerator classes pledged, for compute providers: 'integrated', 'consumer', 'workstation', or 'datacentre'")]
+    pub accelerators: Option<Vec<String>>,
+    #[schemars(description = "Whole terabytes pledged, for storage providers")]
+    pub terabytes: Option<u32>,
+    #[schemars(description = "Highest cloud service class offered, for cloud operators: 'functions', 'databases', or 'machines'")]
+    pub cloud_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -711,7 +727,7 @@ pub struct UnstakeTokensParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RegisterProviderParams {
-    #[schemars(description = "Provider type: 'validator', 'model_provider', 'tee_provider', or 'storage_provider'")]
+    #[schemars(description = "Provider type: 'validator', 'rpc', 'tee', 'model', 'compute', 'storage', 'cloud', 'trainer', or 'syncer'")]
     pub provider_type: String,
     #[schemars(description = "Provider display name")]
     pub name: String,
@@ -719,6 +735,12 @@ pub struct RegisterProviderParams {
     pub stake: Option<String>,
     #[schemars(description = "Maximum concurrent requests to handle (default 10)")]
     pub max_concurrent: Option<u32>,
+    #[schemars(description = "Accelerator classes pledged, for compute providers: 'integrated', 'consumer', 'workstation', or 'datacentre'")]
+    pub accelerators: Option<Vec<String>>,
+    #[schemars(description = "Whole terabytes pledged, for storage providers")]
+    pub terabytes: Option<u32>,
+    #[schemars(description = "Highest cloud service class offered, for cloud operators: 'functions', 'databases', or 'machines'")]
+    pub cloud_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3933,6 +3955,61 @@ fn parse_vm_type(s: &str) -> std::result::Result<tenzro_token::TokenVmType, Erro
     }
 }
 
+fn parse_provider_type(
+    s: &str,
+) -> std::result::Result<tenzro_types::token::ProviderType, ErrorData> {
+    s.parse::<tenzro_types::token::ProviderType>()
+        .map_err(|e| ErrorData {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(e),
+            data: None,
+        })
+}
+
+/// Build the capacity pledge that sets a provider's bond.
+///
+/// Only three roles scale with capacity; every other role takes the flat
+/// bond for its rung and ignores whatever the caller passed.
+fn parse_stake_capacity(
+    provider_type: tenzro_types::token::ProviderType,
+    accelerators: Option<&Vec<String>>,
+    terabytes: Option<u32>,
+    cloud_tier: Option<&str>,
+) -> std::result::Result<tenzro_types::token::StakeCapacity, ErrorData> {
+    use tenzro_types::token::{AcceleratorClass, CloudTier, ProviderType, StakeCapacity};
+
+    let invalid = |e: String| ErrorData {
+        code: ErrorCode::INVALID_PARAMS,
+        message: Cow::from(e),
+        data: None,
+    };
+
+    match provider_type {
+        ProviderType::ComputeProvider => {
+            let classes = accelerators
+                .map(|list| {
+                    list.iter()
+                        .map(|s| s.parse::<AcceleratorClass>())
+                        .collect::<std::result::Result<Vec<_>, String>>()
+                })
+                .transpose()
+                .map_err(invalid)?
+                .unwrap_or_default();
+            Ok(StakeCapacity::Accelerators(classes))
+        }
+        ProviderType::StorageProvider => Ok(StakeCapacity::Terabytes(terabytes.unwrap_or(0))),
+        ProviderType::CloudProvider => {
+            let tier = cloud_tier
+                .map(str::parse::<CloudTier>)
+                .transpose()
+                .map_err(invalid)?
+                .unwrap_or(CloudTier::Functions);
+            Ok(StakeCapacity::Cloud(tier))
+        }
+        _ => Ok(StakeCapacity::None),
+    }
+}
+
 fn bytes_to_address(bytes: &[u8]) -> Address {
     let mut arr = [0u8; 32];
     let len = bytes.len().min(32);
@@ -6928,6 +7005,27 @@ impl TenzroMcpServer {
         let temperature = params.temperature;
         let max_tokens = params.max_tokens;
 
+        // Attachments arrive base64 over the MCP wire and go to the runtime as
+        // raw bytes; the projector identifies the format from the bytes.
+        let media: Vec<Vec<u8>> = match params.images {
+            Some(images) => {
+                use base64::Engine as _;
+                images
+                    .iter()
+                    .map(|b64| {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(b64.trim())
+                            .map_err(|e| ErrorData {
+                                code: ErrorCode::INVALID_PARAMS,
+                                message: Cow::from(format!("undecodable base64 image: {e}")),
+                                data: None,
+                            })
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            }
+            None => Vec::new(),
+        };
+
         // Resolve the model: an explicit `model` wins; otherwise select one from
         // the stated intent (use_case + budget + quality_floor + optimize) via
         // the MetaRouter, so callers can chat without naming a model.
@@ -7063,8 +7161,55 @@ impl TenzroMcpServer {
                 }
             })?;
 
-            match model_runtime.generate(&svc.model_id, &message, &config).await {
-                Ok(result) => {
+            if !media.is_empty() && !model_runtime.supports_media(&svc.model_id) {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Model '{}' serves text only — it declares no multimodal projector, \
+                         or the projector is not present on this node",
+                        svc.model_id
+                    )),
+                    data: None,
+                });
+            }
+
+            // Both paths report the same five fields this tool surfaces; the
+            // multimodal result additionally carries tool calls, which this tool
+            // does not declare schemas for.
+            let generated = if media.is_empty() {
+                model_runtime
+                    .generate(&svc.model_id, &message, &config)
+                    .await
+                    .map(|r| {
+                        (
+                            r.text,
+                            r.input_tokens,
+                            r.output_tokens,
+                            r.generation_time_ms,
+                            r.tokens_per_second,
+                        )
+                    })
+            } else {
+                let turn = [tenzro_model::ChatMessage {
+                    role: "user".to_string(),
+                    content: message.clone(),
+                }];
+                model_runtime
+                    .generate_chat_multimodal(&svc.model_id, &turn, &media, &[], &config)
+                    .await
+                    .map(|r| {
+                        (
+                            r.text,
+                            r.input_tokens,
+                            r.output_tokens,
+                            r.generation_time_ms,
+                            r.tokens_per_second,
+                        )
+                    })
+            };
+
+            match generated {
+                Ok((text, input_tokens, output_tokens, generation_time_ms, tokens_per_second)) => {
                     // Local models are free — no wei cost
                     let cost_wei: u128 = 0;
 
@@ -7081,7 +7226,7 @@ impl TenzroMcpServer {
                         &self.node,
                         &svc.model_id,
                         message.as_bytes(),
-                        result.text.as_bytes(),
+                        text.as_bytes(),
                     );
                     if jurisdiction_receipt_required && jurisdiction.is_none() {
                         return Err(ErrorData {
@@ -7095,15 +7240,15 @@ impl TenzroMcpServer {
 
                     json_result(serde_json::json!({
                         "model": svc.model_id,
-                        "response": result.text,
+                        "response": text,
                         "usage": {
-                            "prompt_tokens": result.input_tokens,
-                            "completion_tokens": result.output_tokens,
-                            "total_tokens": result.input_tokens + result.output_tokens,
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": output_tokens,
+                            "total_tokens": input_tokens + output_tokens,
                         },
                         "cost_wei": cost_wei.to_string(),
-                        "generation_time_ms": result.generation_time_ms,
-                        "tokens_per_second": result.tokens_per_second,
+                        "generation_time_ms": generation_time_ms,
+                        "tokens_per_second": tokens_per_second,
                         "load": load,
                         "tenzro_jurisdiction": jurisdiction,
                     }))
@@ -7111,7 +7256,20 @@ impl TenzroMcpServer {
                 Err(e) => text_result(format!("Inference failed: {}", e)),
             }
         } else {
-            // Network model — forward to remote provider
+            // Network model — forward to remote provider. The forwarded body is
+            // OpenAI-compatible, whose `content` is a string, so attachments have
+            // nowhere to go on this hop.
+            if !media.is_empty() {
+                return Err(ErrorData {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Model '{}' is served by a remote provider — attachments are accepted \
+                         only for models this node serves itself",
+                        svc.model_id
+                    )),
+                    data: None,
+                });
+            }
             let remote_url = format!("{}/chat/completions", svc.api_endpoint);
             let client = reqwest::Client::new();
 
@@ -7373,6 +7531,15 @@ impl TenzroMcpServer {
                     "utilization_percent": snap.utilization_percent,
                     "load_level": snap.load_level.to_string(),
                 });
+            }
+            // Whether this endpoint takes image attachments alongside text.
+            // Reported only for models this node serves itself — a remote
+            // provider's projector state isn't visible from here.
+            if matches!(svc.location, tenzro_types::model::ModelLocation::Local)
+                && let Some(runtime) = self.node.model_runtime.as_ref()
+            {
+                entry["accepts_media"] =
+                    serde_json::json!(runtime.supports_media(&svc.model_id));
             }
             entry
         }).collect();
@@ -8320,24 +8487,20 @@ impl TenzroMcpServer {
 
     // ─── Staking & Provider Management ───
 
-    #[tool(description = "Stake TNZO tokens to participate as a validator, model provider, TEE provider, or storage provider. Staked tokens earn rewards and increase network weight.")]
+    #[tool(description = "Stake TNZO tokens to take a role on the network: validator, RPC operator, TEE provider, model provider, compute provider, storage provider, cloud operator, trainer, or syncer. The bond required depends on the role and, for compute, storage and cloud, on the capacity pledged. Staked tokens earn rewards and increase network weight.")]
     async fn stake_tokens(
         &self,
         Parameters(params): Parameters<StakeTokensParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
         let staking = self.node.staking().ok_or_else(|| err_internal("Staking not initialized"))?;
 
-        let provider_type = match params.provider_type.to_lowercase().as_str() {
-            "validator" => tenzro_types::token::ProviderType::Validator,
-            "model_provider" | "modelprovider" | "inference" => tenzro_types::token::ProviderType::ModelProvider,
-            "tee_provider" | "teeprovider" | "tee" => tenzro_types::token::ProviderType::TeeProvider,
-            "storage_provider" | "storageprovider" | "storage" => tenzro_types::token::ProviderType::StorageProvider,
-            other => return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Unknown provider type '{}'. Use: validator, model_provider, tee_provider, storage_provider", other)),
-                data: None,
-            }),
-        };
+        let provider_type = parse_provider_type(&params.provider_type)?;
+        let capacity = parse_stake_capacity(
+            provider_type,
+            params.accelerators.as_ref(),
+            params.terabytes,
+            params.cloud_tier.as_deref(),
+        )?;
 
         let amount_wei: u128 = params.amount.parse().map_err(|_| ErrorData {
             code: ErrorCode::INVALID_PARAMS,
@@ -8361,12 +8524,12 @@ impl TenzroMcpServer {
             Address::zero()
         };
 
-        match staking.stake(staker_address, amount_wei, provider_type) {
+        match staking.stake_with_capacity(staker_address, amount_wei, provider_type, capacity) {
             Ok(_) => {
                 json_result(serde_json::json!({
                     "status": "staked",
                     "amount_wei": amount_wei.to_string(),
-                    "provider_type": format!("{:?}", provider_type),
+                    "provider_type": provider_type.to_string(),
                     "staker": format!("0x{}", hex::encode(&staker_address.as_bytes()[..20])),
                     "message": "Successfully staked tokens. Rewards will accrue each epoch.",
                 }))
@@ -8411,22 +8574,18 @@ impl TenzroMcpServer {
         }
     }
 
-    #[tool(description = "Register as a service provider on the Tenzro Network. Providers earn TNZO by serving AI models (inference), providing TEE enclaves (security), validating blocks, or providing storage.")]
+    #[tool(description = "Register as a service provider on the Tenzro Network. Providers earn TNZO by validating blocks, carrying RPC traffic, providing TEE enclaves, serving AI models, renting accelerators, providing storage, operating cloud services, or training and syncing models.")]
     async fn register_provider(
         &self,
         Parameters(params): Parameters<RegisterProviderParams>,
     ) -> std::result::Result<Json<RpcPassthroughOutput>, ErrorData> {
-        let provider_type = match params.provider_type.to_lowercase().as_str() {
-            "validator" => tenzro_types::token::ProviderType::Validator,
-            "model_provider" | "modelprovider" | "inference" => tenzro_types::token::ProviderType::ModelProvider,
-            "tee_provider" | "teeprovider" | "tee" => tenzro_types::token::ProviderType::TeeProvider,
-            "storage_provider" | "storageprovider" | "storage" => tenzro_types::token::ProviderType::StorageProvider,
-            other => return Err(ErrorData {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Unknown provider type '{}'. Use: validator, model_provider, tee_provider, storage_provider", other)),
-                data: None,
-            }),
-        };
+        let provider_type = parse_provider_type(&params.provider_type)?;
+        let capacity = parse_stake_capacity(
+            provider_type,
+            params.accelerators.as_ref(),
+            params.terabytes,
+            params.cloud_tier.as_deref(),
+        )?;
 
         let provider_id = format!("provider-{}", uuid::Uuid::new_v4());
         let max_concurrent = params.max_concurrent.unwrap_or(10);
@@ -8453,21 +8612,22 @@ impl TenzroMcpServer {
             } else {
                 Address::zero()
             };
-            staking.stake(staker_address, stake_wei, provider_type).map_err(|e| ErrorData {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Provider stake failed: {}", e)),
-                data: None,
-            })?;
+            staking.stake_with_capacity(staker_address, stake_wei, provider_type, capacity)
+                .map_err(|e| ErrorData {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Provider stake failed: {}", e)),
+                    data: None,
+                })?;
         }
 
         json_result(serde_json::json!({
             "status": "registered",
             "provider_id": provider_id,
-            "provider_type": format!("{:?}", provider_type),
+            "provider_type": provider_type.to_string(),
             "name": params.name,
             "max_concurrent": max_concurrent,
             "stake_wei": stake_wei.to_string(),
-            "message": format!("Provider '{}' registered as {:?}. Use serve_model or start providing services.", params.name, provider_type),
+            "message": format!("Provider '{}' registered as {}. Use serve_model or start providing services.", params.name, provider_type),
         }))
     }
 
@@ -8479,8 +8639,9 @@ impl TenzroMcpServer {
         let models_served = self.node.served_models.len();
         let total_inferences = self.node.transaction_history.read().len();
 
-        // Get staking totals, optionally filtered by provider address
-        let (total_staked, validator_count): (u128, usize) = if let Some(staking) = self.node.staking() {
+        // Staking totals, optionally filtered by provider address, broken out
+        // per rung of the ladder so a node holding several roles is legible.
+        let (total_staked, stakes_by_role) = if let Some(staking) = self.node.staking() {
             let all_stakes = staking.get_all_stakes();
             let filtered: Vec<_> = if let Some(ref addr_str) = params.address {
                 let addr_norm = addr_str.trim_start_matches("0x").to_lowercase();
@@ -8491,12 +8652,14 @@ impl TenzroMcpServer {
                 all_stakes.iter().collect()
             };
             let total: u128 = filtered.iter().map(|(_, s)| s.amount).sum();
-            let validators = filtered.iter()
-                .filter(|(_, s)| matches!(s.provider_type, tenzro_types::token::ProviderType::Validator))
-                .count();
-            (total, validators)
+            let mut by_role: std::collections::BTreeMap<&'static str, usize> =
+                std::collections::BTreeMap::new();
+            for (_, stake) in &filtered {
+                *by_role.entry(stake.provider_type.as_str()).or_insert(0) += 1;
+            }
+            (total, by_role)
         } else {
-            (0u128, 0)
+            (0u128, std::collections::BTreeMap::new())
         };
 
         // Get identity count
@@ -8510,7 +8673,7 @@ impl TenzroMcpServer {
             "models_served": models_served,
             "total_inferences": total_inferences,
             "total_staked_wei": total_staked.to_string(),
-            "validator_count": validator_count,
+            "stakes_by_role": stakes_by_role,
             "identity_count": {
                 "human": human_count,
                 "machine": machine_count,

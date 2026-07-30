@@ -1,0 +1,2747 @@
+diff --git a/common/chat.cpp b/common/chat.cpp
+index 56873e3..efd1fa0 100644
+--- a/common/chat.cpp
++++ b/common/chat.cpp
+@@ -1556,6 +1556,176 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
+     return data;
+ }
+ 
++// Kimi K3 - XTML-ish tagged format from the model's own template:
++//   open_tag(t, attrs) = <|open|>t k="v"...<|sep|>   close_tag(t) = <|close|>t<|sep|>
++//   assistant := [think] [response] [tools] close_tag(message) <|end_of_msg|>
++// Note the generation prompt already opens the think (or response) section, so
++// the section opener is optional here - same situation as Kimi K2 Thinking.
++static common_chat_params common_chat_params_init_kimi_k3(const common_chat_template &          tmpl,
++                                                          const autoparser::generation_params & inputs) {
++    common_chat_params data;
++
++    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
++    data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
++    data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
++    data.supports_thinking = true;
++
++    const std::string SEP         = "<|sep|>";
++    const std::string MSG_START   = "<|open|>message role=\"assistant\"<|sep|>";
++    const std::string THINK_START = "<|open|>think<|sep|>";
++    const std::string THINK_END   = "<|close|>think<|sep|>";
++    const std::string RESP_START  = "<|open|>response<|sep|>";
++    const std::string RESP_END    = "<|close|>response<|sep|>";
++    const std::string TOOLS_START = "<|open|>tools<|sep|>";
++    const std::string TOOLS_END   = "<|close|>tools<|sep|>";
++    const std::string CALL_START  = "<|open|>call tool=\"";
++    const std::string CALL_END    = "<|close|>call<|sep|>";
++    const std::string ARG_START   = "<|open|>argument key=\"";
++    const std::string ARG_END     = "<|close|>argument<|sep|>";
++    const std::string MSG_END     = "<|close|>message<|sep|>";
++    const std::string EOM_TOKEN   = "<|end_of_msg|>";
++
++    // The four markers are the only special tokens; tag names ("think",
++    // "response", "message") are ordinary tokens and must NOT be preserved,
++    // or ordinary prose containing those words would be mangled.
++    data.preserved_tokens = {
++        "<|open|>",
++        "<|close|>",
++        "<|sep|>",
++        "<|end_of_msg|>",
++    };
++
++    data.thinking_start_tag = THINK_START;
++    data.thinking_end_tag   = THINK_END;
++
++    auto has_tools         = inputs.tools.is_array() && !inputs.tools.empty();
++    auto extract_reasoning = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
++    auto include_grammar   = has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
++
++    if (inputs.has_continuation()) {
++        const auto & msg = inputs.continue_msg;
++
++        data.generation_prompt = MSG_START + THINK_START + msg.reasoning_content;
++        if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
++            data.generation_prompt += THINK_END + RESP_START + msg.render_content();
++        }
++
++        data.prompt += data.generation_prompt;
++    }
++
++    auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
++        auto end = p.end();
++
++        auto start = p.optional(p.literal(MSG_START));
++
++        // The think section is ALWAYS consumed, even when reasoning extraction
++        // is off: K3's generation prompt ends with open_tag('think'), so the
++        // opener is present on every request and would otherwise leak into
++        // content. With extraction off the thoughts fall into content, matching
++        // how the other reasoning models behave.
++        // Reasoning stops at its own closer, or at the response opener if the
++        // model skips the closer entirely (seen on short answers).
++        auto think_body = extract_reasoning ? p.reasoning(p.until_one_of({ THINK_END, RESP_START })) :
++                                              p.content(p.until_one_of({ THINK_END, RESP_START }));
++
++        auto reasoning = p.optional(p.optional(p.literal(THINK_START)) + think_body +
++                                    p.optional(p.literal(THINK_END)));
++
++        // Content runs to the response closer, or to whatever comes next if a
++        // truncated generation never emits one.
++        auto response = p.optional(p.literal(RESP_START)) +
++                        p.content(p.until_one_of({ RESP_END, TOOLS_START, MSG_END })) +
++                        p.optional(p.literal(RESP_END));
++
++        // The message closer is followed by the EOG token, which reaches the
++        // parser as text and must be consumed or the parse is left incomplete.
++        auto trailer = p.optional(p.literal(MSG_END)) + p.optional(p.literal(EOM_TOKEN));
++
++        if (!has_tools || inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_NONE) {
++            return start + reasoning + response + trailer + end;
++        }
++
++        auto tool_choices = p.choice();
++        foreach_function(inputs.tools, [&](const json & tool) {
++            const auto & function = tool.at("function");
++            std::string  name     = function.at("name");
++            const json   schema   = function.contains("parameters") ? function.at("parameters") : json::object();
++
++            // Arguments arrive one tag per key, with the JSON type carried in a
++            // type="..." attribute. We take the type from the tool schema
++            // instead - it is authoritative, and it tells us whether the value
++            // should be parsed as JSON or kept as a literal string.
++            auto args = p.eps();
++            if (schema.contains("properties") && !schema.at("properties").empty()) {
++                auto arg_choices = p.choice();
++                for (const auto & prop : schema.at("properties").items()) {
++                    const std::string & key = prop.key();
++
++                    std::string type = "string";
++                    if (prop.value().is_object() && prop.value().contains("type") &&
++                        prop.value().at("type").is_string()) {
++                        type = prop.value().at("type").get<std::string>();
++                    }
++
++                    auto value = type == "string" ? p.tool_arg_string_value(p.until(ARG_END)) :
++                                                    p.tool_arg_value(p.until(ARG_END));
++
++                    // skip the trailing type="..." attribute: anything up to <|sep|>
++                    arg_choices |= p.rule("kimi-k3-arg-" + name + "-" + key,
++                                          p.tool_arg(p.tool_arg_open(p.literal(ARG_START)) +
++                                                     p.tool_arg_name(p.literal(key)) + p.literal("\"") +
++                                                     p.until(SEP) + p.literal(SEP) + value +
++                                                     p.tool_arg_close(p.literal(ARG_END))));
++                }
++                args = p.zero_or_more(arg_choices);
++            }
++
++            // skip the trailing index="N" attribute the same way
++            auto call = p.tool(p.tool_open(p.literal(CALL_START) + p.tool_name(p.literal(name)) + p.literal("\"") +
++                                           p.until(SEP) + p.literal(SEP)) +
++                               p.tool_args(args) + p.tool_close(p.literal(CALL_END)));
++
++            tool_choices |= p.rule("kimi-k3-tool-" + name, call);
++        });
++
++        // K3 emits every call inside one <|open|>tools<|sep|> section, then
++        // closes the message. The message closer is part of the trigger rule so
++        // that the lazy grammar still permits it once tool calls have started -
++        // otherwise constrained decoding rejects the model's own closing tag.
++        auto tools_section =
++            p.trigger_rule("kimi-k3-tool-call", p.literal(TOOLS_START) + p.one_or_more(tool_choices) +
++                                                    p.literal(TOOLS_END) + p.optional(p.literal(MSG_END)) +
++                                                    p.optional(p.literal(EOM_TOKEN)));
++
++        auto tools = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED ? tools_section :
++                                                                             p.optional(tools_section);
++
++        return start + reasoning + response + tools + trailer + end;
++    });
++
++    data.parser = parser.save();
++
++    if (include_grammar) {
++        data.grammar_lazy = inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_REQUIRED;
++        data.grammar      = build_grammar([&](const common_grammar_builder & builder) {
++            foreach_function(inputs.tools, [&](const json & tool) {
++                const auto & function = tool.at("function");
++                if (function.contains("parameters")) {
++                    auto schema = function.at("parameters");
++                    builder.resolve_refs(schema);
++                }
++            });
++            parser.build_grammar(builder, data.grammar_lazy);
++        });
++
++        data.grammar_triggers = {
++            { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, TOOLS_START },
++        };
++    }
++
++    return data;
++}
++
+ // LFM2 format: uses <|tool_list_start|>[...]<|tool_list_end|> in system prompt
+ // and <|tool_call_start|>[name(arg="val")]<|tool_call_end|> for tool calls.
+ // - Reasoning: <think>{reasoning}</think> (optional)
+@@ -2244,6 +2414,14 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
+         return common_chat_params_init_kimi_k2(tmpl, params);
+     }
+ 
++    // Kimi K3 - XTML-ish tagged format built from open_tag/close_tag macros.
++    // Detection: the <|open|>/<|close|>/<|sep|> marker trio is unique to K3.
++    if (src.find("<|open|>") != std::string::npos && src.find("<|close|>") != std::string::npos &&
++        src.find("<|end_of_msg|>") != std::string::npos) {
++        LOG_DBG("Using specialized template: Kimi K3\n");
++        return common_chat_params_init_kimi_k3(tmpl, params);
++    }
++
+     if (is_lfm2_template(src)) {
+         LOG_DBG("Using specialized template: LFM2\n");
+         return common_chat_params_init_lfm2(tmpl, params);
+diff --git a/conversion/__init__.py b/conversion/__init__.py
+index 2c38123..c9da369 100644
+--- a/conversion/__init__.py
++++ b/conversion/__init__.py
+@@ -107,6 +107,7 @@ TEXT_MODEL_MAP: dict[str, str] = {
+     "JinaEmbeddingsV5Model": "bert",
+     "KORMoForCausalLM": "qwen",
+     "KimiK25ForConditionalGeneration": "deepseek",
++    "KimiK3ForConditionalGeneration": "kimi_k3",
+     "KimiLinearForCausalLM": "kimi_linear",
+     "KimiLinearModel": "kimi_linear",
+     "KimiVLForConditionalGeneration": "deepseek",
+@@ -249,6 +250,7 @@ MMPROJ_MODEL_MAP: dict[str, str] = {
+     "InternVisionModel": "internvl",
+     "JanusForConditionalGeneration": "januspro",
+     "KimiK25ForConditionalGeneration": "kimivl",
++    "KimiK3ForConditionalGeneration": "kimivl",
+     "KimiVLForConditionalGeneration": "kimivl",
+     "Lfm2AudioForConditionalGeneration": "lfm2",
+     "Lfm2VlForConditionalGeneration": "lfm2",
+diff --git a/conversion/base.py b/conversion/base.py
+index 30c2124..81b9ab4 100644
+--- a/conversion/base.py
++++ b/conversion/base.py
+@@ -72,6 +72,54 @@ class ModelType(IntEnum):
+     MMPROJ = 2
+ 
+ 
++def repack_mxfp4_blocks(packed: Tensor, scale: Tensor) -> np.ndarray:
++    """
++    Repack 4-bit MX weights into ggml `block_mxfp4`. Lossless - this only moves
++    bits, it does not dequantize and requantize.
++
++    Source (compressed-tensors "mxfp4-pack-quantized", and DeepSeek-V4's
++    equivalent weight/scale pair):
++      packed  uint8 [rows, cols/2]  two 4-bit codes per byte, element 2i in the
++                                    low nibble and 2i+1 in the high nibble
++      scale   uint8 [rows, cols/32] one E8M0 biased exponent per 32-element group
++
++    Destination, per 32-element group: one scale byte then 16 code bytes, where
++    byte j holds element j in the low nibble and element j+16 in the high nibble
++    (see dequantize_row_mxfp4 in ggml-quants.c).
++
++    The 4-bit codes themselves need no remapping: both sides use sign in bit 3
++    and a magnitude index into (0, .5, 1, 1.5, 2, 3, 4, 6), which is exactly
++    ggml's kvalues_mxfp4 order. ggml's kvalues are doubled and its scale is
++    halved (GGML_E8M0_TO_FP32_HALF), so the represented value is unchanged.
++    """
++    p = packed.contiguous().view(torch.uint8)
++    s = scale.contiguous().view(torch.uint8)
++
++    rows, packed_cols = p.shape
++    cols = packed_cols * 2
++    if cols % 32 != 0:
++        raise ValueError(f"MXFP4 source row has {cols} values, expected a multiple of 32")
++
++    n_blocks = cols // 32
++    if tuple(s.shape) != (rows, n_blocks):
++        raise ValueError(f"MXFP4 scale shape {tuple(s.shape)} does not match {(rows, n_blocks)}")
++
++    # 0xff is the NaN E8M0 exponent; caught later without the tensor name
++    n_bad = int((s == 0xFF).sum())
++    if n_bad:
++        raise ValueError(f"invalid E8M0 scale byte 0xff in {n_bad} MXFP4 block(s)")
++
++    src = p.reshape(rows, n_blocks, 16)
++    lo = src & 0x0F           # elements 0, 2, 4, ...
++    hi = (src >> 4) & 0x0F    # elements 1, 3, 5, ...
++
++    vals = torch.stack((lo, hi), dim=-1).reshape(rows, n_blocks, 32)
++    qs = vals[:, :, :16] | (vals[:, :, 16:] << 4)
++
++    raw = torch.cat((s.unsqueeze(-1), qs.to(torch.uint8)), dim=-1)
++    return raw.reshape(rows, n_blocks * 17).cpu().numpy()
++
++
+ class ModelBase:
+     _model_classes: dict[ModelType, dict[str, type[ModelBase]]] = {
+         ModelType.TEXT: {},
+@@ -2461,7 +2509,10 @@ def get_model_architecture(hparams: dict[str, Any], model_type: ModelType) -> st
+     # Step3-VL keeps text config under text_config but uses a custom top-level architecture.
+     # For text conversion we route to a dedicated text-only class.
+     # TODO: refactor this later to avoid adding exception here
+-    if model_type == ModelType.TEXT and arch in ("StepVLForConditionalGeneration", "Sarashina2VisionForCausalLM"):
++    # Kimi-K3's text_config reports "KimiLinearForCausalLM", which is the Kimi-Linear-48B
++    # architecture and cannot load K3 (no attention residuals, no latent MoE, no situ).
++    # Route on the top-level architecture instead.
++    if model_type == ModelType.TEXT and arch in ("StepVLForConditionalGeneration", "Sarashina2VisionForCausalLM", "KimiK3ForConditionalGeneration"):
+         return arch
+ 
+     # if "architectures" is found in the sub-config, use that instead
+diff --git a/conversion/kimi_k3.py b/conversion/kimi_k3.py
+new file mode 100644
+index 0000000..1064249
+--- /dev/null
++++ b/conversion/kimi_k3.py
+@@ -0,0 +1,390 @@
++from __future__ import annotations
++
++import re
++from typing import Callable, Iterable, Iterator, TYPE_CHECKING
++
++import numpy as np
++import torch
++
++if TYPE_CHECKING:
++    from torch import Tensor
++
++from .base import LazyTorchTensor, ModelBase, TextModel, gguf, logger, repack_mxfp4_blocks
++
++from .kimi_linear import KimiLinearModel
++
++
++@ModelBase.register("KimiK3ForConditionalGeneration")
++class KimiK3Model(TextModel):
++    """
++    Kimi-K3 text model (KimiLinearForCausalLM under a `language_model.` prefix).
++
++    Shares the hybrid MLA + KDA skeleton with Kimi-Linear-48B but is not
++    loadable by that converter: K3 adds cross-layer attention residuals, a
++    latent MoE, the situ activation, an MLA output gate and a full-rank KDA
++    gate, none of which exist in the older architecture.
++
++    The vision tower and mm_projector are skipped - text only for now.
++    """
++
++    model_arch = gguf.MODEL_ARCH.KIMI_K3
++
++    _experts: list[dict[str, Tensor]] | None = None
++
++    # `<x>_res_norm.weight` and `<x>_res_proj.weight` are only ever used as the
++    # elementwise product norm.weight * proj.weight (see _apply_attn_res in
++    # modeling_kimi_linear.py), so they are fused into a single [n_embd] vector
++    # at conversion time. They arrive as separate tensors, so buffer whichever
++    # comes first, tagged with which one it is.
++    _res_parts: dict[str, tuple[str, Tensor]]
++
++    # HF suffix -> (gguf tensor, per-layer?)
++    _RES_FUSIONS = {
++        "self_attention_res": (gguf.MODEL_TENSOR.ATTN_RES_SCORE, True),
++        "mlp_res":            (gguf.MODEL_TENSOR.FFN_RES_SCORE,   True),
++        "output_attn_res":    (gguf.MODEL_TENSOR.OUTPUT_RES_SCORE, False),
++    }
++
++    # compressed-tensors MXFP4. The `language_model.` prefix is still present here:
++    # self.model_tensors is keyed by the raw checkpoint names, get_tensors() strips
++    # the prefix only on the way out.
++    _MXFP4_FORMAT = "mxfp4-pack-quantized"
++    _MXFP4_EXPERT_RE = re.compile(
++        r"^(?:language_model\.)?model\.layers\.(\d+)"
++        r"\.block_sparse_moe\.experts\.(\d+)\.(w[123])\.weight_packed$"
++    )
++    _MXFP4_PROJ = {
++        "w1": gguf.MODEL_TENSOR.FFN_GATE_EXP,
++        "w2": gguf.MODEL_TENSOR.FFN_DOWN_EXP,
++        "w3": gguf.MODEL_TENSOR.FFN_UP_EXP,
++    }
++
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self._res_parts = {}
++
++    def set_vocab(self):
++        # K3 ships the same TikToken vocab as K2: its pre-tokenizer hashes to
++        # 81212dc7... which base.py already maps to "kimi-k2", so no new
++        # pre-tokenizer registration is needed.
++        #
++        # Borrowed rather than inherited: K3 shares kimi-linear's vocab handling
++        # but none of its tensor layout. The method only touches TextModel
++        # members, so an unrelated TextModel is a valid receiver.
++        KimiLinearModel.set_vocab(self)  # ty: ignore[invalid-argument-type]
++
++        # ...but K2's converter ends by forcing eos to the tokenizer's own
++        # eos_id, which for K3 is 163585 = [EOS], the *document* terminator.
++        # K3's config and generation_config both say 163586 = <|end_of_msg|>,
++        # the chat turn terminator. Keeping [EOS] means generation never stops
++        # at the end of an assistant turn. Restore the configured value.
++        if (eos := self.hparams.get("eos_token_id")) is not None:
++            logger.info(f"restoring configured eos_token_id {eos} (kimi-linear forces the tokenizer's)")
++            self.gguf_writer.add_eos_token_id(eos)
++
++    #
++    # compressed-tensors MXFP4 -> ggml MXFP4
++    #
++    # The real checkpoint stores only the routed experts quantized (everything
++    # else is excluded by quantization_config["ignore"]), as a
++    # weight_packed/weight_scale pair per expert. Both sides are 4-bit E2M1 with
++    # a per-32 E8M0 scale, so this is a pure repack - see repack_mxfp4_blocks.
++    #
++    # Dequantizing instead would be catastrophic here: the routed experts are
++    # ~1.38 TB at 4 bits, so a bf16 round-trip would need ~5.5 TB of output.
++    #
++
++    def _is_mxfp4_packed(self) -> bool:
++        quant_config = self.hparams.get("quantization_config") or {}
++        return (quant_config.get("quant_method") == "compressed-tensors"
++                and quant_config.get("format") == self._MXFP4_FORMAT)
++
++    def dequant_model(self):
++        if not self._is_mxfp4_packed():
++            return super().dequant_model()
++
++        # Skipping base.py's dequant is only safe because the experts are the
++        # *only* quantized tensors. Verify that rather than assume it.
++        stray = [n for n in self.model_tensors
++                 if n.endswith(".weight_packed") and not self._MXFP4_EXPERT_RE.match(n)]
++        if stray:
++            raise NotImplementedError(
++                f"{len(stray)} MXFP4 tensor(s) outside the routed experts, e.g. {stray[0]!r}; "
++                "only the routed experts have a repack path"
++            )
++
++    def _mxfp4_expert_tensor(self, loaders: list[tuple[Callable[[], Tensor], Callable[[], Tensor]]]):
++        """
++        One stacked [n_expert, rows, cols] MXFP4 tensor, built lazily.
++
++        Laziness is not an optimization here, it is the difference between
++        working and not: gguf_writer holds every added tensor until the final
++        write, so materializing this eagerly (as the DeepSeek-V4 and NVFP4 paths
++        do) would keep all ~1.38 TB of experts resident. Deferring it means only
++        the tensor currently being written is in memory, one expert at a time.
++        """
++        # meta shapes, so this does not read any weights
++        rows, packed_cols = loaders[0][0]().shape
++        n_blocks = (packed_cols * 2) // 32
++        byte_shape = (len(loaders), rows, n_blocks * 17)
++
++        def load(fns: list[tuple[Callable[[], Tensor], Callable[[], Tensor]]]) -> np.ndarray:
++            out = np.empty(byte_shape, dtype=np.uint8)
++            for eid, (packed_fn, scale_fn) in enumerate(fns):
++                out[eid] = repack_mxfp4_blocks(
++                    LazyTorchTensor.to_eager(packed_fn()),
++                    LazyTorchTensor.to_eager(scale_fn()),
++                )
++            return out
++
++        # loaders goes through args rather than the closure so that `func` matches
++        # LazyBase's single-argument shape; _recurse_apply passes plain callables
++        # through untouched.
++        return gguf.LazyNumpyTensor(
++            meta=gguf.LazyNumpyTensor.meta_with_dtype_and_shape(np.uint8, byte_shape),
++            args=(loaders,),
++            func=load,
++        )
++
++    def _write_mxfp4_experts(self) -> None:
++        n_experts = self.hparams["num_experts"]
++
++        # (bid, wid) -> {expert id: (packed name, scale name)}
++        groups: dict[tuple[int, str], dict[int, tuple[str, str]]] = {}
++        for name in self.model_tensors:
++            m = self._MXFP4_EXPERT_RE.match(name)
++            if m is None:
++                continue
++            bid, eid, wid = int(m.group(1)), int(m.group(2)), m.group(3)
++            scale_name = name.removesuffix("_packed") + "_scale"
++            if scale_name not in self.model_tensors:
++                raise KeyError(f"missing {scale_name} for {name}")
++            groups.setdefault((bid, wid), {})[eid] = (name, scale_name)
++
++        consumed: list[str] = []
++        for (bid, wid), experts in sorted(groups.items()):
++            missing = [e for e in range(n_experts) if e not in experts]
++            if missing:
++                raise KeyError(
++                    f"layer {bid} {wid}: {len(missing)} of {n_experts} experts missing, "
++                    f"first is {missing[0]}"
++                )
++            if len(experts) != n_experts:
++                raise KeyError(f"layer {bid} {wid}: {len(experts)} experts, expected {n_experts}")
++
++            loaders = []
++            for eid in range(n_experts):
++                packed_name, scale_name = experts[eid]
++                loaders.append((self.model_tensors[packed_name], self.model_tensors[scale_name]))
++                consumed += [packed_name, scale_name]
++
++            data = self._mxfp4_expert_tensor(loaders)
++            new_name = self.format_tensor_name(self._MXFP4_PROJ[wid], bid)
++            shape = gguf.quant_shape_from_byte_shape(data.shape, gguf.GGMLQuantizationType.MXFP4)
++            logger.info(
++                f"{new_name}: repacked {n_experts} experts to MXFP4, "
++                f"shape = {{{', '.join(str(n) for n in reversed(shape))}}}"
++            )
++            self.gguf_writer.add_tensor(new_name, data, raw_dtype=gguf.GGMLQuantizationType.MXFP4)
++
++        for name in consumed:
++            del self.model_tensors[name]
++
++    def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
++        # Deliberately not a generator: base.py builds
++        # chain(generate_extra_tensors(), get_tensors()), so the tensors consumed
++        # here must be removed from model_tensors before get_tensors() starts.
++        if self._is_mxfp4_packed():
++            self._write_mxfp4_experts()
++        return ()
++
++    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
++        for name, data in super().get_tensors():
++            if name.startswith(("vision_tower.", "mm_projector.")):
++                continue  # text only
++            if name.startswith("language_model."):
++                name = name[len("language_model."):]
++            yield name, data
++
++    def set_gguf_parameters(self):
++        # MLA is served as MQA with a single large head, then decompressed
++        self.hparams["num_key_value_heads"] = 1
++
++        super().set_gguf_parameters()
++        self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
++
++        linear_attn_config = self.hparams["linear_attn_config"]
++
++        # layer types: n_head_kv == 0 marks a KDA (recurrent) layer.
++        # KimiLinearConfig.is_kda_layer uses (layer_idx + 1) in kda_layers, so
++        # the lists are 1-indexed - an off-by-one here silently produces garbage.
++        full_attn_layers = linear_attn_config["full_attn_layers"]
++        n_kv_heads = [
++            self.hparams["num_key_value_heads"] if (il + 1) in full_attn_layers else 0
++            for il in range(self.hparams["num_hidden_layers"])
++        ]
++        assert len(n_kv_heads) == self.hparams["num_hidden_layers"]
++        self.gguf_writer.add_head_count_kv(n_kv_heads)
++
++        # --- KDA ---
++        self.gguf_writer.add_ssm_conv_kernel(linear_attn_config["short_conv_kernel_size"])
++        self.gguf_writer.add_kda_head_dim(linear_attn_config["head_dim"])
++        if (lb := linear_attn_config.get("gate_lower_bound")) is not None:
++            self.gguf_writer.add_kda_gate_lower_bound(lb)
++
++        # --- MLA ---
++        if (q_lora_rank := self.hparams.get("q_lora_rank")) is not None:
++            self.gguf_writer.add_q_lora_rank(q_lora_rank)
++        kv_lora_rank = self.hparams["kv_lora_rank"]
++        self.gguf_writer.add_kv_lora_rank(kv_lora_rank)
++
++        qk_nope_head_dim = self.hparams["qk_nope_head_dim"]
++        qk_rope_head_dim = self.hparams["qk_rope_head_dim"]
++        v_head_dim = self.hparams["v_head_dim"]
++        # K3 is nope-only; qk_rope_head_dim still sizes the un-absorbed part of K
++        assert self.hparams.get("mla_use_nope"), "K3 MLA is expected to be nope-only"
++        self.gguf_writer.add_rope_dimension_count(qk_rope_head_dim)
++        self.gguf_writer.add_key_length(kv_lora_rank + qk_rope_head_dim)
++        self.gguf_writer.add_key_length_mla(qk_nope_head_dim + qk_rope_head_dim)
++        self.gguf_writer.add_value_length_mla(v_head_dim)
++
++        # --- MoE ---
++        self.gguf_writer.add_expert_feed_forward_length(self.hparams["moe_intermediate_size"])
++        self.gguf_writer.add_expert_shared_count(self.hparams["num_shared_experts"])
++        self.gguf_writer.add_leading_dense_block_count(self.hparams["first_k_dense_replace"])
++        self.gguf_writer.add_expert_weights_scale(self.hparams["routed_scaling_factor"])
++        self.gguf_writer.add_expert_weights_norm(self.hparams["moe_renormalize"])
++        assert self.hparams["moe_router_activation_func"] == "sigmoid"
++        self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
++        # latent MoE: routed experts live in a down-projected space
++        if (latent := self.hparams.get("routed_expert_hidden_size")) is not None:
++            self.gguf_writer.add_expert_latent_length(latent)
++
++        # --- situ activation ---
++        assert self.hparams["hidden_act"] == "situ", \
++            f"unexpected hidden_act {self.hparams['hidden_act']!r}"
++        self.gguf_writer.add_activation_situ_beta(self.hparams["activation_situ_beta"])
++        self.gguf_writer.add_activation_situ_linear_beta(self.hparams["activation_situ_linear_beta"])
++
++        # --- cross-layer attention residuals ---
++        self.gguf_writer.add_attn_res_block_size(self.hparams["attn_res_block_size"])
++
++    def prepare_tensors(self):
++        super().prepare_tensors()
++        if self._experts is not None:
++            leftover = [k for d in self._experts for k in d.keys()]
++            if leftover:
++                raise ValueError(f"Unprocessed experts: {leftover}")
++        if self._res_parts:
++            raise ValueError(f"Unpaired attention-residual tensors: {sorted(self._res_parts)}")
++        if self._is_mxfp4_packed():
++            # label the file for what it is; prepare_metadata runs after this
++            self._is_mxfp4 = True
++            self.ftype = gguf.LlamaFileType.MOSTLY_MXFP4_MOE
++
++    def _try_fuse_res(self, data_torch: Tensor, name: str, bid: int | None):
++        """
++        Pair <x>_res_norm.weight with <x>_res_proj.weight and emit their product.
++
++        proj is [1, n_embd]; norm is [n_embd]. _apply_attn_res only ever uses
++        norm.weight * proj.weight.squeeze(0), so one vector is enough.
++        Returns None if this is not a res tensor, [] if buffered pending its pair.
++        """
++        for prefix, (tensor_id, per_layer) in self._RES_FUSIONS.items():
++            for kind in ("norm", "proj"):
++                if not name.endswith(f"{prefix}_{kind}.weight"):
++                    continue
++                key = f"{prefix}.{bid}"
++                other = self._res_parts.pop(key, None)
++                if other is None:
++                    self._res_parts[key] = (kind, data_torch)
++                    return []
++                other_kind, other_data = other
++                assert other_kind != kind, f"duplicate {kind} for {key}"
++                norm = data_torch if kind == "norm" else other_data
++                proj = data_torch if kind == "proj" else other_data
++                fused = norm.float().flatten() * proj.float().flatten()
++                # ".weight" suffix matches the convention map_tensor_name applies
++                new_name = (self.format_tensor_name(tensor_id, bid) if per_layer
++                            else gguf.TENSOR_NAMES[tensor_id] + ".weight")
++                logger.info(f"fused {prefix}_norm * {prefix}_proj -> {new_name}")
++                return [(new_name, fused)]
++        return None
++
++    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
++        # --- cross-layer attention residuals: fuse norm * proj ---
++        fused = self._try_fuse_res(data_torch, name, bid)
++        if fused is not None:
++            yield from fused
++            return
++
++        # --- KDA conv1d: HF [d_inner, 1, d_conv] -> ggml ne [d_conv, 1, d_inner, 1] ---
++        # GGUF reverses the numpy shape on write, so target numpy (1, d_inner, 1, d_conv).
++        # Both layouts have conv_step varying fastest, so this is a pure reshape.
++        if name.endswith((".q_conv1d.weight", ".k_conv1d.weight", ".v_conv1d.weight")):
++            if data_torch.ndim == 3:      # [d_inner, 1, d_conv]
++                d_inner, _, d_conv = data_torch.shape
++            elif data_torch.ndim == 2:    # [d_inner, d_conv]
++                d_inner, d_conv = data_torch.shape
++            else:
++                raise ValueError(f"unexpected conv1d rank {data_torch.ndim} for {name}")
++            data_torch = data_torch.reshape(1, d_inner, 1, d_conv)
++
++        # -exp(A_log) is folded here so the graph does not have to
++        if name.endswith(".A_log"):
++            n_head = self.hparams["num_attention_heads"]
++            data_torch = -torch.exp(data_torch.float()[:n_head])
++
++        # dt_bias -> the name SSM_DT's mapping expects
++        if name.endswith(".dt_bias"):
++            name = name.rpartition(".dt_bias")[0] + ".dt_proj.bias"
++
++        # --- g_proj is two different tensors sharing one HF name ---
++        # KDA layers: full-rank gate, [d_inner, n_embd]  (replaces g_a/g_b)
++        # MLA layers: output gate,    [n_head*v_head_dim, n_embd]
++        # Name-based mapping cannot tell them apart, so resolve by layer type.
++        if name.endswith(".self_attn.g_proj.weight"):
++            assert bid is not None
++            is_kda = (bid + 1) not in self.hparams["linear_attn_config"]["full_attn_layers"]
++            tensor_id = gguf.MODEL_TENSOR.SSM_G if is_kda else gguf.MODEL_TENSOR.ATTN_GATE
++            yield self.format_tensor_name(tensor_id, bid), data_torch
++            return
++
++        # --- routed experts: stack per-expert 2D weights into one 3D tensor ---
++        if ".block_sparse_moe.experts." in name:
++            n_experts = self.hparams["num_experts"]
++            assert bid is not None
++
++            if self._experts is None:
++                self._experts = [{} for _ in range(self.block_count)]
++            self._experts[bid][name] = data_torch
++
++            if len(self._experts[bid]) < n_experts * 3:
++                return
++
++            # w1: gate, w2: down, w3: up
++            for wid, tensor_id in (("w1", gguf.MODEL_TENSOR.FFN_GATE_EXP),
++                                   ("w2", gguf.MODEL_TENSOR.FFN_DOWN_EXP),
++                                   ("w3", gguf.MODEL_TENSOR.FFN_UP_EXP)):
++                datas = []
++                for xid in range(n_experts):
++                    ename = f"model.layers.{bid}.block_sparse_moe.experts.{xid}.{wid}.weight"
++                    datas.append(self._experts[bid].pop(ename))
++                stacked = torch.stack(datas, dim=0)
++                yield from super().modify_tensors(stacked, self.format_tensor_name(tensor_id, bid), bid)
++            return
++
++        # --- MLA absorption: split kv_b into k_b (transposed) and v_b ---
++        if name.endswith("kv_b_proj.weight"):
++            n_head_kv = self.hparams["num_key_value_heads"]
++            v_head_dim = self.hparams["v_head_dim"]
++            qk_nope_head_dim = self.hparams["qk_nope_head_dim"]
++            assert data_torch.shape[0] == n_head_kv * (v_head_dim + qk_nope_head_dim)
++            kv_b = data_torch.view(n_head_kv, v_head_dim + qk_nope_head_dim, data_torch.shape[-1])
++            k_b, v_b = torch.split(kv_b, [qk_nope_head_dim, v_head_dim], dim=1)
++            k_b = k_b.transpose(1, 2)
++            yield from super().modify_tensors(k_b, name.replace("kv_b_proj", "k_b_proj"), bid)
++            yield from super().modify_tensors(v_b, name.replace("kv_b_proj", "v_b_proj"), bid)
++            return
++
++        yield from super().modify_tensors(data_torch, name, bid)
+diff --git a/conversion/kimivl.py b/conversion/kimivl.py
+index 63b8a07..5e80133 100644
+--- a/conversion/kimivl.py
++++ b/conversion/kimivl.py
+@@ -152,3 +152,77 @@ class KimiK25Model(MmprojModel):
+             name = name.replace(".proj.2.", ".proj.linear_2.")
+ 
+         yield from super().modify_tensors(data_torch, name, bid)
++
++
++@ModelBase.register("KimiK3ForConditionalGeneration")
++class KimiK3VisionModel(MmprojModel):
++    """Kimi-K3 MoonViT-3d vision tower, image path.
++
++    Structurally the Kimi-K2.5 tower with RMSNorm, no biases, a non-square fused QKV
++    (qkv_hidden_size 1536 vs vt_hidden_size 1024) and a post-norm patchmergerv2 projector.
++    Video is out of scope: at t == 1 the temporal pool and the temporal position term vanish.
++    """
++
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        assert self.hparams_vision is not None, "Kimi-K3 requires vision_config in config.json"
++        self.merge_kernel_size = tuple(self.hparams_vision.get("merge_kernel_size", [2, 2]))
++        self.patch_size = self.hparams_vision.get("patch_size", 14)
++        pos_emb_h = self.hparams_vision.get("init_pos_emb_height", 64)
++        self.hparams_vision["image_size"] = pos_emb_h * self.patch_size
++
++    def set_gguf_parameters(self):
++        super().set_gguf_parameters()
++        assert self.hparams_vision is not None
++        self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.KIMIK3)
++
++        # qkv width != n_embd, so the runtime cannot derive d_head
++        n_head = self.hparams_vision["vt_num_attention_heads"]
++        qkv_hidden = self.hparams_vision.get("qkv_hidden_size") or self.hparams_vision["vt_hidden_size"]
++        assert qkv_hidden % n_head == 0, f"qkv_hidden_size {qkv_hidden} not divisible by {n_head} heads"
++        self.gguf_writer.add_vision_head_dim(qkv_hidden // n_head)
++
++        self.gguf_writer.add_vision_use_gelu(True)  # activation_func is gelu_pytorch_tanh
++        self.gguf_writer.add_vision_attention_layernorm_eps(
++            self.hparams_vision.get("projector_ln_eps", 1e-5))
++        self.gguf_writer.add_vision_projector_scale_factor(self.merge_kernel_size[0])
++
++        in_patch_limit = self.preprocessor_config.get("media_proc_cfg", {}).get(
++            "in_patch_limit", self.preprocessor_config.get("in_patch_limit", 16384))
++        pixels_per_patch = self.patch_size ** 2
++        self.gguf_writer.add_vision_min_pixels(8 * pixels_per_patch)
++        self.gguf_writer.add_vision_max_pixels(in_patch_limit * pixels_per_patch)
++
++    @classmethod
++    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
++        name, _ = item
++        if not name.startswith(("vision_tower.", "mm_projector.")):
++            return None
++        return super().filter_tensors(item)
++
++    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
++        assert self.hparams_vision is not None
++        n_head = self.hparams_vision["vt_num_attention_heads"]
++
++        if "wqkv" in name and "weight" in name:
++            # de-interleave Q/K so the runtime can use build_rope_2d(interleave_freq=false)
++            out_dim = data_torch.shape[0]
++            qkv_dim = out_dim // 3
++            head_dim = qkv_dim // n_head
++            wq, wk, wv = (data_torch[:qkv_dim], data_torch[qkv_dim:2 * qkv_dim], data_torch[2 * qkv_dim:])
++
++            def deinterleave(w: Tensor) -> Tensor:
++                return (w.reshape(n_head, head_dim // 4, 2, 2, w.shape[-1])
++                         .permute(0, 2, 1, 3, 4)
++                         .reshape(w.shape[0], w.shape[-1]))
++
++            data_torch = torch.cat([deinterleave(wq), deinterleave(wk), wv], dim=0)
++
++        # pos_emb.weight is kept 3D: the runtime reads grid extents from ne[1]/ne[2]
++
++        if "mm_projector.proj.0." in name:
++            name = name.replace(".proj.0.", ".proj.linear_1.")
++        elif "mm_projector.proj.2." in name:
++            name = name.replace(".proj.2.", ".proj.linear_2.")
++
++        yield from super().modify_tensors(data_torch, name, bid)
+diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
+index c25f217..44da71f 100644
+--- a/gguf-py/gguf/constants.py
++++ b/gguf-py/gguf/constants.py
+@@ -123,6 +123,7 @@ class Keys:
+         EXPERT_WEIGHTS_NORM               = "{arch}.expert_weights_norm"
+         EXPERT_GATING_FUNC                = "{arch}.expert_gating_func"
+         EXPERT_GROUP_SCALE                = "{arch}.expert_group_scale"
++        EXPERT_LATENT_LENGTH              = "{arch}.expert_latent_length"
+         EXPERTS_PER_GROUP                 = "{arch}.experts_per_group"
+         MOE_EVERY_N_LAYERS                = "{arch}.moe_every_n_layers"
+         MOE_LATENT_SIZE                   = "{arch}.moe_latent_size"
+@@ -208,6 +209,13 @@ class Keys:
+         SCALING_YARN_BETA_FAST    = "{arch}.rope.scaling.yarn_beta_fast"
+         SCALING_YARN_BETA_SLOW    = "{arch}.rope.scaling.yarn_beta_slow"
+ 
++    class Activation:
++        SITU_BETA        = "{arch}.activation.situ_beta"
++        SITU_LINEAR_BETA = "{arch}.activation.situ_linear_beta"
++
++    class AttnRes:
++        BLOCK_SIZE = "{arch}.attn_res.block_size"
++
+     class Split:
+         LLM_KV_SPLIT_NO            = "split.no"
+         LLM_KV_SPLIT_COUNT         = "split.count"
+@@ -222,7 +230,8 @@ class Keys:
+         DT_B_C_RMS     = "{arch}.ssm.dt_b_c_rms"
+ 
+     class KDA:
+-        HEAD_DIM = "{arch}.kda.head_dim"
++        HEAD_DIM         = "{arch}.kda.head_dim"
++        GATE_LOWER_BOUND = "{arch}.kda.gate_lower_bound"
+ 
+     class WKV:
+         HEAD_SIZE = "{arch}.wkv.head_size"
+@@ -325,6 +334,7 @@ class Keys:
+         class Attention:
+             HEAD_COUNT      = "clip.vision.attention.head_count"
+             HEAD_COUNT_KV   = "clip.vision.attention.head_count_kv" # used by mimovl (GQA)
++            HEAD_DIM        = "clip.vision.attention.head_dim"      # when qkv width != embedding_length
+             LAYERNORM_EPS   = "clip.vision.attention.layer_norm_epsilon"
+ 
+         class Projector:
+@@ -505,6 +515,7 @@ class MODEL_ARCH(IntEnum):
+     LLAMA_EMBED      = auto()
+     MAINCODER        = auto()
+     KIMI_LINEAR      = auto()
++    KIMI_K3          = auto()
+ 
+ 
+ class VISION_PROJECTOR_TYPE(IntEnum):
+@@ -612,6 +623,13 @@ class MODEL_TENSOR(IntEnum):
+     SSM_BETA             = auto() # Kimi Linear qwen3.5
+     SSM_G_A              = auto() # Kimi Linear
+     SSM_G_B              = auto() # Kimi Linear
++    SSM_G                = auto() # Kimi K3 (full-rank KDA gate, replaces SSM_G_A/SSM_G_B)
++    ATTN_RES_SCORE       = auto() # Kimi K3 (fused res_norm * res_proj, pre-attention)
++    FFN_RES_SCORE        = auto() # Kimi K3 (fused res_norm * res_proj, pre-FFN)
++    OUTPUT_RES_SCORE     = auto() # Kimi K3 (fused res_norm * res_proj, final)
++    FFN_ROUTED_DOWN      = auto() # Kimi K3 (latent MoE: hidden -> latent)
++    FFN_ROUTED_UP        = auto() # Kimi K3 (latent MoE: latent -> hidden)
++    FFN_ROUTED_NORM      = auto() # Kimi K3 (latent MoE: norm on expert output)
+     TIME_MIX_W0          = auto()
+     TIME_MIX_W1          = auto()
+     TIME_MIX_W2          = auto()
+@@ -1021,6 +1039,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
+     MODEL_ARCH.LLAMA_EMBED:      "llama-embed",
+     MODEL_ARCH.MAINCODER:        "maincoder",
+     MODEL_ARCH.KIMI_LINEAR:      "kimi-linear",
++    MODEL_ARCH.KIMI_K3:          "kimi-k3",
+ }
+ 
+ VISION_PROJECTOR_TYPE_NAMES: dict[VISION_PROJECTOR_TYPE, str] = {
+@@ -1126,6 +1145,13 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
+     MODEL_TENSOR.SSM_BETA:                  "blk.{bid}.ssm_beta",             # Kimi Linear qwen3.5
+     MODEL_TENSOR.SSM_G_A:                   "blk.{bid}.ssm_g_a",              # Kimi Linear
+     MODEL_TENSOR.SSM_G_B:                   "blk.{bid}.ssm_g_b",              # Kimi Linear
++    MODEL_TENSOR.SSM_G:                     "blk.{bid}.ssm_g",                # Kimi K3
++    MODEL_TENSOR.ATTN_RES_SCORE:            "blk.{bid}.attn_res_score",       # Kimi K3
++    MODEL_TENSOR.FFN_RES_SCORE:             "blk.{bid}.ffn_res_score",        # Kimi K3
++    MODEL_TENSOR.OUTPUT_RES_SCORE:          "output_res_score",               # Kimi K3
++    MODEL_TENSOR.FFN_ROUTED_DOWN:           "blk.{bid}.ffn_routed_down",      # Kimi K3
++    MODEL_TENSOR.FFN_ROUTED_UP:             "blk.{bid}.ffn_routed_up",        # Kimi K3
++    MODEL_TENSOR.FFN_ROUTED_NORM:           "blk.{bid}.ffn_routed_norm",      # Kimi K3
+     MODEL_TENSOR.TIME_MIX_W0:               "blk.{bid}.time_mix_w0",
+     MODEL_TENSOR.TIME_MIX_W1:               "blk.{bid}.time_mix_w1",
+     MODEL_TENSOR.TIME_MIX_W2:               "blk.{bid}.time_mix_w2",
+@@ -4013,6 +4039,53 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
+         MODEL_TENSOR.FFN_DOWN_SHEXP,
+         MODEL_TENSOR.FFN_UP_SHEXP,
+     ],
++    MODEL_ARCH.KIMI_K3: [
++        MODEL_TENSOR.TOKEN_EMBD,
++        MODEL_TENSOR.OUTPUT_NORM,
++        MODEL_TENSOR.OUTPUT,
++        MODEL_TENSOR.OUTPUT_RES_SCORE,
++        MODEL_TENSOR.ATTN_NORM,
++        MODEL_TENSOR.ATTN_RES_SCORE,
++        MODEL_TENSOR.FFN_RES_SCORE,
++        MODEL_TENSOR.ATTN_Q,
++        MODEL_TENSOR.ATTN_K,
++        MODEL_TENSOR.ATTN_V,
++        MODEL_TENSOR.ATTN_OUT,
++        MODEL_TENSOR.ATTN_GATE,
++        MODEL_TENSOR.ATTN_Q_A,
++        MODEL_TENSOR.ATTN_Q_B,
++        MODEL_TENSOR.ATTN_KV_A_MQA,
++        MODEL_TENSOR.ATTN_KV_B,
++        MODEL_TENSOR.ATTN_K_B,
++        MODEL_TENSOR.ATTN_V_B,
++        MODEL_TENSOR.ATTN_Q_A_NORM,
++        MODEL_TENSOR.ATTN_KV_A_NORM,
++        MODEL_TENSOR.SSM_CONV1D_Q,
++        MODEL_TENSOR.SSM_CONV1D_K,
++        MODEL_TENSOR.SSM_CONV1D_V,
++        MODEL_TENSOR.SSM_F_A,
++        MODEL_TENSOR.SSM_F_B,
++        MODEL_TENSOR.SSM_BETA,
++        MODEL_TENSOR.SSM_A,
++        MODEL_TENSOR.SSM_G,
++        MODEL_TENSOR.SSM_DT,
++        MODEL_TENSOR.SSM_NORM,
++        MODEL_TENSOR.FFN_NORM,
++        MODEL_TENSOR.FFN_GATE,
++        MODEL_TENSOR.FFN_DOWN,
++        MODEL_TENSOR.FFN_UP,
++        MODEL_TENSOR.FFN_GATE_INP,
++        MODEL_TENSOR.FFN_EXP_PROBS_B,
++        MODEL_TENSOR.FFN_GATE_EXP,
++        MODEL_TENSOR.FFN_DOWN_EXP,
++        MODEL_TENSOR.FFN_UP_EXP,
++        MODEL_TENSOR.FFN_GATE_SHEXP,
++        MODEL_TENSOR.FFN_DOWN_SHEXP,
++        MODEL_TENSOR.FFN_UP_SHEXP,
++        MODEL_TENSOR.FFN_ROUTED_DOWN,
++        MODEL_TENSOR.FFN_ROUTED_UP,
++        MODEL_TENSOR.FFN_ROUTED_NORM,
++    ],
+     # TODO
+ }
+ 
+@@ -4263,6 +4336,7 @@ class VisionProjectorType:
+     KIMIVL = "kimivl"
+     PADDLEOCR = "paddleocr"
+     KIMIK25 = "kimik25"
++    KIMIK3 = "kimik3"
+     LIGHTONOCR = "lightonocr"
+     COGVLM = "cogvlm"
+     JANUS_PRO = "janus_pro"
+diff --git a/gguf-py/gguf/gguf_writer.py b/gguf-py/gguf/gguf_writer.py
+index a101382..3967385 100644
+--- a/gguf-py/gguf/gguf_writer.py
++++ b/gguf-py/gguf/gguf_writer.py
+@@ -1021,6 +1021,21 @@ class GGUFWriter:
+     def add_ssm_dt_b_c_rms(self, value: bool) -> None:
+         self.add_bool(Keys.SSM.DT_B_C_RMS.format(arch=self.arch), value)
+ 
++    def add_kda_gate_lower_bound(self, value: float) -> None:
++        self.add_float32(Keys.KDA.GATE_LOWER_BOUND.format(arch=self.arch), value)
++
++    def add_expert_latent_length(self, value: int) -> None:
++        self.add_uint32(Keys.LLM.EXPERT_LATENT_LENGTH.format(arch=self.arch), value)
++
++    def add_activation_situ_beta(self, value: float) -> None:
++        self.add_float32(Keys.Activation.SITU_BETA.format(arch=self.arch), value)
++
++    def add_activation_situ_linear_beta(self, value: float) -> None:
++        self.add_float32(Keys.Activation.SITU_LINEAR_BETA.format(arch=self.arch), value)
++
++    def add_attn_res_block_size(self, value: int) -> None:
++        self.add_uint32(Keys.AttnRes.BLOCK_SIZE.format(arch=self.arch), value)
++
+     def add_kda_head_dim(self, value: int) -> None:
+         self.add_uint32(Keys.KDA.HEAD_DIM.format(arch=self.arch), value)
+ 
+@@ -1154,6 +1169,9 @@ class GGUFWriter:
+     def add_vision_head_count_kv(self, value: int) -> None:
+         self.add_uint32(Keys.ClipVision.Attention.HEAD_COUNT_KV, value)
+ 
++    def add_vision_head_dim(self, value: int) -> None:
++        self.add_uint32(Keys.ClipVision.Attention.HEAD_DIM, value)
++
+     def add_vision_attention_layernorm_eps(self, value: float) -> None:
+         self.add_float32(Keys.ClipVision.Attention.LAYERNORM_EPS, value)
+ 
+diff --git a/gguf-py/gguf/tensor_mapping.py b/gguf-py/gguf/tensor_mapping.py
+index f40cb82..6958aec 100644
+--- a/gguf-py/gguf/tensor_mapping.py
++++ b/gguf-py/gguf/tensor_mapping.py
+@@ -891,6 +891,19 @@ class TensorNameMap:
+             "model.layers.{bid}.linear_attn.in_proj_b",  # qwen3.5
+             "model.layers.{bid}.self_attn.b_proj",       # Kimi Linear
+         ),
++        # Kimi K3 latent MoE: routed experts operate in a down-projected space
++        MODEL_TENSOR.FFN_ROUTED_DOWN: (
++            "model.layers.{bid}.block_sparse_moe.routed_expert_down_proj",
++        ),
++
++        MODEL_TENSOR.FFN_ROUTED_UP: (
++            "model.layers.{bid}.block_sparse_moe.routed_expert_up_proj",
++        ),
++
++        MODEL_TENSOR.FFN_ROUTED_NORM: (
++            "model.layers.{bid}.block_sparse_moe.routed_expert_norm",
++        ),
++
+         MODEL_TENSOR.SSM_G_A: (
+             "model.layers.{bid}.self_attn.g_a_proj",
+         ),
+diff --git a/models/templates/Kimi-K3.jinja b/models/templates/Kimi-K3.jinja
+new file mode 100644
+index 0000000..67e51a6
+--- /dev/null
++++ b/models/templates/Kimi-K3.jinja
+@@ -0,0 +1,325 @@
++{%- macro escape_attr(value) -%}
++{{- value|string|replace('&', '&amp;')|replace('"', '&quot;') -}}
++{%- endmacro -%}
++
++{%- macro open_tag(tag, attrs=[]) -%}
++{{- '<|open|>' + tag -}}
++{%- for attr in attrs -%}
++{{- ' ' + attr[0] + '="' -}}{{- escape_attr(attr[1]) -}}{{- '"' -}}
++{%- endfor -%}
++{{- '<|sep|>' -}}
++{%- endmacro -%}
++
++{%- macro close_tag(tag) -%}
++{{- '<|close|>' + tag + '<|sep|>' -}}
++{%- endmacro -%}
++
++{%- macro next_image(state) -%}
++{%- if image_prompts is defined and image_prompts is not none -%}
++    {%- if state.image_index >= image_prompts|length -%}
++        {{- raise_exception('More image placeholders than image prompts.') -}}
++    {%- endif -%}
++    {{- image_prompts[state.image_index] -}}
++    {%- set state.image_index = state.image_index + 1 -%}
++{%- else -%}
++    {{- '<|kimi_image_placeholder|>' -}}
++{%- endif -%}
++{%- endmacro -%}
++
++{%- macro render_text(text, state) -%}
++{%- set text = text|string -%}
++{%- if image_prompts is defined and image_prompts is not none and '<|kimi_image_placeholder|>' in text -%}
++    {%- set parts = text.split('<|kimi_image_placeholder|>') -%}
++    {%- for part in parts -%}
++        {{- part -}}
++        {%- if not loop.last -%}{{- next_image(state) -}}{%- endif -%}
++    {%- endfor -%}
++{%- else -%}
++    {{- text -}}
++{%- endif -%}
++{%- endmacro -%}
++
++{%- macro render_content(content, state) -%}
++{%- if content is string -%}
++    {{- render_text(content, state) -}}
++{%- elif content is not none and content is defined -%}
++    {%- for part in content -%}
++        {%- if part.type in ['image', 'image_url'] -%}
++            {{- next_image(state) -}}
++        {%- else -%}
++            {{- render_text(part.text, state) -}}
++        {%- endif -%}
++    {%- endfor -%}
++{%- endif -%}
++{%- endmacro -%}
++
++{%- macro internal_system_message(message_type, body) -%}
++{{- open_tag('message', [('role', 'system'), ('type', message_type)]) -}}
++{{- body|trim -}}
++{{- close_tag('message') -}}
++{{- '<|end_of_msg|>' -}}
++{%- endmacro -%}
++
++{%- macro json_sorted(value) -%}
++{#- Minja は tojson(sort_keys=true) を実装していない。K3 参照実装は
++    deep_sort_dict() の後に compact JSON 化するため、dictsort と再帰マクロで
++    同じバイト列を作る。配列の順序は保持し、mapping の各階層だけソートする。 -#}
++{%- if value is mapping -%}
++{{- '{' -}}
++{%- for key, item in value|dictsort -%}
++{%- if not loop.first -%}{{- ',' -}}{%- endif -%}
++{{- key|tojson(ensure_ascii=false) -}}{{- ':' -}}{{- json_sorted(item) -}}
++{%- endfor -%}
++{{- '}' -}}
++{%- elif value is string or value is number or value is boolean or value is none -%}
++{{- value|tojson(ensure_ascii=false) -}}
++{%- else -%}
++{{- '[' -}}
++{%- for item in value -%}
++{%- if not loop.first -%}{{- ',' -}}{%- endif -%}
++{{- json_sorted(item) -}}
++{%- endfor -%}
++{{- ']' -}}
++{%- endif -%}
++{%- endmacro -%}
++
++{%- macro render_tool_declare(tool_list, dynamic=false) -%}
++{{- open_tag('message', [('role', 'system'), ('type', 'tool-declare')]) -}}
++{%- if dynamic -%}
++{{- '## New Tools Available\nThe system dynamically extends the toolset via lazy-loading.\nYou have access to all existing and extended tools.\nHere are the specs for the extended tools.\n\n```json\n' -}}
++{%- else -%}
++{{- '# Tools\nHere are the available tools, described in JSONSchema.\n\n```json\n' -}}
++{%- endif -%}
++{{- json_sorted(tool_list) -}}
++{{- '\n```' -}}
++{{- close_tag('message') -}}
++{{- '<|end_of_msg|>' -}}
++{%- endmacro -%}
++
++{%- macro xtml_type(value) -%}
++{%- if value is boolean -%}boolean
++{%- elif value is none -%}null
++{%- elif value is number -%}number
++{%- elif value is string -%}string
++{%- elif value is mapping -%}object
++{%- else -%}array
++{%- endif -%}
++{%- endmacro -%}
++
++{%- macro xtml_value(value) -%}
++{%- if value is string -%}
++{{- value -}}
++{%- else -%}
++{{- value|tojson(ensure_ascii=false) -}}
++{%- endif -%}
++{%- endmacro -%}
++
++{%- macro render_assistant(message, state) -%}
++{%- if thinking -%}
++    {%- set reasoning_content = message.get('reasoning_content') or message.get('reasoning') -%}
++    {{- open_tag('think') -}}
++    {%- if reasoning_content is not none and reasoning_content|string|trim -%}
++        {{- render_text(reasoning_content, state) -}}
++    {%- endif -%}
++    {{- close_tag('think') -}}
++{%- endif -%}
++{{- open_tag('response') -}}
++{{- render_content(message.get('content'), state) -}}
++{{- close_tag('response') -}}
++{%- set tool_calls = message.get('tool_calls') -%}
++{%- if tool_calls -%}
++    {{- open_tag('tools') -}}
++    {%- for tool_call in tool_calls -%}
++        {%- if tool_call is not mapping -%}
++            {{- raise_exception('Kimi K3 tool calls must be mappings.') -}}
++        {%- endif -%}
++        {%- set fn = tool_call.function if tool_call.function is defined and tool_call.function is mapping else tool_call -%}
++        {%- if fn.get('name') is none -%}
++            {{- raise_exception('Kimi K3 tool calls require a function name.') -}}
++        {%- endif -%}
++        {{- open_tag('call', [('tool', fn.name), ('index', loop.index)]) -}}
++        {%- set arguments = fn.get('arguments', {}) -%}
++        {%- set json_block = fn.get('_xtml_json_block') -%}
++        {%- if json_block is not none -%}
++            {{- open_tag('json', [('type', 'object')]) -}}
++            {{- render_text(json_block, state) -}}
++            {{- close_tag('json') -}}
++        {%- elif arguments is mapping -%}
++            {%- for key, value in arguments.items() -%}
++                {{- open_tag('argument', [('key', key), ('type', xtml_type(value))]) -}}
++                {{- render_text(xtml_value(value), state) -}}
++                {{- close_tag('argument') -}}
++            {%- endfor -%}
++        {%- elif arguments is string and arguments|trim -%}
++            {{- open_tag('json', [('type', 'object')]) -}}
++            {{- render_text(arguments, state) -}}
++            {{- close_tag('json') -}}
++        {%- elif arguments is not none and arguments is not string -%}
++            {{- raise_exception('Kimi K3 tool call arguments must be a mapping or a JSON object string.') -}}
++        {%- endif -%}
++        {{- close_tag('call') -}}
++    {%- endfor -%}
++    {{- close_tag('tools') -}}
++{%- endif -%}
++{%- endmacro -%}
++
++{%- macro render_tool_message(message, state, resolved_name=none) -%}
++{%- set state.tool_index = state.tool_index + 1 -%}
++{%- if resolved_name is not none -%}
++    {%- set tool_name = resolved_name -%}
++{%- elif 'tool' in message -%}
++    {%- set tool_name = message.get('tool') -%}
++{%- else -%}
++    {%- set tool_name = message.get('name') -%}
++{%- endif -%}
++{%- if tool_name is none and state.tool_calls is not none and state.tool_index <= state.tool_calls|length -%}
++    {%- set fallback_call = state.tool_calls[state.tool_index - 1] -%}
++    {%- set fallback_fn = fallback_call.function if fallback_call.function is defined and fallback_call.function is mapping else fallback_call -%}
++    {%- set tool_name = fallback_fn.name -%}
++{%- endif -%}
++{%- if tool_name is none -%}
++    {{- raise_exception('Kimi K3 tool messages need a resolvable tool name: carry `tool`/`name`, or match a preceding assistant tool_call by order.') -}}
++{%- endif -%}
++{{- open_tag('message', [('role', 'tool'), ('tool', tool_name), ('index', state.tool_index)]) -}}
++{{- render_content(message.get('content'), state) -}}
++{{- close_tag('message') -}}
++{{- '<|end_of_msg|>' -}}
++{%- endmacro -%}
++
++{%- if thinking is undefined -%}
++    {%- set thinking = true -%}
++{%- endif -%}
++{%- if thinking_effort is undefined -%}
++    {%- set thinking_effort = 'max' -%}
++{%- endif -%}
++{%- if thinking and thinking_effort is not none and thinking_effort not in ['low', 'high', 'max'] -%}
++    {{- raise_exception('Unsupported thinking_effort=' + thinking_effort|string + '; supported values are low, high, and max.') -}}
++{%- endif -%}
++
++{%- set state = namespace(image_index=0, tool_calls=none, tool_index=0, response_schema=none) -%}
++
++{%- if tools is defined and tools -%}
++    {{- render_tool_declare(tools) -}}
++{%- endif -%}
++
++{%- if thinking and thinking_effort in ['low', 'high', 'max'] -%}
++    {{- internal_system_message(
++        'thinking-effort',
++        '`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=' + thinking_effort|string + '`.'
++    ) -}}
++{%- endif -%}
++
++{%- for message in messages -%}
++    {%- if message is mapping -%}
++        {%- if 'role' not in message -%}
++            {{- raise_exception('Kimi K3 messages require a role.') -}}
++        {%- elif message.role == 'user' -%}
++            {%- set attrs = [('role', 'user')] -%}
++            {%- if message.get('name') -%}{%- set attrs = attrs + [('name', message.name)] -%}{%- endif -%}
++            {{- open_tag('message', attrs) -}}
++            {{- render_content(message.get('content'), state) -}}
++            {{- close_tag('message') -}}
++            {{- '<|end_of_msg|>' -}}
++        {%- elif message.role == 'system' and message.get('tools') -%}
++            {{- render_tool_declare(message.tools, dynamic=true) -}}
++        {%- elif message.role == 'system' -%}
++            {%- set attrs = [('role', 'system')] -%}
++            {%- if message.get('name') -%}{%- set attrs = attrs + [('name', message.name)] -%}{%- endif -%}
++            {{- open_tag('message', attrs) -}}
++            {{- render_content(message.get('content'), state) -}}
++            {{- close_tag('message') -}}
++            {{- '<|end_of_msg|>' -}}
++        {%- elif message.role == 'assistant' -%}
++            {%- set state.tool_calls = message.get('tool_calls') -%}
++            {%- set state.tool_index = 0 -%}
++            {%- set attrs = [('role', 'assistant')] -%}
++            {%- if message.get('name') -%}{%- set attrs = attrs + [('name', message.name)] -%}{%- endif -%}
++            {{- open_tag('message', attrs) -}}
++            {{- render_assistant(message, state) -}}
++            {{- close_tag('message') -}}
++            {{- '<|end_of_msg|>' -}}
++        {%- elif message.role == 'tool' and (loop.first or messages[loop.index0 - 1].role != 'tool') -%}
++            {%- set run = namespace(tool_messages=[], resolved_count=0) -%}
++            {%- for candidate in messages[loop.index0:] -%}
++                {%- if candidate is not mapping or candidate.role != 'tool' -%}{%- break -%}{%- endif -%}
++                {%- set run.tool_messages = run.tool_messages + [candidate] -%}
++                {%- set call_id = candidate.get('tool_call_id', candidate.get('id')) -%}
++                {%- set match = namespace(found=false) -%}
++                {%- if call_id is not none and state.tool_calls is not none -%}
++                    {%- for tool_call in state.tool_calls -%}
++                        {%- if not match.found and tool_call is mapping and tool_call.get('id') is not none and tool_call.get('id')|string == call_id|string -%}
++                            {%- set match.found = true -%}
++                        {%- endif -%}
++                    {%- endfor -%}
++                {%- endif -%}
++                {%- if match.found -%}{%- set run.resolved_count = run.resolved_count + 1 -%}{%- endif -%}
++            {%- endfor -%}
++            {%- if run.tool_messages|length > 0 and run.resolved_count == run.tool_messages|length -%}
++                {%- set emitted = namespace(ids=[]) -%}
++                {%- for tool_call in state.tool_calls -%}
++                    {%- if tool_call is mapping and tool_call.get('id') is not none and tool_call.get('id')|string not in emitted.ids -%}
++                        {%- set emitted.ids = emitted.ids + [tool_call.get('id')|string] -%}
++                        {%- set fn = tool_call.function if tool_call.function is defined and tool_call.function is mapping else tool_call -%}
++                        {%- for tool_message in run.tool_messages -%}
++                            {%- set result_id = tool_message.get('tool_call_id', tool_message.get('id')) -%}
++                            {%- if result_id is not none and result_id|string == tool_call.get('id')|string -%}
++                                {{- render_tool_message(tool_message, state, fn.get('name')) -}}
++                            {%- endif -%}
++                        {%- endfor -%}
++                    {%- endif -%}
++                {%- endfor -%}
++            {%- else -%}
++                {%- for tool_message in run.tool_messages -%}
++                    {{- render_tool_message(tool_message, state) -}}
++                {%- endfor -%}
++            {%- endif -%}
++        {%- endif -%}
++    {%- endif -%}
++{%- endfor -%}
++
++{%- if tool_choice is defined and tool_choice == 'required' -%}
++    {{- internal_system_message('tool-choice', 'The system is invoked with `tool_choice=required`.\nYou MUST call tools in the next message.') -}}
++{%- elif tool_choice is defined and tool_choice == 'none' -%}
++    {{- internal_system_message('tool-choice', 'The system is invoked with `tool_choice=none`.\nYou MUST NOT call any tools in the next message.') -}}
++{%- endif -%}
++
++{%- if response_schema is defined -%}
++    {%- set state.response_schema = response_schema -%}
++{%- elif response_format is defined and response_format is mapping and response_format.get('json_schema') is not none -%}
++    {%- set schema_wrapper = response_format.get('json_schema') -%}
++    {%- if schema_wrapper is mapping and 'schema' in schema_wrapper -%}
++        {%- set state.response_schema = schema_wrapper.get('schema') -%}
++    {%- elif schema_wrapper is mapping and 'json_schema' in schema_wrapper -%}
++        {%- set state.response_schema = schema_wrapper.get('json_schema') -%}
++    {%- else -%}
++        {%- set state.response_schema = schema_wrapper -%}
++    {%- endif -%}
++{%- endif -%}
++
++{%- set response_format_type = none -%}
++{%- if response_format is defined and response_format is mapping -%}
++    {%- set response_format_type = response_format.get('type') -%}
++{%- elif response_format is defined -%}
++    {%- set response_format_type = response_format -%}
++{%- endif -%}
++{%- if response_format_type == 'json_object' -%}
++    {{- internal_system_message(
++        'response-format',
++        'The system is invoked with `response_format=json_object`.\nYour response must be raw JSON data without markdown code blocks (```json) or any additional formatting.'
++    ) -}}
++{%- elif response_format_type == 'json_schema' -%}
++    {{- internal_system_message(
++        'response-format',
++        'The system is invoked with `response_format=json_schema`.\nYour response must be raw JSON data without markdown code blocks (```json) or any additional formatting.\nThe JSON data must match the following schema:\n```json\n' + json_sorted(state.response_schema) + '\n```'
++    ) -}}
++{%- endif -%}
++
++{%- if add_generation_prompt -%}
++    {{- open_tag('message', [('role', 'assistant')]) -}}
++    {{- open_tag('think' if thinking else 'response') -}}
++{%- endif -%}
++
++{%- if image_prompts is defined and image_prompts is not none and state.image_index != image_prompts|length -%}
++    {{- raise_exception('image prompt count ' + image_prompts|length|string + ' != consumed placeholder count ' + state.image_index|string) -}}
++{%- endif -%}
++
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index c9eead1..1a6639c 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -133,6 +133,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+     { LLM_ARCH_LLAMA_EMBED,      "llama-embed"      },
+     { LLM_ARCH_MAINCODER,        "maincoder"        },
+     { LLM_ARCH_KIMI_LINEAR,      "kimi-linear"      },
++    { LLM_ARCH_KIMI_K3,          "kimi-k3"          },
+     { LLM_ARCH_UNKNOWN,          "(unknown)"        },
+ };
+ 
+@@ -171,6 +172,9 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_FEATURES_LENGTH,                   "%s.features_length"                   },
+     { LLM_KV_BLOCK_COUNT,                       "%s.block_count"                       },
+     { LLM_KV_LEADING_DENSE_BLOCK_COUNT,         "%s.leading_dense_block_count"         },
++    { LLM_KV_ATTN_RES_BLOCK_SIZE,               "%s.attn_res.block_size"               },
++    { LLM_KV_ACTIVATION_SITU_BETA,              "%s.activation.situ_beta"              },
++    { LLM_KV_ACTIVATION_SITU_LINEAR_BETA,       "%s.activation.situ_linear_beta"       },
+     { LLM_KV_FEED_FORWARD_LENGTH,               "%s.feed_forward_length"               },
+     { LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        "%s.expert_feed_forward_length"        },
+     { LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, "%s.expert_shared_feed_forward_length" },
+@@ -186,6 +190,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_EXPERT_GROUP_USED_COUNT,           "%s.expert_group_used_count"           },
+     { LLM_KV_EXPERT_WEIGHTS_SCALE,              "%s.expert_weights_scale"              },
+     { LLM_KV_EXPERT_WEIGHTS_NORM,               "%s.expert_weights_norm"               },
++    { LLM_KV_EXPERT_LATENT_LENGTH,              "%s.expert_latent_length"              },
+     { LLM_KV_EXPERT_GATING_FUNC,                "%s.expert_gating_func"                },
+     { LLM_KV_EXPERT_GROUP_SCALE,                "%s.expert_group_scale"                },
+     { LLM_KV_EXPERTS_PER_GROUP,                 "%s.experts_per_group"                 },
+@@ -274,6 +279,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_SSM_DT_B_C_RMS,     "%s.ssm.dt_b_c_rms"     },
+ 
+     { LLM_KV_KDA_HEAD_DIM, "%s.kda.head_dim" },
++    { LLM_KV_KDA_GATE_LOWER_BOUND, "%s.kda.gate_lower_bound" },
+ 
+     { LLM_KV_WKV_HEAD_SIZE, "%s.wkv.head_size" },
+ 
+@@ -416,6 +422,13 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
+     { LLM_TENSOR_SSM_F_B,                                "blk.%d.ssm_f_b" },
+     { LLM_TENSOR_SSM_BETA,                               "blk.%d.ssm_beta" },
+     { LLM_TENSOR_SSM_G_A,                                "blk.%d.ssm_g_a" },
++    { LLM_TENSOR_SSM_G,                                  "blk.%d.ssm_g" },
++    { LLM_TENSOR_ATTN_RES_SCORE,                         "blk.%d.attn_res_score" },
++    { LLM_TENSOR_FFN_RES_SCORE,                          "blk.%d.ffn_res_score" },
++    { LLM_TENSOR_OUTPUT_RES_SCORE,                       "output_res_score" },
++    { LLM_TENSOR_FFN_ROUTED_DOWN,                        "blk.%d.ffn_routed_down" },
++    { LLM_TENSOR_FFN_ROUTED_UP,                          "blk.%d.ffn_routed_up" },
++    { LLM_TENSOR_FFN_ROUTED_NORM,                        "blk.%d.ffn_routed_norm" },
+     { LLM_TENSOR_SSM_G_B,                                "blk.%d.ssm_g_b" },
+     { LLM_TENSOR_SSM_NORM,                               "blk.%d.ssm_norm" },
+     { LLM_TENSOR_ATTN_Q_A_NORM,                          "blk.%d.attn_q_a_norm" },
+@@ -658,6 +671,13 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
+     {LLM_TENSOR_SSM_F_B,                    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+     {LLM_TENSOR_SSM_BETA,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+     {LLM_TENSOR_SSM_G_A,                    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_SSM_G,                      {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_ATTN_RES_SCORE,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
++    {LLM_TENSOR_FFN_RES_SCORE,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
++    {LLM_TENSOR_OUTPUT_RES_SCORE,           {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL}},
++    {LLM_TENSOR_FFN_ROUTED_DOWN,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_FFN_ROUTED_UP,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
++    {LLM_TENSOR_FFN_ROUTED_NORM,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_SSM_G_B,                    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+     {LLM_TENSOR_TIME_MIX_LERP_X,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_TIME_MIX_LN,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+@@ -858,6 +878,7 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
+         case LLM_ARCH_NEMOTRON_H_MOE:
+         case LLM_ARCH_QWEN3NEXT:
+         case LLM_ARCH_KIMI_LINEAR:
++        case LLM_ARCH_KIMI_K3:
+         case LLM_ARCH_QWEN35:
+         case LLM_ARCH_QWEN35MOE:
+             return true;
+@@ -913,6 +934,7 @@ bool llm_arch_supports_sm_tensor(const llm_arch & arch) {
+         case LLM_ARCH_MINIMAX_M2:
+         case LLM_ARCH_MISTRAL4:
+         case LLM_ARCH_KIMI_LINEAR:
++        case LLM_ARCH_KIMI_K3:
+             return false;
+         default:
+             return true;
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index 89cf16c..127291d 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -137,6 +137,7 @@ enum llm_arch {
+     LLM_ARCH_LLAMA_EMBED,
+     LLM_ARCH_MAINCODER,
+     LLM_ARCH_KIMI_LINEAR,
++    LLM_ARCH_KIMI_K3,
+     LLM_ARCH_UNKNOWN,
+ };
+ 
+@@ -175,6 +176,9 @@ enum llm_kv {
+     LLM_KV_FEATURES_LENGTH,
+     LLM_KV_BLOCK_COUNT,
+     LLM_KV_LEADING_DENSE_BLOCK_COUNT,
++    LLM_KV_ATTN_RES_BLOCK_SIZE,
++    LLM_KV_ACTIVATION_SITU_BETA,
++    LLM_KV_ACTIVATION_SITU_LINEAR_BETA,
+     LLM_KV_FEED_FORWARD_LENGTH,
+     LLM_KV_EXPERT_FEED_FORWARD_LENGTH,
+     LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH,
+@@ -190,6 +194,7 @@ enum llm_kv {
+     LLM_KV_EXPERT_GROUP_USED_COUNT,
+     LLM_KV_EXPERT_WEIGHTS_SCALE,
+     LLM_KV_EXPERT_WEIGHTS_NORM,
++    LLM_KV_EXPERT_LATENT_LENGTH,
+     LLM_KV_EXPERT_GATING_FUNC,
+     LLM_KV_EXPERT_GROUP_SCALE,
+     LLM_KV_EXPERTS_PER_GROUP,
+@@ -278,6 +283,7 @@ enum llm_kv {
+     LLM_KV_SSM_DT_B_C_RMS,
+ 
+     LLM_KV_KDA_HEAD_DIM,
++    LLM_KV_KDA_GATE_LOWER_BOUND,
+ 
+     LLM_KV_WKV_HEAD_SIZE,
+ 
+@@ -444,6 +450,13 @@ enum llm_tensor {
+     LLM_TENSOR_SSM_BETA,            // kimi: beta mixing coefficient and qwen3.5
+     LLM_TENSOR_SSM_G_A,             // kimi: output gate projection A
+     LLM_TENSOR_SSM_G_B,             // kimi: output gate projection B
++    LLM_TENSOR_SSM_G,               // kimi-k3: full-rank KDA gate
++    LLM_TENSOR_ATTN_RES_SCORE,      // kimi-k3: fused res_norm*res_proj (pre-attn)
++    LLM_TENSOR_FFN_RES_SCORE,       // kimi-k3: fused res_norm*res_proj (pre-ffn)
++    LLM_TENSOR_OUTPUT_RES_SCORE,    // kimi-k3: fused res_norm*res_proj (final)
++    LLM_TENSOR_FFN_ROUTED_DOWN,     // kimi-k3: latent MoE down
++    LLM_TENSOR_FFN_ROUTED_UP,       // kimi-k3: latent MoE up
++    LLM_TENSOR_FFN_ROUTED_NORM,     // kimi-k3: latent MoE norm
+     LLM_TENSOR_TIME_MIX_W0,
+     LLM_TENSOR_TIME_MIX_W1,
+     LLM_TENSOR_TIME_MIX_W2,
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 3cc8ffa..985ce93 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -2192,6 +2192,10 @@ void llama_context::output_reorder() {
+ //
+ 
+ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
++    if (model.arch == LLM_ARCH_KIMI_K3) {
++        // the n_tokens*40 budget below is exhausted at ubatch 3840
++        return std::max<uint32_t>(n_tokens * 160, 64u * model.n_tensors());
++    }
+     if (model.arch == LLM_ARCH_QWEN3NEXT || model.arch == LLM_ARCH_KIMI_LINEAR || model.arch == LLM_ARCH_QWEN35 || model.arch == LLM_ARCH_QWEN35MOE) {
+         return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
+     }
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 31cf41a..f2404e3 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1614,6 +1614,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+                 cur = ggml_silu(ctx0, cur);
+                 cb(cur, "ffn_moe_silu", il);
+             } break;
++        case LLM_FFN_SITU:
++            {
++                // situ(gate, up) = beta*tanh(gate/beta)*sigmoid(gate) * lb*tanh(up/lb)
++                GGML_ASSERT(has_gate);
++                const float beta = hparams.situ_beta;
++                const float lb   = hparams.situ_linear_beta;
++
++                ggml_tensor * act = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, cur, 1.0f/beta)), beta);
++                act = ggml_mul(ctx0, act, ggml_sigmoid(ctx0, cur));
++                if (lb > 0.0f) {
++                    up = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, up, 1.0f/lb)), lb);
++                }
++                cur = ggml_mul(ctx0, act, up);
++                cb(cur, "ffn_moe_situ", il);
++            } break;
+         case LLM_FFN_GELU:
+             if (has_gate) {
+                 cur = ggml_geglu_split(ctx0, cur, up);
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index bf67782..581a935 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -44,6 +44,7 @@ enum llm_ffn_op_type {
+     LLM_FFN_GEGLU,
+     LLM_FFN_REGLU,
+     LLM_FFN_SWIGLU_OAI_MOE,
++    LLM_FFN_SITU,           // kimi-k3 (appended: do not renumber existing values)
+ };
+ 
+ enum llm_ffn_gate_type {
+diff --git a/src/llama-hparams.h b/src/llama-hparams.h
+index e2d051e..a2509e4 100644
+--- a/src/llama-hparams.h
++++ b/src/llama-hparams.h
+@@ -4,10 +4,11 @@
+ 
+ #include <array>
+ #include <cassert>
++#include <cmath>
+ 
+ // bump if necessary
+ #define LLAMA_MAX_LAYERS  512
+-#define LLAMA_MAX_EXPERTS 512 // Qwen3 Next
++#define LLAMA_MAX_EXPERTS 1024 // Kimi K3
+ 
+ enum llama_expert_gating_func_type {
+     LLAMA_EXPERT_GATING_FUNC_TYPE_NONE           = 0,
+@@ -153,6 +154,13 @@ struct llama_hparams {
+     // for hybrid state space models
+     std::array<bool, LLAMA_MAX_LAYERS> recurrent_layer_arr;
+ 
++    // kimi-k3
++    uint32_t n_expert_latent      = 0;      // routed_expert_hidden_size (0 = experts run at n_embd)
++    uint32_t attn_res_block_size  = 0;      // 0 = no cross-layer attention residuals
++    float    kda_gate_lower_bound = -INFINITY;
++    float    situ_beta            = 1.0f;
++    float    situ_linear_beta     = 0.0f;   // 0 = no linear-beta transform on the up branch
++
+     bool ssm_dt_b_c_rms = false;
+ 
+     float f_clamp_kqv      = 0.0f;
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 8bf20a7..06ec246 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -282,6 +282,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
+             return new llama_model_mimo2(params);
+         case LLM_ARCH_KIMI_LINEAR:
+             return new llama_model_kimi_linear(params);
++        case LLM_ARCH_KIMI_K3:
++            return new llama_model_kimi_k3(params);
+         case LLM_ARCH_STEP35:
+             return new llama_model_step35(params);
+         default:
+@@ -778,6 +780,7 @@ const char * llm_type_name(llm_type type) {
+         case LLM_TYPE_355B_A32B:     return "355B.A32B";
+         case LLM_TYPE_397B_A17B:     return "397B.A17B";
+         case LLM_TYPE_744B_A40B:     return "744B.A40B";
++        case LLM_TYPE_2_8T_A50B:     return "2.8T.A50B";
+         case LLM_TYPE_E2B:           return "E2B";
+         case LLM_TYPE_E4B:           return "E4B";
+         default:                     return "?B";
+@@ -2239,6 +2242,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
+         case LLM_ARCH_NEMOTRON_H:
+         case LLM_ARCH_NEMOTRON_H_MOE:
+         case LLM_ARCH_KIMI_LINEAR:
++        case LLM_ARCH_KIMI_K3:
+             return LLAMA_ROPE_TYPE_NONE;
+ 
+         // use what we call a normal RoPE, operating on pairs of consecutive head values
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 01c87a7..fd7322c 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -138,6 +138,7 @@ enum llm_type {
+     LLM_TYPE_355B_A32B, // GLM-4.5
+     LLM_TYPE_397B_A17B, // Qwen3.5
+     LLM_TYPE_744B_A40B, // GLM-5
++    LLM_TYPE_2_8T_A50B, // Kimi-K3
+     LLM_TYPE_E2B,
+     LLM_TYPE_E4B,
+ };
+@@ -477,6 +478,14 @@ struct llama_layer {
+     struct ggml_tensor * ssm_g_b    = nullptr;
+     struct ggml_tensor * ssm_o_norm = nullptr;
+ 
++    // kimi-k3
++    struct ggml_tensor * ssm_g           = nullptr; // full-rank KDA gate (replaces ssm_g_a/ssm_g_b)
++    struct ggml_tensor * attn_res_score  = nullptr; // fused res_norm*res_proj, pre-attention
++    struct ggml_tensor * ffn_res_score   = nullptr; // fused res_norm*res_proj, pre-FFN
++    struct ggml_tensor * ffn_routed_down = nullptr; // latent MoE: n_embd -> n_expert_latent
++    struct ggml_tensor * ffn_routed_up   = nullptr; // latent MoE: n_expert_latent -> n_embd
++    struct ggml_tensor * ffn_routed_norm = nullptr;
++
+     // DSA (deepseek sparse attention)
+     struct ggml_tensor * indexer_k_norm   = nullptr;
+     struct ggml_tensor * indexer_k_norm_b = nullptr;
+@@ -528,6 +537,7 @@ struct llama_model {
+     struct ggml_tensor * tok_norm_b = nullptr;
+ 
+     struct ggml_tensor * output_norm     = nullptr;
++    struct ggml_tensor * output_res_score = nullptr; // kimi-k3: final cross-layer residual mix
+     struct ggml_tensor * output_norm_b   = nullptr;
+     struct ggml_tensor * output          = nullptr;
+     struct ggml_tensor * output_b        = nullptr;
+diff --git a/src/models/kimi-k3.cpp b/src/models/kimi-k3.cpp
+new file mode 100644
+index 0000000..5b91c7e
+--- /dev/null
++++ b/src/models/kimi-k3.cpp
+@@ -0,0 +1,656 @@
++#include "models.h"
++#include "llama-memory-recurrent.h"
++
++//
++// Kimi-K3 text model.
++//
++// Hybrid KDA (linear) + MLA (full) attention, as in Kimi-Linear-48B, plus five
++// things that architecture does not have:
++//
++//   1. cross-layer residual attention  (attn_res_block_size)
++//   2. latent MoE                      (routed experts run at n_expert_latent)
++//   3. situ activation                 (replaces SwiGLU everywhere)
++//   4. MLA output gate                 (sigmoid gate before o_proj)
++//   5. full-rank KDA gate              (single ssm_g instead of ssm_g_a/ssm_g_b)
++//
++
++void llama_model_kimi_k3::load_arch_hparams(llama_model_loader & ml) {
++    ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
++    ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH_MLA,    hparams.n_embd_head_k_mla_impl);
++    ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_MLA,  hparams.n_embd_head_v_mla_impl);
++    ml.get_key(LLM_KV_ATTENTION_Q_LORA_RANK,       hparams.n_lora_q, false);
++    ml.get_key(LLM_KV_ATTENTION_KV_LORA_RANK,      hparams.n_lora_kv);
++    ml.get_key(LLM_KV_SSM_CONV_KERNEL,             hparams.ssm_d_conv);
++    ml.get_key(LLM_KV_KDA_HEAD_DIM,                hparams.n_embd_head_kda);
++    ml.get_key(LLM_KV_KDA_GATE_LOWER_BOUND,        hparams.kda_gate_lower_bound, false);
++
++    // n_head_kv == 0 marks a KDA (recurrent) layer, as in kimi-linear
++    for (uint32_t i = 0; i < hparams.n_layer; ++i) {
++        hparams.recurrent_layer_arr[i] = hparams.n_head_kv(i) == 0;
++    }
++
++    ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp);
++    ml.get_key(LLM_KV_EXPERT_SHARED_COUNT,        hparams.n_expert_shared);
++    ml.get_key(LLM_KV_LEADING_DENSE_BLOCK_COUNT,  hparams.n_layer_dense_lead, false);
++    ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,       hparams.expert_weights_scale, false);
++    ml.get_key(LLM_KV_EXPERT_WEIGHTS_NORM,        hparams.expert_weights_norm, false);
++    ml.get_key(LLM_KV_EXPERT_GATING_FUNC,         hparams.expert_gating_func);
++    // required: a silent default here loads cleanly and produces garbage
++    ml.get_key(LLM_KV_EXPERT_LATENT_LENGTH,         hparams.n_expert_latent);
++    ml.get_key(LLM_KV_ATTN_RES_BLOCK_SIZE,          hparams.attn_res_block_size);
++    ml.get_key(LLM_KV_ACTIVATION_SITU_BETA,         hparams.situ_beta);
++    ml.get_key(LLM_KV_ACTIVATION_SITU_LINEAR_BETA,  hparams.situ_linear_beta);
++
++    GGML_ASSERT(hparams.attn_res_block_size > 0 && "Kimi-K3 requires attn_res.block_size");
++    GGML_ASSERT(hparams.n_expert_latent   > 0 && "Kimi-K3 requires expert_latent_length");
++
++    switch (hparams.n_layer) {
++        case 93: type = LLM_TYPE_2_8T_A50B; break; // Kimi-K3
++        default: type = LLM_TYPE_UNKNOWN;
++    }
++}
++
++void llama_model_kimi_k3::load_arch_tensors(llama_model_loader &) {
++    LLAMA_LOAD_LOCALS;
++
++    const int64_t n_embd_latent = hparams.n_expert_latent > 0 ? hparams.n_expert_latent : n_embd;
++
++    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
++
++    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
++    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, 0);
++
++    if (hparams.attn_res_block_size > 0) {
++        output_res_score = create_tensor(tn(LLM_TENSOR_OUTPUT_RES_SCORE, "weight"), {n_embd}, 0);
++    }
++
++    for (int i = 0; i < n_layer; ++i) {
++        auto & layer = layers[i];
++
++        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
++        layer.ffn_norm  = create_tensor(tn(LLM_TENSOR_FFN_NORM,  "weight", i), {n_embd}, 0);
++
++        if (hparams.attn_res_block_size > 0) {
++            layer.attn_res_score = create_tensor(tn(LLM_TENSOR_ATTN_RES_SCORE, "weight", i), {n_embd}, 0);
++            layer.ffn_res_score  = create_tensor(tn(LLM_TENSOR_FFN_RES_SCORE,  "weight", i), {n_embd}, 0);
++        }
++
++        const int64_t head_dim = hparams.n_embd_head_kda;
++        const int64_t d_conv   = hparams.ssm_d_conv;
++        const int64_t d_inner  = head_dim * n_head;
++
++        if (hparams.is_recurrent(i)) {
++            // conv1d may be stored 4D [d_conv, 1, d_inner, 1] or 3D (quantization drops the trailing 1)
++            auto conv = [&](llm_tensor tid) {
++                ggml_tensor * t = create_tensor(tn(tid, "weight", i), {d_conv, 1, d_inner, 1}, TENSOR_NOT_REQUIRED);
++                return t ? t : create_tensor(tn(tid, "weight", i), {d_conv, 1, d_inner}, 0);
++            };
++            layer.ssm_q_conv = conv(LLM_TENSOR_SSM_CONV1D_Q);
++            layer.ssm_k_conv = conv(LLM_TENSOR_SSM_CONV1D_K);
++            layer.ssm_v_conv = conv(LLM_TENSOR_SSM_CONV1D_V);
++
++            create_tensor_qkv(layer, i, n_embd, d_inner, d_inner, d_inner, 0);
++
++            layer.ssm_f_a  = create_tensor(tn(LLM_TENSOR_SSM_F_A,  "weight", i), {n_embd, head_dim}, 0);
++            layer.ssm_f_b  = create_tensor(tn(LLM_TENSOR_SSM_F_B,  "weight", i), {head_dim, d_inner}, 0);
++            layer.ssm_beta = create_tensor(tn(LLM_TENSOR_SSM_BETA, "weight", i), {n_embd, n_head}, 0);
++
++            // K3's A_log is a plain 1-D [n_head] parameter (kimi-linear's is padded);
++            // accept the padded forms too so both layouts load. -exp() is folded at
++            // conversion time. Only the element count matters - the graph reshapes it.
++            layer.ssm_a = create_tensor(tn(LLM_TENSOR_SSM_A, i), {n_head}, TENSOR_NOT_REQUIRED);
++            if (!layer.ssm_a) {
++                layer.ssm_a = create_tensor(tn(LLM_TENSOR_SSM_A, i), {1, n_head, 1, 1}, TENSOR_NOT_REQUIRED);
++            }
++            if (!layer.ssm_a) {
++                layer.ssm_a = create_tensor(tn(LLM_TENSOR_SSM_A, i), {1, n_head}, 0);
++            }
++
++            layer.ssm_dt_b = create_tensor(tn(LLM_TENSOR_SSM_DT, "bias", i), {d_inner}, 0);
++
++            // K3 uses a single full-rank gate instead of kimi-linear's g_a/g_b pair
++            layer.ssm_g      = create_tensor(tn(LLM_TENSOR_SSM_G,    "weight", i), {n_embd, d_inner}, 0);
++            layer.ssm_o_norm = create_tensor(tn(LLM_TENSOR_SSM_NORM, "weight", i), {head_dim}, 0);
++            layer.wo         = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {d_inner, n_embd}, 0);
++        } else {
++            const int64_t q_lora_rank      = hparams.n_lora_q;
++            const int64_t kv_lora_rank     = hparams.n_lora_kv;
++            const int64_t n_embd_head_k    = hparams.n_embd_head_k_mla();
++            const int64_t n_embd_head_v    = hparams.n_embd_head_v_mla();
++            const int64_t qk_rope_head_dim = hparams.n_rot();
++            const int64_t qk_nope_head_dim = n_embd_head_k - qk_rope_head_dim;
++
++            layer.attn_q_a_norm  = create_tensor(tn(LLM_TENSOR_ATTN_Q_A_NORM,  "weight", i), {q_lora_rank}, TENSOR_NOT_REQUIRED);
++            layer.attn_kv_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_NORM, "weight", i), {kv_lora_rank}, 0);
++
++            if (layer.attn_q_a_norm) {
++                layer.wq_a = create_tensor(tn(LLM_TENSOR_ATTN_Q_A, "weight", i), {n_embd, q_lora_rank}, 0);
++                layer.wq_b = create_tensor(tn(LLM_TENSOR_ATTN_Q_B, "weight", i), {q_lora_rank, n_head * n_embd_head_k}, 0);
++            } else {
++                layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", i), {n_embd, n_head * n_embd_head_k}, 0);
++            }
++
++            layer.wkv_a_mqa = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_MQA, "weight", i), {n_embd, kv_lora_rank + qk_rope_head_dim}, 0);
++            layer.wkv_b     = create_tensor(tn(LLM_TENSOR_ATTN_KV_B, "weight", i),
++                                            {kv_lora_rank, n_head * (qk_nope_head_dim + n_embd_head_v)},
++                                            TENSOR_NOT_REQUIRED | TENSOR_SKIP_IF_VIRTUAL);
++            if (!layer.wkv_b) {
++                layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K_B, "weight", i), {qk_nope_head_dim, kv_lora_rank, n_head}, 0);
++                layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V_B, "weight", i), {kv_lora_rank, n_embd_head_v, n_head}, 0);
++            }
++
++            // K3: sigmoid output gate applied to the attention output before o_proj
++            layer.wqkv_gate = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "weight", i), {n_embd, n_head * n_embd_head_v}, TENSOR_NOT_REQUIRED);
++
++            layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_head * n_embd_head_v, n_embd}, 0);
++        }
++
++        if (i < (int) hparams.n_layer_dense_lead) {
++            layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd, n_ff}, 0);
++            layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {n_ff, n_embd}, 0);
++            layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd, n_ff}, 0);
++        } else {
++            const int64_t n_ff_exp = hparams.n_ff_exp;
++
++            layer.ffn_gate_inp    = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,    "weight", i), {n_embd, n_expert}, 0);
++            layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias",   i), {n_expert}, 0);
++
++            // routed experts live in the latent space
++            layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {n_embd_latent, n_ff_exp, n_expert}, 0);
++            layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp, n_embd_latent, n_expert}, 0);
++            layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {n_embd_latent, n_ff_exp, n_expert}, 0);
++
++            if (hparams.n_expert_latent > 0) {
++                layer.ffn_routed_down = create_tensor(tn(LLM_TENSOR_FFN_ROUTED_DOWN, "weight", i), {n_embd, n_embd_latent}, 0);
++                layer.ffn_routed_up   = create_tensor(tn(LLM_TENSOR_FFN_ROUTED_UP,   "weight", i), {n_embd_latent, n_embd}, 0);
++                layer.ffn_routed_norm = create_tensor(tn(LLM_TENSOR_FFN_ROUTED_NORM, "weight", i), {n_embd_latent}, TENSOR_NOT_REQUIRED);
++            }
++
++            // shared experts stay at n_embd, width = moe_intermediate_size * n_expert_shared
++            const int64_t n_ff_shexp = n_ff_exp * (hparams.n_expert_shared > 0 ? hparams.n_expert_shared : 1);
++            layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {n_embd, n_ff_shexp}, TENSOR_NOT_REQUIRED);
++            layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {n_ff_shexp, n_embd}, TENSOR_NOT_REQUIRED);
++            layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd, n_ff_shexp}, TENSOR_NOT_REQUIRED);
++        }
++    }
++}
++
++std::unique_ptr<llm_graph_context> llama_model_kimi_k3::build_arch_graph(const llm_graph_params & params) const {
++    return std::make_unique<graph>(*this, params);
++}
++
++//
++// situ activation:
++//   situ(gate, up) = beta*tanh(gate/beta)*sigmoid(gate) * linear_beta*tanh(up/linear_beta)
++// linear_beta <= 0 disables the transform on the up branch.
++//
++static ggml_tensor * kimi_k3_situ(ggml_context * ctx0, ggml_tensor * gate, ggml_tensor * up,
++                                  float beta, float linear_beta) {
++    ggml_tensor * a = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, gate, 1.0f/beta)), beta);
++    a = ggml_mul(ctx0, a, ggml_sigmoid(ctx0, gate));
++
++    if (linear_beta > 0.0f) {
++        up = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, up, 1.0f/linear_beta)), linear_beta);
++    }
++    return ggml_mul(ctx0, a, up);
++}
++
++//
++// cross-layer residual attention
++//
++
++void llama_model_kimi_k3::graph::res_push(ggml_tensor * cur, int64_t n_embd, int64_t n_tokens) {
++    ckpts.push_back(ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens));
++}
++
++ggml_tensor * llama_model_kimi_k3::graph::res_stack(int64_t n_embd, int64_t n_tokens) {
++    GGML_UNUSED(n_embd);
++    GGML_UNUSED(n_tokens);
++    if (stack_cache_n == (int) ckpts.size()) {
++        return stack_cache;   // set unchanged since the last mix
++    }
++    ggml_tensor * acc = ckpts[0];
++    for (size_t i = 1; i < ckpts.size(); ++i) {
++        acc = ggml_concat(ctx0, acc, ckpts[i], 1);
++    }
++    stack_cache   = acc;
++    stack_cache_n = (int) ckpts.size();
++    return acc;
++}
++
++ggml_tensor * llama_model_kimi_k3::graph::res_mix(ggml_tensor * cur, ggml_tensor * score_w,
++                                                  int64_t n_embd, int64_t n_tokens, int il) {
++    const int n_ckpt = (int) ckpts.size();
++    if (n_ckpt == 0) {
++        return cur; // layer 0: nothing banked yet
++    }
++
++    const float eps = hparams.f_norm_rms_eps;
++
++    ggml_tensor * src = res_stack(n_embd, n_tokens);   // [n_embd, n_ckpt, n_tokens]
++
++    // Scores for the banked checkpoints. One rms_norm covers all of them because
++    // ne0 is n_embd. NOTE: the scores use the *normalized* values, but the weighted
++    // sum below uses the *raw* ones - mirroring _apply_attn_res.
++    ggml_tensor * sc_src = ggml_rms_norm(ctx0, src, eps);
++    sc_src = ggml_mul(ctx0, sc_src, score_w);
++    sc_src = ggml_sum_rows(ctx0, sc_src);                          // [1, n_ckpt, n_tokens]
++    sc_src = ggml_reshape_2d(ctx0, sc_src, n_ckpt, n_tokens);
++
++    // The current residual stream is scored separately and kept out of the stack,
++    // so the stack stays append-only.
++    ggml_tensor * sc_cur = ggml_rms_norm(ctx0, cur, eps);
++    sc_cur = ggml_mul(ctx0, sc_cur, score_w);
++    sc_cur = ggml_sum_rows(ctx0, sc_cur);                          // [1, n_tokens]
++
++    ggml_tensor * scores = ggml_concat(ctx0, sc_src, sc_cur, 0);   // [n_ckpt+1, n_tokens]
++    ggml_tensor * probs  = ggml_soft_max(ctx0, scores);            // over ne0 = n_ckpt+1
++    cb(probs, "res_probs", il);
++
++    // The convex combination is a reduction over ne1 of the stack. Expressed as
++    // n_ckpt broadcast-multiplies against the individual checkpoints rather than
++    // one fused ne1 reduction, because the fused form has no Metal kernel and
++    // would split the graph onto the CPU. n_ckpt is bounded by
++    // attn_res_block_size, so the unrolled form stays cheap.
++    ggml_tensor * out = nullptr;
++    for (int c = 0; c < n_ckpt; ++c) {
++        ggml_tensor * p_c = ggml_cont(ctx0, ggml_view_2d(ctx0, probs, 1, n_tokens, probs->nb[1],
++                                                        probs->nb[0] * c));
++        ggml_tensor * term = ggml_mul(ctx0, ggml_reshape_2d(ctx0, ckpts[c], n_embd, n_tokens), p_c);
++        out = out ? ggml_add(ctx0, out, term) : term;
++    }
++
++    ggml_tensor * p_cur = ggml_cont(ctx0, ggml_view_2d(ctx0, probs, 1, n_tokens, probs->nb[1],
++                                                       probs->nb[0] * n_ckpt));
++    out = ggml_add(ctx0, out, ggml_mul(ctx0, cur, p_cur));
++
++    return out;
++}
++
++llama_model_kimi_k3::graph::graph(const llama_model & model, const llm_graph_params & params) :
++    llm_build_delta_net_base(params), model(model) {
++
++    ggml_tensor * cur;
++    ggml_tensor * inpL;
++
++    inpL = build_inp_embd(model.tok_embd);
++    cb(inpL, "inp_embd", -1);
++
++    // K3 MLA is nope-only, so there is no position input
++
++    auto * inp_kv      = !hparams.is_mla() ? build_inp_mem_hybrid()   : nullptr;
++    auto * inp_k       =  hparams.is_mla() ? build_inp_mem_hybrid_k() : nullptr;
++    auto * inp_rs      =  hparams.is_mla() ? inp_k->get_recr() : inp_kv->get_recr();
++    auto * inp_attn_kv = !hparams.is_mla() ? inp_kv->get_attn() : nullptr;
++    auto * inp_attn_k  =  hparams.is_mla() ? inp_k->get_attn()  : nullptr;
++
++    ggml_tensor * inp_out_ids = build_inp_out_ids();
++
++    const int64_t n_head_kda = hparams.n_head();
++    const int64_t head_dim   = hparams.n_embd_head_kda;
++    const int64_t d_conv     = hparams.ssm_d_conv;
++    const int64_t d_inner    = n_head_kda * head_dim;
++    const int64_t n_seqs     = ubatch.n_seqs;
++    const int64_t n_seq_tokens = ubatch.n_seq_tokens;
++
++    GGML_ASSERT(n_seqs != 0);
++    GGML_ASSERT(ubatch.equal_seqs());
++    GGML_ASSERT(ubatch.n_tokens == n_seq_tokens * n_seqs);
++
++    const int64_t n_embd_head_k_mla   = hparams.n_embd_head_k_mla();
++    const int64_t n_embd_head_v_mla   = hparams.n_embd_head_v_mla();
++    const int64_t kv_lora_rank        = hparams.n_lora_kv;
++    const int64_t n_embd_head_qk_rope = hparams.n_rot();
++    const int64_t n_embd_head_qk_nope = n_embd_head_k_mla - n_embd_head_qk_rope;
++    const float   kq_scale_mla        = 1.0f / sqrtf((float) n_embd_head_k_mla);
++
++    const uint32_t res_bs        = hparams.attn_res_block_size;
++    const bool     use_attn_res  = res_bs > 0;
++    const int64_t  n_embd_latent = hparams.n_expert_latent > 0 ? hparams.n_expert_latent : n_embd;
++
++    for (int il = 0; il < n_layer; ++il) {
++        const auto & layer = model.layers[il];
++
++        // `prefix_sum` is the residual stream. On checkpoint layers it is banked
++        // into res_stack and restarts from the attention output alone.
++        ggml_tensor * prefix_sum = inpL;
++
++        cur = use_attn_res ? res_mix(prefix_sum, layer.attn_res_score, n_embd, n_tokens, il)
++                           : prefix_sum;
++
++        bool banked = false;
++        if (use_attn_res && (uint32_t) il % res_bs == 0) {
++            res_push(prefix_sum, n_embd, n_tokens);  // banks the RAW layer input, not `cur`
++            banked = true;
++        }
++
++        cur = build_norm(cur, layer.attn_norm, NULL, LLM_NORM_RMS, il);
++        cb(cur, "attn_norm", il);
++        ggml_build_forward_expand(gf, cur);
++
++        if (hparams.is_recurrent(il)) {
++            cur = build_kda_layer(cur, layer, inp_rs, d_conv, head_dim, n_head_kda,
++                                  d_inner, n_seq_tokens, n_seqs, il);
++        } else {
++            cur = build_mla_layer(cur, layer, inp_attn_k, inp_attn_kv,
++                                  n_embd_head_k_mla, n_embd_head_v_mla, kv_lora_rank,
++                                  n_embd_head_qk_rope, n_embd_head_qk_nope, kq_scale_mla, il);
++        }
++
++        prefix_sum = banked ? cur : ggml_add(ctx0, prefix_sum, cur);
++        cb(prefix_sum, "prefix_sum_attn", il);
++
++        cur = use_attn_res ? res_mix(prefix_sum, layer.ffn_res_score, n_embd, n_tokens, il)
++                           : prefix_sum;
++
++        cur = build_norm(cur, layer.ffn_norm, NULL, LLM_NORM_RMS, il);
++        cb(cur, "ffn_norm", il);
++
++        if ((uint32_t) il < hparams.n_layer_dense_lead) {
++            ggml_tensor * g = ggml_mul_mat(ctx0, layer.ffn_gate, cur);
++            ggml_tensor * u = ggml_mul_mat(ctx0, layer.ffn_up,   cur);
++            cur = kimi_k3_situ(ctx0, g, u, hparams.situ_beta, hparams.situ_linear_beta);
++            cur = ggml_mul_mat(ctx0, layer.ffn_down, cur);
++            cb(cur, "ffn_out", il);
++        } else {
++            cur = build_latent_moe(cur, layer, n_embd_latent, il);
++        }
++
++        prefix_sum = ggml_add(ctx0, prefix_sum, cur);
++        prefix_sum = build_cvec(prefix_sum, il);
++        cb(prefix_sum, "l_out", il);
++
++        inpL = prefix_sum;
++    }
++
++    cur = inpL;
++
++    // final mix, then narrow to the output tokens
++    if (use_attn_res) {
++        cur = res_mix(cur, model.output_res_score, n_embd, n_tokens, -1);
++    }
++    if (inp_out_ids) {
++        cur = ggml_get_rows(ctx0, cur, inp_out_ids);
++    }
++
++    cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
++    cb(cur, "result_norm", -1);
++    res->t_embd = cur;
++
++    cur = ggml_mul_mat(ctx0, model.output, cur);
++    cb(cur, "result_output", -1);
++    res->t_logits = cur;
++
++    ggml_build_forward_expand(gf, cur);
++}
++
++//
++// KDA layer
++//
++
++// Causal conv1d over one of Q/K/V. `qkv` selects which third of the conv state to use.
++// Polled rather than blocking is not a concern here; this mirrors kimi-linear's helper.
++static ggml_tensor * kimi_k3_conv1d(ggml_cgraph * gf, ggml_context * ctx0,
++                                    ggml_tensor * conv_states_all, ggml_tensor * conv_state_all,
++                                    int64_t qkv, ggml_tensor * x, ggml_tensor * proj_w, ggml_tensor * conv_w,
++                                    int64_t d_conv, int64_t head_dim, int64_t n_head,
++                                    int64_t n_seq_tokens, int64_t n_seqs, int64_t n_tokens, int64_t kv_head) {
++    const int64_t d_inner         = head_dim * n_head;
++    const int64_t conv_state_size = (d_conv - 1) * d_inner;
++    const int64_t n_embd_r_total  = 3 * conv_state_size;
++
++    ggml_tensor * conv_state_x = ggml_view_3d(ctx0, conv_state_all, d_conv - 1, d_inner, n_seqs,
++        (d_conv - 1)   * ggml_element_size(conv_state_all),
++        n_embd_r_total * ggml_element_size(conv_state_all),
++        qkv * conv_state_size * ggml_element_size(conv_state_all));
++
++    ggml_tensor * x_proj = ggml_mul_mat(ctx0, proj_w, x);
++    ggml_tensor * x_3d   = ggml_reshape_3d(ctx0, x_proj, d_inner, n_seq_tokens, n_seqs);
++    ggml_tensor * conv_x = ggml_concat(ctx0, conv_state_x, ggml_transpose(ctx0, x_3d), 0);
++
++    ggml_tensor * last_conv_x = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner, n_seqs,
++        conv_x->nb[1], conv_x->nb[2], n_seq_tokens * conv_x->nb[0]);
++    ggml_build_forward_expand(gf,
++        ggml_cpy(ctx0, last_conv_x,
++            ggml_view_3d(ctx0, conv_states_all, d_conv - 1, d_inner, n_seqs,
++                (d_conv - 1)   * ggml_element_size(conv_states_all),
++                n_embd_r_total * ggml_element_size(conv_states_all),
++                (kv_head * n_embd_r_total + qkv * conv_state_size) * ggml_element_size(conv_states_all))));
++
++    ggml_tensor * conv_weight = ggml_reshape_2d(ctx0, conv_w, d_conv, d_inner);
++    ggml_tensor * Xcur = ggml_ssm_conv(ctx0, conv_x, conv_weight);
++    Xcur = ggml_reshape_2d(ctx0, Xcur, d_inner, n_tokens);
++    Xcur = ggml_silu(ctx0, Xcur);
++
++    return ggml_reshape_4d(ctx0, Xcur, head_dim, n_head, n_seq_tokens, n_seqs);
++}
++
++ggml_tensor * llama_model_kimi_k3::graph::build_kda_layer(
++        ggml_tensor * cur, const llama_layer & layer, llm_graph_input_rs * inp_rs,
++        int64_t d_conv, int64_t head_dim, int64_t n_head_kda,
++        int64_t d_inner, int64_t n_seq_tokens, int64_t n_seqs, int il) {
++
++    const auto * mctx_cur = inp_rs->mctx;
++    const auto   kv_head  = mctx_cur->get_head();
++
++    ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
++    ggml_tensor * conv_state_all  = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs);
++
++    ggml_tensor * Qcur = kimi_k3_conv1d(gf, ctx0, conv_states_all, conv_state_all, 0, cur, layer.wq, layer.ssm_q_conv, d_conv, head_dim, n_head_kda, n_seq_tokens, n_seqs, n_tokens, kv_head);
++    ggml_tensor * Kcur = kimi_k3_conv1d(gf, ctx0, conv_states_all, conv_state_all, 1, cur, layer.wk, layer.ssm_k_conv, d_conv, head_dim, n_head_kda, n_seq_tokens, n_seqs, n_tokens, kv_head);
++    ggml_tensor * Vcur = kimi_k3_conv1d(gf, ctx0, conv_states_all, conv_state_all, 2, cur, layer.wv, layer.ssm_v_conv, d_conv, head_dim, n_head_kda, n_seq_tokens, n_seqs, n_tokens, kv_head);
++    cb(Qcur, "kda_q_conv", il);
++    cb(Kcur, "kda_k_conv", il);
++    cb(Vcur, "kda_v_conv", il);
++
++    // The decay gate has two forms, selected by linear_attn_config.gate_lower_bound
++    // (fla/ops/kda/gate.py). `lower_bound` is NOT a clamp - when set it swaps the
++    // activation entirely:
++    //
++    //   unset (kimi-linear):  g = -exp(A_log) * softplus(f_b(f_a(x)) + dt_bias)
++    //   set   (K3, -5.0):     g = lower_bound * sigmoid(exp(A_log) * (f_b(f_a(x)) + dt_bias))
++    //
++    // ssm_a holds -exp(A_log) (folded at conversion time), so exp(A_log) == -ssm_a.
++    ggml_tensor * f_a = ggml_mul_mat(ctx0, layer.ssm_f_a, cur);
++    ggml_tensor * g1  = ggml_mul_mat(ctx0, layer.ssm_f_b, f_a);
++    g1 = ggml_add(ctx0, g1, layer.ssm_dt_b);
++
++    ggml_tensor * A = ggml_reshape_3d(ctx0, layer.ssm_a, 1, n_head_kda, 1);
++
++    if (hparams.kda_gate_lower_bound > -INFINITY) {
++        g1 = ggml_reshape_3d(ctx0, g1, head_dim, n_head_kda, n_tokens);
++        g1 = ggml_mul(ctx0, g1, A);                                    // -exp(A_log) * (...)
++        g1 = ggml_sigmoid(ctx0, ggml_scale(ctx0, g1, -1.0f));
++        g1 = ggml_scale(ctx0, g1, hparams.kda_gate_lower_bound);
++    } else {
++        g1 = ggml_softplus(ctx0, g1);
++        g1 = ggml_reshape_3d(ctx0, g1, head_dim, n_head_kda, n_tokens);
++        g1 = ggml_mul(ctx0, g1, A);
++    }
++    cb(g1, "kda_g1", il);
++
++    g1 = ggml_reshape_4d(ctx0, g1, head_dim, n_head_kda, n_seq_tokens, n_seqs);
++
++    ggml_tensor * beta = ggml_mul_mat(ctx0, layer.ssm_beta, cur);
++    beta = ggml_reshape_4d(ctx0, beta, 1, n_head_kda, n_seq_tokens, n_seqs);
++    beta = ggml_sigmoid(ctx0, beta);
++    cb(beta, "kda_beta", il);
++
++    ggml_tensor * cur_3d = ggml_reshape_3d(ctx0, cur, cur->ne[0], n_seq_tokens, n_seqs);
++
++    ggml_tensor * ssm_states_all = mctx_cur->get_s_l(il);
++    ggml_tensor * state = build_rs(inp_rs, ssm_states_all, hparams.n_embd_s(), n_seqs);
++    state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head_kda, n_seqs);
++
++    const float eps = hparams.f_norm_rms_eps;
++    Qcur = ggml_l2_norm(ctx0, Qcur, eps);
++    Kcur = ggml_l2_norm(ctx0, Kcur, eps);
++
++    auto attn_out = build_delta_net(Qcur, Kcur, Vcur, g1, beta, state, il);
++
++    ggml_tensor * output    = ggml_cont(ctx0, attn_out.first);
++    cb(output, "kda_scan_out", il);
++    ggml_tensor * new_state = attn_out.second;
++
++    ggml_build_forward_expand(gf,
++        ggml_cpy(ctx0, new_state,
++            ggml_view_1d(ctx0, ssm_states_all, hparams.n_embd_s() * n_seqs,
++                         kv_head * hparams.n_embd_s() * ggml_element_size(ssm_states_all))));
++
++    // K3: single full-rank gate (kimi-linear factors this as g_b(g_a(x)))
++    ggml_tensor * cur_2d = ggml_reshape_2d(ctx0, cur_3d, cur_3d->ne[0], n_seq_tokens * n_seqs);
++    ggml_tensor * g2     = ggml_mul_mat(ctx0, layer.ssm_g, cur_2d);
++    g2 = ggml_reshape_3d(ctx0, g2, head_dim, n_head_kda, n_seq_tokens * n_seqs);
++
++    ggml_tensor * o      = ggml_reshape_3d(ctx0, output, head_dim, n_head_kda, n_seq_tokens * n_seqs);
++    ggml_tensor * normed = build_norm(o, layer.ssm_o_norm, nullptr, LLM_NORM_RMS, il);
++    cb(g2, "kda_g2", il);
++    cb(normed, "kda_normed", il);
++    ggml_tensor * gated  = ggml_mul(ctx0, normed, ggml_sigmoid(ctx0, g2));
++
++    gated = ggml_cont_2d(ctx0, gated, d_inner, n_tokens);
++    cur   = ggml_mul_mat(ctx0, layer.wo, gated);
++    cb(cur, "kda_out", il);
++
++    return cur;
++}
++
++//
++// MLA layer (nope-only, with K3's sigmoid output gate)
++//
++
++ggml_tensor * llama_model_kimi_k3::graph::build_mla_layer(
++        ggml_tensor * cur, const llama_layer & layer,
++        llm_graph_input_attn_k * inp_attn_k, llm_graph_input_attn_kv * inp_attn_kv,
++        int64_t n_embd_head_k_mla, int64_t n_embd_head_v_mla, int64_t kv_lora_rank,
++        int64_t n_embd_head_qk_rope, int64_t n_embd_head_qk_nope, float kq_scale, int il) {
++
++    ggml_tensor * inp_gate = cur; // the output gate reads the *normed* layer input
++
++    ggml_tensor * Qcur;
++    if (layer.wq_a) {
++        Qcur = ggml_mul_mat(ctx0, layer.wq_a, cur);
++        Qcur = build_norm(Qcur, layer.attn_q_a_norm, nullptr, LLM_NORM_RMS, il);
++        Qcur = ggml_mul_mat(ctx0, layer.wq_b, Qcur);
++    } else {
++        Qcur = ggml_mul_mat(ctx0, layer.wq, cur);
++    }
++
++    ggml_tensor * kv_cmpr_pe = ggml_mul_mat(ctx0, layer.wkv_a_mqa, cur);
++
++    ggml_tensor * kv_cmpr = ggml_view_2d(ctx0, kv_cmpr_pe, kv_lora_rank, n_tokens,
++        ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope), 0);
++    ggml_tensor * k_pe = ggml_view_3d(ctx0, kv_cmpr_pe, n_embd_head_qk_rope, 1, n_tokens,
++        ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope),
++        ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope),
++        ggml_row_size(kv_cmpr_pe->type, kv_lora_rank));
++
++    // no RoPE: mla_use_nope is asserted at conversion time
++    kv_cmpr = build_norm(kv_cmpr, layer.attn_kv_a_norm, nullptr, LLM_NORM_RMS, il);
++
++    ggml_tensor * out;
++    if (layer.wk_b && layer.wv_b) {
++        ggml_tensor * q_nope = ggml_view_3d(ctx0, Qcur, n_embd_head_qk_nope, n_head, n_tokens,
++            ggml_row_size(Qcur->type, n_embd_head_k_mla),
++            ggml_row_size(Qcur->type, n_embd_head_k_mla) * n_head, 0);
++        ggml_tensor * q_pe = ggml_view_3d(ctx0, Qcur, n_embd_head_qk_rope, n_head, n_tokens,
++            ggml_row_size(Qcur->type, n_embd_head_k_mla),
++            ggml_row_size(Qcur->type, n_embd_head_k_mla) * n_head,
++            ggml_row_size(Qcur->type, n_embd_head_qk_nope));
++
++        q_nope = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
++        ggml_tensor * q_nope_absorbed = ggml_mul_mat(ctx0, layer.wk_b, q_nope);
++        q_nope_absorbed = ggml_permute(ctx0, q_nope_absorbed, 0, 2, 1, 3);
++
++        ggml_tensor * Q = ggml_concat(ctx0, q_nope_absorbed, q_pe, 0);
++        ggml_tensor * kv_cmpr_3d = ggml_reshape_3d(ctx0, kv_cmpr, kv_lora_rank, 1, n_tokens);
++        ggml_tensor * K = ggml_concat(ctx0, kv_cmpr_3d, k_pe, 0);
++        ggml_tensor * V = kv_cmpr_3d;
++
++        // wo == NULL: the output projection is applied after the gate below
++        out = build_attn(inp_attn_k, nullptr, NULL, nullptr, Q, K, V, nullptr, nullptr, layer.wv_b, kq_scale, il);
++    } else {
++        ggml_tensor * Q = ggml_reshape_3d(ctx0, Qcur, n_embd_head_k_mla, n_head, n_tokens);
++        ggml_tensor * kv = ggml_mul_mat(ctx0, layer.wkv_b, kv_cmpr);
++        const int64_t kv_per_head = n_embd_head_qk_nope + n_embd_head_v_mla;
++
++        ggml_tensor * k_nope = ggml_view_3d(ctx0, kv, n_embd_head_qk_nope, n_head, n_tokens,
++            ggml_row_size(kv->type, kv_per_head), ggml_row_size(kv->type, kv_per_head * n_head), 0);
++        ggml_tensor * V = ggml_cont(ctx0, ggml_view_3d(ctx0, kv, n_embd_head_v_mla, n_head, n_tokens,
++            ggml_row_size(kv->type, kv_per_head), ggml_row_size(kv->type, kv_per_head * n_head),
++            ggml_row_size(kv->type, n_embd_head_qk_nope)));
++
++        ggml_tensor * k_pe_t = ggml_new_tensor_3d(ctx0, k_pe->type, n_embd_head_qk_rope, n_head, n_tokens);
++        ggml_tensor * K = ggml_concat(ctx0, ggml_repeat(ctx0, k_pe, k_pe_t), k_nope, 0);
++
++        out = build_attn(inp_attn_kv, nullptr, NULL, nullptr, Q, K, V, nullptr, nullptr, nullptr, kq_scale, il);
++    }
++
++    // K3: attn_output *= sigmoid(g_proj(x)), then o_proj
++    if (layer.wqkv_gate) {
++        ggml_tensor * g = ggml_sigmoid(ctx0, ggml_mul_mat(ctx0, layer.wqkv_gate, inp_gate));
++        out = ggml_mul(ctx0, out, g);
++        cb(out, "mla_gated", il);
++    }
++
++    out = ggml_mul_mat(ctx0, layer.wo, out);
++    cb(out, "mla_out", il);
++
++    return out;
++}
++
++//
++// latent MoE: down-project, run the routed experts in the latent space, norm, up-project;
++// shared experts stay at n_embd and read the un-projected input.
++//
++
++ggml_tensor * llama_model_kimi_k3::graph::build_latent_moe(
++        ggml_tensor * cur, const llama_layer & layer, int64_t n_embd_latent, int il) {
++
++    ggml_tensor * identity = cur;
++
++    ggml_tensor * routed_in = layer.ffn_routed_down
++        ? ggml_mul_mat(ctx0, layer.ffn_routed_down, cur)
++        : cur;
++
++    // The router scores the FULL-WIDTH input while the experts consume the latent
++    // one, so the logits are computed here and handed to build_moe_ffn via
++    // `probs_in` (which substitutes for the gate_inp matmul).
++    ggml_tensor * logits = ggml_mul_mat(ctx0, layer.ffn_gate_inp, identity);
++    cb(logits, "ffn_moe_logits", il);
++
++    ggml_tensor * moe_out = build_moe_ffn(routed_in,
++        nullptr, // gate_inp unused: logits supplied below
++        layer.ffn_up_exps,
++        layer.ffn_gate_exps,
++        layer.ffn_down_exps,
++        layer.ffn_exp_probs_b,
++        hparams.n_expert,
++        hparams.n_expert_used,
++        LLM_FFN_SITU, hparams.expert_weights_norm,
++        hparams.expert_weights_scale,
++        (llama_expert_gating_func_type) hparams.expert_gating_func,
++        il,
++        logits);
++    cb(moe_out, "ffn_moe_out", il);
++
++    if (layer.ffn_routed_norm) {
++        moe_out = build_norm(moe_out, layer.ffn_routed_norm, NULL, LLM_NORM_RMS, il);
++    }
++    if (layer.ffn_routed_up) {
++        moe_out = ggml_mul_mat(ctx0, layer.ffn_routed_up, moe_out);
++    }
++    GGML_UNUSED(n_embd_latent);
++
++    if (layer.ffn_gate_shexp) {
++        ggml_tensor * g = ggml_mul_mat(ctx0, layer.ffn_gate_shexp, identity);
++        ggml_tensor * u = ggml_mul_mat(ctx0, layer.ffn_up_shexp,   identity);
++        ggml_tensor * sh = kimi_k3_situ(ctx0, g, u, hparams.situ_beta, hparams.situ_linear_beta);
++        sh = ggml_mul_mat(ctx0, layer.ffn_down_shexp, sh);
++        cb(sh, "ffn_shexp", il);
++        moe_out = ggml_add(ctx0, moe_out, sh);
++    }
++
++    cb(moe_out, "ffn_out", il);
++    return moe_out;
++}
+diff --git a/src/models/models.h b/src/models/models.h
+index 7e551eb..45dd755 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -1842,6 +1842,55 @@ struct llama_model_mimo2 : public llama_model_base {
+ };
+ 
+ 
++struct llama_model_kimi_k3 : public llama_model_base {
++    llama_model_kimi_k3(const struct llama_model_params & params) : llama_model_base(params) {}
++    void load_arch_hparams(llama_model_loader & ml) override;
++    void load_arch_tensors(llama_model_loader & ml) override;
++
++    struct graph : public llm_build_delta_net_base {
++        graph(const llama_model & model, const llm_graph_params & params);
++
++        const llama_model & model;
++
++        // Cross-layer residual attention (K3's `_apply_attn_res`).
++        //
++        // `src` holds the block-residual checkpoints, one [n_embd, n_token] slab
++        // per checkpoint, packed as [n_embd, n_ckpt, n_token] so that a single
++        // ggml_rms_norm reduces over ne0 = n_embd and scores all slabs at once,
++        // with no transpose of the (large) stack.
++        // Each checkpoint is kept as its own [n_embd, 1, n_token] tensor and the
++        // [n_embd, n_ckpt, n_token] stack is materialised with ggml_concat only when
++        // the set changes (8 times per forward pass for the real model). A single
++        // preallocated buffer would be cheaper, but a bare ggml_new_tensor leaf has
++        // no backing buffer - ggml-alloc only allocates tensors that are op outputs.
++        std::vector<ggml_tensor *> ckpts;
++        ggml_tensor * stack_cache   = nullptr;
++        int           stack_cache_n = -1;
++
++        void          res_push(ggml_tensor * cur, int64_t n_embd, int64_t n_tokens);
++        ggml_tensor * res_stack(int64_t n_embd, int64_t n_tokens);
++        ggml_tensor * res_mix(ggml_tensor * cur, ggml_tensor * score_w,
++                              int64_t n_embd, int64_t n_tokens, int il);
++
++        ggml_tensor * build_kda_layer(ggml_tensor * cur, const llama_layer & layer,
++                                      llm_graph_input_rs * inp_rs,
++                                      int64_t d_conv, int64_t head_dim, int64_t n_head_kda,
++                                      int64_t d_inner, int64_t n_seq_tokens, int64_t n_seqs, int il);
++
++        ggml_tensor * build_mla_layer(ggml_tensor * cur, const llama_layer & layer,
++                                      llm_graph_input_attn_k  * inp_attn_k,
++                                      llm_graph_input_attn_kv * inp_attn_kv,
++                                      int64_t n_embd_head_k_mla, int64_t n_embd_head_v_mla,
++                                      int64_t kv_lora_rank, int64_t n_embd_head_qk_rope,
++                                      int64_t n_embd_head_qk_nope, float kq_scale, int il);
++
++        ggml_tensor * build_latent_moe(ggml_tensor * cur, const llama_layer & layer,
++                                       int64_t n_embd_latent, int il);
++    };
++
++    std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
++};
++
+ struct llama_model_kimi_linear : public llama_model_base {
+     llama_model_kimi_linear(const struct llama_model_params & params) : llama_model_base(params) {}
+     void load_arch_hparams(llama_model_loader & ml) override;
+diff --git a/tests/test-chat.cpp b/tests/test-chat.cpp
+index a428ef3..a2d73c7 100644
+--- a/tests/test-chat.cpp
++++ b/tests/test-chat.cpp
+@@ -3713,6 +3713,111 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
+         }
+     }
+ 
++    // Kimi-K3 tests - custom parser
++    // Unique feature: XTML-ish tags built from <|open|>/<|close|>/<|sep|>, and a
++    // generation prompt that leaves the think section already open.
++    {
++        auto tst = peg_tester("models/templates/Kimi-K3.jinja", detailed_debug);
++
++        // Content only. The response section is explicit even with no reasoning.
++        tst.test("<|open|>response<|sep|>Hello, world!\nWhat's up?<|close|>response<|sep|>"
++                 "<|close|>message<|sep|>")
++            .expect(message_assist)
++            .run();
++
++        // Reasoning with NO opening tag - the generation prompt already opened
++        // it. This is the case that silently loses reasoning if unhandled.
++        tst.test("I'm thinking about this<|close|>think<|sep|>"
++                 "<|open|>response<|sep|>Hello, world!\nWhat's up?<|close|>response<|sep|>"
++                 "<|close|>message<|sep|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .expect(simple_assist_msg("Hello, world!\nWhat's up?", "I'm thinking about this"))
++            .run();
++
++        // Prose that mentions the tag names must survive intact.
++        tst.test("<|open|>response<|sep|>Use the response tag, then message the handler."
++                 "<|close|>response<|sep|><|close|>message<|sep|>")
++            .expect(simple_assist_msg("Use the response tag, then message the handler."))
++            .run();
++
++        // Truncated mid-reasoning (hit the token budget): keep the reasoning.
++        tst.test("I was still thinking when the budget ran out")
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .expect_reasoning("I was still thinking when the budget ran out")
++            .run();
++
++        // Single tool call, one argument.
++        tst.test("<|open|>response<|sep|><|close|>response<|sep|>"
++                 "<|open|>tools<|sep|>"
++                 "<|open|>call tool=\"special_function\" index=\"1\"<|sep|>"
++                 "<|open|>argument key=\"arg1\" type=\"number\"<|sep|>1<|close|>argument<|sep|>"
++                 "<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>")
++            .tools({ special_function_tool })
++            .expect_tool_calls({
++                { "special_function", R"({"arg1":1})", "" },
++            })
++            .run();
++
++        // Tool call preceded by reasoning (no opening think tag) and content.
++        tst.test("I should call it<|close|>think<|sep|>"
++                 "<|open|>response<|sep|>On it.<|close|>response<|sep|>"
++                 "<|open|>tools<|sep|>"
++                 "<|open|>call tool=\"special_function\" index=\"1\"<|sep|>"
++                 "<|open|>argument key=\"arg1\" type=\"number\"<|sep|>1<|close|>argument<|sep|>"
++                 "<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
++            .tools({ special_function_tool })
++            .expect(simple_assist_msg("On it.", "I should call it", "special_function",
++                                      R"({"arg1":1})", ""))
++            .run();
++
++        // Multiple typed arguments: the type lives in an attribute, and the
++        // value must come back as a JSON number, not the string "2".
++        tst.test("<|open|>response<|sep|><|close|>response<|sep|>"
++                 "<|open|>tools<|sep|>"
++                 "<|open|>call tool=\"special_function_with_opt\" index=\"1\"<|sep|>"
++                 "<|open|>argument key=\"arg1\" type=\"number\"<|sep|>1<|close|>argument<|sep|>"
++                 "<|open|>argument key=\"arg2\" type=\"number\"<|sep|>2<|close|>argument<|sep|>"
++                 "<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>")
++            .tools({ special_function_tool_with_optional_param })
++            .expect_tool_calls({
++                { "special_function_with_opt", R"({"arg1":1,"arg2":2})", "" },
++            })
++            .run();
++
++        // Parallel tool calls in one <|open|>tools<|sep|> section.
++        tst.test("<|open|>response<|sep|><|close|>response<|sep|>"
++                 "<|open|>tools<|sep|>"
++                 "<|open|>call tool=\"special_function\" index=\"1\"<|sep|>"
++                 "<|open|>argument key=\"arg1\" type=\"number\"<|sep|>1<|close|>argument<|sep|>"
++                 "<|close|>call<|sep|>"
++                 "<|open|>call tool=\"special_function_with_opt\" index=\"2\"<|sep|>"
++                 "<|open|>argument key=\"arg1\" type=\"number\"<|sep|>1<|close|>argument<|sep|>"
++                 "<|open|>argument key=\"arg2\" type=\"number\"<|sep|>2<|close|>argument<|sep|>"
++                 "<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>")
++            .parallel_tool_calls(true)
++            .tools({ special_function_tool, special_function_tool_with_optional_param })
++            .expect_tool_calls({
++                { "special_function", R"({"arg1":1})", "" },
++                { "special_function_with_opt", R"({"arg1":1,"arg2":2})", "" },
++            })
++            .run();
++
++        // String-typed argument keeps its literal text (no JSON coercion).
++        tst.test("<|open|>response<|sep|><|close|>response<|sep|>"
++                 "<|open|>tools<|sep|>"
++                 "<|open|>call tool=\"python\" index=\"1\"<|sep|>"
++                 "<|open|>argument key=\"code\" type=\"string\"<|sep|>print('hey')"
++                 "<|close|>argument<|sep|>"
++                 "<|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>")
++            .tools({ python_tool })
++            .expect_tool_calls({
++                // custom delimiter: the payload itself contains )"
++                { "python", R"JSON({"code":"print('hey')"})JSON", "" },
++            })
++            .run();
++    }
++
+     // Kimi-K2-Thinking tests - custom parser
+     // Unique feature: tool call ID embeds function name as functions.<name>:<counter>
+     {
+diff --git a/tests/test-llama-archs.cpp b/tests/test-llama-archs.cpp
+index 16af11a..b58acf6 100644
+--- a/tests/test-llama-archs.cpp
++++ b/tests/test-llama-archs.cpp
+@@ -101,6 +101,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+     } else if (arch == LLM_ARCH_DEEPSEEK2
+             || arch == LLM_ARCH_GLM_DSA
+             || arch == LLM_ARCH_KIMI_LINEAR
++            || arch == LLM_ARCH_KIMI_K3
+             || arch == LLM_ARCH_MISTRAL4) {
+         n_embd = 128;
+         n_head = 1;
+@@ -139,7 +140,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+     ms.add_kv(LLM_KV_FULL_ATTENTION_INTERVAL, uint32_t(2));
+ 
+     if (arch == LLM_ARCH_PLAMO2 || arch == LLM_ARCH_JAMBA || arch == LLM_ARCH_NEMOTRON_H || arch == LLM_ARCH_NEMOTRON_H_MOE ||
+-            arch == LLM_ARCH_GRANITE_HYBRID || arch == LLM_ARCH_LFM2 || arch == LLM_ARCH_LFM2MOE || arch == LLM_ARCH_KIMI_LINEAR) {
++            arch == LLM_ARCH_GRANITE_HYBRID || arch == LLM_ARCH_LFM2 || arch == LLM_ARCH_LFM2MOE || arch == LLM_ARCH_KIMI_LINEAR || arch == LLM_ARCH_KIMI_K3) {
+         GGML_ASSERT(n_layer >= 2);
+         std::vector<uint32_t> n_head_per_layer;
+         n_head_per_layer.reserve(n_layer);
+@@ -157,6 +158,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+     if (arch == LLM_ARCH_DEEPSEEK2
+             || arch == LLM_ARCH_GLM_DSA
+             || arch == LLM_ARCH_KIMI_LINEAR
++            || arch == LLM_ARCH_KIMI_K3
+             || arch == LLM_ARCH_MISTRAL4) {
+         ms.add_kv(LLM_KV_ATTENTION_KEY_LENGTH,       uint32_t(576));
+         ms.add_kv(LLM_KV_ATTENTION_VALUE_LENGTH,     uint32_t(512));
+@@ -351,6 +353,7 @@ static bool moe_mandatory(const llm_arch arch) {
+         case LLM_ARCH_PADDLEOCR:
+         case LLM_ARCH_MIMO2:
+         case LLM_ARCH_KIMI_LINEAR:
++        case LLM_ARCH_KIMI_K3:
+         case LLM_ARCH_STEP35:
+         case LLM_ARCH_MISTRAL4:
+             return true;
+@@ -409,7 +412,7 @@ static bool arch_supported(const llm_arch arch) {
+ 
+     // FIXME some models are segfaulting with WebGPU:
+ #ifdef GGML_USE_WEBGPU
+-    if (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_KIMI_LINEAR) {
++    if (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_KIMI_LINEAR || arch == LLM_ARCH_KIMI_K3) {
+         return false;
+     }
+ #endif // GGML_USE_WEBGPU
+diff --git a/tools/mtmd/CMakeLists.txt b/tools/mtmd/CMakeLists.txt
+index a76adc9..e75d9a8 100644
+--- a/tools/mtmd/CMakeLists.txt
++++ b/tools/mtmd/CMakeLists.txt
+@@ -24,6 +24,7 @@ add_library(mtmd
+             models/granite-speech.cpp
+             models/hunyuanocr.cpp
+             models/internvl.cpp
++            models/kimik3.cpp
+             models/kimivl.cpp
+             models/kimik25.cpp
+             models/nemotron-v2-vl.cpp
+diff --git a/tools/mtmd/clip-impl.h b/tools/mtmd/clip-impl.h
+index c359851..9ac2801 100644
+--- a/tools/mtmd/clip-impl.h
++++ b/tools/mtmd/clip-impl.h
+@@ -32,6 +32,7 @@
+ #define KEY_PROJ_DIM            "clip.%s.projection_dim"
+ #define KEY_N_HEAD              "clip.%s.attention.head_count"
+ #define KEY_N_HEAD_KV           "clip.%s.attention.head_count_kv"
++#define KEY_N_EMBD_HEAD         "clip.%s.attention.head_dim"
+ #define KEY_LAYER_NORM_EPS      "clip.%s.attention.layer_norm_epsilon"
+ 
+ // vision-specific
+@@ -342,6 +343,7 @@ enum projector_type {
+     PROJECTOR_TYPE_YOUTUVL,
+     PROJECTOR_TYPE_YASA2,
+     PROJECTOR_TYPE_KIMIK25,
++    PROJECTOR_TYPE_KIMIK3,
+     PROJECTOR_TYPE_NEMOTRON_V2_VL,
+     PROJECTOR_TYPE_HUNYUANOCR,
+     PROJECTOR_TYPE_HUNYUANVL,
+@@ -392,6 +394,7 @@ static std::map<projector_type, std::string> PROJECTOR_TYPE_NAMES = {
+     { PROJECTOR_TYPE_YOUTUVL,   "youtuvl"},
+     { PROJECTOR_TYPE_YASA2,     "yasa2"},
+     { PROJECTOR_TYPE_KIMIK25,   "kimik25"},
++    { PROJECTOR_TYPE_KIMIK3,    "kimik3"},
+     { PROJECTOR_TYPE_NEMOTRON_V2_VL, "nemotron_v2_vl"},
+     { PROJECTOR_TYPE_HUNYUANOCR, "hunyuanocr"},
+     { PROJECTOR_TYPE_HUNYUANVL,  "hunyuanvl"},
+diff --git a/tools/mtmd/clip-model.h b/tools/mtmd/clip-model.h
+index ce15dbc..eeefb27 100644
+--- a/tools/mtmd/clip-model.h
++++ b/tools/mtmd/clip-model.h
+@@ -43,6 +43,8 @@ struct clip_hparams {
+     int32_t projection_dim = 0;
+     int32_t n_head = 0;
+     int32_t n_head_kv = 0;
++    // 0 = derive from n_embd; set when qkv width != n_embd
++    int32_t n_embd_head = 0;
+     int32_t n_layer = 0;
+     // idefics3
+     int32_t n_merge = 0; // number of patch merges **per-side**
+diff --git a/tools/mtmd/clip.cpp b/tools/mtmd/clip.cpp
+index 9727a73..417969d 100644
+--- a/tools/mtmd/clip.cpp
++++ b/tools/mtmd/clip.cpp
+@@ -240,7 +240,7 @@ clip_graph::clip_graph(clip_ctx * ctx, const clip_image_f32 & img) :
+         n_patches(n_patches_x * n_patches_y),
+         n_embd(hparams.n_embd),
+         n_head(hparams.n_head),
+-        d_head(n_embd / n_head),
++        d_head(hparams.n_embd_head > 0 ? hparams.n_embd_head : (n_head > 0 ? n_embd / n_head : 0)),
+         n_layer(hparams.n_layer),
+         n_mmproj_embd(clip_n_mmproj_embd(ctx)),
+         eps(hparams.eps),
+@@ -345,12 +345,12 @@ ggml_tensor * clip_graph::build_vit(
+                 Kcur = ggml_view_3d(ctx0, cur, d_head, n_head, n_pos,
+                     /* nb1    */ ggml_row_size(cur->type, d_head),
+                     /* nb2    */ cur->nb[1],
+-                    /* offset */ ggml_row_size(cur->type, n_embd));
++                    /* offset */ ggml_row_size(cur->type, n_head * d_head));
+ 
+                 Vcur = ggml_view_3d(ctx0, cur, d_head, n_head, n_pos,
+                     /* nb1    */ ggml_row_size(cur->type, d_head),
+                     /* nb2    */ cur->nb[1],
+-                    /* offset */ ggml_row_size(cur->type, 2 * n_embd));
++                    /* offset */ ggml_row_size(cur->type, 2 * n_head * d_head));
+ 
+                 if (layer.q_norm) {
+                     GGML_ASSERT(layer.q_norm->ne[0] == Qcur->ne[0]);
+@@ -926,6 +926,10 @@ static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32
+             {
+                 builder = std::make_unique<clip_graph_kimik25>(ctx, img);
+             } break;
++        case PROJECTOR_TYPE_KIMIK3:
++            {
++                builder = std::make_unique<clip_graph_kimik3>(ctx, img);
++            } break;
+         case PROJECTOR_TYPE_COGVLM:
+             {
+                 builder = std::make_unique<clip_graph_cogvlm>(ctx, img);
+@@ -1110,6 +1114,7 @@ struct clip_model_loader {
+             const char * prefix = is_vision ? "vision" : "audio";
+             get_u32(string_format(KEY_N_EMBD,         prefix), hparams.n_embd);
+             get_u32(string_format(KEY_N_HEAD,         prefix), hparams.n_head);
++            get_u32(string_format(KEY_N_EMBD_HEAD,    prefix), hparams.n_embd_head, false);
+             get_u32(string_format(KEY_N_FF,           prefix), hparams.n_ff);
+             get_u32(string_format(KEY_N_BLOCK,        prefix), hparams.n_layer);
+             get_u32(string_format(KEY_PROJ_DIM,       prefix), hparams.projection_dim);
+@@ -1347,6 +1352,23 @@ struct clip_model_loader {
+                         hparams.rope_theta = 10000.0f;
+                         get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge, false);
+ 
++                        int min_pixels = 0, max_pixels = 0;
++                        get_u32(KEY_IMAGE_MIN_PIXELS, min_pixels, false);
++                        get_u32(KEY_IMAGE_MAX_PIXELS, max_pixels, false);
++                        if (min_pixels > 0 && max_pixels > 0) {
++                            hparams.image_min_pixels = min_pixels;
++                            hparams.image_max_pixels = max_pixels;
++                            hparams.warmup_image_size = static_cast<int>(std::sqrt(max_pixels));
++                        } else {
++                            hparams.set_limit_image_tokens(2, 4096);
++                        }
++                    } break;
++                case PROJECTOR_TYPE_KIMIK3:
++                    {
++                        hparams.image_resize_algo = RESIZE_ALGO_BILINEAR;
++                        hparams.rope_theta = 10000.0f;
++                        get_u32(KEY_PROJ_SCALE_FACTOR, hparams.n_merge, false);
++
+                         int min_pixels = 0, max_pixels = 0;
+                         get_u32(KEY_IMAGE_MIN_PIXELS, min_pixels, false);
+                         get_u32(KEY_IMAGE_MAX_PIXELS, max_pixels, false);
+@@ -2169,6 +2191,13 @@ struct clip_model_loader {
+                     model.mm_2_w = get_tensor(string_format(TN_LLAVA_PROJ, 2, "weight"));
+                     model.mm_2_b = get_tensor(string_format(TN_LLAVA_PROJ, 2, "bias"));
+                 } break;
++            case PROJECTOR_TYPE_KIMIK3:
++                {
++                    // patchmergerv2, bias-free, norm after the projection
++                    model.mm_1_w = get_tensor(string_format(TN_LLAVA_PROJ, 1, "weight"));
++                    model.mm_2_w = get_tensor(string_format(TN_LLAVA_PROJ, 2, "weight"));
++                    model.mm_post_norm_w = get_tensor(string_format(TN_MM_POST_NORM, "weight"));
++                } break;
+             case PROJECTOR_TYPE_KIMIVL:
+             case PROJECTOR_TYPE_PADDLEOCR:
+             case PROJECTOR_TYPE_KIMIK25:
+@@ -3195,6 +3224,7 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
+         case PROJECTOR_TYPE_LFM2:
+         case PROJECTOR_TYPE_KIMIVL:
+         case PROJECTOR_TYPE_KIMIK25:
++        case PROJECTOR_TYPE_KIMIK3:
+             {
+                 // dynamic size
+                 int out_patch_size = params.patch_size * ctx->model.hparams.n_merge;
+@@ -3816,6 +3846,7 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
+         case PROJECTOR_TYPE_PIXTRAL:
+         case PROJECTOR_TYPE_KIMIVL:
+         case PROJECTOR_TYPE_KIMIK25:
++        case PROJECTOR_TYPE_KIMIK3:
+         case PROJECTOR_TYPE_LIGHTONOCR:
+             {
+                 // set the 2D positions
+@@ -4244,6 +4275,7 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
+         case PROJECTOR_TYPE_KIMIVL:
+         case PROJECTOR_TYPE_PADDLEOCR:
+         case PROJECTOR_TYPE_KIMIK25:
++        case PROJECTOR_TYPE_KIMIK3:
+         case PROJECTOR_TYPE_YASA2:
+             return ctx->model.mm_2_w->ne[1];
+         case PROJECTOR_TYPE_HUNYUANOCR:
+diff --git a/tools/mtmd/models/kimik3.cpp b/tools/mtmd/models/kimik3.cpp
+new file mode 100644
+index 0000000..7558f1f
+--- /dev/null
++++ b/tools/mtmd/models/kimik3.cpp
+@@ -0,0 +1,80 @@
++#include "models.h"
++
++#include <cmath>
++#include <cstring>
++
++// Kimi-K3 MoonViT-3d, image path.
++// Follows clip_graph_kimik25, but with RMSNorm, no biases, qkv width != n_embd, and a post-norm patchmergerv2 projector.
++// Images only: at t == 1 the temporal pool and the temporal position term vanish.
++
++ggml_tensor * clip_graph_kimik3::resize_position_embeddings_3d(uint32_t interpolation_mode) {
++    ggml_tensor * pos_embd = model.position_embeddings;
++    const int height       = img.ny / patch_size;
++    const int width        = img.nx / patch_size;
++
++    GGML_ASSERT(pos_embd);
++
++    const int64_t stored_c = pos_embd->ne[0];
++    const int64_t orig_w   = pos_embd->ne[1];
++    const int64_t orig_h   = pos_embd->ne[2];
++
++    GGML_ASSERT(stored_c == n_embd);
++
++    if (height == (int) orig_h && width == (int) orig_w) {
++        return ggml_cont_2d(ctx0, pos_embd, n_embd, width * height);
++    }
++
++    pos_embd = ggml_permute(ctx0, pos_embd, 2, 1, 0, 3);
++    pos_embd = ggml_interpolate(ctx0, pos_embd, height, width, n_embd, 1, interpolation_mode);
++    pos_embd = ggml_permute(ctx0, pos_embd, 2, 1, 0, 3);
++    pos_embd = ggml_cont_2d(ctx0, pos_embd, n_embd, width * height);
++    return pos_embd;
++}
++
++ggml_cgraph * clip_graph_kimik3::build() {
++    ggml_tensor * pos_h = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_patches);
++    ggml_set_name(pos_h, "pos_h");
++    ggml_set_input(pos_h);
++
++    ggml_tensor * pos_w = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_patches);
++    ggml_set_name(pos_w, "pos_w");
++    ggml_set_input(pos_w);
++
++    ggml_tensor * learned_pos_embd = resize_position_embeddings_3d(GGML_SCALE_MODE_BILINEAR);
++
++    // Q/K are de-interleaved during conversion.
++    auto add_pos = [&](ggml_tensor * cur, const clip_layer &) {
++        return build_rope_2d(ctx0, cur, pos_w, pos_h, hparams.rope_theta, false);
++    };
++
++    ggml_tensor * inp = build_inp();
++    inp = ggml_add(ctx0, inp, learned_pos_embd);
++
++    ggml_tensor * cur = build_vit(
++                            inp, n_patches,
++                            NORM_TYPE_RMS,
++                            hparams.ffn_op,
++                            nullptr,
++                            add_pos);
++    cb(cur, "vit_out", -1);
++
++    {
++        const int scale_factor = model.hparams.n_merge;
++        cur = build_patch_merge_permute(cur, scale_factor);
++
++        cur = build_ffn(cur,
++            model.mm_1_w, nullptr,
++            nullptr,      nullptr,
++            model.mm_2_w, nullptr,
++            FFN_GELU,
++            -1);
++        cb(cur, "proj_mlp_out", -1);
++
++        cur = build_norm(cur, model.mm_post_norm_w, nullptr, NORM_TYPE_RMS, hparams.eps, -1);
++        cb(cur, "proj_out", -1);
++    }
++
++    ggml_build_forward_expand(gf, cur);
++
++    return gf;
++}
+diff --git a/tools/mtmd/models/models.h b/tools/mtmd/models/models.h
+index 955daa6..c35cd79 100644
+--- a/tools/mtmd/models/models.h
++++ b/tools/mtmd/models/models.h
+@@ -190,3 +190,10 @@ struct clip_graph_kimik25 : clip_graph {
+ 
+     ggml_tensor * resize_position_embeddings_3d(uint32_t interpolation_mode);
+ };
++
++struct clip_graph_kimik3 : clip_graph {
++    clip_graph_kimik3(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
++    ggml_cgraph * build() override;
++
++    ggml_tensor * resize_position_embeddings_3d(uint32_t interpolation_mode);
++};
+diff --git a/tools/mtmd/mtmd.cpp b/tools/mtmd/mtmd.cpp
+index 8f12d0b..d46ccc2 100644
+--- a/tools/mtmd/mtmd.cpp
++++ b/tools/mtmd/mtmd.cpp
+@@ -421,6 +421,7 @@ struct mtmd_context {
+                     image_preproc = std::make_unique<mtmd_image_preprocessor_dyn_size>(ctx_v);
+                 } break;
+             case PROJECTOR_TYPE_KIMIK25:
++            case PROJECTOR_TYPE_KIMIK3:
+                 {
+                     // <|media_begin|> ... (image embeddings) ... <|media_end|>
+                     img_beg = "<|media_begin|>";

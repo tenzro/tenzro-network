@@ -8,9 +8,14 @@
 
 use std::sync::Arc;
 use tenzro_storage::RocksDbStore;
-use tenzro_token::{StakingManager, StakeStatus, DEFAULT_MIN_STAKE};
+use tenzro_token::{StakingManager, StakeStatus};
+use tenzro_types::constants::MIN_VALIDATOR_STAKE;
 use tenzro_types::primitives::Address;
 use tenzro_types::token::ProviderType;
+
+/// Every stake in this test posts at least the validator bond, which is the
+/// highest flat bond on the ladder.
+const BOND: u128 = MIN_VALIDATOR_STAKE;
 
 #[test]
 fn test_complete_staking_lifecycle_with_persistence() {
@@ -32,9 +37,9 @@ fn test_complete_staking_lifecycle_with_persistence() {
         let validator2 = Address::new([2u8; 32]);
         let validator3 = Address::new([3u8; 32]);
 
-        let stake1 = DEFAULT_MIN_STAKE;
-        let stake2 = DEFAULT_MIN_STAKE * 2;
-        let stake3 = DEFAULT_MIN_STAKE * 3;
+        let stake1 = BOND;
+        let stake2 = BOND * 2;
+        let stake3 = BOND * 3;
 
         manager
             .stake(validator1, stake1, ProviderType::Validator)
@@ -71,9 +76,9 @@ fn test_complete_staking_lifecycle_with_persistence() {
         println!("  ✓ Loaded {} stakes from storage", all_stakes.len());
 
         // Verify totals were recomputed
-        let stake1 = DEFAULT_MIN_STAKE;
-        let stake2 = DEFAULT_MIN_STAKE * 2;
-        let stake3 = DEFAULT_MIN_STAKE * 3;
+        let stake1 = BOND;
+        let stake2 = BOND * 2;
+        let stake3 = BOND * 3;
 
         assert_eq!(
             manager.get_total_staked(ProviderType::Validator),
@@ -90,7 +95,7 @@ fn test_complete_staking_lifecycle_with_persistence() {
         // Slash a validator
         let validator1 = Address::new([1u8; 32]);
         let slasher = Address::new([99u8; 32]);
-        let slash_amount = DEFAULT_MIN_STAKE / 10; // 10%
+        let slash_amount = BOND / 10; // 10%
         manager
             .slash(
                 &validator1,
@@ -120,7 +125,7 @@ fn test_complete_staking_lifecycle_with_persistence() {
         let stake1_info = manager.get_stake(&validator1).unwrap();
         assert_eq!(
             stake1_info.amount,
-            DEFAULT_MIN_STAKE - (DEFAULT_MIN_STAKE / 10)
+            BOND - (BOND / 10)
         );
         assert_eq!(stake1_info.slashing_history.len(), 1);
         assert_eq!(stake1_info.slashing_history[0].reason, "Test misbehavior");
@@ -128,7 +133,7 @@ fn test_complete_staking_lifecycle_with_persistence() {
 
         // Verify final totals
         let expected_validator_total =
-            DEFAULT_MIN_STAKE - (DEFAULT_MIN_STAKE / 10) + DEFAULT_MIN_STAKE * 2;
+            BOND - (BOND / 10) + BOND * 2;
         assert_eq!(
             manager.get_total_staked(ProviderType::Validator),
             expected_validator_total
@@ -155,7 +160,7 @@ fn test_config_persistence_across_restarts() {
         let storage = Arc::new(RocksDbStore::open_default(&temp_dir).unwrap());
         let manager = StakingManager::with_storage(storage);
 
-        let custom_min_stake = DEFAULT_MIN_STAKE * 5;
+        let custom_min_stake = BOND * 5;
         let custom_unbonding = 14 * 24 * 60 * 60 * 1000; // 14 days
 
         manager.set_min_stake(custom_min_stake);
@@ -173,7 +178,7 @@ fn test_config_persistence_across_restarts() {
 
         // The config should be loaded from storage
         let staker = Address::new([1u8; 32]);
-        let result = manager.stake(staker, DEFAULT_MIN_STAKE, ProviderType::Validator);
+        let result = manager.stake(staker, BOND, ProviderType::Validator);
 
         // Should fail because min stake is now 5x default
         assert!(result.is_err());

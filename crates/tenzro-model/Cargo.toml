@@ -83,11 +83,17 @@ pollster = { version = "0.3", optional = true }
 bytemuck = { version = "1", optional = true, features = ["derive"] }
 
 [features]
-default = ["cluster-serving"]
+default = ["cluster-serving", "mtmd"]
 # LAN layer-pipeline cluster serving: builds the ggml RPC backend + rpc-server
 # binary so a model that exceeds one machine can be served across members on
 # the local segment. Enabled by default — it is core to multi-node serving.
 cluster-serving = ["llama-cpp-2/rpc"]
+# Multimodal projector serving: builds llama.cpp's mtmd sources so a catalog
+# entry that declares an `mmproj` (Gemma 4's SigLIP tower, Kimi K3's
+# MoonViT-3d) loads its projector at model-load time and accepts image and
+# audio input alongside text. Enabled by default — the downloader already
+# fetches the projector for every entry that declares one.
+mtmd = ["llama-cpp-2/mtmd"]
 # NVIDIA CUDA — datacenter (A100/H100/B200) and consumer (RTX 3090/4090)
 cuda = ["llama-cpp-2/cuda"]
 # NVIDIA CUDA without virtual memory management (older drivers / embedded)

@@ -215,14 +215,26 @@ The transport is hidden behind the scheme — callers do not write `iroh://` URI
 
 ## 8. Roles
 
-The node binary `tenzro-node` has four roles, all running the same wire protocol:
+The node binary `tenzro-node` runs one wire protocol under twelve roles, selected with `--roles <token>[,<token>...]`. A single node may serve any combination:
 
-- **`Validator`** — produces blocks, runs HotStuff-2 consensus, gets the 1.5× multiplier on leader-selection draw when TEE-attested. Runs the server halves of relay + AutoNAT for community joiners.
-- **`ModelProvider`** — serves AI inference (chat / multi-modal / MoE expert shards / MTP). Subscribes to `tenzro/inference` and `tenzro/models`. Bonds optionally; bond required for Verified / Confidential tiers.
-- **`TeeProvider`** — serves confidential compute, custody, attested execution. Carries the `Intel TDX / AMD SEV-SNP / AWS Nitro / NVIDIA GPU CC / Intel Tiber` attestation chain.
-- **`LightClient`** — consumes the network without producing. Subscribes to the topics it cares about, dials specific request/response endpoints as needed. Default role for `tenzro join` clients.
+| Token | Role | What it does |
+|---|---|---|
+| `validator` | Validator | Produces blocks, runs HotStuff-2 consensus, gets the 1.5× multiplier on leader-selection draw when TEE-attested. Runs the server halves of relay + AutoNAT for community joiners. |
+| `fullnode` | FullNode | Follows and serves the full chain without producing blocks. |
+| `light` | LightClient | Consumes the network without producing. Subscribes to the topics it cares about, dials specific request/response endpoints as needed. Default role for `tenzro join` clients. |
+| `tee` | TeeProvider | Serves confidential compute, custody, attested execution. Carries the `Intel TDX / AMD SEV-SNP / AWS Nitro / NVIDIA GPU CC / Intel Tiber` attestation chain. |
+| `ai` | ModelProvider | Serves inference (chat / multi-modal / MoE expert shards / MTP). Subscribes to `tenzro/inference` and `tenzro/models`. |
+| `compute` | ComputeProvider | Rents accelerator capacity for fixed terms. Distinct from `ai`: serving catalog weights and renting a card to run someone else's workload are different obligations and carry different bonds. |
+| `storage` | StorageProvider | Holds content-addressed blobs, model weights, sealed shards; serves snapshot and DA requests. |
+| `cloud` | CloudProvider | Runs hosted services on top of the network — functions, static sites, managed databases, machines. |
+| `edge` | Edge | Terminates public TLS at a controlled DNS name and host-routes an incoming hostname to whichever node holds the content, serving locally or forwarding over p2p. A public front door, not a consensus participant. |
+| `archive` | Archive | Stores full history. |
+| `bootstrap` | Bootstrap | Seed node for peer discovery. |
+| `micro` | MicroNode | Ultra-lightweight participant; no P2P required. |
 
-All four are real binaries — the same `tenzro-node` differentiated by `--role`. There is no RPC-only mode; the public RPC pod is a validator with extra HTTP / MCP / A2A exposure.
+All twelve are the same binary differentiated by `--roles`. There is no RPC-only mode; a public RPC node is a validator with extra HTTP / MCP / A2A exposure.
+
+The role selects what a node *does*. What a node must *bond* is a separate ladder covering validator, RPC operator, TEE, model, compute, storage, cloud, trainer, and syncer — see `docs/TOKENOMICS.md` section 7.
 
 ---
 

@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     clang \
     cmake \
     protobuf-compiler \
+    patch \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -31,6 +32,20 @@ COPY tools/ tools/
 # dependencies — they're copied here because COPY vendor/ is a single layer
 # and the cost is negligible vs. surgical sub-copies.
 COPY vendor/ vendor/
+
+# The public repository carries the vendored llama.cpp as a git submodule pinned
+# to an upstream commit, so a clone of it does not include the kimi-k3
+# architecture (Kimi Delta Attention, gated MLA, latent MoE) or the MoonViT-3d
+# clip model. Both are carried as a patch instead. A build from the monorepo
+# already has the changes inline, so the sentinel file skips the apply.
+RUN set -eux; \
+    cd vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp; \
+    if [ -f src/models/kimi-k3.cpp ]; then \
+      echo "kimi-k3 already present in the vendored tree"; \
+    else \
+      patch -p1 --batch --forward < /build/vendor/patches/llama.cpp-kimi-k3.patch; \
+      test -f src/models/kimi-k3.cpp; \
+    fi
 
 # Create minimal stub for desktop app workspace member (not built, but cargo needs it to resolve workspace)
 # The real Cargo.toml is excluded by .gcloudignore (apps/), so we generate a stub inline

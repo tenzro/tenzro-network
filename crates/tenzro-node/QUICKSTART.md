@@ -82,8 +82,8 @@ With the node running, register as a provider in one command:
 tenzro join --provider
 ```
 
-This detects your hardware, provisions identity + wallet, posts the 100 TNZO
-compute bond (faucet-funded on testnet), registers you with default pricing,
+This detects your hardware, provisions identity + wallet, posts the 1,000 TNZO
+compute bond the model-provider rung requires, registers you with default pricing,
 and downloads + serves the largest catalog model that fits your machine.
 Capacity is advertised automatically and inference demand routes to you.
 

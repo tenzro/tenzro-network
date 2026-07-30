@@ -108,15 +108,22 @@ def build_agent_card(base_url: str = "https://a2a.tenzro.xyz") -> dict:
                     "against the canonical hash record before load. Read that "
                     "record (BLAKE3 + SHA-256 + per-file manifest hash, recorder "
                     "DID, record epoch) with a model_id, or list every recorded "
-                    "hash."
+                    "hash. Chat turns carry images when metadata supplies them "
+                    "as base64 (metadata.images, or metadata.image_base64 for a "
+                    "single one; PNG / JPEG / WebP / GIF, format read from the "
+                    "bytes). A model that loaded no multimodal projector refuses "
+                    "the request; read accepts_media on a model endpoint to see "
+                    "which do."
                 ),
                 "tags": [
                     "ai", "inference", "models", "intent-routing",
                     "difficulty-aware", "content-addressed", "blake3",
+                    "multimodal",
                 ],
                 "examples": [
                     "List available AI models",
                     "Run inference on model X",
+                    "Ask what is in this image (metadata: image_base64)",
                     "Route by intent for a reasoning use case",
                     "Chat by intent with budget 1000000000000000000",
                     "Record the outcome escalated for model_id=… cluster=3",

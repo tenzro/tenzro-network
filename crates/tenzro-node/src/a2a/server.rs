@@ -1479,25 +1479,27 @@ fn handle_staking_query(state: &A2aState) -> String {
     if let Some(staking) = state.node.staking() {
         let all_stakes = staking.get_all_stakes();
         let total_staked: u128 = all_stakes.iter().map(|(_, s)| s.amount).sum();
-        let validator_count = all_stakes.iter()
-            .filter(|(_, s)| matches!(s.provider_type, tenzro_types::token::ProviderType::Validator))
-            .count();
-        let model_provider_count = all_stakes.iter()
-            .filter(|(_, s)| matches!(s.provider_type, tenzro_types::token::ProviderType::ModelProvider))
-            .count();
+        let mut by_role: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        for (_, stake) in &all_stakes {
+            *by_role.entry(stake.provider_type.as_str()).or_insert(0) += 1;
+        }
+        let roles = by_role
+            .iter()
+            .map(|(role, count)| format!("             - {role}: {count}"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         format!(
             "Staking Info:\n\
              - Total staked: {:.6} TNZO\n\
-             - Active validators: {}\n\
-             - Model providers: {}\n\
-             - Total stakers: {}\n\n\
+             - Total stakers: {}\n\
+             Stakers per role:\n{}\n\n\
              To stake: Use MCP tool `stake_tokens` or RPC `tenzro_stake`\n\
              To unstake: Use MCP tool `unstake_tokens` or RPC `tenzro_unstake`",
             total_staked as f64 / 1e18,
-            validator_count,
-            model_provider_count,
             all_stakes.len(),
+            roles,
         )
     } else {
         "Staking module not initialized.".to_string()

@@ -23,8 +23,16 @@ pub enum NetworkRole {
     TeeProvider,
     /// Model inference provider node
     ModelProvider,
+    /// Compute provider node — rents accelerator capacity for fixed terms.
+    /// Distinct from [`Self::ModelProvider`]: serving weights from the
+    /// catalogue and renting a card to run someone else's workload are
+    /// different obligations and carry different bonds.
+    ComputeProvider,
     /// Storage provider node
     StorageProvider,
+    /// Cloud operator node — hosted functions, static sites, managed
+    /// databases and machines
+    CloudProvider,
     /// Edge/ingress node — terminates public TLS at a controlled DNS name and
     /// host-routes any incoming hostname to whichever fleet node holds the
     /// content, serving locally or forwarding over p2p. Any operator can run
@@ -50,7 +58,11 @@ impl NetworkRole {
     pub fn is_provider(&self) -> bool {
         matches!(
             self,
-            Self::TeeProvider | Self::ModelProvider | Self::StorageProvider
+            Self::TeeProvider
+                | Self::ModelProvider
+                | Self::ComputeProvider
+                | Self::StorageProvider
+                | Self::CloudProvider
         )
     }
 
@@ -80,7 +92,9 @@ impl NetworkRole {
             Self::LightClient => "light",
             Self::TeeProvider => "tee",
             Self::ModelProvider => "ai",
+            Self::ComputeProvider => "compute",
             Self::StorageProvider => "storage",
+            Self::CloudProvider => "cloud",
             Self::Edge => "edge",
             Self::Archive => "archive",
             Self::Bootstrap => "bootstrap",
@@ -110,7 +124,11 @@ impl FromStr for NetworkRole {
             "ai" | "model" | "modelprovider" | "model_provider" | "inference" => {
                 Ok(Self::ModelProvider)
             }
+            "compute" | "computeprovider" | "compute_provider" | "gpu" => {
+                Ok(Self::ComputeProvider)
+            }
             "storage" | "storageprovider" | "storage_provider" => Ok(Self::StorageProvider),
+            "cloud" | "cloudprovider" | "cloud_provider" => Ok(Self::CloudProvider),
             "edge" | "ingress" => Ok(Self::Edge),
             "archive" => Ok(Self::Archive),
             "bootstrap" | "seed" => Ok(Self::Bootstrap),
@@ -194,6 +212,16 @@ impl RoleSet {
     /// True if the node hosts decentralized storage.
     pub fn serves_storage(&self) -> bool {
         self.has(NetworkRole::StorageProvider)
+    }
+
+    /// True if the node rents its accelerators out by the hour.
+    pub fn serves_compute(&self) -> bool {
+        self.has(NetworkRole::ComputeProvider)
+    }
+
+    /// True if the node hosts sites, functions and machines for the network.
+    pub fn serves_cloud(&self) -> bool {
+        self.has(NetworkRole::CloudProvider)
     }
 
     /// True if the node offers TEE confidential compute.

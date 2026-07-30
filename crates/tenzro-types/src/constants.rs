@@ -45,17 +45,95 @@ pub const BASE_TRANSACTION_GAS: u64 = 21_000;
 /// Gas cost per byte of transaction data
 pub const GAS_PER_BYTE: u64 = 68;
 
-/// Minimum stake required to become a validator (10,000 TNZO)
-pub const MIN_VALIDATOR_STAKE: u128 = 10_000 * 10u128.pow(TOKEN_DECIMALS as u32);
+/// One whole TNZO in the smallest unit.
+pub const ONE_TNZO: u128 = 10u128.pow(TOKEN_DECIMALS as u32);
 
-/// Minimum stake required for TEE providers (1,000 TNZO)
-pub const MIN_TEE_PROVIDER_STAKE: u128 = 1_000 * 10u128.pow(TOKEN_DECIMALS as u32);
+// ---------------------------------------------------------------------------
+// Provider bonds
+//
+// Two shapes live here. Roles that grant a *protocol privilege* — producing
+// blocks, serving RPC to tenants, attesting inside an enclave — carry a flat
+// bond, because the thing being collateralised is the privilege itself and it
+// does not come in units. Roles that sell *capacity* — accelerators, disk,
+// hosted services — scale with the capacity actually pledged, so a laptop
+// pledging one integrated GPU is not asked for the same bond as a rack of
+// datacentre cards.
+//
+// The absolute numbers are calibrated against comparable networks as a
+// fraction of total supply rather than in nominal tokens, since nominal
+// amounts say nothing across chains with different supplies. A flat bond at
+// 0.001% of supply sits between Polkadot's validator self-stake and NEAR's
+// floor; the per-accelerator base sits in the same band as Phala's per-GPU
+// bond and a small multiple of io.net's per-chip entry.
+// ---------------------------------------------------------------------------
 
-/// Minimum stake required for model providers (500 TNZO)
-pub const MIN_MODEL_PROVIDER_STAKE: u128 = 500 * 10u128.pow(TOKEN_DECIMALS as u32);
+/// Validator bond (10,000 TNZO, 0.001% of supply).
+pub const MIN_VALIDATOR_STAKE: u128 = 10_000 * ONE_TNZO;
 
-/// Minimum stake required for storage providers (500 TNZO)
-pub const MIN_STORAGE_PROVIDER_STAKE: u128 = 500 * 10u128.pow(TOKEN_DECIMALS as u32);
+/// RPC operator bond (100,000 TNZO, 0.01% of supply).
+///
+/// Ten times the validator bond, and the highest rung on the ladder, because
+/// this bond is not only collateral: it is routing weight and it is the right
+/// to mint tenant API keys against the operator's own credentials. An operator
+/// that carries other people's traffic and issues their access has more to
+/// answer for than one that only signs blocks.
+pub const MIN_RPC_OPERATOR_STAKE: u128 = 100_000 * ONE_TNZO;
+
+/// Confidential compute bond (10,000 TNZO, 0.001% of supply).
+///
+/// Priced level with the validator bond rather than with the other capacity
+/// roles: a TEE provider's output is an attestation that relying parties act
+/// on without being able to re-derive it, so the bond stands behind a claim
+/// nobody else can check independently.
+pub const MIN_TEE_PROVIDER_STAKE: u128 = 10_000 * ONE_TNZO;
+
+/// Model provider bond (1,000 TNZO, 0.0001% of supply).
+///
+/// Flat rather than per-model: serving weights is bounded by the memory the
+/// machine already has, and the budget screen already stops an operator
+/// pledging more models than fit.
+pub const MIN_MODEL_PROVIDER_STAKE: u128 = 1_000 * ONE_TNZO;
+
+/// Bond per pledged accelerator at consumer-discrete class, before the class
+/// multiplier (1,000 TNZO).
+pub const COMPUTE_STAKE_PER_ACCELERATOR: u128 = 1_000 * ONE_TNZO;
+
+/// Floor for a compute-rental bond (500 TNZO) — one integrated accelerator.
+pub const MIN_COMPUTE_PROVIDER_STAKE: u128 = 500 * ONE_TNZO;
+
+/// Bond per whole terabyte pledged (100 TNZO).
+///
+/// At ten terabytes this reaches 1,000 TNZO, which is where a flat storage
+/// bond would otherwise have sat. Below that it decays to something a laptop
+/// operator with spare disk can actually post.
+pub const STORAGE_STAKE_PER_TB: u128 = 100 * ONE_TNZO;
+
+/// Floor for a storage bond (100 TNZO) — any pledge under one terabyte.
+pub const MIN_STORAGE_PROVIDER_STAKE: u128 = 100 * ONE_TNZO;
+
+/// Cloud operator bond, functions and static sites only (1,000 TNZO).
+pub const MIN_CLOUD_PROVIDER_STAKE: u128 = 1_000 * ONE_TNZO;
+
+/// Cloud operator bond, adding managed databases (5,000 TNZO).
+///
+/// A database holds a tenant's state where a function does not, so losing the
+/// node loses data rather than an idempotent request.
+pub const CLOUD_DATABASE_TIER_STAKE: u128 = 5_000 * ONE_TNZO;
+
+/// Cloud operator bond, adding Firecracker machines (25,000 TNZO).
+///
+/// The top rung: long-lived VMs running unmodified tenant processes, which
+/// needs `/dev/kvm` and root, so it is a datacentre posture rather than a
+/// laptop one.
+pub const CLOUD_MACHINE_TIER_STAKE: u128 = 25_000 * ONE_TNZO;
+
+/// Refundable deposit posted with a marketplace bid or quote (5 TNZO).
+///
+/// Sybil resistance on order flow belongs here rather than in the role bond.
+/// Pricing spam into the bond would raise the cost of honest onboarding to
+/// solve a problem that only appears at bid time; a deposit that comes back on
+/// settlement costs an honest bidder nothing.
+pub const MARKETPLACE_BID_DEPOSIT: u128 = 5 * ONE_TNZO;
 
 /// Staking reward rate (basis points per year) - 5%
 pub const STAKING_REWARD_RATE_BPS: u32 = 500;
@@ -162,8 +240,21 @@ pub const GENESIS_TIMESTAMP: i64 = 1700000000000; // Nov 14, 2023 22:13:20 GMT
 /// Blocks per epoch (for reward distribution)
 pub const BLOCKS_PER_EPOCH: u64 = 43200; // Approximately 1 day at 2s block time
 
-/// Slash percentage for double signing (basis points) - 10%
-pub const DOUBLE_SIGN_SLASH_BPS: u32 = 1000;
+/// Slash for an isolated double-signing offence (basis points) — 5%.
+///
+/// An isolated equivocation is far more often a misconfigured failover or a
+/// restored snapshot than an attack, and a rate high enough to be ruinous for
+/// an honest mistake discourages exactly the small operators the network wants.
+/// Correlated equivocation is the one that indicates coordination, and it is
+/// priced separately at [`CORRELATED_SLASH_BPS`].
+pub const DOUBLE_SIGN_SLASH_BPS: u32 = 500;
+
+/// Slash for correlated or repeated equivocation (basis points) — 15%.
+///
+/// Applied when a validator equivocates again inside the unbonding window, or
+/// when several validators equivocate at the same view. Both signals point at
+/// coordination rather than operator error.
+pub const CORRELATED_SLASH_BPS: u32 = 1500;
 
 /// Slash percentage for downtime (basis points) - 0.1%
 pub const DOWNTIME_SLASH_BPS: u32 = 10;

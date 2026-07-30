@@ -538,9 +538,11 @@ impl ComputeBondManager {
     }
 
     /// `true` if the provider currently has an Active bond at or above
-    /// the manager's `min_bond` gate. Hot path for `register_provider`.
-    pub fn meets_minimum(&self, provider_did: &str) -> bool {
-        self.effective_for_registration(provider_did) >= self.min_bond
+    /// `required` — the amount its rung on the stake ladder demands for the
+    /// capacity it pledged, never below the manager's `min_bond` floor. Hot
+    /// path for `register_provider`.
+    pub fn meets_requirement(&self, provider_did: &str, required: u128) -> bool {
+        self.effective_for_registration(provider_did) >= required.max(self.min_bond)
     }
 }
 
@@ -615,15 +617,21 @@ mod tests {
     }
 
     #[test]
-    fn meets_minimum_gate() {
+    fn meets_requirement_gate() {
         let m = ComputeBondManager::new().with_governance(
             DEFAULT_COMPUTE_BOND_COOLDOWN_MS,
             500,
         );
         m.post("p1", addr(1), 400, 1).unwrap();
-        assert!(!m.meets_minimum("p1"));
+        assert!(!m.meets_requirement("p1", 500));
         m.increase("p1", 200, 2).unwrap();
-        assert!(m.meets_minimum("p1"));
+        assert!(m.meets_requirement("p1", 500));
+        // A rung above the floor gates on the rung, not the floor.
+        assert!(!m.meets_requirement("p1", 1000));
+        m.increase("p1", 400, 3).unwrap();
+        assert!(m.meets_requirement("p1", 1000));
+        // A rung below the floor still gates on the floor.
+        assert!(m.meets_requirement("p1", 1));
     }
 
     #[test]

@@ -1988,6 +1988,36 @@ pub fn process_7702_authorizations(
 /// tool (Biconomy SDK, Pimlico bundler, web wallet) is dispatched here.
 pub const EXECUTE_SELECTOR: [u8; 4] = [0xb6, 0x1d, 0x27, 0xf6];
 
+/// Encode `execute(address,uint256,bytes)` calldata.
+///
+/// The inverse of [`decode_execute_calldata`], and the shape any client
+/// building a UserOperation has to produce for the EntryPoint to route
+/// the call anywhere other than back at the sender. Layout is documented
+/// on the decoder.
+pub fn encode_execute_calldata(to: &[u8; 20], value: u128, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(132 + data.len().div_ceil(32) * 32);
+    out.extend_from_slice(&EXECUTE_SELECTOR);
+    // slot 1: to (32 bytes, left-padded)
+    out.extend_from_slice(&[0u8; 12]);
+    out.extend_from_slice(to);
+    // slot 2: value (32 bytes BE)
+    out.extend_from_slice(&[0u8; 16]);
+    out.extend_from_slice(&value.to_be_bytes());
+    // slot 3: offset = 0x60 (96)
+    let mut off = [0u8; 32];
+    off[31] = 0x60;
+    out.extend_from_slice(&off);
+    // slot 4: length
+    let mut len = [0u8; 32];
+    len[16..].copy_from_slice(&(data.len() as u128).to_be_bytes());
+    out.extend_from_slice(&len);
+    // data + zero-pad to 32
+    out.extend_from_slice(data);
+    let pad = (32 - data.len() % 32) % 32;
+    out.extend(std::iter::repeat_n(0u8, pad));
+    out
+}
+
 /// Decode `execute(address,uint256,bytes)` calldata into `(to, value, data)`.
 ///
 /// ABI layout (all big-endian, 32-byte slots):
@@ -2869,30 +2899,6 @@ mod tests {
         let restored2 = factory.get_account(&acc2_addr).expect("acc2 hydrated");
         assert_eq!(restored2.owner, b"owner-2");
         assert!(restored2.validator_modules.is_empty());
-    }
-
-    fn encode_execute_calldata(to: &[u8; 20], value: u128, data: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(132 + data.len().div_ceil(32) * 32);
-        out.extend_from_slice(&EXECUTE_SELECTOR);
-        // slot 1: to (32 bytes, left-padded)
-        out.extend_from_slice(&[0u8; 12]);
-        out.extend_from_slice(to);
-        // slot 2: value (32 bytes BE)
-        out.extend_from_slice(&[0u8; 16]);
-        out.extend_from_slice(&value.to_be_bytes());
-        // slot 3: offset = 0x60 (96)
-        let mut off = [0u8; 32];
-        off[31] = 0x60;
-        out.extend_from_slice(&off);
-        // slot 4: length
-        let mut len = [0u8; 32];
-        len[16..].copy_from_slice(&(data.len() as u128).to_be_bytes());
-        out.extend_from_slice(&len);
-        // data + zero-pad to 32
-        out.extend_from_slice(data);
-        let pad = (32 - data.len() % 32) % 32;
-        out.extend(std::iter::repeat_n(0u8, pad));
-        out
     }
 
     #[test]

@@ -194,8 +194,9 @@ a node running (`tenzro-node --roles ai`), one command handles everything:
 tenzro join --provider
 ```
 
-Hardware detection, wallet provisioning, faucet funding, the 100 TNZO
-compute bond, provider registration, default pricing, and pulling + serving
+Hardware detection, wallet provisioning, faucet funding, the 1,000 TNZO
+compute bond the model-provider rung requires, provider registration,
+default pricing, and pulling + serving
 the largest catalog model that fits your machine are all automatic. Your
 capacity is advertised on the provider gossip topic and inference demand
 routes to you, settling in TNZO per call.

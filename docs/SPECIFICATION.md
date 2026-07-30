@@ -211,17 +211,21 @@ The system is implemented as a Rust workspace of 32 crates plus SDKs, organized 
 
 Participants in the Tenzro Network operate nodes in one of several roles. Nodes can serve multiple roles simultaneously (e.g., a validator can also be a Model Provider and/or TEE Provider, or a validator can additionally serve as an RPC Provider):
 
-- **Validator.** Participates in HotStuff-2 consensus, proposes and votes on blocks, earns block rewards and priority fees (gas paid in TNZO). Each validator also runs a Canton participant node natively, connecting to one or more Canton synchronizers for Daml smart contract execution. **Three-tier model** detailed in §3.5: Tier 1 (resource-only, no stake required), Tier 2 (staked, ≥ 10,000 TNZO), Tier 3 (RPC provider, ≥ 100,000 TNZO and implies Tier 2). Validators secure the Ledger.
+- **Validator.** Participates in HotStuff-2 consensus, proposes and votes on blocks, earns block rewards and priority fees (gas paid in TNZO). Each validator also runs a Canton participant node natively, connecting to one or more Canton synchronizers for Daml smart contract execution. **Three-tier model** detailed in §3.4a: Tier 1 (resource-only, unbonded), Tier 2 (staked, ≥ 10,000 TNZO), Tier 3 (RPC provider, ≥ 100,000 TNZO and implies Tier 2). All three tiers run the same protocol and sign the same QCs, but quorum weight is the validator's own bond, so a Tier 1 node that bonds nothing adds nothing to the tally. Tier 1 also carries no governance vote and no financial slashing exposure — there is no bond to slash. That is what makes open validator admission safe: participation is free, influence is not. Validators secure the Ledger.
 
 - **RPC Provider.** A Tier 3 validator role. Serves public JSON-RPC + REST verification API. Sanctioned to mint scoped tenant API keys (`tenzro_createApiKey`), broker access to operator-held upstream credentials (Canton participants, AI provider keys, data feed subscriptions), and route cross-chain mint/burn flows. Requires ≥ 100,000 TNZO bonded (implies the Tier 2 minimum). Tenzro Labs operates the first RPC Provider at `rpc.tenzro.xyz`.
 
-- **Model Provider.** Serves AI models for inference requests. **Open entry, no stake required**; optional bond unlocks higher reward multiplier (1.1× per TOKENOMICS §9). Earns per-inference fees (paid in TNZO) settled through micropayment channels. The Network takes a 0.5% commission on provider earnings, which flows to the treasury. Model providers provide **intelligence** to the Network.
+- **Model Provider.** Serves AI models for inference requests. Bonds **1,000 TNZO**; admission is permissionless above the bond, with no allowlist and no approval step. Earns a 1.1× reward multiplier per TOKENOMICS §9 and per-inference fees (paid in TNZO) settled through micropayment channels. The Network takes a 0.5% commission on provider earnings, which flows to the treasury. Model providers provide **intelligence** to the Network.
 
-- **TEE Provider.** Operates hardware TEE enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU TEEs, Intel Tiber) for confidential computation, key management, custody services, and attestation. **Open entry, no stake required**; optional bond unlocks higher reward multiplier (1.2× per TOKENOMICS §9, reflecting the capital cost of confidential hardware). Earns fees for TEE services (paid in TNZO). The Network takes a 0.5% commission on provider earnings, which flows to the treasury. TEE providers provide **security** to the Network.
+- **TEE Provider.** Operates hardware TEE enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU TEEs, Intel Tiber) for confidential computation, key management, custody services, and attestation. Bonds **10,000 TNZO** — the second-largest rung on the ladder, reflecting that a false attestation compromises every party relying on it. Earns a 1.2× reward multiplier per TOKENOMICS §9 and fees for TEE services (paid in TNZO). The Network takes a 0.5% commission on provider earnings, which flows to the treasury. TEE providers provide **security** to the Network.
 
-- **Storage Provider.** Stores and serves blockchain state, model weights, and historical data. **Open entry, no stake required.** Earns storage fees.
+- **Storage Provider.** Stores and serves blockchain state, model weights, and historical data. Bonds **100 TNZO per terabyte pledged**, floored at 100 TNZO, so the bond tracks the capacity it collateralizes. Earns storage fees.
 
-- **Training Provider.** Participates in Tenzro Train distributed training runs as a trainer. **Open entry, no stake required.** Optional bond required for participation in the witness committee (Tier 2 staked validators only).
+- **Compute Provider.** Rents accelerators for inference, training, and rendering. Bonds **per card by accelerator class** — 500 TNZO integrated, 1,000 consumer, 2,000 workstation, 5,000 datacentre — summed over everything pledged and floored at 500 TNZO. Earns time-based rental revenue.
+
+- **Cloud Operator.** Hosts static sites, WASI HTTP functions, managed databases, and Firecracker machines. Bonds by the **highest service class offered**, each class a superset of the one below: 1,000 TNZO functions, 5,000 databases, 25,000 machines. Earns hosting fees.
+
+- **Training Provider.** Participates in Tenzro Train distributed training runs as a trainer. Bonds **1,000 TNZO**, slashable for withholding training results. Witness committee membership is separate and restricted to Tier 2 staked validators.
 
 - **Media Worker.** Renders Tenzro Media Gen diffusion jobs — image and video generation. **Open entry, no stake required.** Earns per-job fees (paid in TNZO) against the price ceiling the requester posted; the Network takes a 0.5% commission on worker earnings, which flows to the treasury. A worker enrolls the whole models it can hold and, separately, the individual experts of a split model — one half of a timestep-boundary expert pair fits accelerators that cannot hold the full model (§20a.4).
 
@@ -825,18 +829,34 @@ The network commission distribution parameters are governed by on-chain proposal
 
 ### 8.3 Staking
 
-Participants stake TNZO to become validators or service providers:
+Participants bond TNZO against a provider type. The ladder has nine rungs, each sized to the trust surface the role opens. It is defined in `tenzro-types/src/constants.rs` and applied by `ProviderType::required_stake`:
+
+| Provider type | Bond | Scales with |
+|---|---|---|
+| RPC Provider | 100,000 TNZO | — |
+| Validator | 10,000 TNZO | — |
+| TEE Provider | 10,000 TNZO | — |
+| Model Provider | 1,000 TNZO | — |
+| Trainer | 1,000 TNZO | — |
+| Syncer | 1,000 TNZO | — |
+| Compute Provider | 500 TNZO floor | Accelerators pledged |
+| Storage Provider | 100 TNZO floor | Terabytes pledged |
+| Cloud Operator | 1,000 TNZO floor | Highest service class offered |
+
+Three rungs scale with pledged capacity, so the bond tracks the exposure it collateralizes:
+
+- **Compute Provider** — 1,000 TNZO per accelerator scaled by class (0.5× integrated, 1× consumer, 2× workstation, 5× datacentre), summed over everything pledged. One datacentre card plus one consumer card bonds 6,000 TNZO.
+- **Storage Provider** — 100 TNZO per whole terabyte, so 50 TB bonds 5,000 TNZO.
+- **Cloud Operator** — 1,000 TNZO functions, 5,000 databases, 25,000 machines. Classes are supersets: bonding for machines covers databases and functions.
+
+Pledging no capacity to a scaling rung yields that rung's floor, never zero. The RPC Provider bond is the largest because a public endpoint brokers tenant traffic and upstream credentials, the largest trust surface any role holds. Every figure is governance-adjustable.
 
 | Parameter | Value |
 |-----------|-------|
-| Minimum stake (Validator) | 10,000 TNZO |
-| Minimum stake (TEE Provider) | 1,000 TNZO |
-| Minimum stake (Model Provider) | 500 TNZO |
-| Minimum stake (Storage Provider) | 500 TNZO |
 | Unbonding period | 7 days (604,800,000 ms) |
 | Slashing | Variable, based on offense severity |
 
-**Provider types and staking:**
+**Reward multipliers:**
 
 | Provider Type | Reward Multiplier | Description |
 |--------------|-------------------|-------------|
@@ -844,8 +864,12 @@ Participants stake TNZO to become validators or service providers:
 | TEE Provider | 1.2x (20% bonus) | Hardware-attested confidential compute |
 | Model Provider | 1.1x (10% bonus) | AI model serving |
 | Storage Provider | 1.0x | Data storage and serving |
+| Compute Provider | 1.0x | Accelerator rental |
+| Cloud Operator | 1.0x | Hosted functions, databases, machines |
 
 The elevated multiplier for TEE providers incentivizes investment in hardware-rooted trust infrastructure.
+
+Consensus weight is separate from every bond above: only the validator bond carries finality weight, so bonding for any number of service rungs cannot move a quorum.
 
 **Staking lifecycle:**
 1. **Stake.** Lock TNZO against a provider type. Must meet minimum stake requirement.

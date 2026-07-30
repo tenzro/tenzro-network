@@ -81,8 +81,10 @@ USAGE:
 OPTIONS:
     -c, --config <FILE>         Path to configuration file
     -d, --data-dir <DIR>        Data directory
-    -r, --roles <ROLES>         Node roles, comma-separated (validator, model-provider/ai,
-                                tee-provider/tee, storage, edge/ingress, user/light)
+    -r, --roles <ROLES>         Node roles, comma-separated (validator, ai/model-provider,
+                                compute/gpu, storage, cloud, tee/tee-provider,
+                                edge/ingress, fullnode, archive, bootstrap/seed,
+                                micro/user, light)
     -l, --listen-addr <ADDR>    Network listen address
     -b, --boot-nodes <NODES>    Bootstrap nodes (comma-separated multiaddrs)
         --log-level <LEVEL>     Log level [default: info]

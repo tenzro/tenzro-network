@@ -411,10 +411,15 @@ The veto power is explicitly revoked as part of the progressive decentralization
 
 | Parameter | Value |
 |-----------|-------|
-| Validator minimum stake | 10,000 TNZO |
-| TEE provider minimum stake | 1,000 TNZO |
-| Model provider minimum stake | 500 TNZO |
-| Storage provider minimum stake | 500 TNZO |
+| Validator bond | 10,000 TNZO |
+| RPC provider bond | 100,000 TNZO (implies the validator bond) |
+| TEE provider bond | 10,000 TNZO |
+| Model provider bond | 1,000 TNZO |
+| Training provider bond | 1,000 TNZO |
+| Syncer bond | 1,000 TNZO |
+| Compute provider bond | 500 TNZO floor; per accelerator class above it |
+| Storage provider bond | 100 TNZO floor; 100 TNZO per terabyte pledged |
+| Cloud operator bond | 1,000 / 5,000 / 25,000 TNZO by highest service class |
 | Unbonding period | 7 days |
 | Reward model | Work-gated coupons on a declining annual schedule |
 | Epoch duration | 14,400 blocks (~1 day at 6-second block target) |
@@ -428,7 +433,9 @@ Different provider roles receive different reward multipliers reflecting their c
 | Validator | 1.0× | Baseline consensus participation |
 | TEE Provider | 1.2× | Hardware-secured enclaves add trust guarantees |
 | Model Provider | 1.1× | AI inference capacity increases network utility |
+| Compute Provider | 1.0× | Accelerator capacity for inference, training, rendering |
 | Storage Provider | 1.0× | Data availability and state persistence |
+| Cloud Operator | 1.0× | Hosting for sites, functions, databases, machines |
 
 TEE-attested validators additionally receive a 1.5× multiplier on their reputation-weighted leader-selection draw in HotStuff-2, creating a compounding incentive for hardware-secured participation. The multiplicative form preserves the property that observed behaviour fully overcomes attestation — a TEE-attested but flaky validator is dwarfed by a non-TEE validator with a clean recent track record.
 
@@ -879,10 +886,15 @@ Sections governing dissolution (§18) require Phase 3 governance with the enhanc
 | Fee split: Treasury | 40% | tenzro-token |
 | Fee split: Burn | 30% | tenzro-token |
 | Fee split: Stakers | 30% | tenzro-token |
-| Validator min stake | 10,000 TNZO | tenzro-token |
-| TEE provider min stake | 1,000 TNZO | tenzro-token |
-| Model provider min stake | 500 TNZO | tenzro-token |
-| Storage provider min stake | 500 TNZO | tenzro-token |
+| Validator bond | 10,000 TNZO | tenzro-types |
+| RPC provider bond | 100,000 TNZO | tenzro-types |
+| TEE provider bond | 10,000 TNZO | tenzro-types |
+| Model provider bond | 1,000 TNZO | tenzro-types |
+| Training provider bond | 1,000 TNZO | tenzro-types |
+| Syncer bond | 1,000 TNZO | tenzro-types |
+| Compute provider bond | 500 TNZO floor, scales per accelerator | tenzro-types |
+| Storage provider bond | 100 TNZO floor, 100 TNZO per TB | tenzro-types |
+| Cloud operator bond | 1,000 / 5,000 / 25,000 TNZO by class | tenzro-types |
 | Unbonding period | 7 days | tenzro-token |
 | Reward model | Work-gated coupons, declining schedule | tenzro-token |
 | Epoch duration | 14,400 blocks (~1 day at 6-second block target) | tenzro-token |

@@ -8,14 +8,20 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tenzro_types::primitives::{Address, Timestamp};
-use tenzro_types::token::ProviderType;
+use tenzro_types::token::{ProviderType, StakeCapacity};
 use tracing::{info, warn};
 
 /// Default unbonding period: 7 days in milliseconds
 pub const DEFAULT_UNBONDING_PERIOD_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-/// Default minimum stake: 1000 TNZO
-pub const DEFAULT_MIN_STAKE: u128 = 1000 * 1_000_000_000_000_000_000; // 1000 * 10^18
+/// Absolute floor beneath every role bond, in the smallest TNZO unit.
+///
+/// The bond a staker actually has to post is
+/// [`ProviderType::required_stake`] for their role and pledged capacity;
+/// this floor only matters when governance raises it above that figure via
+/// [`StakingManager::set_min_stake`]. It starts at the smallest bond on the
+/// ladder so that, undialled, the floor never overrides a role.
+pub const DEFAULT_MIN_STAKE: u128 = tenzro_types::constants::MIN_STORAGE_PROVIDER_STAKE;
 
 /// Staking information for a provider
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +32,12 @@ pub struct StakeInfo {
     pub amount: u128,
     /// Provider type
     pub provider_type: ProviderType,
+    /// Capacity pledged alongside the bond.
+    ///
+    /// Roles that sell quantity (accelerators, terabytes, cloud tier) size
+    /// their bond from this; roles that collateralise a privilege carry
+    /// [`StakeCapacity::None`].
+    pub capacity: StakeCapacity,
     /// Timestamp when staked
     pub staked_at: Timestamp,
     /// Unbonding timestamp (if unbonding)
@@ -53,11 +65,17 @@ pub struct StakeInfo {
 
 impl StakeInfo {
     /// Creates a new stake info
-    pub fn new(staker: Address, amount: u128, provider_type: ProviderType) -> Self {
+    pub fn new(
+        staker: Address,
+        amount: u128,
+        provider_type: ProviderType,
+        capacity: StakeCapacity,
+    ) -> Self {
         Self {
             staker,
             amount,
             provider_type,
+            capacity,
             staked_at: Timestamp::now(),
             unbonding_at: None,
             slashing_history: Vec::new(),
@@ -66,6 +84,11 @@ impl StakeInfo {
             status: StakeStatus::Active,
             lifecycle_freeze: false,
         }
+    }
+
+    /// Bond this stake has to keep posted for its role and pledged capacity.
+    pub fn required_stake(&self) -> u128 {
+        self.provider_type.required_stake(&self.capacity)
     }
 
     /// Checks if the stake is locked (either active or unbonding)
@@ -384,7 +407,15 @@ impl StakingManager {
         }
     }
 
-    /// Stakes tokens for a provider
+    /// Bond required of `provider_type` at `capacity`, after the governance
+    /// floor is applied.
+    pub fn required_stake(&self, provider_type: ProviderType, capacity: &StakeCapacity) -> u128 {
+        provider_type
+            .required_stake(capacity)
+            .max(*self.min_stake.read())
+    }
+
+    /// Stakes tokens for a provider that pledges no capacity.
     ///
     /// # Arguments
     ///
@@ -392,11 +423,32 @@ impl StakingManager {
     /// * `amount` - Amount to stake
     /// * `provider_type` - Type of provider
     pub fn stake(&self, staker: Address, amount: u128, provider_type: ProviderType) -> Result<()> {
-        // Validate minimum stake
-        let min_stake = *self.min_stake.read();
-        if amount < min_stake {
+        self.stake_with_capacity(staker, amount, provider_type, StakeCapacity::None)
+    }
+
+    /// Stakes tokens for a provider that pledges capacity.
+    ///
+    /// The bond required is [`ProviderType::required_stake`] for the role and
+    /// pledged capacity, raised to the governance floor if that is higher.
+    ///
+    /// # Arguments
+    ///
+    /// * `staker` - Address staking
+    /// * `amount` - Amount to stake
+    /// * `provider_type` - Type of provider
+    /// * `capacity` - Accelerators, terabytes or cloud tier being pledged
+    pub fn stake_with_capacity(
+        &self,
+        staker: Address,
+        amount: u128,
+        provider_type: ProviderType,
+        capacity: StakeCapacity,
+    ) -> Result<()> {
+        // Validate the bond for this role and pledged capacity
+        let required = self.required_stake(provider_type, &capacity);
+        if amount < required {
             return Err(TokenError::MinimumStakeNotMet {
-                required: min_stake,
+                required,
                 provided: amount,
             });
         }
@@ -411,7 +463,7 @@ impl StakingManager {
         }
 
         // Create stake info
-        let stake_info = StakeInfo::new(staker, amount, provider_type);
+        let stake_info = StakeInfo::new(staker, amount, provider_type, capacity);
         self.stakes.insert(staker, stake_info.clone());
 
         // Update total staked
@@ -574,14 +626,14 @@ impl StakingManager {
             });
         }
 
-        // Enforce minimum stake after slashing (safe: checked above that stake.amount >= amount)
-        let min_stake = *self.min_stake.read();
+        // Enforce the role bond after slashing (safe: checked above that stake.amount >= amount)
+        let min_stake = stake.required_stake().max(*self.min_stake.read());
         let new_amount = stake.amount.checked_sub(amount)
             .ok_or_else(|| TokenError::ArithmeticOverflow {
                 operation: "staking slash amount".to_string(),
             })?;
 
-        // If slashing would bring stake below minimum and stake is active,
+        // If slashing would bring stake below the bond and stake is active,
         // force it into unbonding state with fresh unbonding period
         if new_amount > 0 && new_amount < min_stake && stake.status == StakeStatus::Active {
             let unbonding_period = *self.unbonding_period_ms.read();
@@ -719,12 +771,12 @@ impl StakingManager {
         stake.restoration_history.push(restore_event);
 
         // If the stake was forced into Unbonding by a prior slash that
-        // brought it below min_stake, and the restoration brings it back
-        // above min_stake, allow it to return to Active. Withdrawn stakes
+        // brought it below its role bond, and the restoration brings it back
+        // above that bond, allow it to return to Active. Withdrawn stakes
         // stay Withdrawn — restoration into a withdrawn stake is purely
         // accounting (the funds have already left the system).
         let provider_type = stake.provider_type;
-        let min_stake = *self.min_stake.read();
+        let min_stake = stake.required_stake().max(*self.min_stake.read());
         let return_to_active = stake.status == StakeStatus::Unbonding
             && stake.amount >= min_stake;
         if return_to_active {
@@ -871,7 +923,9 @@ impl StakingManager {
             .fold(0u128, |a, b| a.saturating_add(b))
     }
 
-    /// Updates minimum stake requirement
+    /// Raises or lowers the governance floor that sits beneath every role bond.
+    ///
+    /// A role whose own bond is higher than the floor is unaffected.
     pub fn set_min_stake(&self, min_stake: u128) {
         *self.min_stake.write() = min_stake;
         self.persist_config();
@@ -915,12 +969,20 @@ impl std::fmt::Debug for StakingManager {
 mod tests {
     use super::*;
     use tenzro_storage::RocksDbStore;
+    use tenzro_types::constants::{
+        MIN_COMPUTE_PROVIDER_STAKE, MIN_STORAGE_PROVIDER_STAKE, MIN_VALIDATOR_STAKE,
+    };
+    use tenzro_types::token::{AcceleratorClass, CloudTier};
+
+    /// Bond a validator has to clear. Most tests below stake as validators,
+    /// which is the highest flat bond on the ladder.
+    const VALIDATOR_BOND: u128 = MIN_VALIDATOR_STAKE;
 
     #[test]
     fn test_stake() {
         let manager = StakingManager::new();
         let staker = Address::new([1u8; 32]);
-        let amount = DEFAULT_MIN_STAKE;
+        let amount = VALIDATOR_BOND;
 
         manager.stake(staker, amount, ProviderType::Validator).unwrap();
 
@@ -930,10 +992,101 @@ mod tests {
     }
 
     #[test]
+    fn test_stake_below_role_bond_is_rejected() {
+        let manager = StakingManager::new();
+        let staker = Address::new([1u8; 32]);
+
+        // Clears the storage floor but not the validator bond.
+        let err = manager
+            .stake(staker, MIN_STORAGE_PROVIDER_STAKE, ProviderType::Validator)
+            .unwrap_err();
+        match err {
+            TokenError::MinimumStakeNotMet { required, provided } => {
+                assert_eq!(required, MIN_VALIDATOR_STAKE);
+                assert_eq!(provided, MIN_STORAGE_PROVIDER_STAKE);
+            }
+            other => panic!("expected MinimumStakeNotMet, got {:?}", other),
+        }
+
+        // The same amount is enough for a storage provider pledging one
+        // terabyte's worth of the floor.
+        manager
+            .stake(staker, MIN_STORAGE_PROVIDER_STAKE, ProviderType::StorageProvider)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_capacity_scales_the_compute_bond() {
+        let manager = StakingManager::new();
+        let staker = Address::new([1u8; 32]);
+        let rig = StakeCapacity::Accelerators(vec![
+            AcceleratorClass::Datacentre,
+            AcceleratorClass::Datacentre,
+        ]);
+
+        let required = manager.required_stake(ProviderType::ComputeProvider, &rig);
+        assert!(
+            required > manager.required_stake(ProviderType::ComputeProvider, &StakeCapacity::None),
+            "two datacentre accelerators bond more than an empty pledge"
+        );
+
+        // A laptop-class pledge only has to clear the compute floor.
+        let laptop = StakeCapacity::Accelerators(vec![AcceleratorClass::Integrated]);
+        assert_eq!(
+            manager.required_stake(ProviderType::ComputeProvider, &laptop),
+            MIN_COMPUTE_PROVIDER_STAKE
+        );
+
+        let err = manager
+            .stake_with_capacity(staker, required - 1, ProviderType::ComputeProvider, rig.clone())
+            .unwrap_err();
+        assert!(matches!(err, TokenError::MinimumStakeNotMet { .. }));
+
+        manager
+            .stake_with_capacity(staker, required, ProviderType::ComputeProvider, rig.clone())
+            .unwrap();
+        assert_eq!(manager.get_stake(&staker).unwrap().capacity, rig);
+    }
+
+    #[test]
+    fn test_cloud_tiers_bond_separately() {
+        let manager = StakingManager::new();
+
+        let functions = manager
+            .required_stake(ProviderType::CloudProvider, &StakeCapacity::Cloud(CloudTier::Functions));
+        let databases = manager
+            .required_stake(ProviderType::CloudProvider, &StakeCapacity::Cloud(CloudTier::Databases));
+        let machines = manager
+            .required_stake(ProviderType::CloudProvider, &StakeCapacity::Cloud(CloudTier::Machines));
+
+        assert!(functions < databases);
+        assert!(databases < machines);
+    }
+
+    #[test]
+    fn test_governance_floor_raises_every_role() {
+        let manager = StakingManager::new();
+        let staker = Address::new([1u8; 32]);
+        let floor = MIN_VALIDATOR_STAKE * 3;
+
+        manager.set_min_stake(floor);
+        assert_eq!(
+            manager.required_stake(ProviderType::StorageProvider, &StakeCapacity::Terabytes(1)),
+            floor,
+            "floor overrides a role whose own bond is lower"
+        );
+
+        let err = manager
+            .stake(staker, MIN_VALIDATOR_STAKE, ProviderType::Validator)
+            .unwrap_err();
+        assert!(matches!(err, TokenError::MinimumStakeNotMet { .. }));
+    }
+
+    #[test]
     fn test_unstake() {
         let manager = StakingManager::new();
         let staker = Address::new([1u8; 32]);
-        let amount = DEFAULT_MIN_STAKE;
+        let amount = VALIDATOR_BOND;
 
         manager.stake(staker, amount, ProviderType::Validator).unwrap();
         manager.unstake(&staker).unwrap();
@@ -948,7 +1101,7 @@ mod tests {
         let manager = StakingManager::new();
         let staker = Address::new([1u8; 32]);
         let slasher = Address::new([2u8; 32]);
-        let amount = DEFAULT_MIN_STAKE;
+        let amount = VALIDATOR_BOND;
         let slash_amount = amount / 10; // 10%
 
         manager.stake(staker, amount, ProviderType::Validator).unwrap();
@@ -965,7 +1118,7 @@ mod tests {
         let staker = Address::new([1u8; 32]);
         let slasher = Address::new([2u8; 32]);
         let governance = Address::new([3u8; 32]);
-        let amount = DEFAULT_MIN_STAKE * 2;
+        let amount = VALIDATOR_BOND * 2;
         let slash_amount = amount / 10;
 
         manager.stake(staker, amount, ProviderType::Validator).unwrap();
@@ -1004,7 +1157,7 @@ mod tests {
         let staker = Address::new([1u8; 32]);
         let slasher = Address::new([2u8; 32]);
         let governance = Address::new([3u8; 32]);
-        let amount = DEFAULT_MIN_STAKE * 2;
+        let amount = VALIDATOR_BOND * 2;
         let slash_amount = amount / 10;
 
         manager.stake(staker, amount, ProviderType::Validator).unwrap();
@@ -1034,7 +1187,7 @@ mod tests {
         let staker = Address::new([1u8; 32]);
         let slasher = Address::new([2u8; 32]);
         let governance = Address::new([3u8; 32]);
-        let amount = DEFAULT_MIN_STAKE * 2;
+        let amount = VALIDATOR_BOND * 2;
         let slash_amount = amount / 10;
 
         manager.stake(staker, amount, ProviderType::Validator).unwrap();
@@ -1091,7 +1244,7 @@ mod tests {
         let slasher = Address::new([2u8; 32]);
         let governance = Address::new([3u8; 32]);
         // Stake exactly at min, then slash a sliver — that forces Unbonding.
-        let amount = DEFAULT_MIN_STAKE;
+        let amount = VALIDATOR_BOND;
         let slash_amount = 1u128;
 
         manager.stake(staker, amount, ProviderType::Validator).unwrap();
@@ -1133,8 +1286,8 @@ mod tests {
         // Stake some tokens
         let staker1 = Address::new([1u8; 32]);
         let staker2 = Address::new([2u8; 32]);
-        let amount1 = DEFAULT_MIN_STAKE;
-        let amount2 = DEFAULT_MIN_STAKE * 2;
+        let amount1 = VALIDATOR_BOND;
+        let amount2 = VALIDATOR_BOND * 2;
 
         manager.stake(staker1, amount1, ProviderType::Validator).unwrap();
         manager.stake(staker2, amount2, ProviderType::ModelProvider).unwrap();
@@ -1181,7 +1334,7 @@ mod tests {
         let manager = StakingManager::with_storage(storage.clone());
 
         // Update config
-        let new_min_stake = DEFAULT_MIN_STAKE * 2;
+        let new_min_stake = VALIDATOR_BOND * 2;
         let new_unbonding = DEFAULT_UNBONDING_PERIOD_MS * 2;
         manager.set_min_stake(new_min_stake);
         manager.set_unbonding_period(new_unbonding);
@@ -1210,7 +1363,7 @@ mod tests {
 
         // Stake and unstake
         let staker = Address::new([1u8; 32]);
-        let amount = DEFAULT_MIN_STAKE;
+        let amount = VALIDATOR_BOND;
         manager.stake(staker, amount, ProviderType::Validator).unwrap();
         manager.unstake(&staker).unwrap();
 
@@ -1246,7 +1399,7 @@ mod tests {
         // Stake and slash
         let staker = Address::new([1u8; 32]);
         let slasher = Address::new([2u8; 32]);
-        let amount = DEFAULT_MIN_STAKE;
+        let amount = VALIDATOR_BOND;
         let slash_amount = amount / 10;
 
         manager.stake(staker, amount, ProviderType::Validator).unwrap();

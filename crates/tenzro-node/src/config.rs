@@ -1615,6 +1615,14 @@ pub struct NodeConfig {
     #[serde(default)]
     pub hosting: HostingConfig,
 
+    /// Rates this operator charges for the metered provider runtimes —
+    /// storage capacity and accelerator rental. Both are quoted per billing
+    /// epoch ([`crate::node::BILLING_EPOCH_INTERVAL_SECS`], one hour), so the
+    /// compute rate is wei per card-hour and the storage rate is wei per
+    /// byte-hour. Defaults match the network's reference rates.
+    #[serde(default)]
+    pub provider_rates: ProviderRatesConfig,
+
     /// Operator model-license acceptance policy. Governs which catalog models
     /// this node will register/serve: Permissive and Attribution tiers are
     /// always admitted; NonCommercial requires `accept_non_commercial`;
@@ -1670,6 +1678,56 @@ pub struct HostingConfig {
     /// operator hosts for free — the most competitive bid.
     #[serde(default)]
     pub price_per_hour: u128,
+}
+
+/// Rates the provider runtimes spawn with.
+///
+/// One billing epoch is [`crate::node::BILLING_EPOCH_INTERVAL_SECS`] seconds,
+/// so the metered rates are per hour: the compute rate is what a renter pays
+/// for an hour of this node's accelerators, the storage rate what a depositor
+/// pays to hold one byte for an hour. An operator that wants either to follow
+/// demand configures [`crate::pricing::PricingPolicy::Dynamic`] with a capacity
+/// and a band; the runtime then steps it each epoch from metered utilization.
+///
+/// Inference is priced per token instead of per epoch, so it carries the full
+/// [`crate::node::ProviderPricing`] card rather than a policy. It is clamped to
+/// the network maximums when the node reads it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProviderRatesConfig {
+    /// How the storage runtime prices a byte-epoch.
+    #[serde(default = "default_storage_policy")]
+    pub storage: crate::pricing::PricingPolicy,
+
+    /// How the compute-rental runtime prices an epoch.
+    #[serde(default = "default_compute_policy")]
+    pub compute: crate::pricing::PricingPolicy,
+
+    /// What this provider charges per token, per modality unit, and under
+    /// which pricing model.
+    #[serde(default)]
+    pub inference: crate::node::ProviderPricing,
+}
+
+fn default_storage_policy() -> crate::pricing::PricingPolicy {
+    crate::pricing::PricingPolicy::Fixed {
+        rate: crate::node::DEFAULT_STORAGE_RATE_PER_BYTE_EPOCH,
+    }
+}
+
+fn default_compute_policy() -> crate::pricing::PricingPolicy {
+    crate::pricing::PricingPolicy::Fixed {
+        rate: crate::node::DEFAULT_COMPUTE_RATE_PER_EPOCH,
+    }
+}
+
+impl Default for ProviderRatesConfig {
+    fn default() -> Self {
+        Self {
+            storage: default_storage_policy(),
+            compute: default_compute_policy(),
+            inference: crate::node::ProviderPricing::default(),
+        }
+    }
 }
 
 /// Operator-supplied Canton/DAML mirror config for the ERC-8004
@@ -1859,6 +1917,7 @@ impl NodeConfig {
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
+            provider_rates: ProviderRatesConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
         }
@@ -1907,6 +1966,7 @@ impl NodeConfig {
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
+            provider_rates: ProviderRatesConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
         }
@@ -1955,6 +2015,7 @@ impl NodeConfig {
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
+            provider_rates: ProviderRatesConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
         }
@@ -2003,6 +2064,7 @@ impl NodeConfig {
             snapshot: crate::snapshot::SnapshotConfig::default(),
             databases: DatabasesConfig::default(),
             hosting: HostingConfig::default(),
+            provider_rates: ProviderRatesConfig::default(),
             model_licensing: tenzro_types::model::AcceptancePolicy::default(),
             listing_tnzo_usd_micro: None,
         }

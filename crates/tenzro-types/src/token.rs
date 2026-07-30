@@ -310,16 +310,228 @@ impl ProviderStake {
 pub enum ProviderType {
     /// Validator
     Validator,
+    /// RPC operator — carries tenant traffic and mints tenant API keys
+    RpcProvider,
     /// TEE provider
     TeeProvider,
-    /// Model provider
+    /// Model provider — serves inference from the model catalogue
     ModelProvider,
+    /// Compute provider — rents accelerator capacity for fixed terms
+    ComputeProvider,
     /// Storage provider
     StorageProvider,
+    /// Cloud operator — hosted functions, sites, databases and machines
+    CloudProvider,
     /// Tenzro Train trainer — proposes outer gradients for a fragment
     Trainer,
     /// Tenzro Train syncer — aggregates outer gradients and publishes rounds
     Syncer,
+}
+
+/// Class of a pledged accelerator, which sets its share of the compute bond.
+///
+/// Multipliers track the spread observed across per-GPU bonds in comparable
+/// networks, where a datacentre card carries roughly five times the collateral
+/// of a consumer card and integrated memory carries about half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AcceleratorClass {
+    /// Integrated or unified memory — Apple Silicon, iGPU
+    Integrated,
+    /// Consumer discrete card
+    Consumer,
+    /// Workstation or inference card
+    Workstation,
+    /// Datacentre training card
+    Datacentre,
+}
+
+impl AcceleratorClass {
+    /// Share of [`COMPUTE_STAKE_PER_ACCELERATOR`] this class carries, in basis
+    /// points of that base.
+    ///
+    /// [`COMPUTE_STAKE_PER_ACCELERATOR`]: crate::constants::COMPUTE_STAKE_PER_ACCELERATOR
+    pub const fn stake_multiplier_bps(&self) -> u32 {
+        match self {
+            Self::Integrated => 5_000,
+            Self::Consumer => 10_000,
+            Self::Workstation => 20_000,
+            Self::Datacentre => 50_000,
+        }
+    }
+}
+
+/// Service class a cloud operator offers, which sets its bond.
+///
+/// Each rung is a superset of the one below, so an operator that offers
+/// machines is also offering databases, functions and sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CloudTier {
+    /// Request-scoped functions and static sites
+    Functions,
+    /// Adds managed databases
+    Databases,
+    /// Adds long-lived machines
+    Machines,
+}
+
+/// Capacity a provider declares when bonding, for the roles whose bond scales.
+///
+/// Roles that collateralise a privilege rather than a quantity pass
+/// [`StakeCapacity::None`] and take their flat bond.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StakeCapacity {
+    /// No capacity dimension — the role's flat bond applies.
+    None,
+    /// Accelerators pledged for rental.
+    Accelerators(Vec<AcceleratorClass>),
+    /// Whole terabytes of disk pledged.
+    Terabytes(u32),
+    /// Highest cloud service class offered.
+    Cloud(CloudTier),
+}
+
+impl Default for StakeCapacity {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl ProviderType {
+    /// Bond this role requires for the declared `capacity`.
+    ///
+    /// Capacity is ignored by roles that do not scale, so passing
+    /// [`StakeCapacity::None`] to a scaling role yields that role's floor
+    /// rather than zero — bonding is never free.
+    pub fn required_stake(&self, capacity: &StakeCapacity) -> u128 {
+        use crate::constants::*;
+
+        match self {
+            Self::Validator => MIN_VALIDATOR_STAKE,
+            Self::RpcProvider => MIN_RPC_OPERATOR_STAKE,
+            Self::TeeProvider => MIN_TEE_PROVIDER_STAKE,
+            Self::ModelProvider => MIN_MODEL_PROVIDER_STAKE,
+            // Trainers and syncers contribute the same class of work as a
+            // model provider, so they carry the same bond.
+            Self::Trainer | Self::Syncer => MIN_MODEL_PROVIDER_STAKE,
+
+            Self::ComputeProvider => {
+                let pledged = match capacity {
+                    StakeCapacity::Accelerators(classes) => classes
+                        .iter()
+                        .map(|c| {
+                            COMPUTE_STAKE_PER_ACCELERATOR
+                                .saturating_mul(c.stake_multiplier_bps() as u128)
+                                / 10_000
+                        })
+                        .fold(0u128, |acc, v| acc.saturating_add(v)),
+                    _ => 0,
+                };
+                pledged.max(MIN_COMPUTE_PROVIDER_STAKE)
+            }
+
+            Self::StorageProvider => {
+                let pledged = match capacity {
+                    StakeCapacity::Terabytes(tb) => {
+                        STORAGE_STAKE_PER_TB.saturating_mul(*tb as u128)
+                    }
+                    _ => 0,
+                };
+                pledged.max(MIN_STORAGE_PROVIDER_STAKE)
+            }
+
+            Self::CloudProvider => match capacity {
+                StakeCapacity::Cloud(CloudTier::Machines) => CLOUD_MACHINE_TIER_STAKE,
+                StakeCapacity::Cloud(CloudTier::Databases) => CLOUD_DATABASE_TIER_STAKE,
+                _ => MIN_CLOUD_PROVIDER_STAKE,
+            },
+        }
+    }
+
+    /// Canonical wire name for this role, as accepted by [`FromStr`].
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Validator => "validator",
+            Self::RpcProvider => "rpc",
+            Self::TeeProvider => "tee",
+            Self::ModelProvider => "model",
+            Self::ComputeProvider => "compute",
+            Self::StorageProvider => "storage",
+            Self::CloudProvider => "cloud",
+            Self::Trainer => "trainer",
+            Self::Syncer => "syncer",
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ProviderType {
+    type Err = String;
+
+    /// Parse a role name. Matching is case-insensitive and tolerates the
+    /// hyphenated and underscored spellings of the `-provider` suffix, so a
+    /// caller may write `tee`, `tee-provider` or `TEE_PROVIDER` and get the
+    /// same role. Anything else is an error — there is no default role,
+    /// because guessing one would bond the caller to the wrong ladder rung.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let normalised = s.trim().to_lowercase().replace('-', "_");
+        let stem = normalised
+            .strip_suffix("_provider")
+            .or_else(|| normalised.strip_suffix("_operator"))
+            .unwrap_or(&normalised);
+
+        match stem {
+            "validator" => Ok(Self::Validator),
+            "rpc" => Ok(Self::RpcProvider),
+            "tee" | "confidential" => Ok(Self::TeeProvider),
+            "model" | "ai" | "inference" => Ok(Self::ModelProvider),
+            "compute" | "gpu" | "accelerator" => Ok(Self::ComputeProvider),
+            "storage" => Ok(Self::StorageProvider),
+            "cloud" => Ok(Self::CloudProvider),
+            "trainer" => Ok(Self::Trainer),
+            "syncer" => Ok(Self::Syncer),
+            _ => Err(format!(
+                "unknown provider type '{s}' (expected one of: validator, rpc, tee, \
+                 model, compute, storage, cloud, trainer, syncer)"
+            )),
+        }
+    }
+}
+
+impl std::str::FromStr for CloudTier {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "functions" | "sites" | "functions_sites" => Ok(Self::Functions),
+            "databases" | "database" => Ok(Self::Databases),
+            "machines" | "machine" => Ok(Self::Machines),
+            _ => Err(format!(
+                "unknown cloud tier '{s}' (expected one of: functions, databases, machines)"
+            )),
+        }
+    }
+}
+
+impl std::str::FromStr for AcceleratorClass {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "integrated" | "unified" | "igpu" => Ok(Self::Integrated),
+            "consumer" => Ok(Self::Consumer),
+            "workstation" => Ok(Self::Workstation),
+            "datacentre" | "datacenter" => Ok(Self::Datacentre),
+            _ => Err(format!(
+                "unknown accelerator class '{s}' (expected one of: integrated, \
+                 consumer, workstation, datacentre)"
+            )),
+        }
+    }
 }
 
 /// Stake status

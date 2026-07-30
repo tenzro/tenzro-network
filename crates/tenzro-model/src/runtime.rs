@@ -22,6 +22,8 @@
 
 use std::num::NonZeroU32;
 use std::path::Path;
+#[cfg(feature = "mtmd")]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -38,9 +40,14 @@ use crate::catalog::{MtpKind, get_model_by_id};
 use crate::error::{ModelError, Result};
 use crate::external_engine::ExternalEngine;
 
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
+#[cfg(feature = "mtmd")]
+use llama_cpp_2::mtmd::{
+    MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText, mtmd_default_marker,
+};
 use llama_cpp_2::model::params::{LlamaModelParams, LlamaSplitMode};
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
@@ -466,6 +473,27 @@ pub struct ChatWithToolsResult {
     pub commitment: Option<crate::toploc::InferenceCommitment>,
 }
 
+/// The literal that marks where an attachment binds in a multimodal prompt.
+///
+/// A caller that assembles its own prompt writes one of these per attachment,
+/// in the position the attachment belongs, and mtmd substitutes the encoded
+/// embeddings there. Callers that place none get one per attachment prepended
+/// to the last user turn.
+///
+/// Built without the `mtmd` feature the value is unused — multimodal requests
+/// are refused before a prompt is assembled — but the literal has to exist for
+/// prompt-rendering code to compile unconditionally.
+pub fn media_marker() -> &'static str {
+    #[cfg(feature = "mtmd")]
+    {
+        mtmd_default_marker()
+    }
+    #[cfg(not(feature = "mtmd"))]
+    {
+        "<__media__>"
+    }
+}
+
 /// Maximum context length we allow to prevent OOM on consumer hardware.
 const MAX_CONTEXT_LENGTH: u32 = 131_072;
 
@@ -495,6 +523,16 @@ const MAX_WARM_PREFIX_NODES: usize = 256;
 
 /// Internal representation of a loaded model
 struct LoadedModel {
+    /// Multimodal projector for a model whose catalog entry declares an
+    /// `mmproj` — Gemma 4's SigLIP tower, Kimi K3's MoonViT-3d. `None` for a
+    /// text-only model, and for a multimodal one whose projector file has not
+    /// been downloaded, which serves text-only.
+    ///
+    /// Declared ahead of `model` so it is dropped first: the mtmd context
+    /// holds a raw `llama_model *` into the text model and must be torn down
+    /// before the model it points at.
+    #[cfg(feature = "mtmd")]
+    projector: Option<MtmdContext>,
     model: LlamaModel,
     backend: Arc<LlamaBackend>,
     /// Configured context length from catalog (capped at MAX_CONTEXT_LENGTH)
@@ -511,12 +549,14 @@ unsafe impl Sync for LoadedModel {}
 /// A plain text GGUF is served through a continuous-batching [`BatchEngine`]
 /// that owns the `LlamaModel` on a dedicated scheduler thread and interleaves
 /// every in-flight sequence into one decode per step — the throughput path. A
-/// model that carries a Multi-Token-Prediction drafter, or one split across a
-/// LAN pipeline cluster, is served through the serial single-context path
-/// (`Serial`): speculative decoding runs two contexts that can't share the
-/// batch scheduler, and a clustered pipeline threads boundary activations
+/// model that carries a Multi-Token-Prediction drafter, a multimodal
+/// projector, or one split across a LAN pipeline cluster, is served through
+/// the serial single-context path (`Serial`): speculative decoding runs two
+/// contexts that can't share the batch scheduler, mtmd owns its own prefill
+/// sequence per request, and a clustered pipeline threads boundary activations
 /// across devices per request. The variant is chosen once at load time from
-/// the catalog's `mtp_kind` (and the clustered entry point) and never changes.
+/// the catalog's `mtp_kind` and `mmproj` (and the clustered entry point) and
+/// never changes.
 enum LoadedEntry {
     Batched(BatchEngine),
     Serial(Arc<tokio::sync::Mutex<LoadedModel>>),
@@ -588,6 +628,12 @@ pub struct ModelRuntime {
     /// [`tenzro_types::PrefixCacheSummary`] so prefix-affinity routing can
     /// prefer this provider for a matching prompt. Keyed by `model_id`.
     warm_prefixes: Arc<DashMap<String, tenzro_types::PrefixCacheSummary>>,
+    /// Model ids whose multimodal projector loaded, so they accept image or
+    /// audio attachments. Held beside `loaded_models` rather than read out of
+    /// `LoadedModel` so [`Self::supports_media`] is a lock-free probe — a
+    /// discovery call must not queue behind an in-flight generation holding the
+    /// model mutex.
+    media_capable: Arc<dashmap::DashSet<String>>,
     backend: Arc<LlamaBackend>,
     hardware: HardwareInfo,
 }
@@ -636,6 +682,7 @@ impl ModelRuntime {
             external_engines: Arc::new(DashMap::new()),
             inflight: Arc::new(DashMap::new()),
             warm_prefixes: Arc::new(DashMap::new()),
+            media_capable: Arc::new(dashmap::DashSet::new()),
             backend,
             hardware,
         }
@@ -914,7 +961,12 @@ impl ModelRuntime {
                 effective_ctx,
             );
 
+            #[cfg(feature = "mtmd")]
+            let projector = Self::load_projector(&model_id_owned, &gguf_path_owned, &model);
+
             Ok::<LoadedModel, ModelError>(LoadedModel {
+                #[cfg(feature = "mtmd")]
+                projector,
                 model,
                 backend,
                 context_length: effective_ctx,
@@ -932,19 +984,28 @@ impl ModelRuntime {
 
         // A model paired with a Multi-Token-Prediction drafter is served on the
         // serial single-context path: speculative decoding runs the target and
-        // drafter as two contexts that can't share one batch scheduler. Every
-        // other text model is served through the continuous-batching engine.
+        // drafter as two contexts that can't share one batch scheduler. So is a
+        // model that loaded a multimodal projector — mtmd interleaves image and
+        // audio embeddings into its own prefill sequence, which the batch
+        // scheduler has no way to express. Every other text model is served
+        // through the continuous-batching engine.
         let wants_drafter = get_model_by_id(model_id)
             .map(|e| e.mtp_kind != MtpKind::None)
             .unwrap_or(false);
 
-        let entry = if wants_drafter {
+        #[cfg(feature = "mtmd")]
+        let has_projector = loaded.projector.is_some();
+        #[cfg(not(feature = "mtmd"))]
+        let has_projector = false;
+
+        let entry = if wants_drafter || has_projector {
             LoadedEntry::Serial(Arc::new(tokio::sync::Mutex::new(loaded)))
         } else {
             let LoadedModel {
                 model,
                 backend,
                 context_length,
+                ..
             } = loaded;
             let engine = BatchEngine::spawn(
                 model_id.to_string(),
@@ -955,6 +1016,9 @@ impl ModelRuntime {
             LoadedEntry::Batched(engine)
         };
 
+        if has_projector {
+            self.media_capable.insert(model_id.to_string());
+        }
         self.loaded_models
             .insert(model_id.to_string(), Arc::new(entry));
 
@@ -1039,7 +1103,16 @@ impl ModelRuntime {
                 effective_ctx,
             );
 
+            // Kimi K3 is both the largest clustered target and a multimodal
+            // one, so the projector is resolved on the clustered path too. It
+            // stays resident on the rank that owns the context; only the text
+            // model's layers are split across devices.
+            #[cfg(feature = "mtmd")]
+            let projector = Self::load_projector(&model_id_owned, &gguf_path_owned, &model);
+
             Ok::<LoadedModel, ModelError>(LoadedModel {
+                #[cfg(feature = "mtmd")]
+                projector,
                 model,
                 backend,
                 context_length: effective_ctx,
@@ -1057,12 +1130,90 @@ impl ModelRuntime {
         // A clustered pipeline threads boundary activations across devices per
         // request — served on the serial single-context path, not the batch
         // engine.
+        #[cfg(feature = "mtmd")]
+        if loaded.projector.is_some() {
+            self.media_capable.insert(model_id.to_string());
+        }
         self.loaded_models.insert(
             model_id.to_string(),
             Arc::new(LoadedEntry::Serial(Arc::new(tokio::sync::Mutex::new(loaded)))),
         );
 
         Ok(())
+    }
+
+    /// Resolve and load a model's multimodal projector, if it declares one.
+    ///
+    /// The projector is the `mmproj` GGUF the artifact downloader stores flat
+    /// as `<storage>/<id>.mmproj.gguf` alongside the weights. A catalog entry
+    /// with no `mmproj`, or one whose projector has not been downloaded,
+    /// returns `None` and the model serves text-only.
+    #[cfg(feature = "mtmd")]
+    fn load_projector(model_id: &str, gguf_path: &Path, model: &LlamaModel) -> Option<MtmdContext> {
+        if get_model_by_id(model_id)?.mmproj.is_none() {
+            return None;
+        }
+
+        let path = Self::projector_path(model_id, gguf_path)?;
+        let path_str = path.to_str()?;
+
+        let params = MtmdContextParams {
+            use_gpu: true,
+            print_timings: false,
+            n_threads: std::thread::available_parallelism()
+                .map(|n| n.get() as i32)
+                .unwrap_or(4),
+            media_marker: std::ffi::CString::new(mtmd_default_marker()).ok()?,
+        };
+
+        match MtmdContext::init_from_file(path_str, model, &params) {
+            Ok(ctx) => {
+                info!(
+                    "Model {} projector loaded from {}: vision={}, audio={}",
+                    model_id,
+                    path.display(),
+                    ctx.support_vision(),
+                    ctx.support_audio(),
+                );
+                Some(ctx)
+            }
+            Err(e) => {
+                warn!(
+                    "Model {} declares a projector at {} but loading it failed ({}) — serving text-only",
+                    model_id,
+                    path.display(),
+                    e,
+                );
+                None
+            }
+        }
+    }
+
+    /// Locate a downloaded projector for `model_id` given the path its weights
+    /// were loaded from. Single-file weights sit directly in the storage
+    /// directory; a gguf-split set sits one level deeper in `<storage>/<id>/`.
+    /// The projector is flat in the storage directory either way, so both
+    /// layouts are checked.
+    #[cfg(feature = "mtmd")]
+    fn projector_path(model_id: &str, gguf_path: &Path) -> Option<PathBuf> {
+        let filename = format!("{}.mmproj.gguf", model_id);
+        let parent = gguf_path.parent()?;
+
+        let flat = parent.join(&filename);
+        if flat.is_file() {
+            return Some(flat);
+        }
+        let nested = parent.parent()?.join(&filename);
+        if nested.is_file() {
+            return Some(nested);
+        }
+        None
+    }
+
+    /// Whether a loaded model can accept image or audio input — its catalog
+    /// entry declares an `mmproj` and that projector loaded successfully.
+    pub fn supports_media(&self, model_id: &str) -> bool {
+        self.media_capable.contains(model_id)
     }
 
     /// Unload a model from memory.
@@ -1073,6 +1224,7 @@ impl ModelRuntime {
             info!("Unregistered external engine for model: {}", model_id);
             return Ok(());
         }
+        self.media_capable.remove(model_id);
         if let Some((_, entry)) = self.loaded_models.remove(model_id) {
             match entry.as_ref() {
                 LoadedEntry::Batched(engine) => {
@@ -1569,31 +1721,7 @@ impl ModelRuntime {
         let tools = tools.to_vec();
         let config = config.clone();
 
-        // Inline tool descriptions into a synthetic system message. If the
-        // first message is already a system message, we prepend the tools
-        // block to it; otherwise we insert a fresh system message.
-        if !tools.is_empty() {
-            let tools_preamble = render_tools_preamble(&tools);
-            if let Some(first) = messages.first_mut() {
-                if first.role == "system" {
-                    let combined = format!("{}\n\n{}", first.content, tools_preamble);
-                    first.content = combined;
-                } else {
-                    messages.insert(
-                        0,
-                        ChatMessage {
-                            role: "system".to_string(),
-                            content: tools_preamble,
-                        },
-                    );
-                }
-            } else {
-                messages.push(ChatMessage {
-                    role: "system".to_string(),
-                    content: tools_preamble,
-                });
-            }
-        }
+        inject_tools_preamble(&mut messages, &tools);
 
         let inner = if let Some(engine) = external {
             engine.chat(&messages, &config).await?
@@ -1710,6 +1838,114 @@ impl ModelRuntime {
                 handle
                     .await
                     .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))?
+            }
+        }
+    }
+
+    /// Generate a chat completion with image or audio attachments.
+    ///
+    /// Requires a model whose catalog entry declares an `mmproj` and whose
+    /// projector loaded — [`Self::supports_media`] is the check. `media` carries
+    /// the raw encoded bytes of each attachment: PNG / JPEG / WebP for images,
+    /// and WAV / MP3 / FLAC when the projector has an audio tower. The format is
+    /// identified from the bytes, so the caller does not declare it.
+    ///
+    /// Attachments bind to [`media_marker`] occurrences in the prompt, in
+    /// order. A caller that wants precise placement writes the markers into
+    /// message content itself; a caller that writes none gets one per
+    /// attachment prepended to the last user turn.
+    ///
+    /// `tools` behaves exactly as in [`Self::generate_chat_with_tools`] — the
+    /// schemas go into the system turn and any tool call the model emits is
+    /// extracted from the output — so a vision request can drive tools. An empty
+    /// `media` slice is an ordinary chat request and is forwarded as one.
+    pub async fn generate_chat_multimodal(
+        &self,
+        model_id: &str,
+        messages: &[ChatMessage],
+        media: &[Vec<u8>],
+        tools: &[ToolDefinition],
+        config: &GenerationConfig,
+    ) -> Result<ChatWithToolsResult> {
+        if media.is_empty() {
+            return self
+                .generate_chat_with_tools(model_id, messages, tools, config)
+                .await;
+        }
+
+        if self.external_engines.contains_key(model_id) {
+            return Err(ModelError::InferenceError(format!(
+                "model {} is served by an external engine, which carries no multimodal path",
+                model_id,
+            )));
+        }
+
+        let entry = self
+            .loaded_models
+            .get(model_id)
+            .ok_or_else(|| ModelError::Other(format!("Model {} not loaded", model_id)))?
+            .value()
+            .clone();
+
+        let _guard = self.acquire_inflight(model_id)?;
+
+        // No warm-prompt record: the prefix a multimodal request leaves in the KV
+        // cache holds media embeddings, so text-prefix affinity would mis-route.
+
+        match entry.as_ref() {
+            LoadedEntry::Batched(_) => Err(ModelError::InferenceError(format!(
+                "model {} is served text-only — it declares no projector, or its \
+                 projector failed to load. Check ModelRuntime::supports_media before \
+                 sending attachments.",
+                model_id,
+            ))),
+            LoadedEntry::Serial(model_mutex) => {
+                #[cfg(feature = "mtmd")]
+                {
+                    let model_mutex = model_mutex.clone();
+                    let mut messages = messages.to_vec();
+                    let media = media.to_vec();
+                    let config = config.clone();
+                    inject_tools_preamble(&mut messages, tools);
+                    Self::place_media_markers(&mut messages, media.len())?;
+                    let inner = tokio::task::spawn_blocking(move || {
+                        let loaded = model_mutex.blocking_lock();
+                        let prompt = render_chat_prompt(&loaded.model, &messages)?;
+                        Self::generate_sync_multimodal(&loaded, &prompt, &media, &config)
+                    })
+                    .await
+                    .map_err(|e| ModelError::Other(format!("Generation task error: {}", e)))??;
+
+                    let (clean_text, tool_calls) = extract_tool_calls(&inner.text);
+                    let stop_reason = if !tool_calls.is_empty() {
+                        "tool_use".to_string()
+                    } else {
+                        match inner.stop_reason {
+                            StopReason::Length => "max_tokens".to_string(),
+                            StopReason::StopSequence => "stop_sequence".to_string(),
+                            StopReason::Eos => "end_turn".to_string(),
+                        }
+                    };
+                    Ok(ChatWithToolsResult {
+                        text: clean_text,
+                        tool_calls,
+                        input_tokens: inner.input_tokens,
+                        output_tokens: inner.output_tokens,
+                        generation_time_ms: inner.generation_time_ms,
+                        tokens_per_second: inner.tokens_per_second,
+                        stop_reason,
+                        commitment: inner.commitment,
+                    })
+                }
+                #[cfg(not(feature = "mtmd"))]
+                {
+                    let _ = (model_mutex, tools);
+                    Err(ModelError::InferenceError(
+                        "this node was built without the mtmd feature, so it serves \
+                         text only. Rebuild tenzro-model with --features mtmd."
+                            .to_string(),
+                    ))
+                }
             }
         }
     }
@@ -1862,15 +2098,6 @@ impl ModelRuntime {
             .new_context(&loaded.backend, ctx_params)
             .map_err(|e| ModelError::Other(format!("Failed to create context: {}", e)))?;
 
-        let n_ctx_val = ctx.n_ctx() as i32;
-        let total_needed = input_tokens as i32 + config.max_tokens as i32;
-        if total_needed > n_ctx_val {
-            warn!(
-                "Requested {} tokens but context is {} -- output will be truncated",
-                total_needed, n_ctx_val
-            );
-        }
-
         // Create batch sized to fit the entire prompt
         let batch_size = std::cmp::max(tokens_list.len(), 512);
         let mut batch = LlamaBatch::new(batch_size, 1);
@@ -1883,16 +2110,73 @@ impl ModelRuntime {
         }
 
         // Decode prompt (prefill)
+        let n_past = batch.n_tokens();
         ctx.decode(&mut batch)
             .map_err(|e| ModelError::Other(format!("Prompt decode failed: {}", e)))?;
 
+        // The prefill batch asked for logits on its last token only, so that
+        // row is where the first sample reads from.
+        Self::decode_loop(
+            loaded,
+            &mut ctx,
+            n_past,
+            input_tokens,
+            config,
+            token_tx,
+            Some(n_past - 1),
+            start,
+        )
+    }
+
+    /// Autoregressive decode loop, shared by the text and multimodal prefill
+    /// paths. The caller has already created the context, run the prefill, and
+    /// advanced the sequence to `n_past`.
+    ///
+    /// `first_logits` is the batch row the first sample reads its logits from,
+    /// or `None` when the prefill left no readable row. The text path prefills
+    /// through `LlamaContext::decode`, which records which rows carry logits, so
+    /// it passes the last prompt row. The multimodal path prefills through
+    /// `mtmd_helper_eval_chunks`, which decodes on the raw C context and so
+    /// leaves that record empty — reading it would trip the bounds assertion in
+    /// `get_logits_ith`. That path passes `None`, and the first token is sampled
+    /// via the raw `-1` index (last logits row), which the sampler accepts
+    /// without the assertion. Every subsequent step decodes a one-token batch
+    /// through `decode`, so from the second token on both paths read row 0 and
+    /// TOPLOC records normally.
+    ///
+    /// `input_tokens` is the prompt size reported in the result and bound into
+    /// the TOPLOC commitment; it counts media tokens on the multimodal path.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_loop(
+        loaded: &LoadedModel,
+        ctx: &mut LlamaContext,
+        n_past: i32,
+        input_tokens: u32,
+        config: &GenerationConfig,
+        token_tx: Option<&tokio::sync::mpsc::Sender<String>>,
+        first_logits: Option<i32>,
+        start: Instant,
+    ) -> Result<InferenceResult> {
+        let n_ctx_val = ctx.n_ctx() as i32;
+        let total_needed = n_past + config.max_tokens as i32;
+        if total_needed > n_ctx_val {
+            warn!(
+                "Requested {} tokens but context is {} -- output will be truncated",
+                total_needed, n_ctx_val
+            );
+        }
+
         let mut sampler = build_sampler_chain(config);
 
-        // Auto-regressive generation loop
-        let mut n_cur = batch.n_tokens();
+        let mut n_cur = n_past;
         let mut output_tokens: u32 = 0;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut stream = StopStream::new(config.stop.clone());
+        let mut batch = LlamaBatch::new(1, 1);
+
+        // Row the current step reads logits from. `None` means "not readable",
+        // which only happens for the first step after a multimodal prefill.
+        let mut logits_row = first_logits;
 
         // TOPLOC commitment collection: one top-k logit record per
         // generated token, read from the raw logits the sampler chain
@@ -1903,15 +2187,16 @@ impl ModelRuntime {
             .map(|k| k.clamp(1, crate::toploc::MAX_COMMITMENT_K) as usize);
         let mut commitment_steps: Vec<crate::toploc::StepRecord> = Vec::new();
 
-        let max_pos = n_ctx_val.min(input_tokens as i32 + config.max_tokens as i32);
+        let max_pos = n_ctx_val.min(n_past + config.max_tokens as i32);
 
         while n_cur < max_pos {
-            let step_top_k = commitment_k.map(|k| {
-                crate::toploc::top_k_from_logits(ctx.get_logits_ith(batch.n_tokens() - 1), k)
+            let step_top_k = commitment_k.zip(logits_row).map(|(k, row)| {
+                crate::toploc::top_k_from_logits(ctx.get_logits_ith(row), k)
             });
 
-            // Sample next token
-            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            // Sample next token. `-1` is llama.cpp's "last logits row", the only
+            // way to reach the row a multimodal prefill left behind.
+            let token = sampler.sample(&*ctx, logits_row.unwrap_or(-1));
             sampler.accept(token);
 
             // Check for end of generation
@@ -1959,6 +2244,9 @@ impl ModelRuntime {
             ctx.decode(&mut batch)
                 .map_err(|e| ModelError::Other(format!("Decode failed: {}", e)))?;
 
+            // A one-token batch puts the only logits row at 0, and going
+            // through `decode` records it as readable.
+            logits_row = Some(0);
             n_cur += 1;
         }
 
@@ -1992,6 +2280,130 @@ impl ModelRuntime {
             stop_reason,
             commitment,
         })
+    }
+
+    /// Give the rendered prompt one media marker per attachment.
+    ///
+    /// mtmd binds attachments to markers positionally, so the count has to
+    /// match. A caller that placed its own markers is left alone; a caller that
+    /// placed none gets them prepended to the last user turn, which is what a
+    /// chat client sending images followed by a question means. A partial count
+    /// is a caller bug, not something to paper over.
+    #[cfg(feature = "mtmd")]
+    fn place_media_markers(messages: &mut [ChatMessage], count: usize) -> Result<()> {
+        let marker = media_marker();
+        let placed: usize = messages
+            .iter()
+            .map(|m| m.content.matches(marker).count())
+            .sum();
+
+        if placed == count {
+            return Ok(());
+        }
+        if placed != 0 {
+            return Err(ModelError::InferenceError(format!(
+                "prompt carries {} media marker(s) but {} attachment(s) were supplied — \
+                 place one marker per attachment, or none at all to have them prepended \
+                 to the last user turn",
+                placed, count,
+            )));
+        }
+
+        let last_user = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == "user")
+            .ok_or_else(|| {
+                ModelError::InferenceError(
+                    "multimodal request has no user turn to attach media to".to_string(),
+                )
+            })?;
+
+        let markers = vec![marker; count].join("\n");
+        last_user.content = format!("{}\n{}", markers, last_user.content);
+        Ok(())
+    }
+
+    /// Synchronous multimodal generation: decode the attachments, interleave
+    /// their embeddings into the prefill at the marker positions, then run the
+    /// shared decode loop.
+    #[cfg(feature = "mtmd")]
+    fn generate_sync_multimodal(
+        loaded: &LoadedModel,
+        prompt: &str,
+        media: &[Vec<u8>],
+        config: &GenerationConfig,
+    ) -> Result<InferenceResult> {
+        let start = Instant::now();
+
+        let projector = loaded.projector.as_ref().ok_or_else(|| {
+            ModelError::InferenceError(
+                "model has no multimodal projector loaded — it serves text only".to_string(),
+            )
+        })?;
+
+        // mtmd identifies image versus audio from the bytes. Refuse a modality
+        // the projector has no tower for here, where the error can name the
+        // attachment, rather than letting tokenize fail on the whole batch.
+        let mut bitmaps = Vec::with_capacity(media.len());
+        for (i, bytes) in media.iter().enumerate() {
+            let bitmap = MtmdBitmap::from_buffer(projector, bytes).map_err(|e| {
+                ModelError::InferenceError(format!("attachment {} could not be decoded: {}", i, e))
+            })?;
+            let (kind, supported) = if bitmap.is_audio() {
+                ("audio", projector.support_audio())
+            } else {
+                ("an image", projector.support_vision())
+            };
+            if !supported {
+                return Err(ModelError::InferenceError(format!(
+                    "attachment {} is {}, which this projector has no tower for",
+                    i, kind,
+                )));
+            }
+            bitmaps.push(bitmap);
+        }
+        let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
+
+        let chunks = projector
+            .tokenize(
+                MtmdInputText {
+                    text: prompt.to_string(),
+                    add_special: true,
+                    parse_special: true,
+                },
+                &bitmap_refs,
+            )
+            .map_err(|e| {
+                ModelError::InferenceError(format!("multimodal tokenization failed: {}", e))
+            })?;
+
+        let input_tokens = chunks.total_tokens() as u32;
+        if input_tokens == 0 {
+            return Err(ModelError::InferenceError(
+                "prompt tokenized to zero tokens".to_string(),
+            ));
+        }
+
+        let n_ctx = NonZeroU32::new(loaded.context_length)
+            .unwrap_or(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH).unwrap());
+        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(n_ctx));
+        let mut ctx = loaded
+            .model
+            .new_context(&loaded.backend, ctx_params)
+            .map_err(|e| ModelError::Other(format!("Failed to create context: {}", e)))?;
+
+        // Prefill. Text chunks go through llama_decode; image and audio chunks
+        // are encoded by the projector and their embeddings decoded in place, in
+        // the order the markers appeared.
+        let n_batch = ctx.n_batch() as i32;
+        let n_past = chunks
+            .eval_chunks(projector, &ctx, 0, 0, n_batch, true)
+            .map_err(|e| ModelError::InferenceError(format!("multimodal prefill failed: {}", e)))?;
+
+        // `first_logits: None` — this prefill ran on the raw context, so no row
+        // is recorded as readable and the first sample must use the `-1` index.
+        Self::decode_loop(loaded, &mut ctx, n_past, input_tokens, config, None, None, start)
     }
 
     /// Speculative-decoding generation loop using llama.cpp's MTP
@@ -2443,6 +2855,30 @@ fn render_tools_preamble(tools: &[ToolDefinition]) -> String {
     }
     out.push_str("</tools>");
     out
+}
+
+/// Put the tool preamble in front of the conversation.
+///
+/// An existing system message absorbs the preamble so the model still sees a
+/// single system turn; otherwise a synthetic one is inserted at the head. An
+/// empty tool list leaves the conversation untouched.
+fn inject_tools_preamble(messages: &mut Vec<ChatMessage>, tools: &[ToolDefinition]) {
+    if tools.is_empty() {
+        return;
+    }
+    let preamble = render_tools_preamble(tools);
+    match messages.first_mut() {
+        Some(first) if first.role == "system" => {
+            first.content = format!("{}\n\n{}", first.content, preamble);
+        }
+        _ => messages.insert(
+            0,
+            ChatMessage {
+                role: "system".to_string(),
+                content: preamble,
+            },
+        ),
+    }
 }
 
 /// Scan raw model output for tool-call markers and return

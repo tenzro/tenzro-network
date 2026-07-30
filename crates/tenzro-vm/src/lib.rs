@@ -111,6 +111,7 @@ pub use hot_state::{
 pub use account_abstraction::{
     UserOperation, PackedUserOperation, EntryPoint, AccountFactory, SmartAccount, AccountModule,
     Paymaster, BundlerConfig, UserOpReceipt, SimulationResult, AccountAbstractionError,
+    Nonce, EXECUTE_SELECTOR, encode_execute_calldata,
     Eip7702Authorization, EIP_7702_TX_TYPE, EIP_7702_MAGIC,
     EIP_7702_DESIGNATOR_PREFIX, EIP_7702_DESIGNATOR_LEN,
     build_7702_designator, parse_7702_designator,

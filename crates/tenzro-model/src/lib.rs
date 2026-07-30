@@ -220,8 +220,8 @@ pub use hf_download::{
     HfDownloader, PeerHint, SourcePolicy,
 };
 pub use runtime::{
-    ChatMessage, ChatWithToolsResult, GenerationConfig, HardwareInfo, InferenceResult,
-    ModelRuntime, StopReason, ToolCall, ToolDefinition,
+    media_marker, ChatMessage, ChatWithToolsResult, GenerationConfig, HardwareInfo,
+    InferenceResult, ModelRuntime, StopReason, ToolCall, ToolDefinition,
 };
 pub use batching::{BatchEngine, BatchRequest};
 pub use toploc::{

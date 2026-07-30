@@ -292,9 +292,11 @@ impl JoinCmd {
     }
 }
 
-/// Minimum compute bond: 100 TNZO in wei (matches the node's
-/// `DEFAULT_COMPUTE_BOND_MIN`).
-const COMPUTE_BOND_MIN_WEI: u128 = 100 * 1_000_000_000_000_000_000u128;
+/// Compute bond for the model-provider rung: 1,000 TNZO in wei (matches
+/// `tenzro_types::constants::MIN_MODEL_PROVIDER_STAKE`, which
+/// `tenzro_registerProvider` gates admission on). `join --provider`
+/// registers as a model provider, so it posts that rung's bond.
+const COMPUTE_BOND_MIN_WEI: u128 = 1_000 * 1_000_000_000_000_000_000u128;
 
 /// Automatic provider provisioning against the node at `rpc`.
 ///
@@ -343,8 +345,8 @@ async fn run_provider_flow(
     output::print_field("Model memory budget", &format!("{:.1} GB", budget_gb));
     println!();
 
-    // 2. Funding: the compute bond needs at least 100 TNZO. On testnet the
-    // faucet grants a starter allotment, so a fresh wallet self-funds.
+    // 2. Funding: the compute bond needs the model-provider rung. On testnet
+    // the faucet grants a starter allotment, so a fresh wallet self-funds.
     let spinner = output::create_spinner("Checking wallet balance...");
     let mut balance_wei = get_balance_wei(rpc, wallet_address).await;
     if balance_wei < COMPUTE_BOND_MIN_WEI {
@@ -365,9 +367,10 @@ async fn run_provider_flow(
     output::print_field("Balance", &crate::rpc::format_tnzo(balance_wei));
     if balance_wei < COMPUTE_BOND_MIN_WEI {
         anyhow::bail!(
-            "Wallet {} holds less than the 100 TNZO compute bond minimum. \
-             Fund it and re-run `tenzro join --provider`.",
-            wallet_address
+            "Wallet {} holds less than the {} compute bond the model-provider \
+             rung requires. Fund it and re-run `tenzro join --provider`.",
+            wallet_address,
+            crate::rpc::format_tnzo(COMPUTE_BOND_MIN_WEI)
         );
     }
 
@@ -377,7 +380,10 @@ async fn run_provider_flow(
         .await
         .unwrap_or(serde_json::Value::Null);
     if existing_bond.is_null() {
-        let spinner = output::create_spinner("Posting compute bond (100 TNZO)...");
+        let spinner = output::create_spinner(&format!(
+            "Posting compute bond ({})...",
+            crate::rpc::format_tnzo(COMPUTE_BOND_MIN_WEI)
+        ));
         rpc.call::<serde_json::Value>("tenzro_postComputeBond", serde_json::json!([{
             "provider_did": did,
             "provider_address": wallet_address,
@@ -385,7 +391,10 @@ async fn run_provider_flow(
         }])).await
             .map_err(|e| anyhow::anyhow!("Compute bond failed: {}", e))?;
         spinner.finish_and_clear();
-        output::print_success("Compute bond posted (100 TNZO)");
+        output::print_success(&format!(
+            "Compute bond posted ({})",
+            crate::rpc::format_tnzo(COMPUTE_BOND_MIN_WEI)
+        ));
     } else {
         output::print_success("Compute bond already posted for this DID");
     }

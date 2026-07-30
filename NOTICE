@@ -19,6 +19,17 @@ llama-cpp-rs
     The bundled llama.cpp sources under vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp
     retain their upstream MIT license and copyright headers.
 
+    Multi-token-prediction speculative decoding comes from
+    DINOZYAVIER/llama-cpp-rs branch mtp-speculative-decoding, proposed upstream
+    as utilityai/llama-cpp-rs#1027.
+
+    The kimi-k3 architecture (Kimi Delta Attention, gated MLA, latent MoE,
+    cross-layer residual attention) is adapted from Piotr Wilkin's
+    ggml-org/llama.cpp#26185. The MoonViT-3d vision tower and the kimik3 clip
+    projector are adapted from unslothai/llama.cpp branch
+    kimi-k3-fullsize-vision, which is also what produced the mmproj GGUF
+    published at unsloth/Kimi-K3-GGUF. Both carry llama.cpp's MIT license.
+
 glass_pumpkin
     Cryptographic prime generation. License: vendor/glass_pumpkin/LICENSE.
 

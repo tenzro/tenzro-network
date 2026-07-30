@@ -29,17 +29,19 @@ use tenzro_types::primitives::{Address, Timestamp};
 use tracing::{info, warn};
 
 /// Default minimum self-bonded stake to register as a **Tier 2** (staked)
-/// validator: 10 000 TNZO. This is intentionally above
-/// [`crate::staking::DEFAULT_MIN_STAKE`] (1 000 TNZO) — validator slots
-/// cost more than service-provider slots. Per WHITEPAPER §5 +
-/// TOKENOMICS §7, Tier 1 (resource-only) validators require **no
-/// stake**; only Tier 2 must meet this minimum.
-pub const DEFAULT_MIN_VALIDATOR_SELF_STAKE: u128 = 10_000 * 1_000_000_000_000_000_000;
+/// validator. Reads the validator rung of the ladder in
+/// [`tenzro_types::constants`], which sits above the governance floor in
+/// [`crate::staking::DEFAULT_MIN_STAKE`] — validator slots cost more than
+/// service-provider slots. Per WHITEPAPER §5 + TOKENOMICS §7, Tier 1
+/// (resource-only) validators require **no stake**; only Tier 2 must meet
+/// this minimum.
+pub const DEFAULT_MIN_VALIDATOR_SELF_STAKE: u128 =
+    tenzro_types::constants::MIN_VALIDATOR_STAKE;
 
 /// Default minimum self-bonded stake to register as a **Tier 3** (RPC
-/// provider) validator: 100 000 TNZO. Tier 3 implies Tier 2 — the
-/// 100k bond satisfies the 10k Tier 2 minimum, so the effective bond
-/// is 100k total (not 110k).
+/// provider) validator. Tier 3 implies Tier 2 — the RPC bond satisfies the
+/// Tier 2 minimum, so the effective bond is the RPC figure alone, not the
+/// sum of the two.
 ///
 /// Per the 2026-06-10 canonical model (memory:
 /// `project_validator_and_rpc_provider_model_2026_06_10`), Tier 3
@@ -49,7 +51,8 @@ pub const DEFAULT_MIN_VALIDATOR_SELF_STAKE: u128 = 10_000 * 1_000_000_000_000_00
 /// credentials (Canton participants, AI provider keys, data feed
 /// subscriptions), front cross-chain mint/burn flows, and mediate
 /// per-tenant billing. The 10× multiple over Tier 2 reflects this.
-pub const DEFAULT_MIN_RPC_PROVIDER_STAKE: u128 = 100_000 * 1_000_000_000_000_000_000;
+pub const DEFAULT_MIN_RPC_PROVIDER_STAKE: u128 =
+    tenzro_types::constants::MIN_RPC_OPERATOR_STAKE;
 
 /// Default activation churn cap: percentage of active set, in basis points.
 /// 400 bps = 4% per epoch (matching EIP-8061 conservative profile).

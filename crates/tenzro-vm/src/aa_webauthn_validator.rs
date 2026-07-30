@@ -535,6 +535,13 @@ impl WebAuthnValidator {
             .unwrap_or_default()
     }
 
+    /// The exact `Origin` string this validator checks `clientDataJSON.origin`
+    /// against. A signer building an assertion must write this value verbatim;
+    /// deriving it independently risks drifting from the pinned value.
+    pub fn expected_origin(&self) -> &str {
+        &self.expected_origin
+    }
+
     /// Look up a specific credential by `(account, credential_id)`.
     pub fn get_credential(
         &self,

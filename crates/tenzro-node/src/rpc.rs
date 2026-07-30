@@ -33,8 +33,8 @@ use tenzro_model::{
     get_text_segmentation_catalog, get_text_segmentation_model_by_id, get_video_catalog,
     get_vision_catalog, get_vision_model_by_id, ChatMessage as ModelChatMessage, DetrFamily,
     ExternalEngine, ExternalEngineKind,
-    ForecastConfig, GenerationConfig, ImageEmbedConfig, ImageNormalization, OnnxTextEmbeddingEntry,
-    SamFamily, SegmentPrompt, StopReason,
+    ForecastConfig, GenerationConfig, ImageEmbedConfig, ImageNormalization, InferenceResult,
+    OnnxTextEmbeddingEntry, SamFamily, SegmentPrompt, StopReason,
     TextEmbedConfig, TextEncoderFamily, TextSegmentBoxPrompt, TextSegmentConfig,
     ToolDefinition as RuntimeToolDefinition, TranscribeConfig, VideoEmbedConfig, WhisperFamily,
 };
@@ -1535,11 +1535,15 @@ pub(crate) async fn handle_request(
     } else {
         None
     };
+    // `dispatch_request` matches on every RPC method, so its state machine
+    // holds the inlined state of every awaited handler. Left unboxed it is
+    // large enough to exhaust a tokio worker's 2 MB stack as it is moved
+    // through the caller chain. Boxing keeps it on the heap.
     crate::canton_network::scope(
         resolved_canton_network,
         crate::canton_jwt::scope(
             resolved_canton_jwt,
-            dispatch_request(node, request, auth_ctx, api_key),
+            Box::pin(dispatch_request(node, request, auth_ctx, api_key)),
         ),
     )
     .await
@@ -20613,17 +20617,17 @@ async fn handle_set_role(
     let new_roles = RoleSet::from_str(&roles_str).map_err(|e| JsonRpcError {
         code: -32602,
         message: format!(
-            "Invalid roles '{}': {}. Valid: validator, model_provider/ai, tee_provider/tee, storage, full_node, light_client",
+            "Invalid roles '{}': {}. Valid: validator, model_provider/ai, tee_provider/tee, compute, storage, cloud, full_node, light_client",
             roles_str, e
         ),
         data: None,
     })?;
 
     // Refuse to advertise a role this node's hardware cannot back. TEE requires
-    // detected enclave hardware; storage requires verified free disk. AI is
-    // permissionless (any node can run the smallest CPU model). Without this a
-    // node could claim to be a TEE/storage provider and collect work it can't
-    // honor.
+    // detected enclave hardware; storage and cloud require verified free disk;
+    // compute requires an accelerator. AI is permissionless (any node can run
+    // the smallest CPU model). Without this a node could claim to be a provider
+    // and collect work it can't honor.
     node.validate_role_capability(&new_roles)
         .await
         .map_err(|message| JsonRpcError {
@@ -27640,6 +27644,10 @@ fn parse_route_intent(
 /// `prompt`, else the simple shape's `message`, else the last user turn of the
 /// rich shape's `messages`. The last user turn is what the model is being asked
 /// to answer; earlier turns are context and would blur the placement.
+///
+/// A rich turn's content is either a string or a block list; the block list's
+/// text blocks are joined, so a turn that carries image blocks alongside its
+/// text still places in a cluster on that text.
 fn extract_route_prompt(params: &Value) -> Option<String> {
     if let Some(p) = params.get("prompt").and_then(|v| v.as_str())
         && !p.trim().is_empty()
@@ -27662,9 +27670,19 @@ fn extract_route_prompt(params: &Value) -> Option<String> {
                 .or_else(|| turns.last())
         })
         .and_then(|t| t.get("content"))
-        .and_then(|c| c.as_str())
+        .and_then(|c| match c {
+            Value::String(s) => Some(s.clone()),
+            Value::Array(blocks) => Some(
+                blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
         .filter(|c| !c.trim().is_empty())
-        .map(str::to_string)
 }
 
 /// Serializes a [`RouteDecision`] to the JSON-RPC result shape.
@@ -29994,7 +30012,7 @@ async fn handle_chat_rich(
     params: Option<Value>,
 ) -> std::result::Result<Value, JsonRpcError> {
     use tenzro_types::model::{
-        ContentBlock, RichChatMessage, RichUsage, SystemPrompt, ToolResultContent, ToolSchema,
+        ContentBlock, RichChatMessage, RichUsage, SystemPrompt, ToolSchema,
     };
 
     let params = params.ok_or_else(|| JsonRpcError {
@@ -30304,10 +30322,38 @@ async fn handle_chat_rich(
             });
         }
 
-        // Dispatch: if tools are present, run the tool-aware path so the
-        // model sees schemas and we can extract structured tool calls
-        // from the output. Otherwise fall through to plain chat
-        // generation. Both paths exercise real llama.cpp inference.
+        // Attachment bytes, in the marker order the flattening above produced.
+        let media = collect_media(&messages)?;
+        if !media.is_empty() && !model_runtime.supports_media(&model_id) {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!(
+                    "Model '{}' serves text only — it declares no multimodal projector, \
+                     or the projector is not present on this node",
+                    model_id
+                ),
+                data: None,
+            });
+        }
+
+        let runtime_tools: Vec<RuntimeToolDefinition> = tools
+            .iter()
+            .map(|t| RuntimeToolDefinition {
+                name: t.name.clone(),
+                description: if t.description.is_empty() {
+                    None
+                } else {
+                    Some(t.description.clone())
+                },
+                input_schema: t.input_schema.clone(),
+            })
+            .collect();
+
+        // Dispatch: attachments take the multimodal path, which also carries
+        // tool schemas. Tools alone take the tool-aware text path so the model
+        // sees schemas and structured tool calls come back out of the output.
+        // Neither present falls through to plain chat generation. All three
+        // exercise real llama.cpp inference.
         let (
             response_text,
             extracted_tool_calls,
@@ -30316,31 +30362,30 @@ async fn handle_chat_rich(
             inferred_stop_reason,
             result_commitment,
             generation_time_ms,
-        ) = if !tools.is_empty() {
-            let runtime_tools: Vec<RuntimeToolDefinition> = tools
-                .iter()
-                .map(|t| RuntimeToolDefinition {
-                    name: t.name.clone(),
-                    description: if t.description.is_empty() {
-                        None
-                    } else {
-                        Some(t.description.clone())
-                    },
-                    input_schema: t.input_schema.clone(),
-                })
-                .collect();
-
-            let r = model_runtime
-                .generate_chat_with_tools(&model_id, &chat_messages, &runtime_tools, &config)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(model = %model_id, error = %e, "Local inference failed");
-                    JsonRpcError {
-                        code: -32000,
-                        message: sanitize_model_error(&e),
-                        data: None,
-                    }
-                })?;
+        ) = if !media.is_empty() || !runtime_tools.is_empty() {
+            let r = if media.is_empty() {
+                model_runtime
+                    .generate_chat_with_tools(&model_id, &chat_messages, &runtime_tools, &config)
+                    .await
+            } else {
+                model_runtime
+                    .generate_chat_multimodal(
+                        &model_id,
+                        &chat_messages,
+                        &media,
+                        &runtime_tools,
+                        &config,
+                    )
+                    .await
+            }
+            .map_err(|e| {
+                tracing::warn!(model = %model_id, error = %e, "Local inference failed");
+                JsonRpcError {
+                    code: -32000,
+                    message: sanitize_model_error(&e),
+                    data: None,
+                }
+            })?;
             (
                 r.text,
                 r.tool_calls,
@@ -30450,11 +30495,6 @@ async fn handle_chat_rich(
                 cache_control: None,
             });
         }
-
-        // ToolResultContent is part of the schema we accept on input; the
-        // reference here keeps the import live and avoids dead-code lint.
-        let _ = ToolResultContent::Text(String::new());
-        let _ = &messages;
 
         // Persist the TOPLOC commitment (when produced) and surface its
         // hash so the caller can verify or challenge the response later.
@@ -30685,6 +30725,11 @@ fn map_stop_reason(s: &str) -> tenzro_types::model::StopReason {
 /// text string suitable for chat templates that don't yet understand
 /// content blocks. Tool-use and tool-result blocks are inlined as
 /// JSON-tagged text so the model still sees the structure.
+///
+/// An `image` block renders as a media marker, which is where the serving
+/// runtime substitutes the attachment's encoded embeddings. Marker order here
+/// and byte order in [`collect_media`] have to agree — the runtime binds them
+/// positionally and refuses a count mismatch.
 fn render_blocks_as_text(content: &tenzro_types::model::MessageContent) -> String {
     use tenzro_types::model::{ContentBlock, MessageContent, ToolResultContent};
     let blocks = match content {
@@ -30719,6 +30764,9 @@ fn render_blocks_as_text(content: &tenzro_types::model::MessageContent) -> Strin
                         .iter()
                         .filter_map(|b| match b {
                             ContentBlock::Text { text, .. } => Some(text.clone()),
+                            ContentBlock::Image { .. } => {
+                                Some(tenzro_model::media_marker().to_string())
+                            }
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -30735,11 +30783,73 @@ fn render_blocks_as_text(content: &tenzro_types::model::MessageContent) -> Strin
                 ));
             }
             ContentBlock::Image { .. } => {
-                out.push_str("[image]");
+                out.push_str(tenzro_model::media_marker());
             }
         }
     }
     out
+}
+
+/// Collect the attachment bytes a rich chat request carries, in the same order
+/// [`render_blocks_as_text`] emits their markers.
+///
+/// Traversal order is the contract: the serving runtime binds the nth marker in
+/// the prompt to the nth entry here, and refuses the request outright when the
+/// two counts disagree. Any change to one traversal has to be mirrored in the
+/// other.
+///
+/// The system prompt is not walked. It is rendered with `SystemPrompt::as_text`,
+/// which keeps only text blocks, so it contributes no markers.
+fn collect_media(
+    messages: &[tenzro_types::model::RichChatMessage],
+) -> std::result::Result<Vec<Vec<u8>>, JsonRpcError> {
+    use base64::Engine as _;
+    use tenzro_types::model::{ContentBlock, ImageSource, MessageContent, ToolResultContent};
+
+    fn decode(source: &ImageSource) -> std::result::Result<Vec<u8>, JsonRpcError> {
+        match source {
+            ImageSource::Base64 { data, .. } => base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("image block carries undecodable base64: {}", e),
+                    data: None,
+                }),
+        }
+    }
+
+    fn walk(
+        content: &MessageContent,
+        out: &mut Vec<Vec<u8>>,
+    ) -> std::result::Result<(), JsonRpcError> {
+        let blocks = match content {
+            MessageContent::Text(_) => return Ok(()),
+            MessageContent::Blocks(b) => b,
+        };
+        for b in blocks {
+            match b {
+                ContentBlock::Image { source } => out.push(decode(source)?),
+                ContentBlock::ToolResult {
+                    content: ToolResultContent::Blocks(nested),
+                    ..
+                } => {
+                    for n in nested {
+                        if let ContentBlock::Image { source } = n {
+                            out.push(decode(source)?);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    let mut out = Vec::new();
+    for m in messages {
+        walk(&m.content, &mut out)?;
+    }
+    Ok(out)
 }
 
 // Delete model handler
@@ -34431,24 +34541,43 @@ async fn handle_openai_chat_completions(
             );
         }
 
-        // The local serving runtime is text-only. A caller that attaches an
-        // image, audio or file part is refused rather than served a completion
-        // that silently ignored the part — routing to a peer that can render
-        // it is the caller's move, and the error names the part so they can.
+        // `image_url` parts render when this model loaded a multimodal
+        // projector. Every other non-text part, and any part this runtime
+        // cannot render, is refused rather than served a completion that
+        // silently ignored it — routing to a peer that can render it is the
+        // caller's move, and the error names the part so they can.
+        let accepts_media = model_runtime.supports_media(&model_id);
         if let Some(kind) = request
             .messages
             .iter()
-            .find_map(|m| m.content.unsupported_part())
+            .find_map(|m| m.content.unsupported_part(accepts_media))
         {
             return json_error_response(
                 StatusCode::BAD_REQUEST,
                 &format!(
-                    "Model '{}' is served here by a text-only runtime — message content part of type '{}' cannot be rendered",
+                    "Model '{}' is served here by a runtime that cannot render a message content part of type '{}'",
                     model_id, kind
                 ),
                 "invalid_request_error",
                 "unsupported_content_part",
             );
+        }
+
+        // Attachment bytes in part order, which is the order the runtime binds
+        // them to the markers it places in the prompt.
+        let mut media: Vec<Vec<u8>> = Vec::new();
+        for m in &request.messages {
+            match m.content.image_bytes() {
+                Ok(mut bytes) => media.append(&mut bytes),
+                Err(e) => {
+                    return json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &e,
+                        "invalid_request_error",
+                        "invalid_image_part",
+                    );
+                }
+            }
         }
 
         // Fail-closed locality check before generation — covers both the
@@ -34492,8 +34621,9 @@ async fn handle_openai_chat_completions(
             ..GenerationConfig::default()
         };
 
-        // Convert messages to model's ChatMessage format. Every part is text
-        // by this point — the refusal above rejected anything else.
+        // Convert messages to the model's ChatMessage format. Only the text of
+        // each body carries here; image bytes travel in `media` and the runtime
+        // places a marker per attachment in the rendered prompt.
         let chat_messages: Vec<ModelChatMessage> = request
             .messages
             .iter()
@@ -34562,12 +34692,46 @@ async fn handle_openai_chat_completions(
                 .and_then(|o| o.include_usage)
                 .unwrap_or(false);
 
-            // Spawn the generation task — it feeds tokens into token_tx
+            // Spawn the generation task — it feeds tokens into token_tx.
+            //
+            // The projector path has no token-by-token surface: an attachment is
+            // encoded and prefilled as one unit, so a request carrying one
+            // generates in full and arrives as a single delta. The chunk shape,
+            // cursor recording and usage accounting downstream are the same
+            // either way, so a caller that asked for a stream still gets one.
             let gen_model_id = model_id.clone();
             let gen_handle = tokio::spawn(async move {
-                model_runtime
-                    .generate_chat_stream(&gen_model_id, &chat_messages, &config, token_tx)
-                    .await
+                if media.is_empty() {
+                    model_runtime
+                        .generate_chat_stream(&gen_model_id, &chat_messages, &config, token_tx)
+                        .await
+                } else {
+                    let result = model_runtime
+                        .generate_chat_multimodal(
+                            &gen_model_id,
+                            &chat_messages,
+                            &media,
+                            &[],
+                            &config,
+                        )
+                        .await?;
+                    // A receiver that hung up means the client is gone; the
+                    // counts still return so the generation is accounted for.
+                    let _ = token_tx.send(result.text.clone()).await;
+                    Ok(InferenceResult {
+                        text: result.text,
+                        input_tokens: result.input_tokens,
+                        output_tokens: result.output_tokens,
+                        generation_time_ms: result.generation_time_ms,
+                        tokens_per_second: result.tokens_per_second,
+                        stop_reason: match result.stop_reason.as_str() {
+                            "max_tokens" => StopReason::Length,
+                            "stop_sequence" => StopReason::StopSequence,
+                            _ => StopReason::Eos,
+                        },
+                        commitment: result.commitment,
+                    })
+                }
             });
 
             // Build SSE stream from the token receiver
@@ -34741,7 +34905,32 @@ async fn handle_openai_chat_completions(
                 .into_response()
         } else {
             // === NON-STREAMING for local model ===
-            match model_runtime.generate_chat(&model_id, &chat_messages, &config).await {
+            // Attachments route through the projector path. That path is
+            // tool-aware and this surface declares no tools, so it passes none
+            // and the reply carries no tool calls; its `stop_reason` comes back
+            // in the rich shape's spelling and maps onto the engine-native enum
+            // the rest of this arm reads.
+            let gen_result = if media.is_empty() {
+                model_runtime.generate_chat(&model_id, &chat_messages, &config).await
+            } else {
+                model_runtime
+                    .generate_chat_multimodal(&model_id, &chat_messages, &media, &[], &config)
+                    .await
+                    .map(|r| InferenceResult {
+                        text: r.text,
+                        input_tokens: r.input_tokens,
+                        output_tokens: r.output_tokens,
+                        generation_time_ms: r.generation_time_ms,
+                        tokens_per_second: r.tokens_per_second,
+                        stop_reason: match r.stop_reason.as_str() {
+                            "max_tokens" => StopReason::Length,
+                            "stop_sequence" => StopReason::StopSequence,
+                            _ => StopReason::Eos,
+                        },
+                        commitment: r.commitment,
+                    })
+            };
+            match gen_result {
                 Ok(result) => {
                     let units = tenzro_types::model::BillableUnits::tokens(
                         result.input_tokens,
@@ -36025,6 +36214,31 @@ pub async fn handle_chat_stream_rich(
         });
     }
 
+    // Attachment bytes, in the marker order the flattening above produced.
+    let media = match collect_media(&messages) {
+        Ok(m) => m,
+        Err(e) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &e.message,
+                "invalid_request_error",
+                "invalid_image_block",
+            );
+        }
+    };
+    if !media.is_empty() && !model_runtime.supports_media(&model_id) {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Model '{}' serves text only — it declares no multimodal projector, \
+                 or the projector is not present on this node",
+                model_id
+            ),
+            "invalid_request_error",
+            "model_text_only",
+        );
+    }
+
     let runtime_tools: Vec<RuntimeToolDefinition> = tools
         .iter()
         .map(|t| RuntimeToolDefinition {
@@ -36095,15 +36309,16 @@ pub async fn handle_chat_stream_rich(
         yield sse_event!("message_start", start_payload);
 
         // ── run inference ────────────────────────────────────────────
-        let gen_result = if !runtime_tools.is_empty() {
+        // Always the tool-aware shape so the event grammar stays uniform: with
+        // no tools declared it simply extracts zero tool calls. Attachments
+        // route to the multimodal path, which carries tool schemas the same way.
+        let gen_result = if media.is_empty() {
             model_runtime
                 .generate_chat_with_tools(&model_id_for_stream, &chat_messages, &runtime_tools, &config)
                 .await
         } else {
-            // No tools: still go through the tool-aware path so the
-            // event grammar stays uniform (extracts zero tool calls).
             model_runtime
-                .generate_chat_with_tools(&model_id_for_stream, &chat_messages, &[], &config)
+                .generate_chat_multimodal(&model_id_for_stream, &chat_messages, &media, &runtime_tools, &config)
                 .await
         };
 
@@ -36390,6 +36605,15 @@ async fn handle_list_model_endpoints(
                 });
             }
 
+            // Whether this endpoint takes image or audio attachments alongside
+            // text. Reported only for models this node serves itself — a remote
+            // provider's projector state isn't visible from here.
+            if matches!(svc.location, tenzro_types::model::ModelLocation::Local)
+                && let Some(runtime) = node.model_runtime.as_ref()
+            {
+                entry["accepts_media"] = serde_json::json!(runtime.supports_media(&svc.model_id));
+            }
+
             entry
         })
         .collect();
@@ -36422,23 +36646,33 @@ async fn handle_get_model_endpoint(
         .or_else(|| node.find_model_service_by_model_id(query));
 
     match service {
-        Some(svc) => Ok(serde_json::json!({
-            "instance_id": svc.instance_id,
-            "model_id": svc.model_id,
-            "model_name": svc.model_name,
-            "provider_name": svc.provider_name,
-            "location": svc.location.to_string(),
-            "api_endpoint": svc.api_endpoint,
-            "mcp_endpoint": svc.mcp_endpoint,
-            "iroh_endpoint_id": svc.iroh_endpoint_id,
-            "status": svc.status.to_string(),
-            "parameters": svc.parameters,
-            "pricing": {
-                "input": svc.pricing.price_per_input_token,
-                "output": svc.pricing.price_per_output_token,
-            },
-            "created_at": svc.created_at,
-        })),
+        Some(svc) => {
+            let mut out = serde_json::json!({
+                "instance_id": svc.instance_id,
+                "model_id": svc.model_id,
+                "model_name": svc.model_name,
+                "provider_name": svc.provider_name,
+                "location": svc.location.to_string(),
+                "api_endpoint": svc.api_endpoint,
+                "mcp_endpoint": svc.mcp_endpoint,
+                "iroh_endpoint_id": svc.iroh_endpoint_id,
+                "status": svc.status.to_string(),
+                "parameters": svc.parameters,
+                "pricing": {
+                    "input": svc.pricing.price_per_input_token,
+                    "output": svc.pricing.price_per_output_token,
+                },
+                "created_at": svc.created_at,
+            });
+            // Only for models this node serves itself — a remote provider's
+            // projector state isn't visible from here.
+            if matches!(svc.location, tenzro_types::model::ModelLocation::Local)
+                && let Some(runtime) = node.model_runtime.as_ref()
+            {
+                out["accepts_media"] = serde_json::json!(runtime.supports_media(&svc.model_id));
+            }
+            Ok(out)
+        }
         None => Err(JsonRpcError {
             code: -32000,
             message: format!("Model endpoint not found: {}", query),
@@ -36994,6 +37228,13 @@ async fn handle_list_canton_domains(
     // unreachable at startup), surface that as -32000 rather than masking
     // with stale "configured" data.
     let adapter = canton_adapter_or_err(node)?;
+    // Refresh from the participant so an operator-side
+    // `synchronizers.reconnect_all()` shows up without a node restart. A
+    // failed refresh leaves the last known set in place rather than
+    // reporting an empty ledger.
+    if let Err(e) = adapter.discover_synchronizers().await {
+        debug!("Canton synchronizer refresh failed, serving last known set: {}", e);
+    }
     let domains: Vec<Value> = adapter
         .list_synchronizers()
         .into_iter()
@@ -39707,18 +39948,9 @@ async fn handle_stake(
         });
     }
 
-    let provider_type_str = params.get("provider_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("validator");
-
     use tenzro_types::token::ProviderType;
-    let provider_type = match provider_type_str.to_lowercase().as_str() {
-        "validator" => ProviderType::Validator,
-        "tee" | "tee-provider" | "tee_provider" => ProviderType::TeeProvider,
-        "model" | "model-provider" | "model_provider" => ProviderType::ModelProvider,
-        "storage" | "storage-provider" | "storage_provider" => ProviderType::StorageProvider,
-        _ => ProviderType::Validator,
-    };
+    let provider_type = parse_provider_type(&params)?;
+    let capacity = parse_stake_capacity(&params, provider_type)?;
 
     let staking = node.staking().ok_or_else(|| JsonRpcError {
         code: -32603,
@@ -39739,7 +39971,7 @@ async fn handle_stake(
         (Address::default(), None)
     };
 
-    staking.stake(staker_address, amount, provider_type)
+    staking.stake_with_capacity(staker_address, amount, provider_type, capacity)
         .map_err(|e| JsonRpcError {
             code: -32000,
             message: format!("Staking failed: {}", e),
@@ -39808,7 +40040,7 @@ async fn handle_stake(
         "transaction_hash": tx_hash,
         "status": "Active",
         "amount": amount.to_string(),
-        "provider_type": provider_type_str,
+        "provider_type": provider_type.as_str(),
     }))
 }
 
@@ -39910,10 +40142,6 @@ async fn handle_register_provider(
         params
     };
 
-    let provider_type_str = params.get("provider_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("model-provider");
-
     let _name = params.get("name")
         .and_then(|v| v.as_str());
 
@@ -39926,13 +40154,8 @@ async fn handle_register_provider(
         .unwrap_or(10);
 
     use tenzro_types::token::ProviderType;
-    let provider_type = match provider_type_str.to_lowercase().as_str() {
-        "validator" => ProviderType::Validator,
-        "tee" | "tee-provider" | "tee_provider" => ProviderType::TeeProvider,
-        "model" | "model-provider" | "model_provider" => ProviderType::ModelProvider,
-        "storage" | "storage-provider" | "storage_provider" => ProviderType::StorageProvider,
-        _ => ProviderType::ModelProvider,
-    };
+    let provider_type = parse_provider_type(&params)?;
+    let capacity = parse_stake_capacity(&params, provider_type)?;
 
     // Get provider address from identity
     let provider_address = if let Some(registry) = node.identity_registry() {
@@ -39946,10 +40169,12 @@ async fn handle_register_provider(
         Address::default()
     };
 
-    // ComputeBond admission gate (Phase A #153). ModelProvider, TeeProvider,
-    // and StorageProvider classes require an active compute bond before
-    // they can register. Validators are gated by separate validator-registry
-    // self-stake (`DEFAULT_MIN_VALIDATOR_SELF_STAKE`) and skip this check.
+    // ComputeBond admission gate. Every service role requires an active
+    // compute bond at or above its rung on the stake ladder — the bond a
+    // defrauded counterparty is made whole from, so it is sized to the trust
+    // surface the role opens and to the capacity pledged. Validators are gated
+    // by separate validator-registry self-stake
+    // (`DEFAULT_MIN_VALIDATOR_SELF_STAKE`) and skip this check.
     let provider_did_opt = params
         .get("provider_did")
         .and_then(|v| v.as_str());
@@ -39966,19 +40191,24 @@ async fn handle_register_provider(
                 message: "ComputeBondManager not initialized".to_string(),
                 data: None,
             })?;
-        if !bond_manager.meets_minimum(provider_did) {
-            let min = bond_manager.min_bond();
+        let required = provider_type
+            .required_stake(&capacity)
+            .max(bond_manager.min_bond());
+        if !bond_manager.meets_requirement(provider_did, required) {
             let effective = bond_manager.effective_for_registration(provider_did);
             return Err(JsonRpcError {
                 code: -32003,
                 message: format!(
-                    "compute bond below admission minimum (have {} wei, need {} wei) — post via tenzro_postComputeBond",
-                    effective, min,
+                    "compute bond below admission minimum for {} (have {} wei, need {} wei) — post via tenzro_postComputeBond",
+                    provider_type.as_str(),
+                    effective,
+                    required,
                 ),
                 data: Some(serde_json::json!({
                     "provider_did": provider_did,
+                    "provider_type": provider_type.as_str(),
                     "effective_amount_wei": effective.to_string(),
-                    "min_bond_wei": min.to_string(),
+                    "min_bond_wei": required.to_string(),
                 })),
             });
         }
@@ -39987,7 +40217,13 @@ async fn handle_register_provider(
     // Stake if amount provided
     if stake_amount > 0
         && let Some(staking) = node.staking() {
-            let _ = staking.stake(provider_address, stake_amount, provider_type);
+            staking
+                .stake_with_capacity(provider_address, stake_amount, provider_type, capacity)
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("Staking failed: {}", e),
+                    data: None,
+                })?;
         }
 
     let provider_id = format!("provider-{}", hex::encode(&provider_address.as_bytes()[..8]));
@@ -39999,7 +40235,7 @@ async fn handle_register_provider(
         "provider_id": provider_id,
         "transaction_hash": tx_hash,
         "status": "Active",
-        "provider_type": provider_type_str,
+        "provider_type": provider_type.as_str(),
         "address": format!("0x{}", hex::encode(&provider_address.as_bytes()[..20])),
     }))
 }
@@ -40178,6 +40414,92 @@ fn parse_u128_amount(params: &Value, key: &str) -> Option<u128> {
         return s.parse::<u128>().ok();
     }
     v.as_u64().map(|n| n as u128)
+}
+
+/// Parse the `provider_type` field into a ladder role.
+///
+/// The field is required. There is no default: silently falling back to a role
+/// would bond the caller against the wrong rung of the ladder, and the two
+/// plausible defaults (validator, model provider) differ by an order of
+/// magnitude.
+fn parse_provider_type(
+    params: &Value,
+) -> std::result::Result<tenzro_types::token::ProviderType, JsonRpcError> {
+    let raw = params
+        .get("provider_type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Missing provider_type (one of: validator, rpc, tee, model, \
+                      compute, storage, cloud, trainer, syncer)"
+                .to_string(),
+            data: None,
+        })?;
+
+    raw.parse().map_err(|e: String| JsonRpcError {
+        code: -32602,
+        message: e,
+        data: None,
+    })
+}
+
+/// Parse the capacity a scaling role pledges alongside its bond.
+///
+/// Compute providers list `accelerators` by class, storage providers give
+/// whole `terabytes`, cloud operators name their highest `cloud_tier`. Roles
+/// whose bond does not scale ignore the fields entirely.
+fn parse_stake_capacity(
+    params: &Value,
+    provider_type: tenzro_types::token::ProviderType,
+) -> std::result::Result<tenzro_types::token::StakeCapacity, JsonRpcError> {
+    use tenzro_types::token::{AcceleratorClass, CloudTier, ProviderType, StakeCapacity};
+
+    let invalid = |e: String| JsonRpcError {
+        code: -32602,
+        message: e,
+        data: None,
+    };
+
+    match provider_type {
+        ProviderType::ComputeProvider => {
+            let classes = params
+                .get("accelerators")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|v| {
+                            v.as_str()
+                                .ok_or_else(|| {
+                                    "accelerators entries must be strings".to_string()
+                                })
+                                .and_then(|s| s.parse::<AcceleratorClass>())
+                        })
+                        .collect::<std::result::Result<Vec<_>, String>>()
+                })
+                .transpose()
+                .map_err(invalid)?
+                .unwrap_or_default();
+            Ok(StakeCapacity::Accelerators(classes))
+        }
+        ProviderType::StorageProvider => {
+            let tb = params
+                .get("terabytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Ok(StakeCapacity::Terabytes(tb as u32))
+        }
+        ProviderType::CloudProvider => {
+            let tier = params
+                .get("cloud_tier")
+                .and_then(|v| v.as_str())
+                .map(str::parse::<CloudTier>)
+                .transpose()
+                .map_err(invalid)?
+                .unwrap_or(CloudTier::Functions);
+            Ok(StakeCapacity::Cloud(tier))
+        }
+        _ => Ok(StakeCapacity::None),
+    }
 }
 
 async fn handle_liquid_staking_deposit(

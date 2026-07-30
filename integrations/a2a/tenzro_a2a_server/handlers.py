@@ -6,6 +6,8 @@ or Web API.
 """
 
 from .rpc_client import rpc_call, api_call
+import base64
+import binascii
 import json
 import re
 
@@ -420,6 +422,107 @@ def _apply_jurisdiction_params(params: dict, metadata: dict = None) -> None:
             params[key] = value.strip()
 
 
+def _sniff_image_media_type(raw: bytes) -> str | None:
+    """Identifies an image's media type from its leading bytes.
+
+    A serving projector reads the format from the bytes themselves; this is the
+    wire label the image content block carries alongside the base64 payload.
+    """
+    if raw.startswith(b"\x89PNG"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(raw) >= 12 and raw[0:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw.startswith(b"GIF8"):
+        return "image/gif"
+    return None
+
+
+def _chat_image_blocks(metadata: dict = None) -> list[dict]:
+    """Builds the image content blocks for a chat turn from the caller's metadata.
+
+    metadata["images"] is a list of base64-encoded images, or
+    metadata["image_base64"] a single one. Both take raw PNG / JPEG / WebP /
+    GIF bytes; the media type is read from the bytes. An entry whose format is
+    unrecognized is skipped rather than sent with a wrong label.
+
+    Attachments only reach a model that loaded a multimodal projector. A
+    text-only model refuses the request, so the caller learns the model cannot
+    see rather than getting an answer that silently ignored the image.
+    """
+    metadata = metadata or {}
+    payloads = metadata.get("images")
+    if payloads is None:
+        single = metadata.get("image_base64")
+        payloads = [single] if single else []
+    if isinstance(payloads, str):
+        payloads = [payloads]
+
+    blocks: list[dict] = []
+    for payload in payloads:
+        if not isinstance(payload, str) or not payload.strip():
+            continue
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        media_type = _sniff_image_media_type(raw)
+        if media_type is None:
+            continue
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": payload,
+            },
+        })
+    return blocks
+
+
+def _chat_turn_params(prompt: str, blocks: list[dict]) -> dict:
+    """Chat params for one turn: the simple shape, or the rich shape with images.
+
+    Images lead the turn and the text follows, matching the order the serving
+    node binds attachments in.
+    """
+    if not blocks:
+        return {"message": prompt}
+    return {
+        "messages": [
+            {"role": "user", "content": blocks + [{"type": "text", "text": prompt}]}
+        ],
+    }
+
+
+def _chat_result_text(result: dict) -> dict:
+    """Normalizes a rich chat response to the simple shape's reported fields.
+
+    The rich shape answers with a content-block list and nests token counts
+    under `usage`; flattening keeps one response shape for callers regardless
+    of whether their turn carried attachments.
+    """
+    if not isinstance(result, dict) or "content" not in result:
+        return result
+    blocks = result.get("content") or []
+    usage = result.get("usage") or {}
+    flattened = {
+        "output": "".join(
+            b.get("text", "")
+            for b in blocks
+            if isinstance(b, dict) and b.get("type") == "text"
+        ),
+        "input_tokens": usage.get("input_tokens"),
+        "output_tokens": usage.get("output_tokens"),
+    }
+    for key in ("model", "stop_reason", "cost_wei", "settlement", "location",
+                "commitment", "tenzro_jurisdiction", "load"):
+        if result.get(key) is not None:
+            flattened[key] = result[key]
+    return flattened
+
+
 async def handle_inference(text: str, metadata: dict = None) -> str:
     t = text.lower()
 
@@ -485,11 +588,11 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
                 prompt = text[idx + len(kw):].strip().lstrip(":").strip()
                 break
         params = _build_route_intent_params(text, metadata)
-        params["message"] = prompt
+        params.update(_chat_turn_params(prompt, _chat_image_blocks(metadata)))
         params["max_tokens"] = (metadata or {}).get("max_tokens", 256)
         _apply_jurisdiction_params(params, metadata)
         result = await rpc_call("tenzro_chatByIntent", params)
-        return json.dumps(result, indent=2)
+        return json.dumps(_chat_result_text(result), indent=2)
 
     if "chat" in t or "ask" in t or "complete" in t:
         # Extract the prompt after keywords
@@ -499,10 +602,12 @@ async def handle_inference(text: str, metadata: dict = None) -> str:
             if idx >= 0:
                 prompt = text[idx + len(kw):].strip().lstrip(":").strip()
                 break
-        params = {"model_id": "default", "message": prompt, "max_tokens": 100}
+        params = {"model_id": (metadata or {}).get("model_id", "default"),
+                  "max_tokens": (metadata or {}).get("max_tokens", 100)}
+        params.update(_chat_turn_params(prompt, _chat_image_blocks(metadata)))
         _apply_jurisdiction_params(params, metadata)
         result = await rpc_call("tenzro_chat", params)
-        return json.dumps(result, indent=2)
+        return json.dumps(_chat_result_text(result), indent=2)
 
     # Content-addressed weights: the canonical BLAKE3 / SHA-256 record a
     # fetcher verifies weights against before load. "hash" + "model" reads a

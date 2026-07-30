@@ -368,6 +368,17 @@ impl ServingProfile {
                 jinja_required: true,
                 reasoning_default: false,
             },
+            // Kimi K3: temp 1.0 / top_p 0.95 per Unsloth's K3 guidance, and
+            // reasoning is not optional — the model always emits a thinking
+            // block, gated only by `reasoning_effort`.
+            "kimi-k3" => Self {
+                temperature: 1.0,
+                top_p: 0.95,
+                top_k: 0,
+                min_p: 0.01,
+                jinja_required: true,
+                reasoning_default: true,
+            },
             // DeepSeek V3/V4: temp 0.6 / top_p 0.95 / min_p 0.01; needs --jinja.
             "deepseek" | "deepseek-v3" | "deepseek-v4" => Self {
                 temperature: 0.6,
@@ -575,6 +586,15 @@ impl ReasoningPolicy {
             "kimi" | "kimi-k2" => Self {
                 supports_thinking: true,
                 default_mode: ReasoningMode::Auto,
+                thinking_safe_min_b: 0.0,
+                thinking_min_budget_tokens: 32_768,
+            },
+            // Kimi K3: thinking is unconditional — the template emits a
+            // reasoning block on every turn and `reasoning_effort` sets its
+            // depth rather than switching it off.
+            "kimi-k3" => Self {
+                supports_thinking: true,
+                default_mode: ReasoningMode::Always,
                 thinking_safe_min_b: 0.0,
                 thinking_min_budget_tokens: 32_768,
             },
@@ -3877,30 +3897,32 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
         template_fix: TemplateFix::None,
         download_filename: String::new(),
     });
-    // Kimi K3 — the safetensors checkpoint is published, so distributed
-    // expert extraction (`moe_safetensors_repo`) resolves. `unsloth/Kimi-K3-GGUF`
-    // exists but carries no .gguf artifact, so hf_filename is empty, size/RAM
-    // are unset, and the entry is not promotable to whole-model serving. Fill
-    // the GGUF fields + flip promotable once a sharded quant lands upstream.
+    // Kimi K3 — `hf_repo` points at the Unsloth GGUF mirror for whole-model
+    // serving; distributed expert extraction reads the safetensors checkpoint
+    // through `moe_safetensors_repo("kimi-k3")` instead, so the two paths are
+    // independent. `UD-IQ1_S` is the smallest published quant and therefore
+    // the widest-reach declaration; the six folders run from it up to
+    // `UD-Q8_K_XL` at 1.56 TB. `mmproj-BF16.gguf` carries the MoonViT-3d
+    // projector, loaded through the mtmd path.
     catalog.push(HfModelEntry {
         id: "kimi-k3".into(),
         name: "Kimi K3 (MoE, multimodal)".into(),
-        family: "kimi".into(),
-        hf_repo: "moonshotai/Kimi-K3".into(),
-        hf_filename: String::new(),
+        family: "kimi-k3".into(),
+        hf_repo: "unsloth/Kimi-K3-GGUF".into(),
+        hf_filename: "UD-IQ1_S/Kimi-K3-UD-IQ1_S-00001-of-00014.gguf".into(),
         parameters: "2.8T total / 104B active (MoE)".into(),
         architecture: ModelArchitecture::Kimi,
         context_length: 1048576,
-        quantization: "MXFP4".into(),
-        size_bytes: 0,
-        min_ram_gb: 0,
+        quantization: "UD-IQ1_S".into(),
+        size_bytes: 593_997_933_024,
+        min_ram_gb: 610,
         // Custom terms, not MIT: a Model-as-a-Service operator past 20M USD of
         // revenue over any 12 consecutive months needs a separate agreement
         // with Moonshot AI, and a product past 100M monthly active users or
         // 20M USD monthly revenue must display "Kimi K3" in its interface.
         // Internal use carries neither obligation.
         license: "Kimi K3 License".into(),
-        description: "Moonshot AI Kimi K3 — 2.8T total parameters, 104B active, 896 routed experts with 16 selected per token and 2 shared. Kimi Delta Attention plus gated MLA across 93 layers, 1M context, 160K vocabulary, MXFP4 weights and MXFP8 activations from quantization-aware training. Text, image, and video via the MoonViT-V2 encoder. Catalog entry serves distributed expert extraction; whole-model GGUF serving awaits an upstream quant.".into(),
+        description: "Moonshot AI Kimi K3 — 2.8T total parameters, 104B active, 896 routed experts with 16 selected per token and 2 shared. Kimi Delta Attention plus gated MLA across 93 layers, 1M context, 160K vocabulary, MXFP4 weights and MXFP8 activations from quantization-aware training. Text, image, and video via the MoonViT-V2 encoder. `UD-IQ1_S` (594GB) is the smallest quant; `UD-Q2_K_XL` (861GB) is the size/quality balance point. Both exceed any single machine, so whole-model serving means a pipeline cluster; a lone host runs it as distributed expert extraction instead.".into(),
         drafter_id: None,
         mtp_kind: MtpKind::None,
         mtp_default_draft_n: None,
@@ -3910,9 +3932,9 @@ pub fn get_model_catalog() -> Vec<HfModelEntry> {
             shared_experts: 2,
             params_per_expert_x10: Some(31),
         }),
-        promotable: false,
+        promotable: true,
         serving: ServingProfile::default(),
-        mmproj: None,
+        mmproj: Some(MmprojSpec { filename: "mmproj-BF16.gguf".into() }),
         reasoning: ReasoningPolicy { supports_thinking: false, default_mode: ReasoningMode::Auto, thinking_safe_min_b: 0.0, thinking_min_budget_tokens: 0 },
         template_fix: TemplateFix::None,
         download_filename: String::new(),
@@ -5910,7 +5932,6 @@ mod tests {
         gated_sorted.sort();
         let expected = vec![
             "deepseek-v4-pro".to_string(),
-            "kimi-k3".to_string(),
             "minimax-m1-40b".to_string(),
         ];
         assert_eq!(

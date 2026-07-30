@@ -1086,28 +1086,18 @@ impl ResidencyConfig {
     }
 }
 
-/// Read `/proc/meminfo` `MemAvailable` (kiB) and return the auto budget in
-/// bytes: `AUTO_BUDGET_NUM/AUTO_BUDGET_DEN` of available memory. Falls back
-/// to [`DEFAULT_MEMORY_BUDGET_BYTES`] off Linux or on parse failure.
+/// Auto budget in bytes: `AUTO_BUDGET_NUM/AUTO_BUDGET_DEN` of the memory the
+/// host reports as available. Falls back to [`DEFAULT_MEMORY_BUDGET_BYTES`]
+/// when the reading is unavailable or rounds to zero.
 fn auto_memory_budget_bytes() -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
-            for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("MemAvailable:")
-                    && let Some(kib) = rest.split_whitespace().next()
-                    && let Ok(kib) = kib.parse::<u64>()
-                {
-                    let avail = kib.saturating_mul(1024);
-                    let budget = avail / AUTO_BUDGET_DEN * AUTO_BUDGET_NUM;
-                    if budget > 0 {
-                        return budget;
-                    }
-                }
-            }
-        }
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let budget = sys.available_memory() / AUTO_BUDGET_DEN * AUTO_BUDGET_NUM;
+    if budget > 0 {
+        budget
+    } else {
+        DEFAULT_MEMORY_BUDGET_BYTES
     }
-    DEFAULT_MEMORY_BUDGET_BYTES
 }
 
 /// LRU bookkeeping for one memory-resident expert.

@@ -171,9 +171,9 @@ Leader selection is reputation-weighted rather than VRF-only. A validator's repu
 
 ### Stake-weighted consensus, decoupled from service
 
-Consensus and service are decoupled. Block finality is produced by a staked validator set whose voting power equals bonded TNZO: quorum certificates form at the smallest integer weight strictly above two-thirds (6,667 / 10,000 normalized), with a 10% per-validator cap and proportional redistribution, and the Byzantine bound `f` measured as a fraction of stake rather than a head-count of nodes. A node with zero stake carries zero finality weight, so unstaked participants cannot move a quorum — this is what lets service participation stay open without diluting consensus security.
+Consensus and service are decoupled. Block finality is produced by a staked validator set whose voting power equals the bonded validator stake: quorum certificates form at the smallest integer weight strictly above two-thirds (6,667 / 10,000 normalized), with a 10% per-validator cap and proportional redistribution, and the Byzantine bound `f` measured as a fraction of stake rather than a head-count of nodes. Only the validator bond carries finality weight. Service bonds — model, TEE, compute, storage, cloud, trainer, syncer — carry none, so bonding for any number of service rungs cannot move a quorum.
 
-Serving compute, storage, and security is a separate, open set of roles that earn through proof-of-service (pay-per-use, rental, and per-byte fees, section 15) and require no stake and no vote. One operator may both stake to validate and serve capacity, earning on both tracks. TEE attestation is an optional capability that adds a 1.5× leader-selection multiplier; it is never an admission or voting gate. High-trust block classes (training witness committees, high-value bridge duties, institutional settlement routes) restrict leader election to validators above a higher stake and reputation bar, but rest on the same stake-weighted 2/3 bound. The result lowers the barrier to *serving* the network while concentrating the economic security budget entirely in bonded stake.
+Serving compute, storage, and security is a separate set of roles that earn through proof-of-service (pay-per-use, rental, and per-byte fees, section 15). Every rung bonds TNZO, but no service rung votes. The bond is what a defrauded counterparty is made whole from: withheld training results, invalid TEE attestations, upheld inference-verification challenges, and persistent SLA failure all slash against it. Admission stays permissionless — anyone who posts the bond and meets the resource profile may serve, with no allowlist and no committee. Compute, storage, and cloud bonds scale with the capacity pledged, so a bond tracks the exposure it collateralizes rather than a flat fee (section 15). One operator may both validate and serve capacity, earning on both tracks. TEE attestation is an optional capability that adds a 1.5× leader-selection multiplier; it is never an admission or voting gate. High-trust block classes (training witness committees, high-value bridge duties, institutional settlement routes) restrict leader election to validators above a higher stake and reputation bar, but rest on the same stake-weighted 2/3 bound. The result keeps the economic security budget concentrated entirely in validator-bonded stake while every service obligation carries its own collateral.
 
 ### Slashing and tail-fork resistance
 
@@ -329,7 +329,7 @@ Every catalog entry carries a license tier (Permissive / Attribution / Commercia
 
 ### Provider economics
 
-A provider runs the node with `--roles ai`, registers under the model registry, and stakes TNZO bonded to their identity. Inference requests route to providers via the strategy the caller selects. Settlement is per-call or per-token through a micropayment channel; reputation tracks fast on success (latency only on HTTP 200), slow on failure (-5 per fault), and is gated to "settled-success only" on reputation gain so providers cannot game reputation without taking a real payment. Providers can also rent capacity for fixed terms backed by streaming escrow against their stake — see §15, *Capacity rental and escrow*.
+A provider runs the node with `--roles ai`, registers under the model registry, and posts the 1,000 TNZO model-provider bond against their identity. Inference requests route to providers via the strategy the caller selects. Settlement is per-call or per-token through a micropayment channel; reputation tracks fast on success (latency only on HTTP 200), slow on failure (-5 per fault), and is gated to "settled-success only" on reputation gain so providers cannot game reputation without taking a real payment. Providers can also rent capacity for fixed terms backed by streaming escrow against their stake — see §15, *Capacity rental and escrow*.
 
 ### Heterogeneous hardware
 
@@ -517,7 +517,7 @@ TNZO is the network's gas, settlement, staking, and governance token. The maximu
 
 - **Gas** — every transaction pays gas in TNZO under EIP-1559. The base fee is burned; the priority fee goes to validators and stakers.
 - **Settlement** — every payment routed through Tenzro pays a network commission (currently 0.5%). The commission is split 40% treasury / 30% burn / 30% stakers.
-- **Bonds** — providers (validators, model providers, TEE providers, trainers, bridge nodes, agents) bond TNZO. Misbehavior is slashed against the bond.
+- **Bonds** — every participating role bonds TNZO across a nine-rung ladder (validator, RPC operator, TEE provider, model provider, compute provider, storage provider, cloud operator, trainer, syncer), with compute, storage, and cloud bonds scaling with the capacity pledged. Misbehavior is slashed against the bond.
 
 Every demand source grows with usage. Burn channels are demand-driven: more network activity means more burn means more deflationary pressure on circulating supply.
 
@@ -527,7 +527,7 @@ A consumer can reach provider capacity two ways: **pay-per-use** (metered per ca
 
 Rental introduces a timing asymmetry pay-per-use does not have: the consumer is paying for future capacity. Paying upfront exposes the renter if the provider vanishes; paying at the end exposes the provider if the renter walks. Tenzro resolves this with **streaming escrow**. The renter funds an on-chain deposit; booking locks the term's value inside it; each settlement epoch a valid availability proof (heartbeat plus capacity attestation) unlocks that epoch's slice to the provider. A missed proof makes the renter whole *immediately from the provider's stake* — no dispute window — and repeated misses auto-terminate the rental. Neither party is ever exposed for more than one epoch.
 
-The provider's stake does triple duty: it secures consensus, gates serving eligibility, and collateralizes every rental obligation. There is no separate per-rental bond. A provider may hold concurrent rentals only while `stake ≥ Σ(active per-epoch exposure)`; staking more is the market knob on serving capacity. Each epoch's release pays the standard 0.5% commission, and the batch of usage and availability receipts is Merkle-rooted on-chain and crossed to Canton for audit — the money settles per-transaction, the evidence anchors as periodic roots.
+The provider's bond does double duty: it gates serving eligibility and collateralizes every rental obligation. There is no separate per-rental bond. A provider may hold concurrent rentals only while `bond ≥ Σ(active per-epoch exposure)`; bonding more is the market knob on serving capacity. Consensus weight is not part of this — that comes only from the separate validator bond. Each epoch's release pays the standard 0.5% commission, and the batch of usage and availability receipts is Merkle-rooted on-chain and crossed to Canton for audit — the money settles per-transaction, the evidence anchors as periodic roots.
 
 ### Adaptive burn dial
 
@@ -539,7 +539,31 @@ The bootstrap phase of any agentic protocol faces a chicken-and-egg problem — 
 
 ### Staking
 
-Validators, model providers, TEE providers, and storage providers stake TNZO. Stake bonds the operator to honest behavior — equivocation slashes 10% of stake, withholding training results slashes against the training bond, and rampant inference failures slash through the reputation system. Liquid staking (stTNZO) is available — a rebasing token tracking the staked principal plus accrued rewards minus the 10% protocol fee. Unbonding is seven days.
+Every role bonds TNZO. The bond ties the operator to honest behavior — equivocation slashes 10% of validator stake, withholding training results slashes against the training bond, and rampant inference failures slash through the reputation system.
+
+| Role | Bond |
+|---|---|
+| Validator | 10,000 TNZO |
+| RPC operator | 100,000 TNZO |
+| TEE provider | 10,000 TNZO |
+| Model provider | 1,000 TNZO |
+| Trainer | 1,000 TNZO |
+| Syncer | 1,000 TNZO |
+| Compute provider | scales with the accelerators pledged, floor 500 TNZO |
+| Storage provider | 100 TNZO per terabyte pledged, floor 100 TNZO |
+| Cloud operator | scales with the highest service class offered, floor 1,000 TNZO |
+
+Three rungs scale with capacity, so the bond tracks the exposure it collateralizes:
+
+- **Compute** — 5,000 TNZO per datacentre card, 2,000 per workstation card, 1,000 per consumer card, 500 per integrated accelerator, summed over everything pledged. A provider offering one datacentre card and one consumer card bonds 6,000 TNZO.
+- **Storage** — 100 TNZO per terabyte, so a 50 TB provider bonds 5,000 TNZO.
+- **Cloud** — 1,000 TNZO for functions, 5,000 for managed databases, 25,000 for machines. The classes are supersets: bonding for machines covers databases and functions.
+
+Pledging no capacity to a scaling rung yields that rung's floor, never zero — bonding is never free. The RPC operator bond is the largest on the ladder because a public RPC endpoint brokers tenant traffic and upstream chain access, which is the largest trust surface any role holds; it subsumes the validator bond, since an RPC operator is a validator that additionally serves public RPC.
+
+Below the ladder, a node can join, sync, gossip, relay, and run consensus without bonding anything. Quorum weight is the validator's own bond, so bonding nothing contributes nothing to a quorum; there is no governance vote and no slashing exposure, since there is no bond to slash. Admission stays open without making influence free.
+
+Liquid staking (stTNZO) is available — a rebasing token tracking the staked principal plus accrued rewards minus the 10% protocol fee. Unbonding is seven days. Every bond figure is governance-adjustable.
 
 ### Governance vote weighting
 

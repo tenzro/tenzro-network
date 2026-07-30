@@ -91,6 +91,13 @@ pub struct CantonAdapter {
     /// adapter-only deployments where the relying party drains the
     /// queue out of band.
     inbound_tx: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<CantonInboundMessage>>>>,
+    /// Synchronizer ids the participant is actually connected to, read
+    /// from `/v2/state/connected-synchronizers`. A participant's
+    /// synchronizer subscriptions are decided at the Canton console, not
+    /// in this node's config, so the live set is the only accurate
+    /// answer. `config.synchronizer_ids` stays available as an optional
+    /// pin that narrows the discovered set.
+    discovered_synchronizer_ids: Arc<parking_lot::RwLock<Vec<String>>>,
 }
 
 /// Decoded `TenzroBridge:Message` payload delivered via
@@ -141,6 +148,7 @@ impl CantonAdapter {
             token_provider: None,
             resolved_act_as_party_fq: Arc::new(RwLock::new(None)),
             inbound_tx: Arc::new(RwLock::new(None)),
+            discovered_synchronizer_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
         }
     }
 
@@ -175,6 +183,7 @@ impl CantonAdapter {
             token_provider: None,
             resolved_act_as_party_fq: Arc::clone(&self.resolved_act_as_party_fq),
             inbound_tx: Arc::clone(&self.inbound_tx),
+            discovered_synchronizer_ids: Arc::clone(&self.discovered_synchronizer_ids),
         }
     }
 
@@ -186,13 +195,48 @@ impl CantonAdapter {
         self
     }
 
-    /// Returns the configured Canton synchronizers as `ChainInfo` records.
+    /// The synchronizer ids this adapter treats as reachable.
+    ///
+    /// When the operator pinned an explicit set in config, that set wins —
+    /// a deployment may deliberately serve only one of several
+    /// subscriptions. Otherwise the answer is whatever the participant is
+    /// currently connected to, as last read by
+    /// [`Self::discover_synchronizers`].
+    pub fn effective_synchronizer_ids(&self) -> Vec<String> {
+        if !self.config.synchronizer_ids.is_empty() {
+            return self.config.synchronizer_ids.clone();
+        }
+        self.discovered_synchronizer_ids.read().clone()
+    }
+
+    /// Reads `/v2/state/connected-synchronizers` and caches the ids for
+    /// [`Self::effective_synchronizer_ids`]. Called at node startup and
+    /// again whenever a caller asks for the synchronizer list, so an
+    /// operator-side `synchronizers.reconnect_all()` is picked up without
+    /// restarting the node.
+    pub async fn discover_synchronizers(&self) -> Result<Vec<String>> {
+        let body = self.connected_synchronizers().await?;
+        let ids: Vec<String> = body
+            .get("connectedSynchronizers")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| e.get("synchronizerId").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        *self.discovered_synchronizer_ids.write() = ids.clone();
+        Ok(ids)
+    }
+
+    /// Returns the reachable Canton synchronizers as `ChainInfo` records.
     ///
     /// This is the same data exposed via the `BridgeAdapter::supported_chains`
     /// trait method, surfaced as an inherent method so RPC handlers can call
     /// it without importing the trait.
     pub fn list_synchronizers(&self) -> Vec<ChainInfo> {
-        Self::get_supported_synchronizers(&self.config.synchronizer_ids)
+        Self::get_supported_synchronizers(&self.effective_synchronizer_ids())
     }
 
     /// Public wrapper over the private `query_contracts` helper.
@@ -435,77 +479,122 @@ impl CantonAdapter {
         invalid_argument && cause_matches
     }
 
+    /// Namespace fingerprint of this participant, taken from the suffix of
+    /// `GET /v2/parties/participant-id` (`<name>::<namespace>`). Every party
+    /// allocated locally carries this same namespace.
+    async fn participant_namespace(&self) -> Result<String> {
+        let response = self
+            .build_request(reqwest::Method::GET, "/parties/participant-id")
+            .await?
+            .send()
+            .await
+            .map_err(|e| {
+                BridgeError::AdapterError(format!(
+                    "Canton participant-id lookup failed: {}",
+                    Self::classify_reqwest_error(&e)
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton participant-id lookup HTTP {}: {}",
+                status,
+                Self::sanitize_canton_http_error(status, body.len())
+            )));
+        }
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton participant-id response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })?;
+
+        body.get("participantId")
+            .and_then(|v| v.as_str())
+            .and_then(Self::namespace_from_participant_id)
+            .ok_or_else(|| {
+                BridgeError::AdapterError(
+                    "Canton participant-id response carried no `<name>::<namespace>` id"
+                        .to_string(),
+                )
+            })
+    }
+
+    /// Splits `<name>::<namespace>` and returns the namespace.
+    fn namespace_from_participant_id(participant_id: &str) -> Option<String> {
+        participant_id
+            .split_once("::")
+            .map(|(_, namespace)| namespace)
+            .filter(|namespace| !namespace.is_empty())
+            .map(|namespace| namespace.to_string())
+    }
+
     /// Resolves the canonical id of a party hosted on this participant from
-    /// its hint. Canton's canonical form is `<hint>::<namespace-hash>`, so
-    /// the hint is a prefix match; `isLocal` narrows the result to parties
-    /// this participant hosts rather than ones it has merely observed.
+    /// its hint. Canton's canonical form is `<hint>::<namespace>`, and the
+    /// namespace is fixed per participant, so the id is reconstructed and
+    /// confirmed with a direct `GET /v2/parties/<party>`.
     ///
-    /// Reads `GET /v2/parties` rather than `/v2/parties/known` — the latter
-    /// returns an empty `partyDetails` array under the `daml_ledger_api`
-    /// scope even when the participant hosts parties.
+    /// Deliberately not a scan of `GET /v2/parties`: that endpoint lists every
+    /// party the participant knows of, which on a public synchronizer is the
+    /// whole network's directory, paged 10k at a time.
     async fn find_local_party_by_hint(&self, party_id_hint: &str) -> Result<String> {
-        let prefix = format!("{}::", party_id_hint);
-        let mut page_token: Option<String> = None;
+        let namespace = self.participant_namespace().await?;
+        let party = format!("{}::{}", party_id_hint, namespace);
 
-        loop {
-            let mut request = self.build_request(reqwest::Method::GET, "/parties").await?;
-            if let Some(token) = &page_token {
-                request = request.query(&[("pageToken", token.as_str())]);
-            }
+        let path = format!(
+            "/parties/{}::{}",
+            urlencoding::encode(party_id_hint),
+            namespace
+        );
 
-            let response = request.send().await.map_err(|e| {
+        let response = self
+            .build_request(reqwest::Method::GET, &path)
+            .await?
+            .send()
+            .await
+            .map_err(|e| {
                 BridgeError::AdapterError(format!(
                     "Canton party lookup failed: {}",
                     Self::classify_reqwest_error(&e)
                 ))
             })?;
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return Err(BridgeError::AdapterError(format!(
-                    "Canton party lookup HTTP {}: {}",
-                    status,
-                    Self::sanitize_canton_http_error(status, body.len())
-                )));
-            }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BridgeError::AdapterError(format!(
+                "Canton party lookup HTTP {}: {}",
+                status,
+                Self::sanitize_canton_http_error(status, body.len())
+            )));
+        }
 
-            let page: serde_json::Value = response.json().await.map_err(|e| {
-                BridgeError::AdapterError(format!(
-                    "Invalid Canton party lookup response: {}",
-                    Self::classify_reqwest_error(&e)
-                ))
-            })?;
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            BridgeError::AdapterError(format!(
+                "Invalid Canton party lookup response: {}",
+                Self::classify_reqwest_error(&e)
+            ))
+        })?;
 
-            let entries = page
-                .get("partyDetails")
-                .and_then(|v| v.as_array())
-                .or_else(|| page.as_array())
-                .cloned()
-                .unwrap_or_default();
+        let is_local = body
+            .get("partyDetails")
+            .and_then(|v| v.as_array())
+            .map(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("party").and_then(|v| v.as_str()) == Some(party.as_str())
+                        && entry
+                            .get("isLocal")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
 
-            for entry in &entries {
-                let Some(party) = entry.get("party").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let is_local = entry
-                    .get("isLocal")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if is_local && party.starts_with(&prefix) {
-                    return Ok(party.to_string());
-                }
-            }
-
-            page_token = page
-                .get("nextPageToken")
-                .and_then(|v| v.as_str())
-                .filter(|t| !t.is_empty())
-                .map(|t| t.to_string());
-
-            if page_token.is_none() || entries.is_empty() {
-                break;
-            }
+        if is_local {
+            return Ok(party);
         }
 
         Err(BridgeError::AdapterError(format!(
@@ -793,7 +882,7 @@ impl CantonAdapter {
     /// Returns a JSON description of the configured synchronizers
     /// suitable for surfacing to MCP / A2A clients.
     pub fn list_synchronizers_json(&self) -> serde_json::Value {
-        let chains = Self::get_supported_synchronizers(&self.config.synchronizer_ids);
+        let chains = Self::get_supported_synchronizers(&self.effective_synchronizer_ids());
         serde_json::json!({
             "enabled": true,
             "domains": chains.into_iter().map(|c| serde_json::json!({
@@ -2532,7 +2621,7 @@ impl BridgeAdapter for CantonAdapter {
     }
 
     fn supported_chains(&self) -> Vec<ChainInfo> {
-        Self::get_supported_synchronizers(&self.config.synchronizer_ids)
+        Self::get_supported_synchronizers(&self.effective_synchronizer_ids())
     }
 
     async fn send_message(&self, dest_chain: &str, payload: Vec<u8>) -> Result<String> {
@@ -2542,7 +2631,7 @@ impl BridgeAdapter for CantonAdapter {
             .ok_or_else(|| BridgeError::ChainNotSupported(dest_chain.to_string()))?;
 
         // Verify synchronizer is in our configured list
-        if !self.config.synchronizer_ids.contains(&synchronizer_id.to_string()) {
+        if !self.effective_synchronizer_ids().contains(&synchronizer_id.to_string()) {
             return Err(BridgeError::ChainNotSupported(dest_chain.to_string()));
         }
 
@@ -2744,7 +2833,7 @@ impl BridgeAdapter for CantonAdapter {
             .ok_or_else(|| BridgeError::ChainNotSupported(request.dest_chain.clone()))?;
 
         // Verify destination synchronizer is supported
-        if !self.config.synchronizer_ids.contains(&dest_synchronizer.to_string()) {
+        if !self.effective_synchronizer_ids().contains(&dest_synchronizer.to_string()) {
             return Err(BridgeError::ChainNotSupported(request.dest_chain.clone()));
         }
 
@@ -2960,7 +3049,7 @@ impl BridgeAdapter for CantonAdapter {
             .strip_prefix("canton-")
             .ok_or_else(|| BridgeError::ChainNotSupported(dest_chain.to_string()))?;
 
-        if !self.config.synchronizer_ids.contains(&synchronizer_id.to_string()) {
+        if !self.effective_synchronizer_ids().contains(&synchronizer_id.to_string()) {
             return Err(BridgeError::ChainNotSupported(dest_chain.to_string()));
         }
 
@@ -3682,6 +3771,26 @@ mod tests {
         }"#;
         assert!(!CantonAdapter::is_party_already_exists(body));
         assert!(!CantonAdapter::is_party_already_exists("not json at all"));
+    }
+
+    /// A local party's canonical id reuses the participant's own namespace,
+    /// so resolving a hint means reading the namespace off the participant id
+    /// rather than scanning the participant's known-party directory — on a
+    /// public synchronizer that directory is the whole network's.
+    #[test]
+    fn participant_namespace_is_the_suffix_of_the_participant_id() {
+        assert_eq!(
+            CantonAdapter::namespace_from_participant_id("participant-a::1220abc"),
+            Some("1220abc".to_string())
+        );
+        assert_eq!(
+            CantonAdapter::namespace_from_participant_id("no-namespace"),
+            None
+        );
+        assert_eq!(
+            CantonAdapter::namespace_from_participant_id("trailing::"),
+            None
+        );
     }
 
     /// Pins the `submit-and-wait-for-transaction` request body to the

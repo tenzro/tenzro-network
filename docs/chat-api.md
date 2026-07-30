@@ -351,7 +351,23 @@ The `system` field is **not** a message — it is a top-level parameter applied 
 
 `CacheControl`: `{type: "ephemeral"}` — marks the block as a cache breakpoint. Subsequent identical-prefix calls reuse the KV cache, billing only the new tokens. Ephemeral cache entries live ≤5 min.
 
-`image` blocks are reserved in the schema even though no model in the current catalog accepts them. A model that does accept images will declare `modality: "vision"` in its `ModelInfo`; routing to a non-vision model with an image block returns error `-32602`.
+### Images
+
+`image` blocks carry raw PNG, JPEG, WebP, or GIF bytes, base64-encoded. `media_type` is the label; the serving projector reads the actual format from the bytes.
+
+An image reaches a model through its multimodal projector — a companion GGUF (Gemma 4's SigLIP tower, Kimi K3's MoonViT-3d) that the model's catalog entry declares and `tenzro model download` fetches alongside the weights. The projector is loaded at model-load time, and a model serving with one takes attachments; a model without one serves text.
+
+Read `accepts_media` on `tenzro_listModelEndpoints` or `tenzro_getModelEndpoint` to see which locally-served models take images. It is reported for locally-served models only — a model reached over the network is served by another node, which answers for its own capability.
+
+Sending an image to a model that serves text only returns `-32000` with a message naming the model. A projector that has no tower for the attached modality (an audio clip to a vision-only projector) is refused the same way. Undecodable base64 in an `image` block returns `-32602`.
+
+Attachments bind to the prompt in traversal order: the nth image in the request is the nth attachment the model sees. Order runs message by message, and within a message block by block, including images nested in a `tool_result`. Images in the `system` parameter are not collected — `system` is rendered as text.
+
+Images and tools compose. A turn may carry both, and the model can answer with `tool_use` blocks about what it saw.
+
+A model serving images runs one request at a time rather than under continuous batching, for the same reason a model with a draft model does: the multimodal decode path holds the context for the whole turn.
+
+**Surfaces.** Rich-shape `tenzro_chat` and `tenzro_chatStream` carry `image` blocks as above. The OpenAI-compatible path uses an [`image_url` content part](#message-content-parts) with the bytes inlined as a `data:` URI. The MCP `chat_completion` tool takes a flat `images` array of base64 strings alongside its text, bound in array order. `tenzro chat` attaches a local file with `/image <path>` at the REPL, sniffing the media type from the bytes. The simple `tenzro_chat` shape carries a bare `message` string with no field an attachment could ride on, so it serves text whatever the model's projector.
 
 ### Tools
 
@@ -617,7 +633,7 @@ A message `content` is either a bare string or an array of typed parts. Both sha
 | Part `type` | Payload | Fields |
 |-------------|---------|--------|
 | `text` | `text` | The text of this part. |
-| `image_url` | `image_url` | `url` — an `https://` URL or a `data:` URI carrying base64 bytes. `detail` — resolution hint (`auto` / `low` / `high`). |
+| `image_url` | `image_url` | `url` — a `data:` URI carrying base64 bytes for a locally-served model, or an `https://` URL for a peer that fetches. `detail` — resolution hint (`auto` / `low` / `high`). |
 | `input_audio` | `input_audio` | `data` — base64 audio bytes. `format` — `wav` or `mp3`. |
 | `file` | `file` | `file_id` for a pre-uploaded file, or `file_data` + `filename` to inline base64 bytes. |
 
@@ -629,14 +645,18 @@ A message `content` is either a bare string or an array of typed parts. Both sha
       "role": "user",
       "content": [
         { "type": "text", "text": "What is in this image?" },
-        { "type": "image_url", "image_url": { "url": "https://example.com/a.png", "detail": "high" } }
+        { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo...", "detail": "high" } }
       ]
     }
   ]
 }
 ```
 
-The local serving runtime is text-only. A request whose content carries a non-text part is refused with `400 unsupported_content_part`, naming the part type, rather than served a completion that ignored it. On the network path the parts array is forwarded intact, so a peer serving a model that renders images or audio can answer it.
+An `image_url` part renders on a locally-served model that loaded a multimodal projector — read `accepts_media` on `tenzro_listModelEndpoints` to see which do. The bytes must be inlined as a `data:` URI: a serving node does not fetch a caller-named remote resource, so an `https://` URL is refused with `400 invalid_image_part` and the message says to inline instead. Undecodable base64 is refused the same way.
+
+`input_audio` and `file` parts, and any `image_url` sent to a model serving text only, are refused with `400 unsupported_content_part` naming the part type, rather than served a completion that ignored the part. On the network path the parts array is forwarded intact, including remote URLs, so a peer serving a model that renders them can answer.
+
+Attachments bind to the prompt in part order: the nth image across the whole request is the nth attachment the model sees. A request carrying one generates in full before the response opens, so `stream: true` delivers the reply as a single delta followed by the usual finish and usage chunks.
 
 Multiple `text` parts are newline-joined when flattened for a text-only runtime. Jurisdiction receipts hash the parts array as its JSON, so image URLs and inlined bytes are bound by the receipt alongside the text. [Streaming failover](#streaming-failover) carries the parts through to the continuation provider — a continuation that dropped them would re-prefill a different context.
 
@@ -1256,7 +1276,8 @@ Errors follow the OpenAI envelope: `{"error": {"message": …, "type": …, "cod
 |--------|--------|---------|
 | 400 | `unsupported_n` | `n` was present and not `1`. On `/v1/images/generations` and `/v1/images/edits`, one job renders one artifact. |
 | 400 | `model_not_loaded` | The model resolves to this node but is not currently serving. On `/v1/audio/transcriptions`, `/v1/embeddings` and the four `/v1/tenzro/…` routes, no runtime is loaded under that id; the message names both the RPC that loads one and the RPC that lists what is loaded. |
-| 400 | `unsupported_content_part` | A message carries a non-text content part and the model is served here by the text-only runtime. The message names the part type. On `/v1/responses`, also an `input_image` that carries only a `file_id`. |
+| 400 | `unsupported_content_part` | A message carries a content part the serving runtime cannot render: an `input_audio` or `file` part, or an `image_url` for a model that loaded no multimodal projector. The message names the part type. On `/v1/responses`, also an `input_image` that carries only a `file_id`. |
+| 400 | `invalid_image_part` | An `image_url` part that is not a `data:` URI, or whose base64 payload does not decode. A serving node reads inlined bytes only. |
 | 400 | `missing_input` | `/v1/responses` — `input` was absent or an empty array. `/v1/embeddings` — `input` was neither a non-empty string nor an array of strings. |
 | 400 | `unsupported_encoding_format` | `/v1/embeddings` — an `encoding_format` other than `float`. |
 | 400 | `unsupported_response_format` | `/v1/audio/transcriptions` — a `response_format` outside `json`, `text`, `verbose_json`, `srt`, `vtt`. `/v1/images/generations` and `/v1/images/edits` — anything other than `b64_json`. |

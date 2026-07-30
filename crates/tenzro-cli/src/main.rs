@@ -812,6 +812,24 @@ async fn execute_faucet(cmd: FaucetCmd) -> Result<()> {
     Ok(())
 }
 
+/// Identify an attached image's media type from its leading bytes.
+///
+/// A serving projector reads the format from the bytes themselves; this is the
+/// wire label the rich chat shape requires alongside the base64 payload.
+fn sniff_image_media_type(bytes: &[u8]) -> Result<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Ok("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Ok("image/jpeg")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Ok("image/webp")
+    } else if bytes.starts_with(b"GIF8") {
+        Ok("image/gif")
+    } else {
+        anyhow::bail!("unrecognized image format — expected PNG, JPEG, WebP, or GIF")
+    }
+}
+
 /// Execute chat command — uses local model inference with RPC fallback
 async fn execute_chat(cmd: ChatCmd) -> Result<()> {
     use std::io::{self, Write};
@@ -934,6 +952,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
     output::print_info("Type '/exit' or '/quit' to end the conversation");
     output::print_info("Type '/history' to list recent sessions");
     output::print_info("Type '/load {session_id}' to load a previous session");
+    output::print_info("Type '/image {path}' to attach an image to the next message");
     output::print_info("Press Ctrl+C to interrupt");
     println!();
 
@@ -957,6 +976,11 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
         commitment_k: None,
         ..Default::default()
     };
+
+    // Images queued by `/image` and drained by the next real turn. Each entry
+    // is (media_type, bytes) — the bytes go to a local runtime as-is, and the
+    // media type labels the base64 block on the network path.
+    let mut pending_media: Vec<(&'static str, Vec<u8>)> = Vec::new();
 
     loop {
         // Print prompt
@@ -1069,7 +1093,42 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
             continue;
         }
 
+        if let Some(path) = input.strip_prefix("/image ") {
+            let path = path.trim();
+            match std::fs::read(path) {
+                Ok(bytes) => match sniff_image_media_type(&bytes) {
+                    Ok(media_type) => {
+                        output::print_success(&format!(
+                            "Attached {} ({}, {} bytes) — sent with your next message",
+                            path,
+                            media_type,
+                            bytes.len()
+                        ));
+                        pending_media.push((media_type, bytes));
+                    }
+                    Err(e) => output::print_warning(&format!("{}: {}", path, e)),
+                },
+                Err(e) => output::print_warning(&format!("Failed to read {}: {}", path, e)),
+            }
+            println!();
+            continue;
+        }
+
         if input.is_empty() {
+            continue;
+        }
+
+        let media = std::mem::take(&mut pending_media);
+
+        // Refuse attachments before the turn joins the history, so a refused
+        // request leaves the conversation exactly as it was.
+        if use_local && !media.is_empty() && !runtime.supports_media(&model_id) {
+            output::print_warning(&format!(
+                "{} serves text only — it declares no multimodal projector, or the \
+                 projector is not present locally. Attachments dropped.",
+                model_id
+            ));
+            println!();
             continue;
         }
 
@@ -1097,8 +1156,25 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                 messages.push(ModelChatMessage { role, content });
             }
 
-            match runtime.generate_chat(&model_id, &messages, &gen_config).await {
-                Ok(result) => {
+            // Both paths report the same four fields this REPL prints; the
+            // multimodal result additionally carries tool calls, which the
+            // chat REPL does not request.
+            let generated = if media.is_empty() {
+                runtime
+                    .generate_chat(&model_id, &messages, &gen_config)
+                    .await
+                    .map(|r| (r.text, r.input_tokens, r.output_tokens, r.tokens_per_second))
+            } else {
+                let images: Vec<Vec<u8>> =
+                    media.iter().map(|(_, bytes)| bytes.clone()).collect();
+                runtime
+                    .generate_chat_multimodal(&model_id, &messages, &images, &[], &gen_config)
+                    .await
+                    .map(|r| (r.text, r.input_tokens, r.output_tokens, r.tokens_per_second))
+            };
+
+            match generated {
+                Ok((text, input_tokens, output_tokens, tokens_per_second)) => {
                     spinner.finish_and_clear();
 
                     println!();
@@ -1107,16 +1183,16 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                     // the disclosure shows up directly in the terminal.
                     // Use the canonical helper so the prefix string lives in
                     // exactly one place across the workspace.
-                    println!("{}", tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(&result.text));
+                    println!("{}", tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(&text));
                     println!();
 
                     output::print_field(
                         "",
                         &format!("{}[{} in, {} out tokens | {:.1} tok/s | Free (local)]{}",
                             output::colors::BOLD,
-                            result.input_tokens,
-                            result.output_tokens,
-                            result.tokens_per_second,
+                            input_tokens,
+                            output_tokens,
+                            tokens_per_second,
                             output::colors::RESET
                         )
                     );
@@ -1124,7 +1200,7 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
 
                     history.push(serde_json::json!({
                         "role": "assistant",
-                        "content": result.text,
+                        "content": text,
                     }));
 
                     // Save history to session file
@@ -1145,20 +1221,73 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                 output: String,
                 input_tokens: u32,
                 output_tokens: u32,
-                cost: String,
+                cost_wei: String,
                 #[serde(default)]
                 load: Option<serde_json::Value>,
                 #[serde(default)]
                 tenzro_jurisdiction: Option<serde_json::Value>,
             }
 
-            let mut request = serde_json::json!({
-                "model_id": model_id,
-                "message": input,
-                "history": history,
-                "max_tokens": cmd.max_tokens,
-                "temperature": cmd.temperature,
-            });
+            // The rich shape of the same method, used when the turn carries
+            // attachments — only that shape has image content blocks.
+            #[derive(serde::Deserialize)]
+            struct RichChatResponse {
+                content: Vec<serde_json::Value>,
+                usage: RichUsage,
+                cost_wei: String,
+                #[serde(default)]
+                load: Option<serde_json::Value>,
+                #[serde(default)]
+                tenzro_jurisdiction: Option<serde_json::Value>,
+            }
+
+            #[derive(serde::Deserialize)]
+            struct RichUsage {
+                input_tokens: u32,
+                output_tokens: u32,
+            }
+
+            let mut request = if media.is_empty() {
+                serde_json::json!({
+                    "model_id": model_id,
+                    "message": input,
+                    "history": history,
+                    "max_tokens": cmd.max_tokens,
+                    "temperature": cmd.temperature,
+                })
+            } else {
+                use base64::Engine as _;
+                // Attachments ride on the current turn as image blocks ahead of
+                // the text, matching the order the serving node binds them in.
+                let mut blocks: Vec<serde_json::Value> = media
+                    .iter()
+                    .map(|(media_type, bytes)| {
+                        serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+                            }
+                        })
+                    })
+                    .collect();
+                blocks.push(serde_json::json!({ "type": "text", "text": input }));
+
+                // `history` already ends with this turn as plain text; swap that
+                // entry's content for the block list.
+                let mut messages = history.clone();
+                if let Some(last) = messages.last_mut() {
+                    last["content"] = serde_json::Value::Array(blocks);
+                }
+
+                serde_json::json!({
+                    "model_id": model_id,
+                    "messages": messages,
+                    "max_tokens": cmd.max_tokens,
+                    "temperature": cmd.temperature,
+                })
+            };
             if let Some(n) = cmd.draft_n {
                 request["draft_n"] = serde_json::json!(n);
             }
@@ -1169,7 +1298,26 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                 request["jurisdiction_receipt"] = serde_json::json!("required");
             }
 
-            let response: Result<ChatResponse> = rpc.call("tenzro_chat", request).await;
+            let response: Result<ChatResponse> = if media.is_empty() {
+                rpc.call("tenzro_chat", request).await
+            } else {
+                rpc.call::<RichChatResponse>("tenzro_chat", request)
+                    .await
+                    .map(|r| ChatResponse {
+                        output: r
+                            .content
+                            .iter()
+                            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(""),
+                        input_tokens: r.usage.input_tokens,
+                        output_tokens: r.usage.output_tokens,
+                        cost_wei: r.cost_wei,
+                        load: r.load,
+                        tenzro_jurisdiction: r.tenzro_jurisdiction,
+                    })
+            };
 
             spinner.finish_and_clear();
 
@@ -1182,10 +1330,11 @@ async fn execute_chat(cmd: ChatCmd) -> Result<()> {
                     println!("{}", tenzro_node::eu_ai_disclosure::render_cli_chat_chunk(&chat_response.output));
                     println!();
 
-                    let cost_str = if chat_response.cost != "0" {
-                        format!("{} TNZO", chat_response.cost)
-                    } else {
+                    let cost_wei: u128 = chat_response.cost_wei.parse().unwrap_or(0);
+                    let cost_str = if cost_wei == 0 {
                         "Free".to_string()
+                    } else {
+                        format!("{} TNZO", output::format_balance(cost_wei, 18))
                     };
 
                     output::print_field(

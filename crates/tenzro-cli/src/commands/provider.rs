@@ -322,7 +322,7 @@ impl PricingCommand {
 /// Register as a provider
 #[derive(Debug, Parser)]
 pub struct ProviderRegisterCmd {
-    /// Provider type (inference, tee)
+    /// Provider type: validator, rpc, tee, model, compute, storage, cloud, trainer, syncer
     #[arg(long)]
     r#type: String,
 
@@ -330,19 +330,34 @@ pub struct ProviderRegisterCmd {
     #[arg(long)]
     name: Option<String>,
 
-    /// Provider DID — must match a posted compute bond. Required for
-    /// model-provider, tee-provider, and storage-provider types; ignored
-    /// for validator type (validators are gated by self-stake instead).
+    /// Provider DID — must match a posted compute bond. Required for every
+    /// service role; ignored for validators, which are gated by self-stake
+    /// instead.
     #[arg(long)]
     did: Option<String>,
 
-    /// Stake amount (TNZO) — optional for model/inference providers, required for validators
+    /// Stake amount (TNZO). Each role carries its own bond; compute, storage
+    /// and cloud bonds scale with the capacity pledged below.
     #[arg(long, default_value = "0")]
     stake: String,
 
     /// Maximum concurrent requests
     #[arg(long, default_value = "10")]
     max_concurrent: u32,
+
+    /// Accelerator classes pledged, for compute providers. Repeat the flag
+    /// once per card: integrated, consumer, workstation, datacentre
+    #[arg(long = "accelerator")]
+    accelerators: Vec<String>,
+
+    /// Whole terabytes pledged, for storage providers
+    #[arg(long)]
+    terabytes: Option<u32>,
+
+    /// Highest cloud service class offered, for cloud operators:
+    /// functions, databases, machines
+    #[arg(long)]
+    cloud_tier: Option<String>,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -353,21 +368,16 @@ impl ProviderRegisterCmd {
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Register as Provider");
 
-        // Parse provider type
-        let provider_type = match self.r#type.to_lowercase().as_str() {
-            "inference" | "model" => "Inference Provider",
-            "tee" | "trusted-execution" => "TEE Provider",
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Invalid provider type: {}. Must be one of: inference, tee",
-                    self.r#type
-                ));
-            }
-        };
+        // Resolve the role against the canonical ladder so a typo is caught
+        // here rather than after the confirmation prompt.
+        let provider_type: tenzro_types::token::ProviderType = self
+            .r#type
+            .parse()
+            .map_err(|e: String| anyhow::anyhow!(e))?;
 
         // Show registration details
         println!();
-        output::print_field("Provider Type", provider_type);
+        output::print_field("Provider Type", provider_type.as_str());
 
         if let Some(name) = &self.name {
             output::print_field("Provider Name", name);
@@ -378,6 +388,15 @@ impl ProviderRegisterCmd {
             output::print_field("Stake Amount", &format!("{} TNZO", self.stake));
         }
         output::print_field("Max Concurrent", &format!("{} requests", self.max_concurrent));
+        if !self.accelerators.is_empty() {
+            output::print_field("Accelerators", &self.accelerators.join(", "));
+        }
+        if let Some(tb) = self.terabytes {
+            output::print_field("Storage Pledged", &format!("{} TB", tb));
+        }
+        if let Some(tier) = &self.cloud_tier {
+            output::print_field("Cloud Tier", tier);
+        }
         println!();
 
         // Confirm with user
@@ -403,11 +422,14 @@ impl ProviderRegisterCmd {
             "0".to_string()
         };
         let result: serde_json::Value = rpc.call("tenzro_registerProvider", serde_json::json!([{
-            "provider_type": self.r#type,
+            "provider_type": provider_type.as_str(),
             "name": self.name.as_deref(),
             "provider_did": self.did.as_deref(),
             "stake": stake_wei,
             "max_concurrent": self.max_concurrent,
+            "accelerators": self.accelerators,
+            "terabytes": self.terabytes,
+            "cloud_tier": self.cloud_tier.as_deref(),
         }])).await?;
 
         spinner.finish_and_clear();

@@ -323,9 +323,24 @@ pub struct StakeDepositCmd {
     /// Amount to stake (whole TNZO; CLI converts to wei)
     amount: String,
 
-    /// Provider type: validator | model_provider | tee_provider | storage_provider
+    /// Role to bond for: validator, rpc, tee, model, compute, storage, cloud,
+    /// trainer, syncer
     #[arg(long, default_value = "validator")]
     provider_type: String,
+
+    /// Accelerator classes pledged, for compute providers. Repeat the flag
+    /// once per card: integrated, consumer, workstation, datacentre
+    #[arg(long = "accelerator")]
+    accelerators: Vec<String>,
+
+    /// Whole terabytes pledged, for storage providers
+    #[arg(long)]
+    terabytes: Option<u32>,
+
+    /// Highest cloud service class offered, for cloud operators:
+    /// functions, databases, machines
+    #[arg(long)]
+    cloud_tier: Option<String>,
 
     /// RPC endpoint
     #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -336,9 +351,25 @@ impl StakeDepositCmd {
     pub async fn execute(&self) -> Result<()> {
         output::print_header("Stake TNZO Tokens");
 
+        // Resolve the role against the canonical ladder so a typo is caught
+        // here rather than after the confirmation prompt.
+        let provider_type: tenzro_types::token::ProviderType = self
+            .provider_type
+            .parse()
+            .map_err(|e: String| anyhow::anyhow!(e))?;
+
         println!();
         output::print_field("Amount", &format!("{} TNZO", self.amount));
-        output::print_field("Provider Type", &self.provider_type);
+        output::print_field("Provider Type", provider_type.as_str());
+        if !self.accelerators.is_empty() {
+            output::print_field("Accelerators", &self.accelerators.join(", "));
+        }
+        if let Some(tb) = self.terabytes {
+            output::print_field("Storage Pledged", &format!("{} TB", tb));
+        }
+        if let Some(tier) = &self.cloud_tier {
+            output::print_field("Cloud Tier", tier);
+        }
         println!();
 
         use dialoguer::Confirm;
@@ -361,7 +392,10 @@ impl StakeDepositCmd {
         let amount_wei = crate::units::tnzo_to_wei_string(&self.amount)?;
         let result: serde_json::Value = rpc.call("tenzro_stake", serde_json::json!([{
             "amount": amount_wei,
-            "provider_type": self.provider_type,
+            "provider_type": provider_type.as_str(),
+            "accelerators": self.accelerators,
+            "terabytes": self.terabytes,
+            "cloud_tier": self.cloud_tier.as_deref(),
         }])).await?;
 
         spinner.finish_and_clear();

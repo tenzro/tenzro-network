@@ -43,6 +43,7 @@ use tenzro_settlement::{
 use tenzro_storage::{KvStore, RocksDbStore, StorageConfig, CF_MODELS, CF_SKILLS, CF_TOOLS, CF_AGENT_TEMPLATES, CF_MODEL_SERVICES};
 use tenzro_tee::{detect_tee, TeeProvider, TeeRegistry};
 use tenzro_token::{TnzoToken, StakingManager, GovernanceEngine, NetworkTreasury, TokenRegistry};
+use tenzro_types::constants::{CORRELATED_SLASH_BPS, DOUBLE_SIGN_SLASH_BPS};
 use tenzro_types::{primitives::Address, RoleSet};
 use tenzro_types::block::Block;
 use tenzro_types::model::{ModelServiceInstance, ModelLocation, ModelVisibility, ServiceStatus};
@@ -58,11 +59,21 @@ use crate::metrics::MetricsCollector;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
 
+/// Views retained in the co-offender window used to tell an isolated fault
+/// apart from a correlated one.
+const CORRELATION_WINDOW_VIEWS: u64 = 16;
+
 /// Bridges the consensus layer's `SlashingCallback` trait to the token layer's `StakingManager`.
 ///
 /// When the consensus engine detects equivocation (a validator voting for conflicting blocks
 /// in the same view), it invokes this callback to slash the misbehaving validator's stake.
-/// The default slash amount is 10% of the validator's total stake.
+///
+/// The rate depends on how the fault presents. An isolated first offence is
+/// charged [`DOUBLE_SIGN_SLASH_BPS`]; a repeat offence by the same validator,
+/// or a fault landing in the same window as another validator's, is charged
+/// [`CORRELATED_SLASH_BPS`]. A lone operator whose node double-signs once
+/// because of a botched failover therefore pays a fraction of what a
+/// coordinated set pays.
 pub struct StakingSlashingCallback {
     staking: Arc<StakingManager>,
     /// Epoch manager handle. When wired, slashed validators are also dropped
@@ -74,11 +85,20 @@ pub struct StakingSlashingCallback {
     /// they cannot be re-promoted by the next epoch transition until the
     /// jail period elapses.
     validator_registry: Option<Arc<tenzro_token::validator_registry::ValidatorRegistry>>,
+    /// Offences seen in the last [`CORRELATION_WINDOW_VIEWS`] views, keyed by
+    /// view. A second distinct validator faulting inside the window is what
+    /// makes an offence correlated rather than isolated.
+    recent_offences: DashMap<u64, Vec<Address>>,
 }
 
 impl StakingSlashingCallback {
     pub fn new(staking: Arc<StakingManager>) -> Self {
-        Self { staking, epoch_manager: None, validator_registry: None }
+        Self {
+            staking,
+            epoch_manager: None,
+            validator_registry: None,
+            recent_offences: DashMap::new(),
+        }
     }
 
     /// Attach an epoch manager so slashed validators are dropped from the
@@ -101,19 +121,52 @@ impl StakingSlashingCallback {
 
 impl StakingSlashingCallback {
     /// Slash a validator that co-signed a ZK commitment whose fraud proof was
-    /// upheld. Routes through the shared consensus-offence path (10% stake +
-    /// pending-queue drop + registry jail), identical treatment to
+    /// upheld. Routes through the shared consensus-offence path (rate-scaled
+    /// stake burn + pending-queue drop + registry jail), identical treatment to
     /// equivocation. `height` is the finalized height the fraud was resolved at.
     pub fn report_zk_fraud(&self, validator: &Address, height: u64, reason: String) {
         self.slash_for_consensus_offence(validator, height, reason);
     }
 
-    /// Shared slash path for consensus offences: slash 10% of the
-    /// validator's stake, drop them from the next-epoch pending queue,
-    /// and jail them in the permissionless registry.
+    /// Record the offence and report whether it is correlated with another.
+    ///
+    /// An offence is correlated when the same validator has been slashed
+    /// before, or when a different validator also faulted within
+    /// [`CORRELATION_WINDOW_VIEWS`] of this one.
+    fn is_correlated(&self, validator: &Address, view: u64) -> bool {
+        let floor = view.saturating_sub(CORRELATION_WINDOW_VIEWS);
+        self.recent_offences.retain(|seen_view, _| *seen_view >= floor);
+
+        let co_offender = self
+            .recent_offences
+            .iter()
+            .any(|entry| entry.value().iter().any(|other| other != validator));
+
+        self.recent_offences
+            .entry(view)
+            .or_default()
+            .push(*validator);
+
+        let repeat = self
+            .staking
+            .get_stake(validator)
+            .is_some_and(|info| !info.slashing_history.is_empty());
+
+        co_offender || repeat
+    }
+
+    /// Shared slash path for consensus offences: burn the rate the offence
+    /// earns, drop the validator from the next-epoch pending queue, and jail
+    /// them in the permissionless registry.
     fn slash_for_consensus_offence(&self, validator: &Address, view: u64, reason: String) {
+        let rate_bps = if self.is_correlated(validator, view) {
+            CORRELATED_SLASH_BPS
+        } else {
+            DOUBLE_SIGN_SLASH_BPS
+        };
+
         let slash_amount = self.staking.get_stake(validator)
-            .map(|info| info.amount / 10)
+            .map(|info| info.amount * rate_bps as u128 / 10_000)
             .unwrap_or(0);
 
         if slash_amount == 0 {
@@ -131,6 +184,7 @@ impl StakingSlashingCallback {
                     validator = %validator,
                     view = view,
                     slash_amount = slash_amount,
+                    rate_bps = rate_bps,
                     "Slashed validator for consensus offence"
                 );
 
@@ -227,8 +281,9 @@ impl SlashingCallback for StakingSlashingCallback {
 ///
 /// By the time `report_abort` is called, the abort packet has already cleared
 /// witness-quorum and signature checks — the bridge is the authoritative slash
-/// dispatch. Slash amount is 10% of the accused operator's TNZO stake (mirrors
-/// the equivocation rate).
+/// dispatch. A first admitted abort costs [`DOUBLE_SIGN_SLASH_BPS`] of the
+/// accused operator's TNZO stake; an operator with a prior slash on record pays
+/// [`CORRELATED_SLASH_BPS`], mirroring the equivocation escalation.
 ///
 /// Operator-DID → on-chain Address resolution flows through
 /// `IdentityRegistry::resolve(&did).map(|i| i.wallet_address)`. Aborts naming a
@@ -267,7 +322,14 @@ impl tenzro_bridge::mpc::abort::MpcSlashingCallback for MpcAbortSlashingCallback
         let slash_amount = self
             .staking
             .get_stake(&operator_address)
-            .map(|info| info.amount / 10)
+            .map(|info| {
+                let rate_bps = if info.slashing_history.is_empty() {
+                    DOUBLE_SIGN_SLASH_BPS
+                } else {
+                    CORRELATED_SLASH_BPS
+                };
+                info.amount * rate_bps as u128 / 10_000
+            })
             .unwrap_or(0);
 
         if slash_amount == 0 {
@@ -1359,6 +1421,12 @@ pub const DEFAULT_STORAGE_REPLICAS: usize = 6;
 /// node could not honor a single redundancy slot. Storage is permissionless
 /// but capacity is the one thing it cannot fake, so this is a hard floor.
 pub const MIN_STORAGE_PROVIDER_FREE_GB: f64 = 10.0;
+
+/// Minimum verified free disk (GB) a node must have to advertise the
+/// CloudProvider role. Sites and function bundles are small next to storage
+/// deals, but a machine image is not, so the floor is the same order and set
+/// separately to keep the two roles from moving together by accident.
+pub const MIN_CLOUD_PROVIDER_FREE_GB: f64 = 10.0;
 
 /// Provider pricing configuration. All prices are wei per token (1 TNZO = 10^18 wei).
 /// Wire format: u128 decimal strings (matches the rest of the wei-base-unit RPC contract).
@@ -2735,6 +2803,15 @@ impl TenzroNode {
         let placement_scheduler =
             Arc::new(crate::placement::PlacementScheduler::new(ingress_table.clone()));
 
+        // The operator's own card, held at or below the network ceilings. An
+        // operator that quotes above them is charged the ceiling, so clamping
+        // here means the advertised rate is the one that will actually bill.
+        let provider_pricing = {
+            let mut p = config.provider_rates.inference.clone();
+            p.clamp_to_network_maximums();
+            p
+        };
+
         Ok(Self {
             config,
             state: Arc::new(RwLock::new(NodeState::Created)),
@@ -2926,7 +3003,7 @@ impl TenzroNode {
             chain_tip: Arc::new(AtomicU64::new(0)),
             peer_status,
             provider_schedule: Arc::new(RwLock::new(ProviderSchedule::default())),
-            provider_pricing: Arc::new(RwLock::new(ProviderPricing::default())),
+            provider_pricing: Arc::new(RwLock::new(provider_pricing)),
             model_downloads: Arc::new(DashMap::new()),
             moe_prepare_jobs: Arc::new(DashMap::new()),
             served_models: Arc::new(DashMap::new()),
@@ -6257,9 +6334,8 @@ impl TenzroNode {
                 match &self.iroh_resolver {
                     Some(resolver) => {
                         let resolver: Arc<dyn tenzro_iroh::IrohResolver> = resolver.clone();
-                        let policy = crate::pricing::PricingPolicy::Fixed {
-                            rate: DEFAULT_STORAGE_RATE_PER_BYTE_EPOCH,
-                        };
+                        let policy = self.config.provider_rates.storage.clone();
+                        let storage_rate = policy.effective_rate();
                         let runtime = match &self.storage {
                             Some(kv) => crate::storage_provider_runtime::StorageProviderRuntime::with_storage(
                                 provider_address,
@@ -6282,7 +6358,7 @@ impl TenzroNode {
                         self.storage_runtime = Some(Arc::new(runtime));
                         info!(
                             provider = %provider_address,
-                            rate = DEFAULT_STORAGE_RATE_PER_BYTE_EPOCH,
+                            rate = storage_rate,
                             "Storage-provider runtime spawned"
                         );
                     }
@@ -6292,13 +6368,12 @@ impl TenzroNode {
                 }
             }
 
-            // Compute-rental runtime. A node serving AI also rents out its
-            // CPU/GPU capacity for fixed terms; no transport is needed, just the
-            // shared coverage backing.
-            if self.config.roles.serves_ai() {
-                let policy = crate::pricing::PricingPolicy::Fixed {
-                    rate: DEFAULT_COMPUTE_RATE_PER_EPOCH,
-                };
+            // Compute-rental runtime. Serves the compute role directly, and a
+            // node serving AI rents out the same accelerators for fixed terms;
+            // no transport is needed, just the shared coverage backing.
+            if self.config.roles.serves_ai() || self.config.roles.serves_compute() {
+                let policy = self.config.provider_rates.compute.clone();
+                let compute_rate = policy.effective_rate();
                 let runtime = match &self.storage {
                     Some(kv) => crate::compute_rental_runtime::ComputeRentalRuntime::with_storage(
                         provider_address,
@@ -6319,7 +6394,7 @@ impl TenzroNode {
                 self.compute_runtime = Some(Arc::new(runtime));
                 info!(
                     provider = %provider_address,
-                    rate = DEFAULT_COMPUTE_RATE_PER_EPOCH,
+                    rate = compute_rate,
                     "Compute-rental runtime spawned"
                 );
 
@@ -6328,7 +6403,9 @@ impl TenzroNode {
                 // local network, so a model too large for one machine can be
                 // split across members. Only boundary activations cross the
                 // wire, tunnelled over the cluster request-response protocol.
-                if let Some(ref network) = self.network {
+                if self.config.roles.serves_ai()
+                    && let Some(ref network) = self.network
+                {
                     let net: Arc<dyn tenzro_network::NetworkService> = network.clone();
                     let runtime =
                         Arc::new(crate::cluster_serving_runtime::ClusterServingRuntime::new(net));
@@ -6340,7 +6417,10 @@ impl TenzroNode {
                     }
                 }
             }
-        } else if self.config.roles.serves_storage() || self.config.roles.serves_ai() {
+        } else if self.config.roles.serves_storage()
+            || self.config.roles.serves_ai()
+            || self.config.roles.serves_compute()
+        {
             warn!(
                 "Provider role set but staking ledger unavailable; storage/compute runtimes not spawned"
             );
@@ -8818,7 +8898,31 @@ impl TenzroNode {
                     auth = profile_label,
                     "Canton adapter initialized"
                 );
-                self.canton_adapters.insert(net, Arc::new(adapter));
+
+                let adapter = Arc::new(adapter);
+                // Which synchronizers a participant is subscribed to is
+                // decided at the Canton console, so read it rather than
+                // expecting it in this node's config. A participant that
+                // is not reachable yet is not a startup failure — the
+                // list refreshes on the next request.
+                match adapter.discover_synchronizers().await {
+                    Ok(ids) if !ids.is_empty() => info!(
+                        network = %net,
+                        synchronizers = ?ids,
+                        "Canton synchronizers discovered"
+                    ),
+                    Ok(_) => warn!(
+                        network = %net,
+                        "Canton participant reports no connected synchronizer — \
+                         run `synchronizers.reconnect_all()` on the participant"
+                    ),
+                    Err(e) => warn!(
+                        network = %net,
+                        error = %e,
+                        "Canton synchronizer discovery failed — retrying on next request"
+                    ),
+                }
+                self.canton_adapters.insert(net, adapter);
             }
 
             if self.config.canton.network(self.config.canton.default_network).is_none() {
@@ -10322,8 +10426,8 @@ impl TenzroNode {
 
             // A multi-role node advertises every capability it serves. The
             // `provider_type` string is a coarse routing hint; we pick the
-            // most specific service role the node fills (ai > tee > storage),
-            // falling back to "general" for a validator-only node.
+            // most specific service role the node fills, falling back to
+            // "general" for a validator-only node.
             let mut capabilities: Vec<String> = Vec::new();
             if self.config.roles.serves_ai() {
                 capabilities.push("inference".to_string());
@@ -10331,6 +10435,15 @@ impl TenzroNode {
             if self.config.roles.serves_tee() {
                 capabilities.push("tee-attestation".to_string());
                 capabilities.push("confidential-compute".to_string());
+            }
+            if self.config.roles.serves_compute() {
+                // The renter brings their own work, so this says only that the
+                // accelerator is for hire — not what runs on it.
+                capabilities.push("accelerator-rental".to_string());
+            }
+            if self.config.roles.serves_cloud() {
+                capabilities.push("site-hosting".to_string());
+                capabilities.push("function-hosting".to_string());
             }
             if self.config.roles.serves_storage() {
                 capabilities.push("storage".to_string());
@@ -10347,6 +10460,10 @@ impl TenzroNode {
                 "llm"
             } else if self.config.roles.serves_tee() {
                 "tee"
+            } else if self.config.roles.serves_compute() {
+                "compute"
+            } else if self.config.roles.serves_cloud() {
+                "cloud"
             } else if self.config.roles.serves_storage() {
                 "storage"
             } else if self.config.roles.serves_edge() {
@@ -12343,6 +12460,10 @@ impl TenzroNode {
     /// - `StorageProvider` requires verified free disk at or above
     ///   [`MIN_STORAGE_PROVIDER_FREE_GB`]. Capacity is the one storage input a
     ///   node cannot fake.
+    /// - `CloudProvider` requires free disk at or above
+    ///   [`MIN_CLOUD_PROVIDER_FREE_GB`] to hold the bundles it serves.
+    /// - `ComputeProvider` requires a detected accelerator. The role rents the
+    ///   card out by the hour, so a node without one has nothing to sell.
     /// - `ModelProvider` is permissionless: the floor is "can run the smallest
     ///   model on CPU" (Gemma 3 270M), which every machine that boots the node
     ///   clears, so there is nothing to reject. A GPU only widens which larger
@@ -12361,31 +12482,42 @@ impl TenzroNode {
             );
         }
 
-        if roles.serves_storage() {
+        if roles.serves_storage() || roles.serves_cloud() || roles.serves_compute() {
             // The hardware profile is populated lazily (first probe RPC), so an
             // absent profile means "not measured yet", not "zero disk" — detect
             // and cache on demand rather than rejecting on a missing reading.
-            let free_gb = self
-                .hardware_profile
-                .read()
-                .as_ref()
-                .map(|h| h.storage_available_gb);
-            let free_gb = match free_gb {
-                Some(gb) => gb,
+            let measured = self.hardware_profile.read().clone();
+            let profile = match measured {
+                Some(hw) => hw,
                 None => {
                     let hw = detect_hardware(&self.config.data_dir)
                         .await
                         .map_err(|e| format!("hardware probe failed: {e}"))?;
-                    let gb = hw.storage_available_gb;
-                    *self.hardware_profile.write() = Some(hw);
-                    gb
+                    *self.hardware_profile.write() = Some(hw.clone());
+                    hw
                 }
             };
-            if free_gb < MIN_STORAGE_PROVIDER_FREE_GB {
+
+            let free_gb = profile.storage_available_gb;
+            if roles.serves_storage() && free_gb < MIN_STORAGE_PROVIDER_FREE_GB {
                 return Err(format!(
                     "cannot serve the 'storage' role: {free_gb:.1} GB free disk, \
                      need at least {MIN_STORAGE_PROVIDER_FREE_GB:.0} GB"
                 ));
+            }
+            if roles.serves_cloud() && free_gb < MIN_CLOUD_PROVIDER_FREE_GB {
+                return Err(format!(
+                    "cannot serve the 'cloud' role: {free_gb:.1} GB free disk, \
+                     need at least {MIN_CLOUD_PROVIDER_FREE_GB:.0} GB to hold site, \
+                     function and machine images"
+                ));
+            }
+            if roles.serves_compute() && profile.gpus.is_empty() {
+                return Err(
+                    "cannot serve the 'compute' role: no accelerator detected on this node \
+                     (compute rents the card out by the hour, so there has to be one)"
+                        .to_string(),
+                );
             }
         }
 
@@ -12393,7 +12525,7 @@ impl TenzroNode {
     }
 
     /// Soft connectivity gate for *runtime* role changes. A node opting into a
-    /// role that serves traffic (AI, storage, TEE) must be reachable on *some*
+    /// role that serves traffic must be reachable on *some*
     /// lane, or the work routed to it would silently fail. The gate accepts any
     /// reachable WAN tier — a directly-dialable node and a relay-reachable node
     /// both pass — *and* a node that has only a confirmed local-network peer: a
@@ -12414,7 +12546,11 @@ impl TenzroNode {
         &self,
         roles: &RoleSet,
     ) -> std::result::Result<(), String> {
-        let serves_traffic = roles.serves_ai() || roles.serves_storage() || roles.serves_tee();
+        let serves_traffic = roles.serves_ai()
+            || roles.serves_storage()
+            || roles.serves_tee()
+            || roles.serves_compute()
+            || roles.serves_cloud();
         if !serves_traffic {
             return Ok(());
         }
