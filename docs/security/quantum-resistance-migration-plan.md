@@ -153,7 +153,7 @@ The QUIC transport stays — it uses rustls internally and once we install aws-l
 
 ### 3.2 No protocol-version bump needed
 
-libp2p multistream selection happens before the security handshake; legacy Noise peers will fail to negotiate (intentional — flag-day cutover). All testnet pods restart simultaneously after the wipe.
+libp2p multistream selection happens before the security handshake; Noise-only peers fail to negotiate (intentional — flag-day cutover). All testnet nodes restart simultaneously after the wipe.
 
 ---
 
@@ -288,7 +288,7 @@ async fn revocation_broadcast_signature_required() {
 
 ### 6.3 Network smoke (after deploy authorization)
 
-After per-command deploy authorization (each `gcloud builds submit` and each `kubectl set image` is its own ask):
+Once the image build and each per-node rollout are authorized:
 
 ```
 TAG=$(date +%Y%m%d-%H%M%S)
@@ -297,7 +297,8 @@ docker push <your-registry>/tenzro-node:$TAG
 
 # Wipe + re-genesis: flag-day cutover requires destroying all v2 chain state
 # before validators boot the v3 binary. The exact mechanic depends on your
-# deployment (k8s PVC delete, GCE disk re-attach, bare-metal `rm -rf /var/lib/tenzro/data`).
+# deployment (delete the persistent volume, re-attach a blank data disk, or
+# `rm -rf /var/lib/tenzro/data` on bare metal).
 # Then restart each validator with the new genesis embedded and the new image.
 ```
 
@@ -338,7 +339,7 @@ ZK tests (~221) are not touched in this round.
 
 Because cutover is flag-day with testnet wipe, "rollback" means:
 1. Detect breakage post-deploy via smoke tests.
-2. `kubectl rollout undo statefulset/tenzro-validator -n tenzro-testnet` and same for the rpc deployment — go back to previous image tag.
+2. Re-pin each validator (and the RPC-serving node) to the prior image digest and restart.
 3. Re-wipe, re-genesis with the old binary.
 
 The fact that we wiped means there's no production state to lose. Old tx history is gone either way, by design.

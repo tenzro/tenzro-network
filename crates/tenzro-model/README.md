@@ -4,7 +4,7 @@ AI model registry, inference routing, and provider management for Tenzro Network
 
 ## Overview
 
-The `tenzro-model` crate provides the core infrastructure for managing AI models and inference providers on Tenzro Network. It enables a decentralized marketplace for AI inference services with intelligent routing, dynamic pricing, comprehensive provider management, and durable catalog persistence.
+The `tenzro-model` crate provides the core infrastructure for managing AI models and inference providers on Tenzro Network. It enables a decentralized marketplace for AI inference services with intelligent routing, dynamic pricing, provider management, and durable catalog persistence.
 
 ## Features
 
@@ -69,6 +69,7 @@ The `tenzro-model` crate provides the core infrastructure for managing AI models
 
 - Content-addressed, peer-first model distribution: weights are identified by their BLAKE3 hash and a `tenzro://blob/<hash>` URI
 - `HfArtifactDownloader` fetches peer-first through a pluggable `BlobFetcher` (the node wires `IrohBlobFetcher` over the iroh blob transport), falling back to HuggingFace Hub when no peer holds the artifact; downloaded weights are opportunistically re-published into the local blob store so the next node can fetch from this one
+- `BlobFetcher` has two publish paths: `publish(Bytes)` for callers holding bytes, and `publish_file(&Path)` for artifacts already on disk. Model weights are multi-gigabyte, so the download side always takes `publish_file`, which the iroh adapter services by referencing the file in place rather than copying it or reading it into memory
 - Progress tracking with speed estimation
 - Pause, resume, and cancel downloads
 - Verify-before-load: every artifact is checked against its recorded BLAKE3 hash before it loads — a mismatch fails the load
@@ -89,8 +90,8 @@ Feature-gated ONNX runtimes covering 7 modalities. Each runtime caches sessions,
 - **`TextEmbeddingRuntime`** — text-only encoder. Tokenizer loaded from HF `tokenizer.json` via the `tokenizers` crate. Optional dim truncation + re-normalization for Matryoshka models. fp32 / q8 / q4 activation paths. Catalog: Qwen3-Embedding 0.6B/4B/8B, EmbeddingGemma-300M Matryoshka 768/512/256/128, BGE-M3, Snowflake Arctic Embed L v2.0.
 - **`SegmentationRuntime`** — two-pass encoder/decoder runtime. `SamFamily::{Sam1, Sam2}` dispatches the two ABIs: SAM 1 (6-input decoder + `orig_im_size` + longest-side pad to 1024 + raw 0–255 SAM mean/std) and SAM 2 (7-input decoder + `high_res_feats_0/1` + bilinear resize + ImageNet norm). Encoder caches per-image embedding; decoder takes embedding + prompts (points/boxes) → masks. API: `segment(model_id, image_bytes, Vec<SegmentPrompt>)`. Catalog: SAM 2 base/large, EdgeSAM, MobileSAM. SAM 3 / 3.1 are text-promptable with a 14-input box-output decoder, incompatible with the point/box `Segmenter` trait, exposed through the separate `TextSegmentationRuntime`.
 - **`DetectionRuntime`** — `DetrFamily::{RfDetr, DFine}` dispatches two NMS-free DETR-family ABIs: RF-DETR (single input, ImageNet norm, raw `labels` logits + cxcywh-normalized `dets`, client does sigmoid + top-1 + cxcywh→xyxy + scale, **90-class** COCO) and D-FINE (2 inputs incl. `orig_target_sizes` int64, pixel scale-to-[0,1] only, post-sigmoid sorted outputs in xyxy pixels, **80-class**). API: `detect(model_id, image_bytes, score_threshold) -> Vec<Detection>` with `{bbox, label_id, score}`. Catalog: RF-DETR n/s/m/b/l/2xl, D-FINE n/s/m/l/x.
-- **`AudioRuntime`** — ASR. Two ORT-backed `Transcriber` implementations cover the catalog: `MoonshineTranscriber` (raw 16 kHz waveform input, encoder + merged-decoder autoregressive loop with `use_cache_branch` KV-cache, SentencePiece detokenization) and `WhisperTranscriber` (80- or 128-mel log-spectrogram input via Slaney filterbank + Hanning STFT, encoder + merged-decoder autoregressive loop with `use_cache_branch` KV-cache, BPE detokenization, language/SOT/transcribe/no-timestamps prompt prefix). `WhisperFamily::{DistilEn, DistilLargeV3, LargeV3Turbo}` selects mel count and multilingual prompt behavior. Audio decode: `hound` for WAV, `symphonia` for MP3/FLAC/OGG; `rubato` sinc resampler to 16 kHz mono. Catalog: Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo.
-- **`VideoRuntime`** — frame extraction (shell-out to `ffmpeg`) + per-frame embedding via vision encoder fallback (DINOv3/SigLIP2 mean-pooled across frames). Native video catalog (`get_video_catalog()`) returns empty — no permissive ONNX-shippable encoder-only video model exists in the 2026 OSS landscape; the runtime scaffolding is in place for future entries.
+- **`AudioRuntime`** — ASR. Two ORT-backed `Transcriber` implementations cover the catalog: `MoonshineTranscriber` (raw 16 kHz waveform input, encoder + merged-decoder autoregressive loop with `use_cache_branch` KV-cache, SentencePiece detokenization) and `WhisperTranscriber` (80- or 128-mel log-spectrogram input via Slaney filterbank + Hanning STFT, encoder + merged-decoder autoregressive loop with `use_cache_branch` KV-cache, BPE detokenization, language/SOT/transcribe/no-timestamps prompt prefix). `WhisperFamily::{DistilEn, DistilLargeV3, LargeV3Turbo}` selects mel count and multilingual prompt behavior. Two further implementations cover the NeMo families: `ParakeetTranscriber` (Token-and-Duration Transducer — encoder, prediction network, and joint network run as three sessions with RNN-T joint decoding) and `CanaryTranscriber` (Conformer attention-encoder-decoder, four languages). Audio decode: `hound` for WAV, `symphonia` for MP3/FLAC/OGG; `rubato` sinc resampler to 16 kHz mono. Catalog: Moonshine v2 tiny/base, Distil-Whisper small.en/medium.en/large-v3, Whisper-large-v3-turbo, Parakeet-TDT-0.6B-v3, Canary-1B-Flash.
+- **`VideoRuntime`** — frame extraction (shell-out to `ffmpeg`) + per-frame embedding via vision encoder fallback (DINOv3/SigLIP2 mean-pooled across frames), evenly spaced across the clip or at a fixed stride when the request carries `frame_stride`. The video catalog advertises the V-JEPA 2 family (ViT-L and ViT-H under MIT, ViT-g under Apache-2.0, all `Permissive`) as reference clip encoders; the upstream repos publish safetensors only, so `load_video_model` registers the `VisionFallbackVideoEncoder` rather than an ONNX graph. VideoMAE v1/v2 and V-JEPA 2.1 stay off the catalog on license grounds.
 
 ### Distributed MoE Execution
 
@@ -106,7 +107,7 @@ Mixture-of-Experts models run distributed across holders with three cooperating 
 
 **Residency tiers.** A holder can advertise more experts than fit in memory. The runtime keeps a byte-bounded memory-tier LRU (`ResidencyConfig::memory_budget_bytes`, auto-sized to 60% of Linux `MemAvailable`, else a 4 GiB fallback, tunable via `with_memory_budget` / `with_disk_dir`) over a disk tier at `{data_dir}/moe_experts/` that spills raw safetensors (atomic temp-write + rename) and decodes them back on demand. Readahead promotes disk-tier experts a forward is about to select before the batch arrives. `tenzro_moeExpertStatus` reports each expert's tier (`Warm` in memory / `Cold` on disk) and byte footprint.
 
-**Cross-holder overlap.** When the hidden dimension is a multiple of 32, the router may send Q8_0-compressed activation blocks instead of f32 rows (`ExpertExecuteRequest::compressed`, materialized carrier-agnostically via `materialize_hidden`). Backup redispatch (`ExpertBatch::backups`, warm-holder-first) covers a slow or missing holder, and `MoeCombiner` accumulates holder responses as they arrive off a `FuturesUnordered` stream — `MoeCombiner::finish` fails if any expected contribution never lands, so a dropped holder surfaces as an error rather than a silently-wrong sum.
+**Cross-holder overlap.** When the hidden dimension is a multiple of 32, the router may send Q8_0-compressed activation blocks instead of f32 rows (`ExpertExecuteRequest::compressed`, materialized carrier-agnostically via `materialize_hidden`). Backup redispatch (`ExpertBatch::backups`, warm-holder-first) covers a slow or missing holder, and `MoeCombiner` accumulates holder responses as they arrive off a `FuturesUnordered` stream — `MoeCombiner::finish` fails if any expected contribution never arrives, so a dropped holder surfaces as an error rather than a silently-wrong sum.
 
 The node layer exposes planning RPCs (`tenzro_moeShardMap`, `tenzro_moePlanDispatch`, `tenzro_moeReplicationPolicy`, `tenzro_moeCatalogShape`) and execution RPCs (`tenzro_moeExpertLoad`, `tenzro_moeGateLoad`, `tenzro_moeExpertUnload`, `tenzro_moeGateUnload`, `tenzro_moeExpertStatus`, `tenzro_moePrepareExperts`, `tenzro_moeRoute`, `tenzro_moeExecute`, `tenzro_moeForward`); cross-holder transport is the `tenzro/moe` iroh ALPN with HTTP fallback. Catalog entries carry a `MoeShape` describing expert count, top-k, and per-expert dimensions.
 
@@ -117,6 +118,28 @@ All ONNX runtimes build sessions through one shared `onnx_session::build_onnx_se
 ### Modality-Aware Inference Routing
 
 `InferenceRouter::route()` reads `model.modality` from the registry and dispatches a typed `InferencePayload` enum (`Chat | Forecast | VisionEmbed | VisionSimilarity | TextEmbed | Segment | Detect | Transcribe | VideoEmbed`) to the correct runtime handle. Pricing/latency/reputation strategies apply per-modality with independent provider pools.
+
+### Intent Routing and Per-Query Difficulty
+
+Model selection and provider selection are two tiers. `MetaRouter` (`meta_router`) takes a `RouteIntent` — a use case, a per-request cost cap, and a quality floor — and resolves it to a concrete `model_id`; `InferenceRouter` then picks the operator deployment for that model. The meta-router owns use-case→modality mapping, candidate discovery over `ModelRegistry`, quality-tier resolution, budget pre-filtering, usage-stat scoring, and the cross-model fallback order. Three independent ceilings apply: the per-request `Budget` enforced at discovery, a per-DID rolling-window cap through a `BudgetGate`, and a hard wallet-balance ceiling read through a `BalanceProvider` so no model priced above what the payer can settle is ever selected.
+
+Declared metadata says nothing about whether a *specific* prompt needs the expensive model, so `difficulty` supplies the measured signal. Prompts are embedded through a `PromptEmbedder` (backed by `TextEmbeddingRuntime`) and grouped by an online sequential k-means map that grows on demand — no training corpus and no offline fit step. Each model accrues per-cluster outcome counters from real serving results, so a model's strength is a measured property per prompt neighbourhood. A newly registered model starts at the neutral prior with an optimism bonus so it stays explorable, and earns its per-cluster error rates from observations. Both the cluster map and the per-model counters write through to `CF_MODELS` and hydrate on startup.
+
+### Latency-Tail Estimation
+
+Hedging and steering read the tail of a provider's latency distribution, not its mean — racing a backup request at the mean fires far too many hedges. `LatencyTail` tracks a chosen quantile with a streaming five-marker estimator: O(1) memory and O(1) per observation, no stored history and no windowing, converging to the true quantile of the running stream. Every field serializes, so the estimate survives a restart alongside the rest of `ProviderMetrics`.
+
+### Inference Commitments (TOPLOC)
+
+During generation the provider records, per output token, the top-k raw logits (token id and value) that produced the sample. The canonical serialization of those records is the commitment blob, domain-tagged `tenzro/inference/toploc`; its SHA-256 rides on inference results and receipts. A verifier holding the prompt, the output tokens, and the same weights re-executes the sequence as one prefill — far cheaper than the original decode — reads the logits at each output position, and fuzzy-compares them against the committed records. Exact float equality is not required: kernels differ across accelerators, drivers, and batch shapes, so verification tolerates bounded index churn (`MIN_INDEX_OVERLAP`) and bounded logit drift (`MAX_MEAN_LOGIT_DELTA`) per step, and requires `MIN_PASSING_STEP_FRACTION` of steps to pass overall. `DEFAULT_COMMITMENT_K` is 16, capped at `MAX_COMMITMENT_K`.
+
+### SLA Probes
+
+`SlaManager::issue_probe` gives validators a liveness challenge for staked providers that cannot be selectively targeted. The validator generates a VRF proof over `epoch || round || provider_did` with its own Ed25519-compatible VRF key and folds the 64-byte output into a per-provider challenge nonce, so anyone holding the validator's VRF public key can confirm the nonce matches the tuple — no grinding, and no forging a challenge after the response was sampled. Providers reply with an Ed25519 signature over the canonical payload. Misses, signature failures, and past-deadline responses increment the bond's failure count through `ProviderSlashingCallback::record_probe_miss`; crossing the threshold calls `slash_provider_bond`. The crate owns the protocol types, the VRF derivation, and the fault detector; transport is wired at the node layer.
+
+### Provenance and Jurisdiction Receipts
+
+`provenance` signs a statement binding an inference result to the model, weights hash, and serving key. `jurisdiction` mirrors it for locality: a request may pin `parameters.custom["jurisdiction"]` to ISO 3166-1 alpha-2 country codes and bloc tokens, the router hard-filters to providers whose declared `JurisdictionClaim` satisfies the pin, and the serving node returns a signed `JurisdictionReceipt` binding the claim to the exact request and response byte hashes. A receipt is an attestation-bound claim, not a geolocation proof: the signature proves which key and — through `attestation_hash` — which enclave made the claim, and reputation and slashing punish false declarations. Both modules expose a pluggable signer trait, an in-process Ed25519 implementation, and offline verification helpers.
 
 ### LAN Clustering — Layer-Wise Pipeline Parallelism
 
@@ -187,6 +210,15 @@ single end-of-stream settlement charge.
 - Streaming and batch inference
 - Hardware detection and capability reporting
 - **Multi-Token Prediction (MTP) speculative decoding** — the runtime keeps a `loaded_drafters` map alongside `loaded_models`; when a drafter is loaded for a target and the request carries `draft_n`, generation runs real speculative decoding: the drafter proposes a block of candidate tokens, the target verifies them in one batched decode, and the accepted prefix advances the stream. Serving a model auto-loads its paired drafter from the catalog's `drafter_id` (downloaded in the background if absent); a drafter problem never fails the serve. `ModelError::MtpUnavailable` is returned only when `draft_n` is requested with no drafter loaded for that target.
+- **In-process multimodal projector (`mtmd` feature)** — a model whose catalog entry names a multimodal projector loads it alongside the text weights into an `MtmdContext`. Image and audio attachments become `MtmdBitmap`s placed at the media marker inside the prompt, and the projector interleaves encoded media chunks with text tokens during prefill, so a vision-capable GGUF is served in-process without a separate encoder service. The projector owns its own prefill path rather than sharing the batch scheduler; built without the feature, multimodal requests are refused instead of silently dropping the attachment.
+
+### Continuous Batching
+
+`batching` holds one long-lived `llama_context` per model with a fixed pool of KV-cache sequence slots and interleaves every in-flight request into a single `llama_decode` per step, so throughput scales with the number of active sequences instead of serializing decodes behind one mutex. One dedicated OS thread per model owns the model and its context together. Each iteration admits waiting requests into free slots, prefills their prompts requesting logits only at the last position, extends each running sequence by its last sampled token, decodes the interleaved batch once, then samples per sequence from its own logits index with its own sampler so repetition state stays per-request. A sequence finishes on an end-of-generation token, one of its stop sequences, its position ceiling, or when a streaming caller drops the receiver. Stop sequences match over decoded text rather than token ids, so a multi-token delimiter still matches and is trimmed before the text is streamed.
+
+### External Serving Engines
+
+A provider fronting its accelerators with a dedicated serving engine registers it against a `model_id` through `external_engine` instead of loading a local GGUF. `ExternalEngineKind` records which engine sits behind the endpoint (`Vllm`, `Sglang`, `LlamaServer`, `OpenAiCompatible`); all of them speak the same OpenAI `/v1/chat/completions` wire contract, so `ModelRuntime` maps `ChatMessage` / `GenerationConfig` / `InferenceResult` onto that endpoint and routes chat and generate for that model over HTTP.
 
 ## Usage Examples
 
@@ -348,20 +380,40 @@ The crate is organized into several key modules:
 - `registry`: Model catalog and metadata management with durable persistence
 - `provider`: Inference provider registration, metrics, and health monitoring
 - `routing`: Request routing with multiple strategies and circuit breakers
+- `meta_router`: Intent → `model_id` resolution with budget, quality floor, and balance ceilings
+- `difficulty`: Per-query difficulty estimation over online prompt clusters
+- `latency`: Streaming quantile estimator for provider latency tails
 - `pricing`: Cost calculation and market analysis
 - `library`: Model discovery and browsing
 - `download`: Model download management
+- `batching`: Continuous batching engine — one context per model, interleaved decode
+- `external_engine`: OpenAI-compatible external serving-engine backend
+- `toploc`: Top-k logit inference commitments and fuzzy re-execution verification
+- `sla`: VRF-driven liveness probes and provider fault detection
+- `provenance` / `jurisdiction`: Signed inference provenance and locality receipts
+- `provisioning`: Hardware-aware model provisioning recommendations and peer discovery
+- `gguf_shape`: GGUF metadata-header parse for layer count, hidden dim, and size
 - `hf_download`: peer-first artifact downloader (`BlobFetcher` → iroh blobs, HuggingFace Hub fallback)
 - `model_hash`: `ModelHashRegistry` — BLAKE3 content addressing, first-recorder-wins, verify-before-load, `CF_MODEL_HASHES` persistence
 - `runtime`: Local inference via llama.cpp with GPU acceleration and MTP speculative decoding
 - `moe_shard`: Expert → holder shard maps and replication policy
 - `moe_router`: Token-to-expert dispatch planning
 - `moe_exec`: Expert FFN + gating network execution from safetensors
+- `moe_extract`: Per-expert and per-layer-router tensor slicing straight out of an upstream safetensors checkpoint over HTTP Range requests, re-serialized into the blob shape `moe_exec` accepts
+- `moe_receipt`: Signed `ExpertExecutionReceipt` per remote expert execution, binding the input carrier hash to a top-k activation commitment over the output rows
+- `moe_quant`: GGUF-compatible Q8_0 / Q4_K / Q6_K block codecs for expert projections
+- `sealed`: Encrypted shard distribution for private models — AES-256-GCM content key wrapped per recipient with X25519 envelope encryption, signed `SealedModelManifest`
 - `onnx_session`: Shared ONNX session builder with hardware execution providers
 - `usage`: Usage tracking and statistics
 - `load`: Load tracking and concurrency management
 - `catalog`: Static catalogs for HuggingFace plus ONNX vision, forecast, text-embedding, segmentation, detection, audio, and video models, and the generative-media catalog
 - `error`: Error types and handling
+
+## Text-generation catalog
+
+`HfModelEntry` + `get_model_catalog()` / `get_model_by_id()` describe the GGUF text-generation models a provider may serve — Qwen, Gemma, Mistral, Phi, DeepSeek, Granite, GLM, Kimi, and the rest of the open families. Each entry carries the HuggingFace repo and filename, quantization, size, minimum RAM, `ModelArchitecture`, license and `license_tier`, per-family sampling defaults (temperature, top-p, min-p), reasoning behaviour, and — for speculative decoding — `drafter_id` / `mtp_kind` / `mtp_default_draft_n`.
+
+MoE entries additionally carry a `MoeShape` (expert count, top-k, per-expert dimensions) and a safetensors repo resolved through `moe_safetensors_repo(id)`, so the same model is reachable two ways: whole-model serving from the GGUF, or distributed expert extraction from the safetensors. Kimi K3 is the extreme of that split — 2.8T total parameters with 104B active over 896 routed experts, 93 layers, 1M context, and a multimodal encoder. Its smallest quantization exceeds any single machine, so whole-model serving means a pipeline cluster and a lone host runs it as distributed expert extraction instead.
 
 ## ONNX catalogs
 
@@ -373,7 +425,7 @@ In addition to the dynamic model registry, `tenzro-model` provides static catalo
 - **Segmentation** — `OnnxSegmentationEntry` + `get_segmentation_catalog()`: SAM 2 base/large, EdgeSAM, MobileSAM.
 - **Detection** — `OnnxDetectionEntry` + `get_detection_catalog()`: RF-DETR n/s/m/b/l/2xl, D-FINE n/s/m/l/x.
 - **Audio** — `OnnxAudioEntry` + `get_audio_catalog()`: Moonshine v2, Distil-Whisper, Whisper-v3-turbo, Parakeet-TDT-v3, Canary-1B-Flash.
-- **Video** — `OnnxVideoEntry` + `get_video_catalog()`: empty scaffold (awaiting permissive ONNX-shippable encoder).
+- **Video** — `OnnxVideoEntry` + `get_video_catalog()`: V-JEPA 2 ViT-L/256, ViT-H/256, ViT-g/384.
 
 All entries carry `license_tier: Permissive | Attribution | CommercialCustom | NonCommercial`, enforced centrally in `ModelRegistry::register_model()`.
 
@@ -458,4 +510,4 @@ cargo test -p tenzro-model
 
 ## License
 
-MIT or Apache-2.0
+Apache-2.0.

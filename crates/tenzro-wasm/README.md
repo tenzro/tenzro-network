@@ -22,16 +22,19 @@ deterministic runtime for executing community-supplied **agent skills**,
   the host can chain into Tenzro `ReceiptEnvelope` records for durable,
   auditable execution history.
 
-## Public surface
+## Modules
 
-```text
-WasmEngine               process-wide Wasmtime engine
-SkillRuntime             per-host runtime, holds a component registry
-ComponentManifest        declarative metadata bundled with each .wasm
-SkillCapabilities        sandbox grants (storage, network, host methods)
-HostInterface (trait)    node-side dispatcher for `tenzro:*` calls
-ExecutionReceipt         result of an invocation
-```
+| Module | Role |
+|---|---|
+| `engine` | `WasmEngine` — the process-wide Wasmtime engine. Components compile once against it and instantiate cheaply many times; a node holds one `Arc<WasmEngine>` shared by the agent-kit skill executor and the MCP tool host. |
+| `manifest` | `ComponentManifest` / `ComponentRuntime` — the declarative metadata bundled with each `.wasm`, including the content hash the runtime checks at registration. |
+| `capabilities` | `SkillCapabilities`, `StorageCapability`, `NetworkCapability` — the grant set a manifest declares, translated into a WASI 0.2 context at instantiation. |
+| `wasi_state` | `WasiState` — the per-invocation `Store<T>` data carrying the WASI 0.2 context, the WASI HTTP context, and the component-model resource table. Built from the manifest's capabilities, so a component starts with no ambient authority. |
+| `host` | `HostInterface`, `HostInvocation`, `InvocationResult`, `SharedHost` — the node-side dispatcher for `tenzro:*` calls made from inside a component. |
+| `runtime` | `SkillRuntime`, `LoadedComponent` — the embed-friendly entry point: register a component, invoke an export, get a receipt. |
+| `http` | `HttpComponent`, `FunctionResponse`, `IncomingBody`, `OutgoingBody`, `Scheme` — the `wasi:http` serving path for `function`-class apps. A component exporting the `wasi:http/proxy` world is pre-linked once, then serves one request per `serve` call. Bodies are `hyper` 1.x types, so the node's axum edge hands a decoded request straight through and streams the response back over the `tenzro/http` bi-stream without a second serialization hop. |
+| `metrics` | `FuelReport` and `ExecutionReceipt` — fuel accounting and the signed record of an invocation. |
+| `error` | `WasmError` and `WasmResult`. |
 
 Hosts integrate by:
 
@@ -48,8 +51,9 @@ Hosts integrate by:
   selected when a skill template's manifest declares
   `runtime: agent-skill`.
 - `crates/tenzro-node` — MCP tool host. Community-submitted MCP tools
-  ship as `.wasm` components; the node executes them in-process with
-  capability checks.
+  are `.wasm` components; the node executes them in-process with
+  capability checks. The node's app-hosting path uses `HttpComponent`
+  to serve `function`-class apps over the `wasi:http/proxy` world.
 
 ## Security defaults
 

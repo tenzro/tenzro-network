@@ -275,16 +275,17 @@ Durable writes go through `write_batch_sync` with `fdatasync`. Block writes are 
 
 Every node exposes a Prometheus `/metrics` endpoint with per-subsystem counters. Network-side metrics include:
 
-- `tenzro_gossipsub_messages_published_total` / `_received_total` per topic
-- `tenzro_request_response_inflight` per protocol
-- `tenzro_libp2p_connections` (gauge), `tenzro_libp2p_dials_total` / `_failed_total`
-- `tenzro_kademlia_peers_in_routing_table` (gauge)
-- `tenzro_validator_peer_count` (gauge)
+- `tenzro_network_gossip_published_total` / `tenzro_network_gossip_accepted_total`
+- `tenzro_network_gossip_rejected_validator_only_total` / `_rejected_invalid_total` / `_rejected_duplicate_total`
+- `tenzro_network_connections_established` (gauge), `tenzro_network_connections_inbound_total` / `_outbound_total`
+- `tenzro_network_dials_rejected_per_ip_total` / `tenzro_network_dials_rejected_global_total`
+- `tenzro_network_peers_connected` (gauge), `tenzro_network_peers_banned` (gauge)
+- `tenzro_network_kad_routing_table_size` (gauge), `tenzro_network_gossipsub_mesh_size` (gauge)
+- `tenzro_network_peer_address_migrations_total`
+- `tenzro_network_events_dropped_total`
 - `tenzro_workflow_canton_mirrored_total` (gauge — workflows with a Canton mirror)
-- `tenzro_block_sync_blocks_served_total` / `_blocks_received_total`
-- `tenzro_consensus_direct_messages_sent_total` / `_received_total`
 
-These Prometheus metrics let operators monitor mesh size, validator reachability, request/response saturation, and gossipsub message rate per topic.
+These Prometheus metrics let operators monitor mesh size, dial rate-limit pressure, connection churn, gossip accept/reject rates, and peer address migration.
 
 ---
 

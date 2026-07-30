@@ -48,7 +48,7 @@ wants a device-local enclave key gets exactly that and nothing else.
 ## Persistence
 
 Cross-restart unlock works on a plain Developer-ID build with no extra
-entitlements: the Secure-Enclave key is persisted in the legacy file (login)
+entitlements: the Secure-Enclave key is persisted in the file-based (login)
 keychain via `Location::DefaultFileKeychain`, which sets `kSecAttrIsPermanent`
 without requiring the `keychain-access-groups` entitlement or a provisioning
 profile (those are needed only by the data-protection keychain — see Apple

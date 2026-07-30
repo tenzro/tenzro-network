@@ -173,7 +173,7 @@ Run tests with:
 cargo test -p tenzro-token
 ```
 
-Test coverage: 54 tests passing.
+Unit tests cover the treasury, staking, governance, rewards, vesting, and liquid-staking paths.
 
 ## Production Status
 
@@ -195,4 +195,4 @@ Components:
 
 ## License
 
-Apache-2.0 OR MIT
+Apache-2.0.

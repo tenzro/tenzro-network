@@ -4,7 +4,7 @@ State storage layer for Tenzro Network. Provides persistent storage for Tenzro L
 
 ## Overview
 
-The `tenzro-storage` crate provides a comprehensive storage infrastructure for the Tenzro Network blockchain, including efficient key-value storage, Merkle Patricia Trie state commitment, block indexing, account management, and state snapshots.
+The `tenzro-storage` crate provides the storage infrastructure for the Tenzro Network blockchain, including efficient key-value storage, Merkle Patricia Trie state commitment, block indexing, account management, and state snapshots.
 
 ## Features
 
@@ -12,7 +12,7 @@ The `tenzro-storage` crate provides a comprehensive storage infrastructure for t
 - **`KvStore` trait**: `get`, `put`, `delete`, `get_keys_with_prefix`, `write_batch`, `write_batch_sync` — used by upper-layer registries for write-through persistence and startup hydration
 - **Merkle Patricia Trie**: Efficient state commitment and cryptographic proof generation
 - **Block Storage**: Fast indexing and retrieval of blocks by hash and height
-- **Account Storage**: Comprehensive account state management with balance and nonce tracking
+- **Account Storage**: Account state management with balance and nonce tracking
 - **State Snapshots**: Point-in-time state snapshots with automatic pruning and compression
 - **In-Memory Storage**: Testing-friendly in-memory storage implementation
 - **Durability Guarantees**: Explicit fsync via `write_batch_sync()` for finalized blocks
@@ -69,7 +69,7 @@ The storage layer uses RocksDB with the following column families:
 
 ### Data Availability Primitives (`da` module)
 
-High-volume receipts (inference, agent message, channel updates) ship a commitment + pointer instead of the full payload; sensitive low-volume receipts (kill-switch, governance, escrow, lifecycle) stay inline.
+High-volume receipts (inference, agent message, channel updates) carry a commitment + pointer instead of the full payload; sensitive low-volume receipts (kill-switch, governance, escrow, lifecycle) stay inline.
 
 - `ReceiptEnvelope { kind, storage_mode, inline_summary, inline_payload, da_pointer, commitment, mandate_ref }` - Receipts either embed the payload (`Inline`) or record a pointer to an external DA layer (`OffloadedDA`). `commitment` is always `SHA-256(canonical_payload)` regardless of mode. The optional `mandate_ref` ties the receipt to a signed off-chain mandate (AP2 checkout, x402 challenge, MPP session, Stripe SPT, Visa TAP, Mastercard Agent Pay, Capital Intent, Workflow step) closing the audit loop from intent → settlement
 - `MandateRef { protocol, mandate_hash, issuer_did, mandate_uri?, expires_at }` - Reference to a signed off-chain mandate authorizing the receipt; convenience constructors `MandateRef::ap2_checkout(hash, did)` and `MandateRef::x402(hash, did)`; attach via `ReceiptEnvelope::with_mandate(mandate_ref)`
@@ -320,7 +320,7 @@ Account storage interface:
 
 ## Test Coverage
 
-24 unit tests + 1 doc test covering:
+Unit tests and doc tests cover:
 - RocksDB store operations (get, put, delete, batch writes)
 - Merkle Patricia Trie insertion, deletion, proof generation/verification
 - Block storage indexing (by hash and height)
@@ -338,9 +338,4 @@ Account storage interface:
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE](../../LICENSE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT License (http://opensource.org/licenses/MIT)
-
-at your option.
+Apache-2.0.

@@ -226,6 +226,7 @@ The Tenzro A2A agent exposes skills covering blockchain, AI, identity, payments,
 | Method | Description | Parameters |
 |--------|-------------|------------|
 | `tasks/send` | Send a message, create or continue a task | `message` (role, parts), `metadata` |
+| `message/send` | Accepted as an alias for `tasks/send` | `message` (role, parts), `metadata` |
 | `tasks/get` | Get task by ID | `id`, `historyLength` |
 | `tasks/list` | List tasks | `contextId` (optional) |
 | `tasks/cancel` | Cancel a running task | `id` |
@@ -419,6 +420,9 @@ curl http://localhost:3002/.well-known/agent.json
 | `TENZRO_RPC_URL` | `https://rpc.tenzro.xyz` | Tenzro JSON-RPC endpoint |
 | `TENZRO_API_URL` | `https://api.tenzro.xyz` | Tenzro Web API endpoint |
 | `TENZRO_A2A_BASE_URL` | `https://a2a.tenzro.xyz` | Base URL for Agent Card |
+| `TENZRO_BEARER_JWT` | unset | OAuth 2.1 access token sent as `Authorization: Bearer` |
+| `TENZRO_DPOP_PROOF` | unset | DPoP proof sent as the `DPoP` header, binding the token to a key |
+| `TENZRO_ADMIN_TOKEN` | unset | Operator admin token sent as `X-Tenzro-Admin-Token` for operator-gated RPCs |
 | `TENZRO_API_KEY` | unset | API key sent as `X-Tenzro-Api-Key`. Needed for operator-brokered resources like Canton |
 | `TENZRO_CANTON_NETWORK` | unset | `devnet` or `mainnet`, merged into each Canton call as `canton_network` |
 

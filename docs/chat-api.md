@@ -53,7 +53,7 @@ Mint a DPoP-bound bearer JWT directly via one of three onboarding RPCs:
 
 The JWT is issued per OAuth 2.1 with Rich Authorization Requests (RFC 9396) for fine-grained scopes (allowed methods, max amounts, time bounds). The JWT carries a `cnf.jkt` claim — the RFC 7638 thumbprint of the DPoP key — so every request must be accompanied by a fresh DPoP proof signed by that key.
 
-For browser-based flows, the node exposes OAuth 2.1 discovery at `GET /.well-known/oauth-authorization-server` (RFC 8414) and protected-resource metadata at `GET /.well-known/oauth-protected-resource` (RFC 9728).
+For browser-based flows, the node exposes OAuth 2.1 discovery on the verification API (port 8080) at `GET /.well-known/openid-configuration` (RFC 8414 / OpenID Connect Discovery) and protected-resource metadata at `GET /.well-known/oauth-protected-resource` (RFC 9728). The MCP server (port 3001) publishes the same metadata under the RFC 8414 path `GET /.well-known/oauth-authorization-server`.
 
 ### Sending the token
 
@@ -432,7 +432,7 @@ Tools are executed by the **client**, not the server. The Tenzro node never invo
 
 ## Streaming
 
-`tenzro_chatStream` returns a Server-Sent Events stream. The event grammar depends on the request shape.
+`POST /chat-stream` returns a Server-Sent Events stream. The event grammar depends on the request shape.
 
 Streams carry no jurisdiction receipts. When the request carries a `jurisdiction` pin, the fail-closed locality-claim check runs before generation starts — a node whose claim does not satisfy the pin refuses with HTTP 412 (`jurisdiction_not_satisfied`) before the first token. See [Jurisdiction-pinned inference](#jurisdiction-pinned-inference-locality-claims-and-receipts).
 
@@ -457,7 +457,7 @@ DPoP: <jws-compact-dpop-proof>
 {"jsonrpc":"2.0","method":"tenzro_chatStream","params":{...},"id":1}
 ```
 
-Or via JSON-RPC `tenzro_chatStream` returning a `subscription_id`, with the SSE pulled from `GET /events/{subscription_id}`.
+The JSON-RPC method `tenzro_chatStream` accepts the same params over `POST /` and returns the completed result in one JSON response — use `POST /chat-stream` when incremental events are wanted.
 
 ### Simple shape events
 
@@ -721,7 +721,7 @@ Each entry in `GET /v1/models` carries the OpenAI core fields plus the serving c
     "jurisdiction_signing": true,
     "supported_parameters": ["temperature", "top_p", "top_k", "min_p", "max_tokens", "frequency_penalty", "presence_penalty", "repetition_penalty", "stop", "seed", "stream", "stream_options", "user", "draft_n", "verifiable", "jurisdiction", "jurisdiction_receipt", "models", "provider"]
   },
-  "datacenter_location": "us-central1",
+  "datacenter_location": "us-east",
   "datacenters": [{ "country_code": "US" }],
   "api_endpoint": "https://…",
   "mcp_endpoint": "https://…"
@@ -1350,18 +1350,30 @@ Errors follow the OpenAI envelope: `{"error": {"message": …, "type": …, "cod
 
 ## Universal model compatibility
 
-Models in the catalog are tagged by capability. The chat handler maps the on-wire content-block format to each model's native chat template using llama.cpp's template engine.
+Models in the catalog are tagged by capability. The chat handler renders each
+model's own chat template out of the GGUF using llama.cpp's template engine,
+so any GGUF an operator loads gets its native prompt format, catalog member or
+not. A GGUF whose embedded template is absent or renders empty falls back to
+ChatML (`<|im_start|>role\n…<|im_end|>`).
 
 | Family | Tool calls | Thinking | Vision | Native template | Notes |
 |--------|------------|----------|--------|-----------------|-------|
-| Qwen3 (0.6B – 14B) | yes | yes (`<think>` tags) | no | ChatML + `<tool_call>` JSON | Tool calls expressed as `<tool_call>{...}</tool_call>` JSON; mapped to `tool_use` blocks. |
-| Llama 3.1+ (8B, 70B) | yes | no | no | Llama-3 chat | Tool calls in `<|python_tag|>` envelope. |
-| Mistral Nemo / Large 2 | yes | no | no | Mistral V3 tools | `[TOOL_CALLS]` prefix. |
+| Qwen 3 / 3.5 / 3.6 | yes | yes (`<think>` tags) | no | ChatML + `<tool_call>` JSON | Tool calls expressed as `<tool_call>{...}</tool_call>` JSON; mapped to `tool_use` blocks. |
+| Gemma 3 / 4 | yes | no | yes (Gemma 4) | Gemma chat | Vision through the in-process multimodal projector. |
+| Kimi K2 / K3 | yes | yes | no | Kimi chat | MoE; expert residency and dispatch are handled by the serving node. |
+| Mistral | yes | no | no | Mistral tools | `[TOOL_CALLS]` prefix. |
 | DeepSeek V3 | yes | yes | no | DeepSeek-V3 | Native tool calls; thinking via `<think>` like Qwen. |
-| Claude (via API forward) | yes | yes | yes | passthrough | Server forwards to Anthropic-compatible endpoint without transformation. |
+| Granite 4 | yes | no | no | Granite chat | Includes the hybrid `granite4-h-*` entries. |
+| GLM | yes | yes | no | GLM chat | — |
+| Claude (via API forward) | yes | yes | yes | passthrough | Server forwards to an Anthropic-compatible endpoint without transformation. |
 | GPT (via API forward) | yes | no | yes | OpenAI shim | Content blocks mapped to OpenAI `tool_calls` and back. |
 
-A model becomes universally available when its `ModelInfo` declares its template. Catalog entries lacking a recognized template fall back to the simple shape only.
+Tool calls are recovered from the raw completion by scanning, in priority
+order, for `<tool_call>{json}</tool_call>`, `<|python_tag|>{json}`,
+`[TOOL_CALLS] [{json}, …]`, and finally a bare top-level
+`{"name": …, "input": …}` object that spans the whole trimmed output. All
+matched markers are stripped from the returned text and re-emitted as
+`tool_use` blocks.
 
 The Cortex (recurrent-depth) path uses a separate gossipsub topic (`tenzro/cortex`) and its own RPCs — `tenzro_cortexInference`, `tenzro_registerCortexWorker`. Cortex models that also expose a standard chat template can be invoked through `tenzro_chat`; pure recurrent-depth workloads stay on the Cortex RPCs.
 

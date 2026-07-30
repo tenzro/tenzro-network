@@ -23,7 +23,7 @@ TDIP is designed for the AI age — where autonomous agents act on behalf of hum
 ### 1.1 AI-Native
 TDIP registers machines and AI agents on the same terms as humans. Machine identities have capabilities, delegation scopes, reputation scores, and can inherit credentials from their human controllers. Autonomous machines can operate without a human controller.
 
-### 1.2 Seamless Onboarding
+### 1.2 Single-Step Onboarding
 Every TDIP identity is auto-provisioned with an MPC threshold wallet (default 2-of-3). No seed phrases, no manual key management. Users and agents get an identity + wallet in a single step.
 
 ### 1.3 W3C Compatible
@@ -724,19 +724,25 @@ TDIP identities can have registrations on multiple chains:
 | Method | Description |
 |--------|-------------|
 | `tenzro_registerIdentity` | Register a new TDIP identity (returns `RegistrationResult`) |
-| `tenzro_resolveIdentity` | Resolve a DID to TenzroIdentity |
+| `tenzro_registerMachineIdentity` | Register a machine identity under a controller DID |
+| `tenzro_onboardDelegatedAgent` | Register a delegated agent together with its delegation scope |
+| `tenzro_resolveIdentity` (alias `tenzro_resolveDid`) | Resolve a DID to TenzroIdentity |
 | `tenzro_resolveDidDocument` | Resolve a DID to W3C DID Document |
-| `tenzro_revokeIdentity` | Revoke an identity (cascading via `apply_remote_revocation`) |
-| `tenzro_suspendIdentity` | Temporarily suspend an identity |
-| `tenzro_reactivateIdentity` | Reactivate a suspended identity |
-| `tenzro_issueCredential` | Issue a verifiable credential |
-| `tenzro_inheritCredential` | Inherit a credential from controller to machine |
-| `tenzro_verifyCredential` | Verify a credential's proof |
-| `tenzro_updateKycTier` | Update KYC verification tier (requires KYC credential via `update_kyc_tier_with_credential`) |
-| `tenzro_getControlledMachines` | List machines under a human |
-| `tenzro_verifyTrustChain` | Verify the full trust chain (returns `TrustChainResult` with `chain_results`) |
-| `tenzro_registerUsername` | Register a username for an identity (3-20 chars, lowercase alphanumeric + underscores) |
+| `tenzro_listIdentities` | List identities known to this node |
+| `tenzro_updateIdentity` | Controller-signed identity update; dispatches on the `update.kind` field (`credential`, `service`) |
+| `tenzro_revokeDid` (alias `tenzro_revokeIdentity`) | Revoke an identity (cascading via `apply_remote_revocation`) |
+| `tenzro_forgetIdentity` | Right-to-erasure: drop the identity's off-chain record |
+| `tenzro_addCredential` (alias `tenzro_issueCredential`) | Attach a verifiable credential to an identity |
+| `tenzro_addService` | Attach a DID Document service endpoint |
+| `tenzro_addIdentityClaim` | Attach a claim to an identity |
+| `tenzro_setDelegationScope` | Set a machine's delegation scope (admin-token gated) |
+| `tenzro_listMachines` | List machines under a controller |
+| `tenzro_machineStatus` | Read a machine identity's current status |
+| `tenzro_setUsername` (alias `tenzro_registerUsername`) | Bind a username to an identity (3-20 chars, lowercase alphanumeric + underscores) |
 | `tenzro_resolveUsername` | Resolve a username to DID |
+| `tenzro_exportIdentityCar` / `tenzro_importIdentityCar` | CARv1 portable identity bundle: DID + credentials + encrypted keystore |
+| `tenzro_importIdentity` | Import an identity from an existing keypair |
+| `tenzro_verifyDidEnvelope` | Verify a DID-signed envelope (also served at `POST /verify/did-envelope`) |
 
 ---
 

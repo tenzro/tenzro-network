@@ -66,7 +66,7 @@ Continue below if you want to run a node locally.
 | RAM | 8 GB free during build | 16 GB |
 | Disk | 20 GB for `target/` | 50 GB (multi-profile + models) |
 | OS | Linux (glibc 2.31+), macOS 12+ | Ubuntu 22.04 / macOS 14+ |
-| Network | Open outbound 443 (Hugging Face, Cloud Build) | — |
+| Network | Open outbound 443 (crates.io, Hugging Face) | — |
 
 **GPU / accelerator (optional, for local inference):** enabled per cargo feature on `tenzro-node`, one backend per build — `cuda` (NVIDIA), `rocm` (AMD), `metal` (Apple), `vulkan` (any NVIDIA/AMD/Intel/ARM GPU), `sycl` (Intel GPU, needs oneAPI DPC++), `opencl`, `webgpu`, `musa` (Moore Threads), `cann` (Huawei Ascend NPU), `openvino` (Intel CPU/GPU/NPU), `zdnn` (IBM Z Telum), `blas` (accelerated CPU). A node with no backend feature runs CPU-only. See §3.2 and `docs/AI.md` §2.7 for the full matrix.
 
@@ -237,11 +237,10 @@ Ports opened on the node:
 |------|---------|-------|
 | 9000 | libp2p P2P (TCP + QUIC) | 0.0.0.0 |
 | 8545 | JSON-RPC | 0.0.0.0 (default) |
-| 8080 | Web verification API | 0.0.0.0 |
+| 8080 | Web verification API — also serves Prometheus `/metrics` | 0.0.0.0 |
 | 3001 | MCP server | 0.0.0.0 |
 | 3002 | A2A server | 0.0.0.0 |
 | 3003–3008 | Ecosystem MCP servers (Solana, Ethereum, Canton, LayerZero, Chainlink, Li.Fi) | 0.0.0.0 |
-| 9090 | Prometheus `/metrics` | 0.0.0.0 |
 
 Restrict RPC to loopback with `--rpc-addr 127.0.0.1:8545`. The default binds to all interfaces; expose only behind a reverse proxy or firewall.
 
@@ -746,7 +745,7 @@ Every downloaded artifact is verified against its recorded BLAKE3 hash before it
 watch -n 1 'free -h && nproc && ps -eo pid,rss,comm --sort=-rss | head -20'
 ```
 
-A cold build compiles 25 workspace crates plus hundreds of dependencies and may take 20+ minutes on a laptop.
+A cold build compiles 32 workspace crates plus hundreds of dependencies and may take 20+ minutes on a laptop.
 
 ### 9.14 Clean rebuild when everything is wedged
 
@@ -820,15 +819,22 @@ RUST_LOG=tenzro_node=debug,tenzro_consensus=info \
 
 ### 13.1 Prometheus metrics
 
-The node exposes Prometheus-compatible metrics on port 9090:
+The node exposes Prometheus-compatible metrics on the verification API port
+(8080), at the root path so a standard scraper finds them:
 
 ```bash
-curl http://localhost:9090/metrics
+curl http://localhost:8080/metrics
 ```
 
-Metric families include `tenzro_consensus_*` (rounds, votes, view changes), `tenzro_network_*` (peers, gossip throughput), `tenzro_rpc_*` (request rates, latencies), `tenzro_storage_*` (RocksDB stats), and `tenzro_mempool_*` (pending tx counts).
+Metric families include `tenzro_consensus_*` (current view, high-QC view,
+finalized height, view timeouts, equivocation evidence), `tenzro_network_*`
+(peers connected, gossip publish/accept/reject counts, dial rate-limit
+rejections, mesh size, address migrations), `tenzro_mempool_*` (size,
+admitted, rejected), `tenzro_workflow_*` (workflows by status, approvals,
+obligations, Canton mirrors), plus `tenzro_block_height`, `tenzro_peer_count`,
+`tenzro_inference_requests_total`, and `tenzro_settlements_total`.
 
-Wire to Prometheus by scraping `http://<node>:9090/metrics`. A reference Grafana dashboard is included in `docker compose up`.
+Wire to Prometheus by scraping `http://<node>:8080/metrics`.
 
 ### 13.2 Health checks
 
@@ -872,7 +878,7 @@ By default the JSON-RPC server binds to `0.0.0.0:8545`. Exposing RPC to the publ
 
 - Run validators on dedicated hosts, not shared developer machines.
 - Use TEE-attested hardware where possible — TEE validators receive a 1.5× multiplier on their reputation-weighted leader-selection draw and significantly stronger protection against key extraction.
-- Monitor `tenzro_consensus_equivocation_total` — any non-zero value indicates a misconfigured or compromised validator (10% slash penalty applies).
+- Monitor `tenzro_consensus_equivocation_evidence{kind="vote"}` and `{kind="proposal"}` — any non-zero value indicates a misconfigured or compromised validator (10% slash penalty applies).
 
 ### 14.4 Reporting vulnerabilities
 

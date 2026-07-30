@@ -40,12 +40,8 @@ all of them in lockstep.
 
 ## Upstreaming workflow
 
-The upstream submission is gated on explicit maintainer authorization
-(`gh pr create` crosses the boundary into shared external state). The
-process when authorized:
-
-1. **Fork** [ChainAgnostic/namespaces][] under the user's GitHub
-   account or the `tenzro` org.
+1. **Fork** [ChainAgnostic/namespaces][] under your GitHub account or
+   the `tenzro` org.
 
 2. **Copy** the `tenzro/` directory verbatim into the fork at
    `namespaces/tenzro/`:
@@ -54,11 +50,13 @@ process when authorized:
    git clone git@github.com:tenzro/namespaces.git /tmp/chain-agnostic-namespaces
    cd /tmp/chain-agnostic-namespaces
    git checkout -b add-tenzro-namespace
-   cp -R ~/AI/tenzronetwork/docs/caip2-namespace/tenzro namespaces/tenzro
+   cp -R "$TENZRO_REPO/docs/caip2-namespace/tenzro" namespaces/tenzro
    git add namespaces/tenzro
    git commit -m "Add tenzro namespace (CAIP-2/10/19/25)"
    git push -u origin add-tenzro-namespace
    ```
+
+   `$TENZRO_REPO` is your checkout of `tenzro/tenzro-network`.
 
 3. **Open the PR** against `ChainAgnostic/namespaces:main` with title
    `Add tenzro namespace (CAIP-2/10/19/25)` and a body summarizing:

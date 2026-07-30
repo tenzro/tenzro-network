@@ -4,7 +4,7 @@ Unified identity protocol for humans and machines on the Tenzro Network.
 
 ## Overview
 
-**tenzro-identity** implements the **Tenzro Decentralized Identity Protocol (TDIP)**, providing a comprehensive identity system in which humans and AI agents are represented by the same identity type and hold the same rights to act. The crate supports W3C DID Documents, verifiable credentials with recursive trust chain verification, fine-grained delegation scopes, cascading revocation, and automatic FROST-Ed25519 threshold wallet provisioning for every identity.
+**tenzro-identity** implements the **Tenzro Decentralized Identity Protocol (TDIP)**, providing an identity system in which humans and AI agents are represented by the same identity type and hold the same rights to act. The crate supports W3C DID Documents, verifiable credentials with recursive trust chain verification, fine-grained delegation scopes, cascading revocation, and automatic FROST-Ed25519 threshold wallet provisioning for every identity.
 
 The protocol recognises **three identity classes** under the `did:tenzro:` namespace:
 
@@ -30,7 +30,7 @@ The protocol recognises **three identity classes** under the `did:tenzro:` names
 
 ## Features
 
-- **10 modules:** credential, delegation, did, document, error, identity, registry, verification, w3c, wallet_binding
+- **22 modules:** car, credential, delegation, derivation, did, document, envelope, erc7683, erc8004, erc8004_daml, erc8004_svm, error, gossip, identity, iso20022, ivms101, keri, kya, registry, verification, w3c, wallet_binding
 - **W3C Standards:** Full DID Core 1.0 and Verifiable Credentials Data Model v2.0 support
 - **Unified Protocol:** Single `TenzroIdentity` type covering all three identity classes (human / delegated agent / autonomous agent)
 - **Delegation Enforcement:** Fine-grained permission scopes with `enforce_operation()` returning typed `DelegationViolation` errors
@@ -47,7 +47,7 @@ The protocol recognises **three identity classes** under the `did:tenzro:` names
   - `erc8004` — **EVM** adapter: calldata encoders for `register()` / `register(string)` / `register(string,(string,bytes)[])` / `getAgent` / `submitFeedback` / `validationRequest` / `validationResponse` (full v0.6+ surface) plus ABI decoders. Selectors are byte-identical to the Tenzro VM precompiles `0x101a` / `0x101b` / `0x101c`, so the same calldata works against either the native registry or an Ethereum mirror. Canonical OpenZeppelin-ERC721 upgradeable proxies deployed at genesis at `addresses::{IDENTITY_REGISTRY, REPUTATION_REGISTRY, VALIDATION_REGISTRY}`.
   - `erc8004_svm` — **SVM** adapter: emits Anchor-formatted instruction calldata via the `OnChainAgentSvmRegistry` trait, targeting the vendored QuantuLabs Anchor program (`https://github.com/QuantuLabs/erc-8004-svm`). No `solana-sdk` dep is pulled into this crate by design — the operator-side mirror buffers payloads and drains to a Solana RPC.
   - `erc8004_daml` — **DAML** adapter: emits Canton Ledger JSON API v2 `submit-and-wait` commands as `serde_json::Value` via the `OnChainAgentDamlRegistry` trait, targeting the Tenzro-authored Canton package at `vendor/erc8004-daml/daml/Tenzro/Erc8004/{Identity,Reputation,Validation}.daml`. No `tonic` or Canton-client deps in this crate by design. Two-party admin+controller signatory model preserves "single canonical state" without a `msg.sender` equivalent. Package id (= SHA-256 of compiled `.dar`) is supplied at registry construction via `DamlPackageIds`.
-- **85 Tests:** Comprehensive unit and integration tests covering all features
+- **Tests:** Unit and integration tests covering all features
 
 ## Usage
 
@@ -134,9 +134,4 @@ All features confirmed (85 passing tests):
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](../../LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+Apache-2.0.

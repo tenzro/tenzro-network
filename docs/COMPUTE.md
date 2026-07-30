@@ -112,7 +112,7 @@ Before a rental streams, the renter funds a prepaid balance: TNZO is locked out 
 
 - `tenzro_computeBookRental` — book a rental for a term
 - `tenzro_computeSettleEpoch` — settle one epoch with an availability proof
-- `tenzro_computeGetRental` — fetch a rental's state
+- `tenzro_computeRental` — fetch a rental's state
 - `tenzro_computeSetPricing` — switch between fixed and network-dynamic pricing
 - `tenzro_computeStatus` — whether this node is a compute provider, its effective rate, and its active rentals
 - `tenzro_prepaidDeposit` / `tenzro_prepaidWithdraw` / `tenzro_prepaidBalance` — fund, refund, and read the prepaid streaming balance

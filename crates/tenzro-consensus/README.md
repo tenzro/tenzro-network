@@ -222,7 +222,7 @@ For *n* = 4 (current testnet, single-zone):
 - QC verification (3 hybrid checks): ~0.84 ms
 - Observed: ~10 blocks/sec empty-block finalization
 
-Real TPS is execution-layer-dependent and orthogonal to consensus throughput. Production HotStuff-2 deployments at *n* ≈ 150 sustain in the range of 5,000–12,000 TPS depending on execution layer and block size; we expect Tenzro to land in the same operating range when deployed at comparable validator counts.
+Real TPS is execution-layer-dependent and orthogonal to consensus throughput. Production HotStuff-2 deployments at *n* ≈ 150 sustain in the range of 5,000–12,000 TPS depending on execution layer and block size; Tenzro is expected to fall in the same operating range when deployed at comparable validator counts.
 
 ## Safety and liveness
 
@@ -234,9 +234,9 @@ Real TPS is execution-layer-dependent and orthogonal to consensus throughput. Pr
 
 ## Test coverage
 
-39 unit tests covering:
+Unit tests cover:
 
-- Reputation weight computation (16 tests)
+- Reputation weight computation
 - Anti-grinding seed determinism and domain separation
 - Window edge cases (genesis, post-rollover)
 - Stake-weighted draw distribution

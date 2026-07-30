@@ -43,7 +43,7 @@ The VM layer is designed with a pluggable executor architecture that implements 
 
 - **Triple VM Support**: Execute EVM, SVM, and DAML transactions on the same blockchain
 - **Automatic Routing**: Transactions are automatically routed to the correct VM based on address format
-- **Gas Accounting**: Comprehensive gas metering and pricing
+- **Gas Accounting**: Gas metering and pricing
 - **Standard EVM Precompiles (0x01-0x09)**: ecRecover, SHA-256, RIPEMD-160, Identity, ModExp, EC_ADD, EC_MUL, EC_PAIRING, BLAKE2F
 - **BLS12-381 Precompiles (0x0a-0x10, EIP-2537)**: G1ADD, G1MSM, G2ADD, G2MSM, PAIRING_CHECK, MAP_FP_TO_G1, MAP_FP2_TO_G2 using blst
 - **EIP-7951 P256VERIFY (0x100)**: secp256r1 ECDSA signature verification (Fusaka Dec 2025) — bit-exact compatibility with FIDO2 / WebAuthn / Apple Secure Enclave / Android Keystore P-256 signatures
@@ -298,7 +298,7 @@ Run with logging:
 RUST_LOG=tenzro_vm=debug cargo test -p tenzro-vm
 ```
 
-Test coverage: 286 tests passing.
+Unit tests cover the EVM, SVM, DAML, precompile, fee-market, and account-abstraction paths.
 
 ## Performance Considerations
 
@@ -337,4 +337,4 @@ Test coverage: 286 tests passing.
 
 ## License
 
-Apache-2.0 OR MIT
+Apache-2.0.

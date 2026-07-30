@@ -51,7 +51,7 @@ Workflows are dispatched by the Native VM through privileged selectors `0x010000
 
 ## Receipts
 
-Every workflow event emits a `WorkflowReceipt` linked to the previous receipt by hash (anchored at `Hash::default()`). Receipts project to `ReceiptEnvelope` with per-kind defaults — most workflow events are `Inline`; high-volume kinds may be `OffloadedDA` to a configured backend (`InlineFallbackBackend` is the safe default until EigenDA / Celestia / Avail adapters land behind feature flags).
+Every workflow event emits a `WorkflowReceipt` linked to the previous receipt by hash (anchored at `Hash::default()`). Receipts project to `ReceiptEnvelope` with per-kind defaults — most workflow events are `Inline`; high-volume kinds may be `OffloadedDA` to a configured backend (`InlineFallbackBackend` is the safe default until EigenDA / Celestia / Avail adapters are enabled behind feature flags).
 
 ## Canton receipt mirror
 

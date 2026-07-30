@@ -87,6 +87,7 @@ let commitment = compute_zk_commitment(
 
 - Plonky3 STARKs over KoalaBear are sound under collision-resistant hashing alone — no trusted setup, no pairing assumptions
 - AIR constraint correctness is critical — bugs in the AIR translate to soundness gaps. Constraint sets should be reviewed against the soundness analysis on every change
+- `inference`, `identity`, and `pq-qc` carry `soundness_class: "advisory"`. Each binds a structure — digest equality, booleanity, a popcount, a bitmap-to-verification coupling — while the value it stands for is computed off-circuit and written into the witness. `pq-qc` calls the native ML-DSA-65 verifier per signer rather than evaluating the lattice verification equation in constraints, so a prover that writes a passing bit for a signature that does not verify still produces a structurally valid STARK. A relying party that needs the post-quantum leg to be value-binding must re-run the native verifications out of band
 - TEE attestations must be verified against vendor roots of trust before trusting any TEE-bound proof
 - Always verify proof freshness for time-sensitive applications
 - Plonky3 STARK proving is currently CPU-only; GPU/MSM acceleration is a mainnet optimization
@@ -101,7 +102,7 @@ let commitment = compute_zk_commitment(
 
 ## Test Coverage
 
-40 unit tests + 5 doc tests covering:
+Unit tests and doc tests cover:
 - Plonky3 STARK proof generation and verification across all four AIRs
 - `verify_proof_envelope` dispatch (correct circuit, unknown circuit, malformed bytes)
 - Public-input KoalaBear field-chunk encode/decode round-trip
@@ -120,9 +121,4 @@ Known limitations:
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE](../../LICENSE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT License (http://opensource.org/licenses/MIT)
-
-at your option.
+Apache-2.0.

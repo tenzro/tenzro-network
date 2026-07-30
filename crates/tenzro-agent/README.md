@@ -142,7 +142,7 @@ The `insert_hydrated()` method on `AgentIdentityManager` and `AgentLifecycle` by
 
 ## Testing
 
-The crate includes 114 unit tests covering agent lifecycle, messaging, capabilities, autonomy, swarms, and persistence.
+Unit tests cover agent lifecycle, messaging, capabilities, autonomy, swarms, and persistence.
 
 ```bash
 cargo test -p tenzro-agent
@@ -150,9 +150,4 @@ cargo test -p tenzro-agent
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE](../../LICENSE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](../../LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+Apache-2.0.

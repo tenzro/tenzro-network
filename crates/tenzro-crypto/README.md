@@ -4,7 +4,7 @@ Cryptographic primitives for the Tenzro Network.
 
 ## Overview
 
-`tenzro-crypto` provides a comprehensive cryptographic toolkit for the Tenzro Network, including key generation, digital signatures, hashing, symmetric and asymmetric encryption, FROST-Ed25519 threshold signatures (RFC 9591), BLS12-381 signature aggregation, and verifiable random functions (VRF).
+`tenzro-crypto` provides the cryptographic toolkit for the Tenzro Network, including key generation, digital signatures, hashing, symmetric and asymmetric encryption, FROST-Ed25519 threshold signatures (RFC 9591), BLS12-381 signature aggregation, and verifiable random functions (VRF).
 
 ## Modules
 
@@ -175,7 +175,7 @@ assert_eq!(output, verified_output);
 
 ## Test Coverage
 
-68 unit tests + 9 doc tests covering:
+Unit tests and doc tests cover:
 - Key generation and address derivation
 - Signature creation and verification
 - Hash functions (SHA-256, Keccak-256)
@@ -186,9 +186,4 @@ assert_eq!(output, verified_output);
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE](../../LICENSE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT License (http://opensource.org/licenses/MIT)
-
-at your option.
+Apache-2.0.

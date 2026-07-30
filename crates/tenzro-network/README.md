@@ -8,15 +8,25 @@ The `tenzro-network` crate provides the networking infrastructure for **Tenzro N
 
 ## Modules
 
-**8 modules:** behaviour, config, discovery, error, gossip, message, peer_manager, service, transport
+**19 modules:** behaviour, block_sync_proto, cluster_tunnel_proto, config, consensus_direct_proto, da_committee_relay, db_replicate_proto, discovery, error, gossip, message, metrics, mpc_relay, peer_binding, peer_manager, peer_status, reachability, service, transport
 
-- `behaviour` - TenzroBehaviour combining Gossipsub, Kademlia, Identify, Ping
+- `behaviour` - TenzroBehaviour combining Gossipsub, Kademlia, Identify, Ping, the request/response sub-protocols, and the NAT-traversal set
+- `block_sync_proto` - Request/response state sync, one enum-multiplexed codec carrying every sync request kind over a single protocol id
+- `cluster_tunnel_proto` - Relays loopback bytes of a cluster-local inference RPC server over the peer-ID-authenticated Noise/TLS transport, so a server that is unauthenticated on its own loopback port is never exposed on an open network
 - `config` - NetworkConfig for local/testnet/mainnet
+- `consensus_direct_proto` - Validator-only direct overlay for `Vote` / `Proposal` / `Timeout` / `NoEndorsement`, avoiding gossip fan-out amplification on the latency-bound path; the gossipsub topic stays subscribable for observers
+- `da_committee_relay` - `StoreSliver` / `FetchSliver` between data-availability committee members
+- `db_replicate_proto` - `ApplyWrite` with ack counting, backing the Quorum and All write-consistency levels of the database layer
 - `discovery` - Peer discovery via DHT and mDNS, BootstrapConfig
 - `error` - NetworkError and Result types
 - `gossip` - GossipTopics, MessageDeduplicator, MessageValidation, TopicSubscriptions
 - `message` - NetworkMessage, MessagePayload with 11 message types
+- `metrics` - Counters and gauges for connections, gossip traffic, and per-protocol request/response volume
+- `mpc_relay` - Point-to-point MPC round delivery for threshold signing and DKG
+- `peer_binding` - Signed binding of a libp2p PeerId to a validator identity, carried in the Identify `agent_version` field; the transport key and the consensus signing key are distinct, so the binding is what lets a receiver attribute a connection to a staked validator
 - `peer_manager` - PeerManager, ValidatorRegistry, VALIDATOR_ONLY_TOPICS, reputation scoring
+- `peer_status` - Tracks peer-advertised block heights from `tenzro/status`, feeding the `eth_syncing` / `tenzro_syncing` answers
+- `reachability` - Classifies the local node's own reachability from AutoNAT probes and observed addresses
 - `service` - NetworkService trait, TenzroNetworkService implementation
 - `transport` - TCP and QUIC transport with Noise encryption
 
@@ -30,6 +40,8 @@ The `tenzro-network` crate provides the networking infrastructure for **Tenzro N
 - **Message Validation**: Automatic validation with timestamp checks, size limits, and age verification
 - **Multi-Transport**: TCP and QUIC support with Noise encryption
 - **Validator Authentication**: ValidatorRegistry trait with topic-based authorization (consensus/block/attestation topics)
+- **NAT traversal**: Circuit-Relay v2, AutoNAT v2, and DCUtR hole-punching composed into `TenzroBehaviour`. A node with a confirmed public address runs the relay and AutoNAT server halves so peers behind home, mobile, or corporate NAT can use it as a relay hop and a dial-back prober; other roles run the client halves, which discover external reachability, hole-punch with DCUtR, and fall back to `/p2p-circuit` when a direct dial fails. Every sub-behaviour is wrapped in `Toggle` so a disabled half is a no-op rather than a separate behaviour type.
+- **Request/response sub-protocols**: Block sync, consensus-direct, cluster tunnel, DA committee relay, database replication, and MPC relay each run as their own libp2p `request_response` protocol alongside gossip.
 
 ## Architecture
 
@@ -136,18 +148,27 @@ network.ban_peer(&peer_id).await?;
 
 ## Gossipsub Topics
 
-The network uses different topics for different message types (8 topics):
+The network uses different topics for different message types (17 topics):
 
 | Topic | Purpose |
 |-------|---------|
 | `tenzro/blocks` | Block propagation |
 | `tenzro/transactions` | Transaction broadcasting |
 | `tenzro/consensus` | Consensus messages (proposals, votes) - **validator-only** |
+| `tenzro/batches` | Batch availability certificates - **validator-only** |
 | `tenzro/attestations` | TEE attestation reports |
 | `tenzro/models` | Model registration announcements — Ed25519-signed, verified on ingest |
 | `tenzro/inference` | Inference requests and responses |
 | `tenzro/status` | Node status and health checks |
 | `tenzro/agents` | Agent-to-agent messages |
+| `tenzro/providers` | Provider announcements |
+| `tenzro/blobs` | Content-addressed blob availability announcements |
+| `tenzro/cortex` | Cortex worker advertisements |
+| `tenzro/training` | Training run events |
+| `tenzro/training/syncer` | Cross-syncer round-state sync |
+| `tenzro/seed-agents` | Seed agent lifecycle envelopes |
+| `tenzro/databases` | Database descriptor announcements |
+| `tenzro/identity` | Identity and revocation propagation |
 
 For testnet and mainnet, topics are prefixed:
 - Testnet: `tenzro/testnet/blocks/1.0.0`
@@ -229,7 +250,7 @@ The network supports multiple peer discovery mechanisms:
 
 - Well-known nodes for initial connections
 - Configured per network (testnet/mainnet)
-- Used to bootstrap the DHT
+- Seed the DHT routing table on start
 
 ## Reachability Tiers
 
@@ -297,7 +318,7 @@ Validators are authenticated for consensus-critical topics via `ValidatorRegistr
 
 ## Test Coverage
 
-3 unit tests + 1 doc test covering:
+Unit tests and doc tests cover:
 - Config validation
 - Message serialization/deserialization
 - Network service creation
@@ -315,9 +336,6 @@ cargo run --example basic_network
 
 ## License
 
-Licensed under either of:
-
-- MIT license ([LICENSE](../../LICENSE) or http://opensource.org/licenses/MIT)
-- Apache License, Version 2.0 ([LICENSE](../../LICENSE) or http://www.apache.org/licenses/LICENSE-2.0)
+Apache-2.0.
 
 at your option.

@@ -74,12 +74,12 @@ The `tenzro-bridge` crate provides a unified interface for cross-chain interoper
 - **Type**: General Message Passing
 - **Security**: Axelar validator network
 - **Patterns**: `callContract(destinationChain, destinationContractAddress, payload)`; Gas Service pre-pay. Payload-hash acts as the GMP correlation id
-- **Chains**: 30+ canonical Axelar chains including Cosmos (Osmosis, Cosmos Hub, Juno, Neutron, Injective, Kujira, Crescent, Evmos, Kava), Move (Aptos, Sui), Stellar, XRP Ledger, Hyperliquid, Filecoin EVM, plus the standard EVM L1/L2 set
+- **Chains**: 30+ canonical Axelar chains including Cosmos (Osmosis, Cosmos Hub, Juno, Neutron, Injective, Kujira, Crescent, Evmos, Kava), Move (Aptos, Sui), Stellar, XRP Ledger, Hyperliquid, Filecoin EVM, plus the standard EVM chain set
 - **Best for**: Cosmos / Move / Stellar reach that the other adapters don't cover
 
 ### Babylon Bitcoin Staking
 - **Type**: Bitcoin-secured finality-providers protocol (not a token bridge)
-- **Security**: BTC delegations timelocked on Bitcoin L1; equivocation slashed via EOTS (Extractable One-Time Signatures)
+- **Security**: BTC delegations timelocked on Bitcoin; equivocation slashed via EOTS (Extractable One-Time Signatures)
 - **Patterns**: `register_finality_provider(validator_address, btc_pk, commission_bps)`, `BtcDelegation` tracking, `submit_finality_signature` (EOTS over Tenzro block hash), `total_stake_for_provider`
 - **Networks**: Babylon Mainnet (`bbn-1`), Testnet (`bbn-test-5`), Devnet
 - **Best for**: Tenzro validators that want BTC economic security alongside TNZO stake
@@ -115,7 +115,7 @@ The `tenzro-bridge` crate provides a unified interface for cross-chain interoper
 - **Signature Verification**: Real cryptographic verification via `tenzro_crypto::signatures::verify()`
 - **Replay Protection**: Nonce-based message replay prevention
 - **Circuit Breaker**: Automatic failure detection and adapter disabling
-- **Type Safety**: Strongly-typed Rust implementation with comprehensive error handling
+- **Type Safety**: Strongly-typed Rust implementation with explicit error handling
 - **Async/Await**: Full async support for non-blocking operations
 
 ## Usage
@@ -334,7 +334,7 @@ All fee queries fall back to static estimates if the live RPC call fails.
 
 ## Error Handling
 
-The crate provides comprehensive error types:
+The crate provides these error types:
 
 ```rust
 pub enum BridgeError {
@@ -390,4 +390,4 @@ Components:
 
 ## License
 
-Apache-2.0 OR MIT
+Apache-2.0.

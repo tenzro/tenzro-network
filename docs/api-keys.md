@@ -146,7 +146,7 @@ The mutating methods the `free` tier refuses are the ones that change
 upstream state:
 
 - Canton ledger writes — `tenzro_submitDamlCommand`,
-  `tenzro_canton_submitCommand`, `tenzro_canton_submitWithMandate`,
+  `tenzro_canton_submitWithMandate`,
   `tenzro_allocateParty`, `tenzro_canton_uploadDar`,
   `tenzro_canton_grantUserRights`, `tenzro_canton_createIdp`,
   `tenzro_canton_deleteIdp`, `tenzro_canton_watchParty`,

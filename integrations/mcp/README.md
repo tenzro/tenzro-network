@@ -8,9 +8,9 @@ The official [Model Context Protocol](https://modelcontextprotocol.io) server fo
 
 ## Overview
 
-The Tenzro MCP server is an installable Python package that exposes blockchain and multi-modal AI tools across 19+ categories to any MCP-compatible AI agent (Claude, GPT, Cursor, Windsurf, etc.) via **stdio** or **Streamable HTTP** transport. Install with `pip install tenzro-mcp-server` and run locally, or connect directly to the live testnet endpoint. Agents can query balances, send transactions, mint NFTs, bridge tokens, check compliance, subscribe to events, run timeseries forecasts, embed images and text, segment and detect objects, transcribe audio, and interact with AI models — all through the standard MCP tool interface.
+The Tenzro MCP server is an installable Python package that exposes 360 blockchain and multi-modal AI tools to any MCP-compatible AI agent (Claude, GPT, Cursor, Windsurf, etc.) via **stdio** or **Streamable HTTP** transport. Install with `pip install tenzro-mcp-server` and run locally, or connect directly to the live testnet endpoint. Agents can query balances, send transactions, mint NFTs, bridge tokens, check compliance, subscribe to events, run timeseries forecasts, embed images and text, segment and detect objects, transcribe audio, and interact with AI models — all through the standard MCP tool interface.
 
-The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **500+ tools** (Tenzro Ledger + multi-modal AI + distributed MoE serving + AgentBond/insurance + agent memory + app hosting) and is the authoritative tool inventory; this Python distributable exposes a comparable subset over stdio + Streamable HTTP.
+The companion Tenzro Rust node MCP server (`crates/tenzro-node/src/mcp/server.rs`) registers **526 tools** (Tenzro Ledger + multi-modal AI + distributed MoE serving + ERC-8004 calldata encoders + AgentBond/insurance + agent memory + app hosting) and is the authoritative tool inventory; this Python distributable exposes a subset over stdio + Streamable HTTP.
 
 **Testnet endpoint:** `https://mcp.tenzro.xyz/mcp`
 **Local:** `http://localhost:3001/mcp`
@@ -117,7 +117,7 @@ The Tenzro Agent Access Protocol (AAP) layers seven `aap_*` claims on top of OAu
 - `onboard_autonomous_agent` — Issue a fully autonomous agent identity backed by a TNZO bond.
 - `refresh_token` — Exchange a refresh token for a fresh access token (refresh tokens are not rotated in V1).
 - `link_wallet_for_auth` — Mint a fresh access + refresh token pair against an existing FROST-Ed25519 threshold wallet.
-- `revoke_jwt` / `revoke_did` — Revoke a single JWT by `jti` or cascade-invalidate every JWT minted under a DID.
+- `revoke_did` — Cascade-invalidate every JWT minted under a DID and mark the identity `Revoked`.
 - `oauth_discovery` — RFC 8414 Authorization Server Metadata discovery document.
 - `exchange_token` — RFC 8693 OAuth 2.0 Token Exchange for delegated/impersonation flows.
 - `introspect_token` — RFC 7662 OAuth 2.0 Token Introspection.
@@ -126,31 +126,40 @@ Pass `dpop_jkt` (RFC 7638 thumbprint of the holder's Ed25519 public key) to bind
 
 The RAR types the authorization server accepts are `transfer`, `create_escrow`, `discharge_escrow`, `inference`, `stake`, `vote`, `contract`, `register_identity`, and `resource_invocation`. The last of these is how a controller caps what its agent may spend on a marketplace resource: it takes a `max_amount_per_call` ceiling and optionally narrows to one resource `class` and a list of `allowed_resource_ids`. A controller that instead lists `resource.invoke` in the AAP oversight claim's `requires_human_approval_for` parks every paid invocation for review.
 
-### Wallet & Balance (6 tools)
+### Wallet & Balance (7 tools)
 
 - `get_balance` — Get TNZO balance in wei
 - `create_wallet` — Provision a chain-agnostic 2-of-3 FROST-Ed25519 (RFC 9591) threshold wallet (no seed phrase). Tenzro wallets are not per-chain — a single wallet projects into EVM, SVM, and Canton via the pointer-token model, so there is no `chain` parameter. Use `cross_vm_transfer` / `wrap_tnzo` for VM-specific operations and the bridge tools (`bridge_tokens`, deBridge, Wormhole, Li.Fi) for sends to external chains.
 - `send_transaction` — Send TNZO transfer via server-side `tenzro_signAndSendTransaction` (live nonce + gas-price lookup; accepts `value` or `amount` alias; rejects self-sends with `cannot transfer to self`)
+- `send_self_custody_transaction` — Submit a transaction the caller signed itself. The node never sees the private key; it verifies the supplied signature against the transaction hash and broadcasts.
 - `request_faucet` — Request 100 testnet TNZO (24h cooldown)
 - `token_balance` — Get TNZO balance via token subsystem
 - `total_supply` — Get total TNZO supply
 
-### Node & Blocks (4 tools)
+### Node & Blocks (10 tools)
 
 - `get_node_status` — Node health, block height, peers, uptime, role
 - `get_block` — Get block by height with transactions
 - `get_block_range` — Batch-fetch a contiguous range of blocks for catch-up sync (max 256/call; returns `nextHeight` + `moreAvailable` for pagination)
-- `get_transaction` — Look up transaction by hash. Resolves from finalized storage first, then falls back to the consensus mempool: `status` is `"pending"` while in-mempool and `"finalized"` once block-included, so callers polling immediately after broadcast can distinguish "not yet finalized" from "unknown hash"
+- `get_transaction_receipt` — Look up a transaction receipt by hash: sender, recipient, status, gas used, logs
+- `get_gas_price` — Current effective gas price in wei (base fee + suggested tip)
+- `get_max_priority_fee_per_gas` — Suggested EIP-1559 priority fee in wei
+- `get_fee_history` — Base-fee history and gas-usage ratios over the last N blocks
+- `get_price` — Read one or more asset prices from the node's price oracle
+- `list_mandates` — List the persisted AP2 mandates authorized by a controller DID
+- `get_svm_cross_vm_program_info` — Canonical Tenzro Cross-VM SVM-native program id and instruction layout
 
-### Identity (5 tools)
+### Identity (7 tools)
 
 - `register_identity` — Register human or machine DID via TDIP
 - `resolve_did` — Resolve DID to identity info and delegation scope
+- `revoke_did` — Revoke a DID and cascade the revocation to every JWT minted under it
+- `forget_identity` — GDPR Article 17 right-to-erasure. Hard-deletes a `Revoked` DID from the registry and persistent storage. The DID must already be in `Revoked` status; call `revoke_did` first and allow the cascading broadcaster to propagate.
 - `set_delegation_scope` — Set spending limits and allowed operations for machine DID
 - `set_username` — Set human-readable username for a DID
 - `resolve_username` — Resolve username to DID
 
-### Payments (8 tools)
+### Payments (11 tools)
 
 - `create_payment_challenge` — Create MPP, x402, or native payment challenge
 - `verify_payment` — Verify payment credential and settle on-chain
@@ -182,31 +191,7 @@ A discovery catalog over the x402 payment surface: sellers register paid resourc
 - `ap2_validate_mandate_pair` — Nested-ceiling validation of a checkout → payment mandate pair: AP2 CheckoutMandate constraints + TDIP `DelegationScope` (`enforce_operation`) + runtime `SpendingPolicy` (`SpendingPolicySnapshot::check`) + on-chain escrow balance when the pair carries an `escrow_id` + Stripe SPT `usage_limits` when it carries an `spt_grant_id`. An identifier that fails to resolve is a refusal, not a skip.
 - `ap2_protocol_info` — AP2 protocol metadata and supported features
 
-### Stripe SPT (SharedPaymentToken)
-
-- `spt_issue` — Issue a SharedPaymentToken bound to a principal/agent DID pair. The node-side `SptCeilingResolver` cross-checks the requested cap against the principal's `DelegationScope` and runtime `SpendingPolicy` before signing.
-- `spt_verify` — Verify SPT signature, principal/agent DID activity, and remaining cap.
-
-### ERC-8004 v0.6+ Trustless Agents Registry (cross-VM trio)
-
-IdentityRegistry: `erc8004_encode_register` (no-arg overload), `erc8004_encode_register_with_uri` (`register(string)` overload), `erc8004_encode_register_with_metadata` (`register(string,(string,bytes)[])` overload), `erc8004_encode_get_agent`, `erc8004_decode_get_agent`, `erc8004_encode_set_agent_uri`, `erc8004_encode_set_agent_wallet`, `erc8004_encode_set_metadata`, `erc8004_encode_get_metadata`, `erc8004_decode_get_metadata`, `erc8004_encode_get_agent_uri`, `erc8004_encode_get_agent_wallet`.
-
-ReputationRegistry: `erc8004_encode_feedback`, `erc8004_encode_get_feedback`, `erc8004_encode_get_feedback_count`, `erc8004_encode_revoke_feedback`, `erc8004_encode_is_feedback_revoked`, `erc8004_encode_append_response`, `erc8004_encode_get_feedback_responses`.
-
-ValidationRegistry: `erc8004_encode_validation_request`, `erc8004_encode_validation_response`, `erc8004_encode_get_validation`.
-
-The MCP encoder tools above produce **EVM** calldata, byte-identical to the native EVM precompiles `0x101a` / `0x101b` / `0x101c`. They target the canonical OpenZeppelin-ERC721 upgradeable proxies deployed at genesis at `tenzro_identity::erc8004::addresses::{IDENTITY_REGISTRY, REPUTATION_REGISTRY, VALIDATION_REGISTRY}`. Encoder tools accept `agent_id` as a JSON number, decimal string, or 0x-prefixed hex word (rejected if it exceeds `u64::MAX`).
-
-The same registration semantics are mirrored to two non-EVM backends from a single TDIP `register_machine_with_fee` write — neither path is callable via MCP encoder tools (calldata is VM-native):
-
-- **SVM mirror**: QuantuLabs Anchor program (`https://github.com/QuantuLabs/erc-8004-svm`). `tenzro-identity::erc8004_svm` builds Anchor-formatted instruction calldata; the node mirror buffers payloads under `erc8004_svm_pending_tx:` in RocksDB and indexes DID → 32-byte Pubkey under `erc8004_svm_did_index:`. Operator drains the queue to a Solana RPC.
-- **DAML mirror**: Tenzro-authored Canton package at `vendor/erc8004-daml/daml/Tenzro/Erc8004/{Identity,Reputation,Validation}.daml`. `tenzro-identity::erc8004_daml` emits Canton Ledger JSON API v2 `submit-and-wait` commands as `serde_json::Value`; the node mirror buffers payloads under `erc8004_daml_pending_tx:` and indexes DID → 8-byte LE u64 agentId under `erc8004_daml_did_index:`. Opt-in: wired only when `NodeConfig.erc8004_daml` is present (package id = SHA-256 of compiled `.dar`, supplied by operator).
-
-`agentId` is server-allocated by each backing registry (sequential `uint256` on EVM, 32-byte Pubkey on SVM, 8-byte LE u64 on DAML) — never derivable client-side.
-
-### Identity (right-to-erasure)
-
-- `forget_identity` — GDPR Article 17 right-to-erasure. Hard-deletes a `Revoked` DID from the registry and persistent storage. The DID must already be in `Revoked` status; call `revoke_identity` first and allow the cascading broadcaster to propagate.
+The ERC-8004 Trustless Agents calldata encoders (`erc8004_encode_*` / `erc8004_decode_*` for the Identity, Reputation, and Validation registries) are registered on the Rust node MCP server, not on this Python package. Agent registration itself happens through TDIP: a single `register_machine_with_fee` write mirrors into the EVM registry proxies and, when the operator has wired them, into the SVM and DAML backends. `agentId` is server-allocated by each backing registry (sequential `uint256` on EVM, 32-byte Pubkey on SVM, 8-byte LE u64 on DAML) — never derivable client-side.
 
 ### AI Models (16 tools)
 
@@ -251,6 +236,13 @@ Passing `catalog_id` to a loader inherits the structural parameters from the cat
 - `list_proposals` — List active governance proposals
 - `vote_on_proposal` — Vote on a proposal (for/against/abstain)
 - `get_voting_power` — Get voting power based on staked TNZO
+
+### Validator Registry (4 tools)
+
+- `get_validator_state` — Read one validator's registry record
+- `list_validators` — List every validator known to the registry
+- `list_active_validators` — List the validators in the active set for the current epoch
+- `rotate_validator_key` — Rotate a validator's signing key without leaving the active set
 
 ### Bridge (5 tools)
 
@@ -357,7 +349,6 @@ Reads:
 - `canton_fee_schedule` — latest `Splice.AmuletRules:AmuletRules` active contract
 - `canton_connected_synchronizers` — `GET /v2/state/connected-synchronizers` — currently-subscribed synchronizers with permission classes
 - `canton_get_transaction` — `GET /v2/updates/transaction-tree-by-id/{hex}?requestingParties=...`
-- `canton_get_events` — events for a specific contract id
 
 Writes:
 - `canton_submit_command` — DAML `create` / `exercise` via the JSON Ledger API submit-and-wait path. When the presenting API key carries a bound `canton_user_id`, the node forwards `actAs` as that user's `primaryParty`, scoping the submission to the tenant. Canton's AuthService enforces per-user CanActAs rights server-side.
@@ -370,10 +361,11 @@ Per-tenant analytics:
 - `canton_get_my_analytics` — Subject self-read: per-tenant call counters for the API key configured on this client. Returns `{key_id, canton_user_id, calls_total, errors_total, calls_by_method, errors_by_method, first_seen_at, last_called_at}`.
 - `canton_list_api_key_analytics` — Operator admin-read: every tenant's counters (admin-token-gated). Optional `key_id` filter.
 
-### Verification (2 tools)
+Node-scoped equivalents that go through the node's own Canton adapter rather than the tenant-scoped path: `list_canton_domains`, `list_daml_contracts`, `submit_daml_create`, `submit_daml_exercise`.
+
+### Verification (1 tool)
 
 - `verify_zk_proof` — Verify Plonky3 STARK proof over the KoalaBear field; requires `circuit_id` ∈ {inference, settlement, identity} and 4-byte LE field-chunk public inputs
-- `get_provenance` — Resolve the cached synthetic-content provenance manifest (EU AI Act Art. 50(2)) for AI-generated output by its 32-byte hex `content_hash`; errors when no manifest is cached for that hash
 
 ### Tenzro Train (1 tool)
 
@@ -471,12 +463,6 @@ Per-tenant analytics:
 - `chat_stream` — Stream chat completion token by token
 - `subscribe_events_stream` — Subscribe to events via streaming
 
-### AgentBond & Insurance (3 tools)
-
-- `post_agent_bond` — Bond TNZO collateral against an autonomous agent DID (Spec 9)
-- `get_agent_bond` — Look up the current bond and any open insurance claims
-- `file_insurance_claim` — File a claim against an agent's bond
-
 ### deBridge Cross-Chain (5 tools)
 
 - `debridge_search_tokens` — Search tokens on deBridge DLN
@@ -499,32 +485,78 @@ Per-tenant analytics:
 - `get_reserve` — Read latest reserve attestation
 - `attested_mint` — Token issuance gated by a fresh reserve attestation
 
-### Multi-party workflows
+### Multi-party workflows (8 tools)
 
 - `workflow_open` — Declare a saga workflow with ordered steps
 - `workflow_step_execute` — Transition step Pending → Executing (with optional per-step escrow)
 - `workflow_step_verify` — Verify a step's outcome
 - `workflow_step_compensate` — Roll back a step
+- `workflow_set_step_deadline` — Set or clear a step's execution deadline
 - `workflow_finalize` — Emit on-chain WorkflowReceipt
-- `workflow_mirror_to_canton` — Mirror to a Canton synchronizer for DAML reconciliation
+- `get_workflow_saga` — Read the saga state: steps, statuses, escrows, participants
 - `verify_did_envelope` — Verify a DID-signed step payload
-- `get_workflow`, `get_workflow_saga`, `get_workflow_lifecycle`, `get_workflow_receipt`, `get_workflow_operational_metrics`
-- `list_workflows_by_creator`, `list_workflows_by_participant`, `list_workflows_by_status`, `list_workflow_receipts`
 
 ### EVM-side primitives (EIP-7702 / Permit2 / Secure-Mint)
 
-- `install_7702_delegation`, `get_7702_delegation`, `revoke_7702_delegation` — Pectra Type-4 authority → target delegation registry
-- `permit2_domain_separator`, `permit2_digest`, `permit2_verify_and_consume`, `permit2_nonce_used` — Permit2 SignatureTransfer (optional witness for ERC-7683 origin opens)
+- `eip7702_signing_hash`, `eip7702_build_designator`, `eip7702_parse_designator`, `eip7702_protocol_info` — Pectra Type-4 authorization hashing and the 23-byte `0xef0100 || addr20` delegation designator
+- `permit2_domain_separator`, `permit2_digest`, `permit2_verify_and_consume`, `permit2_nonce_used` — Permit2 SignatureTransfer (optional witness for cross-chain intent origin opens)
 - `set_secure_mint_policy`, `get_secure_mint_policy`, `clear_secure_mint_policy`, `secure_mint_check`, `secure_mint_apply`, `secure_mint_record_burn`, `set_secure_mint_paused`, `set_global_issuance_pause` — per-token 1:1 reserve-attestation invariant for tokenized RWAs (token-keyed; fail-closed gate order with freshness/heartbeat/velocity guards; per-token + global issuance circuit breakers)
 
 ### Chain-agnostic discovery (CAIP)
 
 - `caip2`, `caip10`, `caip19` — Canonical Tenzro CAIP identifiers per the submitted `tenzro` namespace spec (`ChainAgnostic/namespaces#184`). CAIP-2 reference is the lowercase hex of the first 16 bytes of the genesis block hash; CAIP-19 supports `slip44` / `token` / `nft` asset namespaces.
 
-### ERC-7683 cross-chain intents
+### Hyperlane V3 (4 tools)
 
-- `open_7683_order`, `get_7683_order`, `list_7683_orders` — Origin-side opener + reads
-- `record_fill_7683`, `get_fill_7683`, `list_fills_7683` — Destination-side fill registry (idempotent)
+- `hyperlane_list_chains` — Chain domains the Hyperlane adapter recognizes
+- `hyperlane_quote_dispatch` — Quote the interchain gas payment for a dispatch
+- `hyperlane_dispatch` — Dispatch a message through the Mailbox
+- `hyperlane_get_message` — Read a dispatched message by id
+
+### Axelar GMP (4 tools)
+
+- `axelar_list_chains` — Canonical Axelar chain identifiers the adapter recognizes
+- `axelar_call_contract` — General Message Passing call to a contract on another chain
+- `axelar_pay_gas` — Pre-pay the Gas Service for a GMP call
+- `axelar_get_message` — Read a GMP message by payload hash
+
+### Babylon Bitcoin Staking (6 tools)
+
+- `babylon_register_finality_provider` — Register a Tenzro validator as a Babylon finality provider
+- `babylon_get_finality_provider` — Read one finality provider's record
+- `babylon_list_finality_providers` — List registered finality providers
+- `babylon_total_stake_for_provider` — Aggregate delegated BTC stake for a provider
+- `babylon_submit_finality_signature` — Submit an EOTS finality signature over a Tenzro block hash
+- `babylon_list_delegations` — List BTC delegations tracked by the adapter
+
+### Bridge fees, sponsorship, and analytics (7 tools)
+
+- `wormhole_ntt_list_chains` — Chains the Wormhole NTT path covers
+- `quote_bridge_fee_in_tnzo` — Quote a bridge fee denominated in TNZO
+- `set_bridge_fee_rate` — Set the fee rate applied to a bridge lane
+- `list_bridge_sponsorship_pools` — List pools that can cover a user's bridge fee
+- `sponsor_bridge_fee` — Draw a bridge fee from a sponsorship pool
+- `set_sponsorship_refill_threshold` — Set the balance at which a sponsorship pool refills
+- `get_bridge_analytics` / `list_bridge_analytics` — Per-lane and fleet-wide bridge counters
+
+### Stable-Asset Issuance (4 tools)
+
+- `register_stable_asset` — Register a reserve-backed asset with its issuance policy
+- `get_stable_asset` — Read a registered stable asset
+- `mint_stable_asset` — Mint against attested reserves
+- `redeem_stable_asset` — Redeem and decrement circulating supply
+
+### Regulated-asset controls (7 tools)
+
+- `urwa_is_kill_switched` — Whether a token is under a kill switch
+- `urwa_trigger_kill_switch` / `urwa_clear_kill_switch` — Halt and resume transfers for a token
+- `urwa_get_frozen_tokens` / `urwa_set_frozen_tokens` — Read and set the frozen balance on a holder
+- `ivms101_canonical_hash` — Canonical hash of an IVMS 101 originator/beneficiary record for travel-rule messaging
+- `attested_clock_now` — Attested wall-clock reading for time-bound compliance checks
+
+### Signed agent cards (1 tool)
+
+- `signed_agent_card_canonical_hash` — Canonical hash of an A2A Agent Card, the preimage a publisher signs
 
 ### Decentralized Storage (6 tools)
 
@@ -562,12 +594,13 @@ Per-tenant analytics:
 
 Treasury config mutations (add/remove withdrawer, threshold) are admin-token-gated RPCs reserved for the node operator and are not exposed as MCP tools.
 
-### Local Discovery & LAN Clustering (4 tools)
+### Local Discovery & LAN Clustering (5 tools)
 
 - `local_peers` — Peers discovered on this node's local segment via mDNS
 - `node_reachability` — Sustained connectivity tier (`direct` / `relay_only` / `unreachable`)
 - `node_profile` — Hardware self-profile: build commit, CPU arch, OS, devices, derived serving capacity / backend / capability key
 - `cluster_plan` — Deterministic layer-wise LAN cluster placement for a model across candidate members
+- `cluster_preview` — Dry-run a placement against the currently discovered members without committing it
 
 ### Managed Databases (11 tools)
 
@@ -591,7 +624,7 @@ In addition to the main Tenzro MCP server, the node runs specialized servers for
 
 | Server | Port | Endpoint | Description |
 |--------|------|----------|-------------|
-| **Tenzro** | 3001 | `/mcp` | 500+ tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + distributed MoE serving + AgentBond/insurance + agent memory + app hosting |
+| **Tenzro** | 3001 | `/mcp` | 526 tools — Tenzro Ledger + multi-modal AI (forecast, vision, text-embed, segmentation, detection, audio ASR, video) + distributed MoE serving + AgentBond/insurance + agent memory + app hosting |
 | **Solana** | 3003 | `/mcp` | 14 tools — Jupiter swaps, SPL tokens, Metaplex NFTs, SNS, staking |
 | **Ethereum** | 3004 | `/mcp` | 17 tools — Chainlink feeds, ENS, ERC-20, EAS, ERC-8004 |
 | **Canton** | 3005 | `/mcp` | 23 tools — Canton 3.5+ JSON Ledger API (active-contracts queries with live offset + FQ party id, party / package / connected-synchronizer / version / health reads, CIP-56 Canton Coin balance, AmuletRules fee schedule, DAR upload via `/v2/packages`, submit-and-wait DAML commands, DvP settlement) |
@@ -712,6 +745,10 @@ curl -s -X POST http://localhost:3001/mcp \
 |----------|---------|-------------|
 | `TENZRO_RPC_URL` | `https://rpc.tenzro.xyz` | Tenzro JSON-RPC endpoint |
 | `TENZRO_API_URL` | `https://api.tenzro.xyz` | Tenzro Web API endpoint |
+| `TENZRO_BEARER_JWT` | unset | OAuth 2.1 access token forwarded as `Authorization: Bearer` |
+| `TENZRO_DPOP_PROOF` | unset | DPoP proof forwarded as the `DPoP` header, binding the token to a key |
+| `TENZRO_API_KEY` | unset | Operator-issued `tnz_...` key forwarded as `X-Tenzro-Api-Key` |
+| `TENZRO_CANTON_NETWORK` | unset | Canton network selector forwarded as `X-Canton-Network` |
 
 Command-line options:
 
@@ -719,7 +756,6 @@ Command-line options:
 |------|---------|-------------|
 | `--transport` | `stdio` | Transport type (`stdio` or `http`) |
 | `--port` | `3001` | HTTP server port (when using `http` transport) |
-| `--host` | `0.0.0.0` | HTTP server bind address |
 
 ## Protocol Details
 

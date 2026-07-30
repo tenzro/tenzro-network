@@ -85,7 +85,7 @@ Counters are exposed over `tenzro_getRouterMetrics`: `requests` (total routed), 
 
 Language inference is exposed six ways over one runtime:
 
-- `tenzro_chat` and `tenzro_chatCompletion` JSON-RPC (the canonical Tenzro chat shape, with `params.custom["draft_n"]` for MTP and `params.custom["chat_session"]` for the persisted session id)
+- `tenzro_chat` and `tenzro_chatStream` JSON-RPC (the canonical Tenzro chat shape, with `params.custom["draft_n"]` for MTP and `params.custom["chat_session"]` for the persisted session id)
 - `tenzro_chatStream` JSON-RPC streaming variant
 - `POST /v1/chat/completions` — OpenAI-compatible HTTP endpoint (handler: `handle_openai_chat_completions`)
 - `POST /v1/responses` — the Responses shape over the same handler (handler: `handle_openai_responses`, translation in `openai_responses.rs`)

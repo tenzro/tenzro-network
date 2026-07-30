@@ -202,7 +202,7 @@ The system is implemented as a Rust workspace of 32 crates plus SDKs, organized 
 | Workflow | `tenzro-workflow` | Multi-party workflow runtime: orchestrates Canton DAML receipts, on-chain transaction selectors `0x01000040`–`0x0100004B` |
 | Sandboxed skills | `tenzro-wasm` | WASI 0.2 component host for language-agnostic agent skills and MCP tools. Capability-based sandbox, deterministic fuel metering, content-addressed component identity, execution receipts |
 | Bridge | `tenzro-bridge` | LayerZero V2, Chainlink CCIP + CCT, deBridge DLN, Li.Fi, Wormhole NTT (with Guardian quorum verifier), Canton, **Hyperlane V3** (sovereign Tenzro-ISM), **Axelar GMP** (Cosmos / Move / Stellar reach), **Babylon Bitcoin staking** (finality-providers protocol) |
-| Node | `tenzro-node` | Full node binary, RPC server (700+ methods across 31+ namespaces), MCP (500+ tools), A2A (40 skills), web API |
+| Node | `tenzro-node` | Full node binary, RPC server (855 methods), MCP (526 tools), A2A (40 skills), web API |
 | CLI | `tenzro-cli` | Command-line interface (103 command modules) |
 | SDK | `tenzro-sdk` | Rust SDK with builder-pattern configuration |
 | TypeScript SDK | `tenzro-ts-sdk` | TypeScript SDK for browser and Node.js integration |
@@ -266,7 +266,7 @@ Transaction submission goes through `tenzro_signAndSendTransaction` (server-cust
 | `GET /facilitator/x402/supported` | Advertise the x402 schemes and chains this facilitator settles |
 
 **MCP Server** (default `0.0.0.0:3001`):
-Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 500+ tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
+Model Context Protocol server using the `rmcp` crate with Streamable HTTP transport (protocol version `2025-11-25`). Exposes 526 tools spanning wallet, identity, payments (AP2 sign + verify, ERC-8004 v0.6+, Stripe SPT), inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), staking, tokens, NFTs, bridges, verification, agents, tasks, skills, tools, compliance, TEE, ZK, VRF, and event subscriptions, that any AI agent (Claude, GPT, etc.) can invoke. Representative groups:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -411,7 +411,7 @@ The Tenzro Ledger's execution layer supports three virtual machines through a un
 
 - **EVM (Ethereum Virtual Machine).** Full EVM-compatible execution for Solidity and Vyper smart contracts.
 - **SVM (Solana Virtual Machine).** Solana-compatible execution for programs written in Rust targeting the BPF instruction set.
-- **Daml (Digital Asset Modeling Language).** Enterprise smart contract execution powered by Canton Network. Each Tenzro validator runs a Canton participant node natively, connecting to one or more Canton synchronizers (the Canton 3.5+ term for what were previously called "domains"). Self-hosted participants expose the Ledger API on gRPC (port 5001 — `CommandService.SubmitAndWait`, `StateService.GetActiveContracts`, `UpdateService.GetUpdates`) and the Admin API on gRPC (port 5002 — `PackageService.UploadDar`). An operator may instead front its participant with the Canton 3.5+ JSON Ledger API v2 (`POST /v2/commands/submit-and-wait-for-transaction`, `POST /v2/state/active-contracts`, `POST /v2/packages`), gated by OAuth2 client credentials. External builders do not dial that participant directly: they present a Canton-scoped API key to the operator's node, the node resolves the key to a Canton user and mints the participant JWT server-side. A builder can therefore transact on Canton without running a participant and without ever holding participant credentials. Canton handles Daml contract lifecycle, sub-transaction privacy (parties only see events for contracts where they are stakeholders), and multi-synchronizer coordination through the Global Synchronizer. From the developer's perspective, Daml transactions are initiated through the same multi-VM interface as EVM and SVM calls.
+- **Daml (Digital Asset Modeling Language).** Enterprise smart contract execution powered by Canton Network. Each Tenzro validator runs a Canton participant node natively, connecting to one or more Canton synchronizers (the Canton 3.5+ term for domains). Self-hosted participants expose the Ledger API on gRPC (port 5001 — `CommandService.SubmitAndWait`, `StateService.GetActiveContracts`, `UpdateService.GetUpdates`) and the Admin API on gRPC (port 5002 — `PackageService.UploadDar`). An operator may instead front its participant with the Canton 3.5+ JSON Ledger API v2 (`POST /v2/commands/submit-and-wait-for-transaction`, `POST /v2/state/active-contracts`, `POST /v2/packages`), gated by OAuth2 client credentials. External builders do not dial that participant directly: they present a Canton-scoped API key to the operator's node, the node resolves the key to a Canton user and mints the participant JWT server-side. A builder can therefore transact on Canton without running a participant and without ever holding participant credentials. Canton handles Daml contract lifecycle, sub-transaction privacy (parties only see events for contracts where they are stakeholders), and multi-synchronizer coordination through the Global Synchronizer. From the developer's perspective, Daml transactions are initiated through the same multi-VM interface as EVM and SVM calls.
 
 #### 4.1.1 Why three VMs — and why this is not redundant
 
@@ -485,7 +485,7 @@ The `BlockStmExecutor` implements optimistic parallel transaction execution usin
 
 ### 4.8 Account Abstraction (ERC-4337 v0.8)
 
-The Ledger implements ERC-4337 v0.8 account abstraction, enabling smart contract wallets. The v0.8 format splits legacy `initCode` into `factory`/`factoryData` and legacy `paymasterAndData` into `paymaster`/`paymasterVerificationGasLimit`/`paymasterPostOpGasLimit`/`paymasterData`, with PackedUserOperation support, EIP-712 typed data hashing, and a gas penalty threshold of 40,000:
+The Ledger implements ERC-4337 v0.8 account abstraction, enabling smart contract wallets. The v0.8 format carries deployment as `factory`/`factoryData` and sponsorship as `paymaster`/`paymasterVerificationGasLimit`/`paymasterPostOpGasLimit`/`paymasterData`, with PackedUserOperation support, EIP-712 typed data hashing, and a gas penalty threshold of 40,000:
 
 - **EntryPoint contract.** Central singleton that validates and executes `UserOperation` bundles (max bundle size: 100).
 - **SmartAccount.** Contract wallets with pluggable modules:
@@ -691,13 +691,17 @@ Tenzro uses Plonky3 STARKs over the KoalaBear field (`p = 2^31 − 2^24 + 1`, tw
 
 ### 6.2 Pre-Built AIRs
 
-Three domain-specific Algebraic Intermediate Representations (AIRs) are provided, each addressed by `circuit_id`:
+Four domain-specific Algebraic Intermediate Representations (AIRs) are provided, each addressed by `circuit_id`:
 
 **Identity Proof AIR (`circuit_id: "identity"`).** Proves knowledge of a private key corresponding to a public identity without revealing the key. Public inputs: public-key hash, capability commitment. Trace columns enforce hash-chain transitions over the private key, capabilities, and blinding factor using Poseidon2.
 
 **Inference Verification AIR (`circuit_id: "inference"`).** Proves that an inference result was correctly computed from a given model and input. Public inputs: model hash, input hash, output hash. The trace binds model checksum, input checksum, and computed output checksum to the public hash digests via Poseidon2 round constraints.
 
 **Settlement Proof AIR (`circuit_id: "settlement"`).** Proves that a settlement amount correctly reflects the agreed service terms. Public inputs: service hash, settlement hash, amount. The trace binds the private service proof and settlement details to the public commitments.
+
+**Post-Quantum QC Aggregation AIR (`circuit_id: "pq-qc"`).** Compresses the ML-DSA-65 leg of a consensus quorum certificate into one STARK instead of N per-vote signatures. The AIR is parameterised by the validator-set size at runtime rather than by a const generic, so the same type serves N = 4 and N = 10,000 — the validator set is permissionless and unbounded. Trace layout is `2N + 1 + DIGEST_LEN` columns: a per-seat presence bitmap, a per-seat ML-DSA verification bit, the declared signer count, and the vote-message Poseidon2 digest. Public values are `[bitmap[0..N] | count | message_digest]`, with the bitmap exposed per bit so a relying party sees exactly which validator seats the certificate claims and can weight by stake without trusting an opaque popcount. Constraints enforce booleanity of both bit vectors, that a set presence bit forces its verification bit, that `count` equals the bitmap popcount, and that the trace digest matches the public digest.
+
+This AIR carries `soundness_class: "advisory"` — the same posture as the identity and inference AIRs. The trace generator computes each verification bit off-circuit by calling native ML-DSA-65 verification and writes the boolean into the witness; the AIR binds the certificate's *structure* but does not evaluate the ML-DSA verification equation inside the circuit. A verifier that needs the post-quantum leg to be value-binding rather than advisory re-runs the N native verifications out of band. Per-vote post-quantum binding still exists on the individual votes.
 
 ### 6.3 Poseidon2 Hash
 
@@ -732,7 +736,7 @@ Proof {
     proof_bytes:    Vec<u8>,           // bincode-serialized p3_uni_stark::Proof
     public_inputs:  Vec<Vec<u8>>,      // each entry: 4-byte LE KoalaBear field-element chunks
     proof_type:     ProofType,         // Plonky3 (the only supported variant)
-    circuit_id:     String,            // "inference" | "settlement" | "identity"
+    circuit_id:     String,            // "inference" | "settlement" | "identity" | "pq-qc"
     created_at:     Timestamp,
     metadata:       ProofMetadata,     // Prover ID, proving time, custom fields
 }
@@ -1437,7 +1441,7 @@ Each Tenzro node runs a Model Context Protocol (MCP) server (default port 3001) 
 - Capabilities: Tools
 - Server name: `tenzro`
 
-**Available tools (500+)** spanning wallet & ledger, network & blocks, identity & delegation (including right-to-erasure via `forget_identity`), payments (AP2 sign + verify, ERC-8004 v0.6+ Trustless Agents Registry, MPP, x402, Stripe SPT, Visa TAP, Mastercard Agent Pay), AI models & inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
+**Available tools (526)** spanning wallet & ledger, network & blocks, identity & delegation (including right-to-erasure via `forget_identity`), payments (AP2 sign + verify, ERC-8004 v0.6+ Trustless Agents Registry, MPP, x402, Stripe SPT, Visa TAP, Mastercard Agent Pay), AI models & inference (multi-modal: forecast, vision, text-embed, segmentation, detection, audio ASR, video), cross-chain bridge, verification (ZK, VRF, attestations), staking & providers, tokens & contracts, NFTs, agents (spawning, swarms, marketplace), tasks (marketplace, quotes, completion), skills, tools, compliance & KYC, TEE, and event subscriptions. Representative samples:
 
 | Group | Example Tools |
 |-------|---------------|
@@ -1640,7 +1644,7 @@ The `tenzro-payments` crate implements all five with a unified `PaymentProtocol`
 | Protocol | Origin | Use Case |
 |----------|--------|----------|
 | **AP2** (Agent Payments Protocol) | Google / FIDO Alliance | Intent / cart / payment VDC mandate sign + verify + validate-pair via `tenzro_ap2SignMandate`, `tenzro_ap2VerifyMandate`, `tenzro_ap2ValidateMandatePair` |
-| **Stripe SPT** (SharedPaymentToken) | Stripe | Token-issuance / verify / cap-check via `tenzro_sptIssue`, `tenzro_sptVerify`, with `granted_token.deactivated` webhook cascade into TDIP `apply_remote_revocation` |
+| **Stripe SPT** (SharedPaymentToken) | Stripe | Issued/granted token lifecycle via `StripeClient::{create_issued_token, retrieve_granted_token, revoke_issued_token, confirm_intent_with_spt}`; surface described by `tenzro_stripeSptProtocolInfo`; `granted_token.deactivated` cascades into TDIP `apply_remote_revocation` via `tenzro_processSptGrantedTokenDeactivated` |
 | **ERC-8004** (Trustless Agents Registry) | Ethereum | Identity / Reputation / Validation registry surfaces — see §13.10 |
 | **MPP** (Machine Payments Protocol) | Stripe / Tempo | Session-based machine payments with HTTP 402 |
 | **x402** | Coinbase | Stateless HTTP 402 payments with EIP-3009 authorization |
@@ -1767,11 +1771,11 @@ facilitator settles.
 
 Stripe's SharedPaymentToken (SPT) is the token primitive that pairs with the MPP wire and Tempo settlement layers (the three layers of the Stripe agentic stack). Tenzro participates as a token issuer with TDIP-anchored cap enforcement:
 
-- **`tenzro_sptIssue { principal_did, agent_did, amount, currency, usage_limits }`** — issues an SPT bound to a principal/agent DID pair, with usage caps. The node-side `SptCeilingResolver` adapter cross-checks the requested cap against the principal's `DelegationScope` and runtime `SpendingPolicy` before signing.
-- **`tenzro_sptVerify { token }`** — verifies the SPT signature, checks the principal/agent DIDs are still active in TDIP, and returns the remaining cap.
-- **AP2 mandate cross-check** — when a checkout mandate references an SPT, validation enforces `usage_limits ≥ total_amount` on the child payment mandate.
-- **ERC-8004 ReputationRegistry cross-write** — on SPT outcome (paid / refunded / disputed), the node writes a feedback entry to the ERC-8004 ReputationRegistry keyed on the agent DID.
-- **Webhook cascade** — Stripe's `granted_token.deactivated` webhook is dispatched into TDIP `apply_remote_revocation`, which propagates the revocation to peers via the cascading-revocation broadcaster (§12.7).
+- **Token lifecycle** — `StripeClient::create_issued_token` mints an issued token bound to a principal/agent DID pair with usage caps; `retrieve_granted_token` reads back the granted token Stripe returns to the agent; `confirm_intent_with_spt` confirms a Payment Intent against that granted token; `revoke_issued_token` tears it down. These live in `crates/tenzro-payments/src/mpp/stripe_spt.rs`.
+- **`tenzro_stripeSptProtocolInfo`** — returns the SPT surface the node implements: client methods, the `SptStatus` lifecycle (`requires_action` → `active` → `used` / `deactivated`), and the ceiling model.
+- **Four-ceiling enforcement** — a payment confirmed against an SPT must satisfy the principal's TDIP `DelegationScope`, the runtime `SpendingPolicy`, the SPT's own `usage_limits`, and — when the payment is carried by an AP2 mandate — the mandate's `total_amount`. The node-side `SptCeilingResolver` resolves `granted_token_id → SptCeilingSnapshot` for the check.
+- **ERC-8004 ReputationRegistry cross-write** — `tenzro_processSptSettlementOutcome` writes a feedback entry to the ERC-8004 ReputationRegistry (precompile `0x101b`) keyed on the agent DID.
+- **Webhook cascade** — `tenzro_processSptGrantedTokenDeactivated` dispatches Stripe's `granted_token.deactivated` webhook into TDIP `apply_remote_revocation`, which propagates the revocation to peers via the cascading-revocation broadcaster (§12.7).
 
 ### 13.8 Tempo Integration
 
@@ -2153,7 +2157,7 @@ This section specifies the full surface: design principles, the six interlocking
 
 **6. Hybrid post-quantum at every layer that the standards permit.** Classical primitives are paired with their NIST FIPS 203/204 post-quantum companions: Ed25519 with ML-DSA-65 for signatures, X25519 with ML-KEM-768 for KEM. Where a standard is single-algorithm (P-256 inside a passkey, secp256k1 inside an EVM EOA), the classical algorithm is used as specified and the PQ companion lives in the on-chain validator metadata rather than in the device key — there is no production threshold ML-DSA in 2026, so threshold-PQ is deferred to a single-key-in-TEE design until the research matures.
 
-**7. Replace, don't migrate.** Tenzro is pre-launch. There is no Shamir-then-reconstruct legacy mode, no `WalletProvisioner` pseudo-MPC, no server-custodial fallback to maintain. The wallet surface is self-custodial from day one.
+**7. One custody model, no fallbacks.** The wallet surface has exactly one custody mode: self-custodial. There is no server-custodial configuration, no reconstruct-on-the-node key assembly, and no alternate provisioning path an operator can select.
 
 ### 15.1 Identity Classes and Custody Targets
 
@@ -2380,7 +2384,7 @@ Tenzro provides a single onboarding flow that provisions a TDIP identity, a self
 
 The response returns the DID, smart-account address, installed validator modules, and hardware profile.
 
-**Import from Existing Key (`tenzro_importIdentity` RPC).** Users with existing Ed25519 / Secp256k1 / P-256 keys can register them as the initial validator on a freshly-deployed smart account. The legacy key is treated as the seed for the validator module's credential — it is never copied to a server.
+**Import from Existing Key (`tenzro_importIdentity` RPC).** Users with existing Ed25519 / Secp256k1 / P-256 keys can register them as the initial validator on a freshly-deployed smart account. The imported key is treated as the seed for the validator module's credential — it is never copied to a server.
 
 **Hardware Profile Detection.**
 
@@ -2947,7 +2951,7 @@ The same surface is reachable through the CLI (`tenzro media-gen …`), the MCP 
 - Connect payment protocols to live settlement rails (Stripe MPP, Coinbase x402, Tempo network)
 
 ### Phase 3: Agent & Protocol Integration
-- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 500+ tools
+- ~~Implement MCP server~~ — **DONE**: rmcp-based server on port 3001, Streamable HTTP transport, 526 tools
 - ~~Implement A2A protocol server~~ — **DONE**: JSON-RPC 2.0 on port 3002, Agent Card discovery, SSE streaming, 40 skills
 - ~~Implement ecosystem MCP servers~~ — **DONE**: Solana (3003), Ethereum (3004), Canton (3005), LayerZero (3006), Chainlink (3007), Li.Fi (3008)
 - ~~Implement challenge store for payment protocols~~ — **DONE**: persistent challenge lookup for MPP and x402

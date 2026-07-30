@@ -238,7 +238,7 @@ Components:
 - Real ZK proof verification via `tenzro_zk::verify_proof_envelope` (Plonky3 STARKs over KoalaBear; non-Plonky3 proof types rejected)
 - Real TEE attestation verification (Intel TDX, AMD SEV-SNP, AWS Nitro, NVIDIA GPU)
 
-Test coverage: 39 tests passing.
+Unit tests cover the escrow, batch, channel, and dispute paths.
 
 ## Dependencies
 
@@ -255,4 +255,4 @@ Test coverage: 39 tests passing.
 
 ## License
 
-Apache-2.0 OR MIT
+Apache-2.0.

@@ -8,7 +8,7 @@ Hardware TEE (Trusted Execution Environment) abstraction layer for the Tenzro Ne
 
 ## Modules
 
-**10 modules:** attestation, certs, detection, enclave_crypto, error, registry, traits, intel_tdx (feature), amd_sev_snp (feature), aws_nitro (feature), nvidia_gpu (feature)
+**15 modules:** attestation, certs, detection, enclave_crypto, enclave_keystore, error, registry, sealed_agent_keypair, sealed_secp256k1, traits, intel_tdx (feature), amd_sev_snp (feature), aws_nitro (feature), nvidia_gpu (feature), intel_tiber (feature)
 
 ### TEE Provider Abstraction
 - `TeeProvider` trait - Unified interface for all TEE vendors
@@ -51,6 +51,15 @@ Hardware TEE (Trusted Execution Environment) abstraction layer for the Tenzro Ne
 - Wire format: `nonce(12) || ciphertext || tag(16)`
 - In production: keys sealed by hardware (MKTME/VMSA/KMS/CC memory)
 - In simulation: keys derived from key UUID
+
+### Enclave Key Storage
+- `enclave_keystore.rs` holds the private scalar behind every `EnclaveKeyHandle` returned by `TeeProvider::enclave_keygen`, and backs `enclave_sign` / `enclave_encrypt` / `enclave_decrypt`
+- Keys are HKDF-SHA256-derived from per-vendor IKM (TDX `MRTD`, SNP `SNP_GET_DERIVED_KEY`, the Nitro signed attestation report, the NVIDIA vBIOS measurement). Off hardware, `is_available()` is `false` and `enclave_keygen` returns `TeeError::not_available` — there is no software-only fabrication path
+- Scalars live in `Zeroizing` buffers and are wiped on drop
+
+### Sealed Signing Keys
+- `sealed_secp256k1.rs` derives a `k256` ECDSA signing key from the hardware root so a bridge EVM signer never holds a long-lived private key in ordinary process memory. The same measured VM image redeploys to the same key; a tampered image or another tenant cannot recover it
+- `sealed_agent_keypair.rs` does the same for the Ed25519 keys behind TDIP / ERC-8004 machine identities. `AgentKeyHandle` exposes only the public key, the vendor measurement, the rotation epoch and a `sign()` entry point; `rotate_agent_key` bumps the epoch while leaving the prior handle alive so in-flight operations finish, and `attest_agent_key` binds the public key into an attestation report's `user_data` slot
 
 ### Simulation Support
 - Runtime detection via `detect_tee()` with automatic fallback
@@ -148,7 +157,7 @@ assert_eq!(plaintext, &decrypted[..]);
 
 ## Test Coverage
 
-80 unit tests + 1 doc test covering:
+Unit tests and doc tests cover:
 - Intel TDX attestation generation and verification
 - AMD SEV-SNP attestation and certificate chain validation
 - AWS Nitro attestation document parsing and signature verification
@@ -160,9 +169,4 @@ assert_eq!(plaintext, &decrypted[..]);
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE](../../LICENSE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT License (http://opensource.org/licenses/MIT)
-
-at your option.
+Apache-2.0.

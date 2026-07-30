@@ -67,6 +67,10 @@ training loop with decoupled outer aggregation, paired with the Rust protocol la
 - **Communication efficiency:** blockwise symmetric gradient quantization
   (`GradientQuantization`: Int8 4×, Int4 ~8× smaller than f32 — the codec in
   `tenzro_trainer.quantization` is byte-identical to the Rust implementation),
+  chunked top-k sparsification with an error-feedback accumulator (a task whose
+  payload kind is sparse transmits only the top-k magnitudes per chunk and folds
+  the residual back into a per-fragment accumulator that decays by
+  `sparse_ef_decay`, default 0.95, so nothing dropped this round is lost),
   streaming synchronization (one parameter shard per round when the task uses
   `SyncStrategy::Streaming`), and delayed outer-update application
   (`OuterUpdateScheduler` applies round r's update during round r+1 so
@@ -140,7 +144,7 @@ identity derivation, crash policy, and the `tenzro_getTrainerDaemonStatus` RPC.
 |---|---|
 | `tenzro_trainer.types` | Python mirrors of `tenzro_types::training` (dataclasses serializable to the same JSON the Rust syncer expects). |
 | `tenzro_trainer.rpc_bridge` | Thin JSON-RPC 2.0 client over `requests`. Handles `enrollTrainer`, `submitOuterGradient`, `finalizeRound`. |
-| `tenzro_trainer.gradient` | Outer-gradient packaging: per-fragment safetensors blobs + SHA-256 + signing helpers (Ed25519 via PyNaCl). |
+| `tenzro_trainer.gradient` | Outer-gradient packaging: per-fragment safetensors blobs + SHA-256 + signing helpers (Ed25519 via PyNaCl), plus the chunked top-k sparse codec (`sparse_encode` / `sparse_decode`). |
 | `tenzro_trainer.inner_loop` | Generic H-step inner driver plus `OuterUpdateScheduler` (delayed outer-update application), partial-state load/apply for streaming shards, and state snapshots. |
 | `tenzro_trainer.rl` | GRPO RL post-training inner loop: `RolloutAdapter` protocol, `load_reward`, group-relative advantages, clipped surrogate + k3 KL loss, `run_rl_inner_loop` (same `(pre, post, report)` contract as the supervised driver). |
 | `tenzro_trainer.muon` | Muon inner optimizer — Newton-Schulz orthogonalization of 2D weight updates, AdamW fallback for 1D / embedding / head parameters. DTensor-aware: sharded gradients gather for Newton-Schulz, momentum stays sharded, the update distributes back. |
@@ -150,7 +154,8 @@ identity derivation, crash policy, and the `tenzro_getTrainerDaemonStatus` RPC.
 | `tenzro_trainer.shards` | Shard URI resolution: `tenzro://` via the local node's iroh blob store (native), `ipfs://` / `ar://` via HTTP gateways, `http(s)://` direct, `file://` / bare paths passthrough. Remote fetches cached under `~/.cache/tenzro-trainer/shards`; vision ImageFolder tarballs unpacked on arrival. |
 | `tenzro_trainer.confidential` | Confidential-tier sealed-shard unwrap: HPKE RFC 9180 base-mode key unwrap + AES-256-GCM shard decryption, run inside the trainer's TEE enclave. |
 | `tenzro_trainer.adapters.*` | Modality-specific model + dataset wiring. |
-| `tenzro_trainer.cli` | `tenzro-trainer enroll | run | submit-gradient | finalize-round` |
+| `tenzro_trainer.cli` | `tenzro-trainer enroll \| run` — `run` drives the whole round: inner loop, outer-gradient packaging, submission, and finalization. |
+| `tenzro_trainer.benchmark` | `tenzro-trainer-bench` — standalone inner-loop throughput benchmark for the timeseries and language (PEFT LoRA) paths. |
 
 ## Why split Rust + Python
 

@@ -4,11 +4,11 @@ FROST-Ed25519 Threshold Wallet System for Tenzro Network — Auto-Provisioned
 
 ## Overview
 
-`tenzro-wallet` provides seamless wallet provisioning using FROST-Ed25519 (RFC 9591) threshold signatures for the Tenzro Network blockchain. Users get instant, secure wallets without managing seed phrases or private keys. Every wallet also carries a mandatory ML-DSA-65 post-quantum signing key for hybrid signatures.
+`tenzro-wallet` provisions wallets using FROST-Ed25519 (RFC 9591) threshold signatures for the Tenzro Network blockchain. Users get wallets without managing seed phrases or private keys. Every wallet also carries a mandatory ML-DSA-65 post-quantum signing key for hybrid signatures.
 
 ## Key Features
 
-- **Seamless Onboarding**: Auto-provisioned FROST-Ed25519 wallets with no seed phrases
+- **Onboarding**: Auto-provisioned FROST-Ed25519 wallets with no seed phrases
 - **Threshold Signatures**: Default 2-of-3 (configurable) FROST-Ed25519 signing per RFC 9591
 - **Hybrid PQ Signatures**: Every wallet pairs a FROST-Ed25519 classical leg with a mandatory ML-DSA-65 post-quantum leg
 - **Multi-Asset Support**: TNZO, USDC, USDT, ETH, SOL, BTC, and custom assets
@@ -19,7 +19,9 @@ FROST-Ed25519 Threshold Wallet System for Tenzro Network — Auto-Provisioned
 - **Nonce Management**: Per-address sequential nonces with replay protection, on-chain sync support
 - **Transaction History**: Full lifecycle tracking (Created → Pending → Confirmed → Finalized/Failed/Dropped), filtering, pagination
 - **Address Book**: Contact management with name resolution, tag filtering, persistent JSON storage
-- **State Sync**: Pluggable `ChainStateProvider` trait for on-chain balance/nonce synchronization, `LocalStateProvider` for offline use
+- **State Sync**: Pluggable `ChainStateProvider` trait for on-chain balance/nonce synchronization, with `TenzroRpcChainProvider` against a live node and `LocalStateProvider` for offline use
+- **Self-Custodial Signing**: Client-side ERC-4337 v0.8 `UserOp` construction and EIP-712 hashing, signed with a device-bound key so the node never holds signing material
+- **Hardware Signers**: `PluggableSigner` trait abstracting Ledger, Trezor, GridPlus Lattice1, and YubiKey behind a public key plus a signature over a 32-byte hash
 - **Key Zeroization**: Sensitive key material zeroized on drop via `zeroize` crate
 
 ## Architecture
@@ -215,13 +217,28 @@ Asset registry managing supported assets and metadata.
 Encrypted storage of FROST secret shares + public-key package using Argon2id KDF; ML-DSA-65 seed sealed in the same bundle.
 
 ### `state_sync`
-On-chain balance/nonce synchronization via `ChainStateProvider` trait.
+On-chain balance/nonce synchronization via the `ChainStateProvider` trait, plus `LocalStateProvider` for offline use.
+
+### `rpc_provider`
+`TenzroRpcChainProvider` — a `reqwest`-backed `ChainStateProvider` that talks to a live node over JSON-RPC. It reads balances (`eth_getBalance`, `tenzro_tokenBalance`), the sender nonce (`eth_getTransactionCount` at the pending block tag), transaction status (`eth_getTransactionReceipt`), and block height (`eth_blockNumber`), and submits signed transactions via `eth_sendRawTransaction`. Also builds ABI calldata for the cross-VM bridge precompile, with `DestVm` naming the destination runtime.
+
+### `signing`
+`HybridSigner` and `HybridSignatureBytes` — the output type carrying both the classical leg and the ML-DSA-65 leg. Admission gates verify both against the `pq_public_key` on the transaction.
+
+### `userop`
+The self-custodial ERC-4337 v0.8 path: `UserOpBuilder` constructs a `UserOp`, `user_op_hash` computes its EIP-712 hash, `pack_validator_signature` packs the signature for the on-chain validator, and `encode_user_op_json` serializes it for `eth_sendUserOperation`. The wallet signs the hash with a device-bound key — Secure Enclave, TPM, StrongBox, passkey, or a FROST share — so the node never holds the signing key. The `UserOp` struct is wire-identical to the VM's `UserOperation` and the hash matches byte for byte; a dedicated integration test cross-checks the two so they cannot drift.
+
+### `pluggable_signer`
+`PluggableSigner` — the hardware-signer seam for advanced custody. Ledger and Trezor speak APDU over HID, GridPlus Lattice1 a REST API, YubiKey FIDO2/CTAP; the trait reduces all of them to `device_kind()`, `public_key()`, `sign_hash(hash)`, and an optional `attest()`, so the rest of the wallet and the on-chain hardware validator module deal only with a public key and a signature over a 32-byte hash. `GenericSigner` covers backends with no device-specific protocol; `HardwareDeviceKind` and `HardwareAttestation` carry the device identifier and its attestation.
 
 ### `service`
 Main `WalletService` implementation with all wallet operations.
 
 ### `traits`
 Core `WalletService` trait defining the wallet interface.
+
+### `error`
+`WalletError` and the crate `Result` alias.
 
 ## Default Configuration
 
@@ -274,7 +291,6 @@ Run integration tests:
 cargo test -p tenzro-wallet --test integration_test
 ```
 
-Test coverage: 99 unit tests + 6 integration tests passing.
 
 ## Dependencies
 
@@ -289,4 +305,4 @@ Test coverage: 99 unit tests + 6 integration tests passing.
 
 ## License
 
-Apache-2.0 OR MIT
+Apache-2.0.

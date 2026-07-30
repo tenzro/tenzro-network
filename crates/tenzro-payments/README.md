@@ -58,7 +58,7 @@ All payment protocols follow the HTTP 402 Payment Required pattern with challeng
 - **X402PaymentRequired** — 402 response with payment details
 - **X402PaymentPayload** — Payment transaction data
 - **X402Facilitator** — Settlement facilitator interface (dispatches to a `SchemeRegistry` of pluggable scheme adapters)
-- **SchemeRegistry** — Pluggable adapter table for x402 schemes; ships with `tenzro-hybrid` (the default), `exact-eip3009` (direct on-chain transfer of the exact challenge amount via EIP-3009 authorization), `permit2` (Permit2 authorization, facilitator pulls funds at settlement), and `erc7710` (ERC-7710 delegation-based authorization). Discoverable at runtime via `tenzro_listX402Schemes`; payers select via `--scheme <name>` on `tenzro x402 pay`.
+- **SchemeRegistry** — Pluggable adapter table for x402 schemes, holding `tenzro-hybrid` (the default), `exact-eip3009` (direct on-chain transfer of the exact challenge amount via EIP-3009 authorization), `permit2` (Permit2 authorization, facilitator pulls funds at settlement), and `erc7710` (ERC-7710 delegation-based authorization). Discoverable at runtime via `tenzro_listX402Schemes`; payers select via `--scheme <name>` on `tenzro x402 pay`.
 - **LocalFacilitatorVerifier** — the default facilitator; runs the exact/EVM scheme's eight admission checks locally and settles through the operator's own `EvmTransactionSigner` rather than a remote facilitator endpoint
 - **CdpFacilitatorClient** — Coinbase CDP facilitator with EIP-3009 calldata encoding and EIP-712 typed data; the alternative route when an operator prefers to defer settlement to Coinbase
 - **ResourceCatalog (Bazaar)** — Discovery catalog for paid resources. A seller registers an `X402ResourceListing` (resource URL, scheme, network, asset, pay-to, max amount, tags); buyers browse via a `ResourceQuery` before ever hitting a `402`. The listing id is derived from `(seller_did, resource)`, so re-registering the same pair is idempotent. Optional `ResourceCatalogStore` gives write-through persistence. Surfaced over RPC as `tenzro_x402RegisterResource` / `tenzro_x402DiscoverResources` / `tenzro_x402DeregisterResource`, with `tenzro_x402VerifyOffer` for server-signed offers and `tenzro_x402PaymentId` for deterministic `pay_<hex>` idempotency ids.
@@ -88,6 +88,9 @@ All payment protocols follow the HTTP 402 Payment Required pattern with challeng
 - **IdentityPaymentBinder** — Two-axis ceiling enforcer: (1) protocol-level `DelegationScope` via `IdentityRegistry::enforce_operation` (max_transaction_value, allowed_operations, time_bound, etc.) and (2) runtime `SpendingPolicy` via the `SpendingPolicyResolver` trait (max_per_transaction, max_daily_spend, current_daily_spend, enabled). Both ceilings must pass for a payment to settle. The resolver is wired in node startup via `IdentityPaymentBinder::with_spending_policy_resolver()`; absent a resolver or registry entry, the binder falls back to DelegationScope-only.
 - **SpendingPolicyResolver** — Trait that resolves a payer DID to an optional `SpendingPolicySnapshot { max_per_transaction, max_daily_spend, current_daily_spend, enabled }`. Implemented in `tenzro-node` against the `AgentRuntime` runtime spending-policy registry.
 - **MandateValidator::validate_with_delegation_policy_escrow_and_spt** — Nested ceilings for AP2 v0.2 PaymentMandates: CheckoutMandate constraints (item set, max_amount, merchant / category / chain allow-lists), TDIP DelegationScope (`enforce_operation`), runtime SpendingPolicy (`SpendingPolicySnapshot::check`), on-chain escrow balance, and Stripe SPT `usage_limits`. The last two apply when the mandate pair carries an `escrow_id` or `spt_grant_id`; an identifier that fails to resolve is a refusal, not a skip. Wired into the `tenzro_ap2ValidateMandatePair` RPC. Narrower variants — `validate`, `validate_with_delegation`, `validate_with_delegation_and_policy`, `validate_with_delegation_policy_and_escrow` — apply the corresponding prefix of the list.
+
+### Challenge Storage
+- **ChallengeStore** — Shared store that both the MPP and x402 servers write a challenge into at creation time and read back at settlement, so a credential can be matched to the challenge that authorized it.
 
 ### RFC 9421 Foundation
 - **Rfc9421SignatureBuilder** — HTTP Message Signature generation per RFC 9421
@@ -220,7 +223,7 @@ let balance = participant.get_balance().await?;
 
 ## Testing
 
-The crate includes 75 unit tests covering MPP, x402, Tempo, Stripe, Coinbase CDP, Visa TAP, Mastercard Agent Pay, RFC 9421 signatures, and identity binding.
+Unit tests cover MPP, x402, Tempo, Stripe, Coinbase CDP, the local facilitator, AP2 mandates, Visa TAP, Mastercard Agent Pay, RFC 9421 signatures, and identity binding.
 
 ```bash
 cargo test -p tenzro-payments
@@ -228,9 +231,4 @@ cargo test -p tenzro-payments
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE](../../LICENSE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](../../LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+Apache-2.0.
