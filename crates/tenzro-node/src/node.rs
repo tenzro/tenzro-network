@@ -3251,13 +3251,17 @@ impl TenzroNode {
             Err(e) => return Err(e),
         }
 
-        // 7. Initialize consensus (validators only)
-        // Only validators produce blocks. All other roles (ModelProvider, TeeProvider,
-        // LightClient) receive blocks from the network via gossipsub block sync.
+        // 7. Initialize consensus.
+        //
+        // Only validators propose and vote. Every other role still builds the
+        // engine and leaves it unstarted: block-sync accepts a block only after
+        // verifying its embedded commit-QC against the validator set active at
+        // that block's height, and that set — plus the epoch transitions needed
+        // to walk across boundaries while catching up — lives in the engine's
+        // `EpochManager`. A ModelProvider without one fetches blocks it can
+        // never accept, so its local height never leaves genesis.
         let should_init_consensus = self.config.roles.is_validator();
-        if should_init_consensus {
-            self.init_consensus().await?;
-        }
+        self.init_consensus(!should_init_consensus).await?;
 
         // 7b. Wire validator registry into the network layer for peer authorization
         if let Some(ref network) = self.network {
@@ -4938,8 +4942,12 @@ impl TenzroNode {
         Ok(())
     }
 
-    async fn init_consensus(&mut self) -> Result<()> {
-        info!("Initializing consensus engine...");
+    async fn init_consensus(&mut self, verify_only: bool) -> Result<()> {
+        if verify_only {
+            info!("Initializing consensus engine for block verification only...");
+        } else {
+            info!("Initializing consensus engine...");
+        }
 
         // Load validator key material from disk. The node binary on
         // `start` strictly LOADS — never generates — to keep a
@@ -4947,6 +4955,24 @@ impl TenzroNode {
         // than fail-silent. `KeyMissing` errors here are actionable:
         // the operator runs `tenzro-node init` to provision the
         // three keys, then re-starts. See `keygen.rs`.
+        //
+        // A verify-only node holds no bonded stake against these keys and
+        // casts no vote, so there is no identity to lose and no double-sign
+        // to induce — the reason for the strict load does not apply. Provision
+        // on first run instead, so joining the network as a provider is a
+        // single command.
+        if verify_only
+            && matches!(
+                crate::keygen::load_validator_keypair(&self.config.data_dir),
+                Err(NodeError::KeyMissing { .. })
+            )
+        {
+            crate::keygen::generate_and_persist_keyset(&self.config.data_dir, false)?;
+            info!(
+                data_dir = ?self.config.data_dir,
+                "Provisioned node keyset — this node verifies blocks but does not vote"
+            );
+        }
         let keypair = crate::keygen::load_validator_keypair(&self.config.data_dir)?;
         let pq_signing_key = crate::keygen::load_validator_pq_key(&self.config.data_dir)?;
         let local_pq_vk = pq_signing_key.verifying_key_bytes().to_vec();
@@ -5184,12 +5210,15 @@ impl TenzroNode {
         // Stash the local validator address so the inbound consensus
         // gossipsub bridge (wired in `start()`) can drop self-broadcasts
         // before they re-enter the engine.
-        self.local_validator_address = Some(address);
+        if !verify_only {
+            self.local_validator_address = Some(address);
+        }
 
         // Wire slashing callback so equivocation triggers real stake slashing.
         // Also pass the engine's epoch-manager handle so slashed validators are
         // dropped from the next epoch's pending-validator queue.
-        if let Some(ref staking) = self.staking {
+        if !verify_only
+            && let Some(ref staking) = self.staking {
             let mut cb = StakingSlashingCallback::new(staking.clone())
                 .with_epoch_manager(engine.epoch_manager());
             if let Some(ref vr) = self.validator_registry {
@@ -5272,23 +5301,29 @@ impl TenzroNode {
             // windows survive a restart. Rebuilds an independent BLS handle
             // from the secret bytes captured before the engine consumed the
             // original.
-            match tenzro_crypto::bls::BlsSecretKey::from_bytes(&bls_secret_bytes) {
-                Ok(sk) => {
-                    let zk_bls = Arc::new(
-                        tenzro_crypto::bls::BlsKeyPair::from_secret_key(sk),
-                    );
-                    let zk_store = Arc::new(
-                        tenzro_consensus::ZkQuorumStore::with_storage(
-                            zk_bls,
-                            address,
-                            storage.clone() as Arc<dyn tenzro_storage::KvStore>,
-                        ),
-                    );
-                    self.zk_quorum_store = Some(zk_store);
-                    info!("ZK quorum store wired (CF_AUDIT; 2f+1 co-sign gate on commitment attestation)");
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to rebuild BLS key for ZK quorum store; commitment quorum gate disabled");
+            //
+            // Co-signing is stake-weighted, so it is reachable only from a
+            // validator: a verify-only node's BLS key carries no weight and its
+            // co-signature would be discarded by every peer that received it.
+            if !verify_only {
+                match tenzro_crypto::bls::BlsSecretKey::from_bytes(&bls_secret_bytes) {
+                    Ok(sk) => {
+                        let zk_bls = Arc::new(
+                            tenzro_crypto::bls::BlsKeyPair::from_secret_key(sk),
+                        );
+                        let zk_store = Arc::new(
+                            tenzro_consensus::ZkQuorumStore::with_storage(
+                                zk_bls,
+                                address,
+                                storage.clone() as Arc<dyn tenzro_storage::KvStore>,
+                            ),
+                        );
+                        self.zk_quorum_store = Some(zk_store);
+                        info!("ZK quorum store wired (CF_AUDIT; 2f+1 co-sign gate on commitment attestation)");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to rebuild BLS key for ZK quorum store; commitment quorum gate disabled");
+                    }
                 }
             }
         }
@@ -5305,21 +5340,26 @@ impl TenzroNode {
         // height — without this jump the engine starts at view=0, hits the
         // CheckHRS rule, and refuses every vote (height=0 wedge observed
         // 2026-04-28T09:12Z testnet).
-        match open_default_file_store(&self.config.data_dir) {
-            Ok(store) => {
-                engine = engine.with_vote_state_store(store);
-                info!(
-                    data_dir = ?self.config.data_dir,
-                    "Persistent vote-state store wired (last_sign.json)"
-                );
-            }
-            Err(e) => {
-                // Refuse to start consensus without durable vote state — the
-                // alternative (in-memory store) would silently re-introduce
-                // the self-equivocation risk we're trying to eliminate.
-                return Err(NodeError::Other(format!(
-                    "Failed to open persistent vote-state store: {}", e
-                )));
+        //
+        // A verify-only node casts no vote, so there is no sign-state to
+        // protect and no wedge to clear.
+        if !verify_only {
+            match open_default_file_store(&self.config.data_dir) {
+                Ok(store) => {
+                    engine = engine.with_vote_state_store(store);
+                    info!(
+                        data_dir = ?self.config.data_dir,
+                        "Persistent vote-state store wired (last_sign.json)"
+                    );
+                }
+                Err(e) => {
+                    // Refuse to start consensus without durable vote state — the
+                    // alternative (in-memory store) would silently re-introduce
+                    // the self-equivocation risk we're trying to eliminate.
+                    return Err(NodeError::Other(format!(
+                        "Failed to open persistent vote-state store: {}", e
+                    )));
+                }
             }
         }
 
@@ -5358,6 +5398,16 @@ impl TenzroNode {
                     warn!(error = %e, "Failed to open block store for height check");
                 }
             }
+        }
+
+        // A verify-only node holds the engine solely to answer "which validator
+        // set was active at height H" while importing synced blocks. It never
+        // proposes, votes, or emits a consensus message, so the outbound channel
+        // and the consensus loop stay unbuilt.
+        if verify_only {
+            self.consensus = Some(Arc::new(engine));
+            info!("Consensus engine built for block verification (not started; this node does not vote)");
+            return Ok(());
         }
 
         // Create the outbound channel BEFORE starting the engine so the engine
@@ -7749,15 +7799,22 @@ impl TenzroNode {
                     seed,
                     address_hex,
                 ) {
-                    let daemon = if let Some(consensus) = self.consensus.clone() {
-                        // Leader-gate provisioning so only one validator in the
-                        // fleet supervises trainers per run; convergence on the
-                        // finalized round-state happens over `tenzro/training`.
-                        let gate: crate::trainer_daemon::TickAuthorityFn =
-                            Arc::new(move || consensus.is_leader_in_next_views(32));
-                        daemon.with_tick_authority(gate)
-                    } else {
-                        daemon
+                    // Leader-gate provisioning so only one validator in the
+                    // fleet supervises trainers per run; convergence on the
+                    // finalized round-state happens over `tenzro/training`.
+                    // A node that does not vote is never the leader, so it
+                    // takes no gate — it supervises the trainers it enrolled
+                    // and nobody else's.
+                    let daemon = match (
+                        self.config.roles.is_validator(),
+                        self.consensus.clone(),
+                    ) {
+                        (true, Some(consensus)) => {
+                            let gate: crate::trainer_daemon::TickAuthorityFn =
+                                Arc::new(move || consensus.is_leader_in_next_views(32));
+                            daemon.with_tick_authority(gate)
+                        }
+                        _ => daemon,
                     };
                     let daemon_arc = Arc::new(daemon);
                     daemon_arc.clone().spawn();
@@ -10307,6 +10364,13 @@ impl TenzroNode {
             self.chain_tip.clone(),
             self.metrics.clone(),
         );
+
+        // Every role holds a consensus engine so block-sync can check each
+        // block's commit-QC against the validator set active at that height,
+        // so engine presence does not answer "do I propose and vote". The role
+        // does.
+        let event_loop =
+            event_loop.with_consensus_participation(self.config.roles.is_validator());
 
         // Wire the weak-subjectivity checkpoint (if configured) so the
         // block-sync import path rejects any historical fork whose committed

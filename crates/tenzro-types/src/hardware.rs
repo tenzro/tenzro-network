@@ -282,7 +282,9 @@ impl HardwareCapabilities {
                     caps.interconnect = Interconnect::Pcie;
                 }
             } else {
-                caps.interconnect = if nvlink_present() {
+                caps.interconnect = if coherent_with_system_ram(&caps.gpus, caps.ram_gb) {
+                    Interconnect::UnifiedMemory
+                } else if nvlink_present() {
                     Interconnect::NvlinkClass
                 } else {
                     Interconnect::Pcie
@@ -349,8 +351,11 @@ impl HardwareCapabilities {
             1..=24 => HardwareClass::ConsumerGpu,
             // A single datacenter accelerator sits in the 32–96 GiB band.
             25..=96 => HardwareClass::DatacenterGpu,
-            // Beyond one datacenter card's VRAM implies multiple devices.
-            _ => HardwareClass::MultiAccelerator,
+            // Beyond that band the memory belongs to several devices — unless
+            // the inventory says otherwise. One 192 GiB card, or a coherent
+            // CPU/GPU pool, is a single accelerator however large it reads.
+            _ if self.gpus.len() > 1 => HardwareClass::MultiAccelerator,
+            _ => HardwareClass::DatacenterGpu,
         }
     }
 
@@ -494,6 +499,29 @@ fn rocminfo_gfx_targets() -> Vec<String> {
         .collect()
 }
 
+/// Whether the single visible accelerator's memory *is* the system memory
+/// rather than a separate device pool.
+///
+/// On coherent-memory NVIDIA parts (GB10 / Grace-Blackwell, Jetson) the CPU
+/// and GPU address one physical pool, and NVML reports a `memory.total` that
+/// tracks `/proc/meminfo` `MemTotal` minus kernel reservation. Summing the
+/// two would count the same DRAM twice, so those parts must read as
+/// [`Interconnect::UnifiedMemory`].
+///
+/// The test is structural rather than an SKU list: one accelerator whose
+/// reported memory is within an eighth of system RAM. Grace-Hopper is
+/// correctly excluded — its HBM3 is a genuinely separate pool an order of
+/// magnitude smaller than the host LPDDR5X. A discrete card would have to
+/// carry nearly as much VRAM as the host has RAM to trip this, and that
+/// direction under-claims capacity, which is the safe error.
+#[cfg(target_os = "linux")]
+fn coherent_with_system_ram(gpus: &[GpuDevice], ram_gb: u32) -> bool {
+    let [gpu] = gpus else {
+        return false;
+    };
+    ram_gb > 0 && gpu.vram_gb * 8 >= ram_gb * 7
+}
+
 /// Whether any NVLink lane is up. `nvidia-smi nvlink --status` prints
 /// per-link bandwidth lines (`… GB/s`) on NVLink-connected parts and
 /// nothing (or an error) on PCIe-only parts.
@@ -550,8 +578,35 @@ mod tests {
         assert_eq!(caps.class(), HardwareClass::ConsumerGpu);
         caps.vram_gb = 80;
         assert_eq!(caps.class(), HardwareClass::DatacenterGpu);
-        caps.vram_gb = 200;
+
+        // Above the single-datacenter-card band, the device inventory
+        // decides: one large card stays DatacenterGpu, several do not.
+        let one = GpuDevice::new(GpuVendor::Nvidia, "B200", 192, "10.0");
+        caps.gpus = vec![one.clone()];
+        caps.vram_gb = 192;
+        assert_eq!(caps.class(), HardwareClass::DatacenterGpu);
+        caps.gpus = vec![one.clone(), one];
+        caps.vram_gb = 384;
         assert_eq!(caps.class(), HardwareClass::MultiAccelerator);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coherent_pool_detected_without_an_sku_list() {
+        // Grace-Blackwell: NVML reports the shared pool, so the accelerator
+        // memory tracks MemTotal.
+        let gb10 = GpuDevice::new(GpuVendor::Nvidia, "NVIDIA GB10", 119, "12.1");
+        assert!(coherent_with_system_ram(std::slice::from_ref(&gb10), 120));
+
+        // Grace-Hopper: HBM3 is a separate, much smaller pool.
+        let gh200 = GpuDevice::new(GpuVendor::Nvidia, "NVIDIA GH200 96GB", 96, "9.0");
+        assert!(!coherent_with_system_ram(std::slice::from_ref(&gh200), 480));
+
+        // Two devices are never one coherent pool with the host.
+        assert!(!coherent_with_system_ram(&[gb10.clone(), gb10], 120));
+
+        // A GPU-less host must not read as unified.
+        assert!(!coherent_with_system_ram(&[], 120));
     }
 
     #[test]

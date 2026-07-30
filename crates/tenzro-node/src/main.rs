@@ -78,7 +78,7 @@ struct Cli {
     /// bootstrap set to DNS. Operators rotate by editing the zone, not
     /// by distributing a new wrapper script to every VM.
     ///
-    /// Example: `--bootstrap-dns boot.tenzro.xyz`
+    /// Example: `--bootstrap-dns tenzro.xyz`
     #[arg(long, value_name = "NAME")]
     bootstrap_dns: Option<String>,
 

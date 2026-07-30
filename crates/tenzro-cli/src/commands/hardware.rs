@@ -67,7 +67,12 @@ fn extract_lspci_device_name(line: &str) -> String {
 }
 
 /// Detect GPUs and accelerators using OS-provided enumeration.
-async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, bool) {
+///
+/// `total_ram_gb` lets the Linux branch tell a coherent CPU/GPU pool from a
+/// discrete card: on Grace-Blackwell parts `nvidia-smi` reports the shared
+/// system pool, so the two figures coincide and the memory must be counted
+/// once.
+async fn detect_accelerators(total_ram_gb: f64) -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, bool) {
     let os = std::env::consts::OS;
     let mut gpus: Vec<AcceleratorInfo> = Vec::new();
     let mut accelerators: Vec<AcceleratorInfo> = Vec::new();
@@ -211,6 +216,12 @@ async fn detect_accelerators() -> (Vec<AcceleratorInfo>, Vec<AcceleratorInfo>, b
                         }
                     }
                 }
+
+            // One accelerator holding within an eighth of system RAM is a
+            // coherent pool, not a card with its own memory.
+            if let [only] = gpus.as_slice() {
+                unified_memory = total_ram_gb > 0.0 && only.memory_gb >= total_ram_gb * 0.875;
+            }
 
             // NPU devices in /sys/class
             if let Ok(entries) = std::fs::read_dir("/sys/class") {
@@ -405,7 +416,7 @@ pub async fn detect_hardware_profile() -> HardwareProfile {
         .map(|d| (d.available_space() as f64 / 1_073_741_824.0 * 10.0).round() / 10.0)
         .unwrap_or(0.0);
 
-    let (gpus, accelerators, unified_memory) = detect_accelerators().await;
+    let (gpus, accelerators, unified_memory) = detect_accelerators(total_ram_gb).await;
     let (tee_available, tee_type, tee_capabilities) = detect_tee_capabilities().await;
 
     let os = std::env::consts::OS.to_string();

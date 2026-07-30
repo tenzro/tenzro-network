@@ -7175,8 +7175,8 @@ async fn handle_faucet(
     let event = if node.consensus().is_some() {
         NodeEvent::LocallyAdmittedTransaction(signed_tx)
     } else {
-        // No consensus engine wired (light client / boot phase) — fall back
-        // to the full event-loop path so the tx still gets locally queued.
+        // Engine not yet built (boot phase) — fall back to the full
+        // event-loop path so the tx still gets locally queued.
         NodeEvent::NewTransaction(signed_tx)
     };
 
@@ -18545,9 +18545,8 @@ async fn handle_send_raw_transaction(
         // Already admitted synchronously above — event loop only does gossip.
         NodeEvent::LocallyAdmittedTransaction(signed_tx)
     } else {
-        // No consensus engine wired (light client / boot phase) — let the
-        // event loop run the full path so the tx still gets gossiped + locally
-        // queued.
+        // Engine not yet built (boot phase) — let the event loop run the full
+        // path so the tx still gets gossiped + locally queued.
         NodeEvent::NewTransaction(signed_tx)
     };
 
@@ -40001,10 +40000,18 @@ async fn handle_stake(
     // Enqueue this node into the next epoch's validator set when staking as a
     // Validator. The consensus engine holds the EpochManager; we look up the
     // node's identity for the consensus key material (Ed25519 + ML-DSA-65
-    // verifying key). Skipped silently if either the consensus engine isn't
-    // wired or the identity is missing one of the required keys — staking
-    // still succeeds in those cases (the node simply won't be promoted).
+    // verifying key). Skipped silently if the identity is missing one of the
+    // required keys — staking still succeeds (the node simply won't be
+    // promoted).
+    //
+    // Restricted to nodes that vote. Every role carries an engine so block-sync
+    // can resolve the validator set at a block's height, but on a non-voting
+    // node the only authority on set membership is the replicated
+    // `ValidatorRegistry` plan applied at each boundary. Staging a local entry
+    // the plan does not carry would put that node's active set out of step with
+    // the network, and its QC checks would start failing.
     if matches!(provider_type, ProviderType::Validator)
+        && node.config().roles.is_validator()
         && let (Some(engine), Some(identity)) = (node.consensus(), identity_for_validator.as_ref())
     {
         let ed25519_pk_bytes = identity
@@ -40124,8 +40131,12 @@ async fn handle_unstake(
 
     // Drop the staker from the next epoch's pending-validator queue. Idempotent:
     // remove_pending_validator just `retain`s, so unstaking a non-validator is a
-    // no-op. Skipped silently if consensus isn't wired.
-    if let Some(engine) = node.consensus() {
+    // no-op. Restricted to nodes that vote, for the same reason as the staking
+    // path: on a non-voting node the replicated registry plan is the only
+    // authority on set membership.
+    if node.config().roles.is_validator()
+        && let Some(engine) = node.consensus()
+    {
         engine.epoch_manager().remove_pending_validator(&staker_address);
         tracing::info!(
             address = %staker_address,
@@ -57913,7 +57924,11 @@ async fn handle_rotate_validator_key(
     // Enqueue an upsert into the next epoch's validator set so HotStuff-2
     // starts verifying votes against the new keys at the boundary.
     // `add_pending_validator` upserts by address — same address, new keys.
-    if let Some(engine) = node.consensus() {
+    // Restricted to nodes that vote: elsewhere the replicated registry plan
+    // carries the rotation across the boundary on its own.
+    if node.config().roles.is_validator()
+        && let Some(engine) = node.consensus()
+    {
         let new_pubkey = tenzro_crypto::PublicKey::new(
             tenzro_crypto::KeyType::Ed25519,
             new_consensus.clone(),

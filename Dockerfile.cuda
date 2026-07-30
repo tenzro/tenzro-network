@@ -2,13 +2,20 @@
 #   - llama.cpp CUDA backend for LLM inference (feature `tenzro-node/cuda`)
 #   - ONNX Runtime CUDA execution provider for the non-LLM modalities
 #     (feature `tenzro-node/onnx-cuda`; forecast / vision / text-embedding /
-#     segmentation / detection / audio runtimes)
+#     segmentation / detection / audio runtimes) — x86_64 only, see below
+#
+# Builds on both x86_64 and aarch64 (Grace-Blackwell GB10 / DGX Spark, Grace
+# Hopper GH200, Jetson Thor). The base images are multi-arch, so `docker build`
+# on the target machine picks the matching one with no extra flags.
 #
 # Run with the NVIDIA container runtime: `docker run --gpus all ...`
 # The CPU image is built from ./Dockerfile and is unchanged by this file.
 
+ARG CUDA_VERSION=13.0.3
+ARG UBUNTU_VERSION=ubuntu24.04
+
 # Stage 1: Build
-FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-${UBUNTU_VERSION} AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -37,15 +44,16 @@ ENV CC=clang
 ENV CXX=clang++
 ENV CUDAHOSTCXX=g++
 
-# Target GPU architectures for the ggml CUDA kernels (CMake >= 3.20 reads
-# CUDAARCHS into CMAKE_CUDA_ARCHITECTURES). "native" is unusable here: the
-# build container has no GPU. Turing / Ampere / Ada / Hopper.
-ENV CUDAARCHS="75;80;86;89;90"
+# CUDAARCHS is deliberately unset. ggml picks the architecture list itself when
+# CMAKE_CUDA_ARCHITECTURES is undefined (ggml/src/ggml-cuda/CMakeLists.txt),
+# covering Turing through Blackwell and appending 121a-real on CUDA >= 12.9 —
+# the compute capability of GB10, which no hand-written list here would carry.
+# It only falls back to the unusable "native" when GGML_NATIVE is ON, and
+# llama-cpp-sys-2 sets that OFF unless the Rust target-cpu is native.
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
-COPY sdk/ sdk/
 COPY tools/ tools/
 # vendor/* subtrees (erc8004-evm, erc8004-solana, erc8004-daml, erc8004-atom)
 # are source artifacts for regenerate.sh / DAML compilation, not build-time
@@ -98,8 +106,18 @@ RUN mkdir -p apps/tenzro-desktop/src-tauri/src && \
 # Build tenzro-node (llama.cpp CUDA + ONNX Runtime CUDA EP) and tenzro-cli.
 # ort-sys with the `cuda` feature downloads the cu12 ONNX Runtime dist at
 # build time (network required, same as the CPU image's download-binaries).
-RUN cargo build --release -p tenzro-node -p tenzro-cli \
-    --features tenzro-node/cuda,tenzro-node/onnx-cuda
+#
+# That dist is published for x86_64 only, so `onnx-cuda` is added on x86_64
+# alone. On aarch64 the ONNX runtimes are still compiled — `ort` is an
+# unconditional dependency and its aarch64 dist is CPU-only — so forecast /
+# vision / text-embedding / segmentation / detection / audio serve from the
+# CPU execution provider while LLM inference runs on the GPU.
+RUN set -eux; \
+    features="tenzro-node/cuda"; \
+    if [ "$(uname -m)" = "x86_64" ]; then \
+      features="$features,tenzro-node/onnx-cuda"; \
+    fi; \
+    cargo build --release -p tenzro-node -p tenzro-cli --features "$features"
 
 # The `rpc` feature (on by default via cluster-serving) builds the standalone
 # ggml `rpc-server` binary into llama-cpp-sys-2's cargo OUT_DIR. That path does
@@ -117,11 +135,11 @@ RUN set -eux; \
     ! ldd /build/rpc-server | grep -v 'libcuda\.so\.1' | grep -qiE 'libggml|libllama|not found'
 
 # Stage 2: Runtime
-FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-${UBUNTU_VERSION} AS runtime
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libssl3 \
+    libssl3t64 \
     curl \
     libstdc++6 \
     libgomp1 \

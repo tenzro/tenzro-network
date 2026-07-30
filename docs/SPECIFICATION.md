@@ -1255,6 +1255,7 @@ Every node profiles its own hardware once at startup, with no operator configura
 - **NVIDIA GPUs** via `nvidia-smi` (name, VRAM, compute capability per device) plus an NVLink probe (`nvidia-smi nvlink --status`) that distinguishes NVLink-connected multi-GPU machines from PCIe-only ones.
 - **AMD GPUs** via `rocm-smi` (name, VRAM) paired with `rocminfo` gfx target discovery.
 - **Apple Silicon** is treated as a unified-memory device: the GPU-usable budget is approximately three quarters of system RAM, matching the Metal working-set limit.
+- **Coherent CPU/GPU parts on Linux** are recognised structurally rather than by model name: a host with exactly one accelerator whose reported memory falls within an eighth of system RAM is holding one physical pool, and its memory is counted once. Parts whose device memory is a genuinely separate pool — including those bridged to host memory over a coherent interconnect — fall outside the test and keep the discrete accounting.
 
 Probe failures degrade to coarser answers — a machine where `nvidia-smi` is absent simply reports no NVIDIA devices; it never errors. A `detected` flag records whether the profile came from a real probe: hardware claims are only ever produced by the node's own detection, never typed in by an operator.
 
@@ -1262,9 +1263,9 @@ Low-precision support is derived from the silicon, not declared: FP8 is inferred
 
 #### Hardware classes and routing
 
-The detected profile collapses into a coarse `HardwareClass` — `Cpu`, `ConsumerGpu` (up to 24 GB VRAM), `DatacenterGpu` (25–96 GB), `MultiAccelerator` (above 96 GB), or `Unknown` when no probe ran. The class contributes a static weight to routing (0.2 / 0.5 / 0.8 / 1.0 respectively) alongside the dynamic observed metrics; `Unknown` providers get a neutral 0.5 and compete purely on measured throughput and reputation. Requests may carry a `min_hardware` hint in `InferenceParameters.custom` (`"consumer-gpu"`, `"datacenter-gpu"`, `"multi-accelerator"`) to set a hardware floor — a provider with no detected profile never satisfies an explicit floor, so the hint filters on verified capability only.
+The detected profile collapses into a coarse `HardwareClass` — `Cpu`, `ConsumerGpu` (up to 24 GB VRAM), `DatacenterGpu` (25–96 GB, and above that band when the inventory holds a single device), `MultiAccelerator` (above 96 GB across more than one device), or `Unknown` when no probe ran. The class contributes a static weight to routing (0.2 / 0.5 / 0.8 / 1.0 respectively) alongside the dynamic observed metrics; `Unknown` providers get a neutral 0.5 and compete purely on measured throughput and reputation. Requests may carry a `min_hardware` hint in `InferenceParameters.custom` (`"consumer-gpu"`, `"datacenter-gpu"`, `"multi-accelerator"`) to set a hardware floor — a provider with no detected profile never satisfies an explicit floor, so the hint filters on verified capability only.
 
-Routing also applies a memory-fit filter: when a model's registry entry carries a real weights size, providers whose detected memory budget cannot hold the model are excluded before scoring. The budget is system RAM plus discrete VRAM (llama.cpp splits a model across both pools), or unified memory alone on Apple Silicon. Providers with no detected profile pass the filter — absence of a claim is not treated as a negative claim.
+Routing also applies a memory-fit filter: when a model's registry entry carries a real weights size, providers whose detected memory budget cannot hold the model are excluded before scoring. The budget is system RAM plus discrete VRAM (llama.cpp splits a model across both pools), or the pool counted once on a unified-memory host. Providers with no detected profile pass the filter — absence of a claim is not treated as a negative claim.
 
 #### VRAM-aware GPU offload
 

@@ -404,8 +404,19 @@ pub struct EventLoop {
     vm_runtime: Arc<MultiVmRuntime>,
     /// State adapter for VM execution (tokio::Mutex for async-safe access during block execution)
     state_adapter: Arc<Mutex<StateAdapter>>,
-    /// Consensus engine (optional, only for validators)
+    /// Consensus engine. Present on every role that has validator key material
+    /// on disk, which after first-run provisioning is every networked node.
     consensus: Option<Arc<HotStuff2Engine>>,
+    /// Whether this node proposes and votes.
+    ///
+    /// A non-validator builds the same [`HotStuff2Engine`] but never starts it:
+    /// block-sync admits a block only after checking its commit-QC against the
+    /// validator set active at that block's height, and that set — plus the
+    /// epoch transitions needed to walk boundaries while catching up — lives in
+    /// the engine's `EpochManager`. So `consensus.is_some()` says "I can verify
+    /// a QC", not "I am a validator"; anything that mutates consensus-owned or
+    /// epoch-owned state must test this flag instead.
+    consensus_participant: bool,
     /// Network service (for broadcasting blocks to gossipsub)
     network: Option<Arc<TenzroNetworkService>>,
     /// Outbound consensus messages (votes, proposals) from the HotStuff-2 engine.
@@ -736,6 +747,7 @@ impl EventLoop {
             vm_runtime,
             state_adapter,
             consensus,
+            consensus_participant: false,
             network,
             consensus_out_rx: None,
             pending_txs: Vec::new(),
@@ -844,6 +856,15 @@ impl EventLoop {
         rx: tokio::sync::mpsc::UnboundedReceiver<ConsensusOutMessage>,
     ) -> Self {
         self.consensus_out_rx = Some(rx);
+        self
+    }
+
+    /// Declares that this node proposes and votes.
+    ///
+    /// Set from the node's role. See [`EventLoop::consensus_participant`] for
+    /// why the presence of a consensus engine is not the same question.
+    pub fn with_consensus_participation(mut self, participant: bool) -> Self {
+        self.consensus_participant = participant;
         self
     }
 
@@ -1479,15 +1500,15 @@ impl EventLoop {
         // interrupted cleanly while waiting for validator peers.
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        // Edge nodes (no consensus engine — ModelProvider-only, storage-
-        // only, etc.) MUST NOT enter the validator warm-up. They have no
-        // consensus role, so waiting for admitted validator peers is
-        // (a) pointless — they can't participate anyway — and (b) noisy
-        // in the log, emitting a 30 s "Bootstrap quorum not yet reached"
-        // warning every attempt until infinity. Fixed 2026-07-16 after
-        // a Studio dev launch spent minutes emitting this warning for
-        // a NAT'd edge ModelProvider that never intended to validate.
-        if self.consensus.is_some()
+        // Edge nodes (ModelProvider-only, storage-only, etc.) MUST NOT enter
+        // the validator warm-up. They have no consensus role, so waiting for
+        // admitted validator peers is (a) pointless — they can't participate
+        // anyway — and (b) noisy in the log, emitting a 30 s "Bootstrap quorum
+        // not yet reached" warning every attempt until infinity. Fixed
+        // 2026-07-16 after a Studio dev launch spent minutes emitting this
+        // warning for a NAT'd edge ModelProvider that never intended to
+        // validate.
+        if self.consensus_participant
             && let Some(network) = self.network.as_ref()
         {
             const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -3609,9 +3630,9 @@ impl EventLoop {
         // This handler is invoked from two callers:
         //   (a) the gossipsub `tenzro/transactions` subscriber in `node.rs`
         //       when a peer publishes a tx onto the mesh, and
-        //   (b) the legacy fallback path on light/boot nodes that have no
-        //       consensus engine wired (the RPC layer dispatches
-        //       `NewTransaction` only when `node.consensus()` is `None`).
+        //   (b) the fallback path on nodes that do not propose blocks (the RPC
+        //       layer dispatches `NewTransaction` only when the node is not a
+        //       consensus participant).
         //
         // In both cases the tx must NOT be re-broadcast here. libp2p's
         // gossipsub mesh propagates received messages to other peers
@@ -3627,7 +3648,9 @@ impl EventLoop {
         // `LocallyAdmittedTransaction` pattern: admit synchronously via
         // `consensus.submit_transaction()`, then dispatch the event so
         // the event loop publishes once into the mesh.
-        if let Some(consensus) = &self.consensus {
+        if self.consensus_participant
+            && let Some(consensus) = &self.consensus
+        {
             match consensus.submit_transaction(tx.clone()) {
                 Ok(()) => {
                     info!(
@@ -3651,12 +3674,13 @@ impl EventLoop {
                 }
             }
         } else {
-            // No consensus engine wired (light/boot node). Hold locally so
-            // the tx isn't lost; once consensus comes up, the next sweep
-            // can flush it. No re-broadcast for the same storm-prevention
-            // reason as above.
+            // This node does not propose blocks, so it has no mempool a
+            // proposer will ever drain. Hold locally so the tx isn't lost;
+            // entries are dropped as the matching hashes appear in finalized
+            // blocks. No re-broadcast for the same storm-prevention reason as
+            // above.
             self.pending_txs.push(tx);
-            debug!(hash = %tx_hash, "Transaction queued locally (no consensus engine)");
+            debug!(hash = %tx_hash, "Transaction queued locally (node does not propose blocks)");
         }
 
         Ok(())
@@ -4584,7 +4608,7 @@ impl EventLoop {
         // historical blocks would amplify into the live mesh and interleave
         // with current-tip blocks, defeating gossipsub recency dedup.
         if !from_sync
-            && self.consensus.is_some()
+            && self.consensus_participant
             && let Some(ref network) = self.network {
                 let network_clone = network.clone();
                 let msg = NetworkMessage::new(MessagePayload::Block(block.clone()));
@@ -4625,6 +4649,7 @@ impl EventLoop {
         // a forward catch-up that mirrors this live hook one boundary at a
         // time, in order.
         if !from_sync
+            && self.consensus_participant
             && let (Some(consensus), Some(registry)) =
             (self.consensus.as_ref(), self.validator_registry.as_ref())
         {
@@ -4636,6 +4661,18 @@ impl EventLoop {
             if em.should_transition(next_height) {
                 Self::stage_registry_epoch_plan(&em, registry);
             }
+        }
+
+        // Follower finalized-height advance: a node that verifies but does not
+        // vote never runs the engine's finalize path, so once it is at the tip
+        // and taking blocks off gossip its tracker would sit at the height
+        // block-sync last left it. Chain-entropy seeds and audit height stamps
+        // read that tracker. Monotone, so re-imports and out-of-order gossip
+        // cannot walk it backwards.
+        if !self.consensus_participant
+            && let Some(consensus) = self.consensus.as_ref()
+        {
+            consensus.observe_finalized_height(block_height);
         }
 
         // Follower epoch catch-up: on a node whose engine is not running the
@@ -4682,6 +4719,7 @@ impl EventLoop {
         // transition above): the snapshot reflects historical supply that
         // doesn't represent the live network's current state.
         if !from_sync
+            && self.consensus_participant
             && let (Some(consensus), Some(burn_rate), Some(token)) = (
                 self.consensus.as_ref(),
                 self.burn_rate_manager.as_ref(),
@@ -4836,6 +4874,7 @@ impl EventLoop {
         // happens; a node replaying history must not issue coupons for
         // epochs the live network already closed.
         if !from_sync
+            && self.consensus_participant
             && let (Some(consensus), Some(rewards)) =
                 (self.consensus.as_ref(), self.reward_engine.as_ref())
         {

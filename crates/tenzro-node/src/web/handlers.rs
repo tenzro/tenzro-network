@@ -1003,6 +1003,10 @@ pub async fn ready(
         .consensus()
         .map(|c| c.high_qc_view())
         .unwrap_or(0);
+    // A node that does not vote runs no view loop, so its high-QC view stays
+    // at zero however far the chain advances. Block lag is the whole readiness
+    // signal there.
+    let votes = node.config().roles.is_validator();
 
     // Compute block lag against network tip if available.
     let block_lag = network_tip.map(|tip| tip.saturating_sub(block_height));
@@ -1026,7 +1030,7 @@ pub async fn ready(
             // precisely — the conservative check is `high_qc_view + view_lag
             // >= local_height`, since under a healthy chain every committed
             // block carries a QC view ≥ block height.
-            if high_qc_view + VIEW_LAG_TOLERANCE < block_height {
+            if votes && high_qc_view + VIEW_LAG_TOLERANCE < block_height {
                 (
                     false,
                     format!(

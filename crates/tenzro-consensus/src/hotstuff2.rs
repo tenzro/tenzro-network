@@ -1620,6 +1620,24 @@ impl HotStuff2Engine {
         self.finality_tracker.finalized_height()
     }
 
+    /// Records that the chain has finalized up to `height` without this
+    /// engine having driven the commit.
+    ///
+    /// A node that verifies blocks but does not vote never runs the finalize
+    /// path, so its tracker would only move when block-sync completes a
+    /// catch-up run. Once such a node is at the tip it takes new blocks off
+    /// gossip instead, and everything reading `current_finalized_height` — the
+    /// chain-entropy seed for committee selection, audit-event height stamps —
+    /// would keep quoting the height it last synced at.
+    ///
+    /// Monotone: a height at or below the tracker's is ignored. Touches only
+    /// the finalized height, never view state or the signing ceiling, so it is
+    /// not a substitute for [`Self::resume_from_synced_height`] on a node that
+    /// votes.
+    pub fn observe_finalized_height(&self, height: BlockHeight) {
+        self.finality_tracker.set_initial_height(height);
+    }
+
     /// Returns a clone of the shared epoch manager handle.
     ///
     /// Used by the staking lifecycle in `tenzro-node` to enqueue / dequeue

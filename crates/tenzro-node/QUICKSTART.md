@@ -184,7 +184,7 @@ To connect to the Tenzro testnet:
   --log-level info
 ```
 
-When neither `--boot-nodes` nor `--bootstrap-dns` is given and the config file carries no boot nodes, the node resolves the network bootstrap name `boot.tenzro.xyz` (SRV `_tenzro-boot._tcp` + TXT `_tenzro-id._tcp` records) and joins the testnet automatically. Pass `--boot-nodes` with explicit multiaddrs for a private deployment, or `--bootstrap-dns <name>` to point at your own bootstrap zone.
+When neither `--boot-nodes` nor `--bootstrap-dns` is given and the config file carries no boot nodes, the node resolves the network bootstrap name `tenzro.xyz` (SRV `_tenzro-boot._tcp` + TXT `_tenzro-id._tcp` records) and joins the testnet automatically. Pass `--boot-nodes` with explicit multiaddrs for a private deployment, or `--bootstrap-dns <name>` to point at your own bootstrap zone.
 
 ## Monitoring Your Node
 

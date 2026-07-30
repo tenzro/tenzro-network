@@ -162,7 +162,9 @@ SYCL additionally needs the oneAPI DPC++ compiler selected as the C/C++ compiler
 
 Backends without a prebuilt image (SYCL, OpenVINO, OpenCL, MUSA, CANN, WebGPU, zDNN, BLAS) build from the base `Dockerfile` template with the vendor toolchain layered into the builder stage and the matching `--features tenzro-node/<x>` flag.
 
-The non-LLM modalities (forecast / vision / text-embed / segmentation / detection / ASR / video) run on ONNX Runtime and fall back to CPU under every GPU image; the `onnx-cuda`, `onnx-tensorrt`, and `onnx-coreml` features link the corresponding ONNX Runtime execution provider where available.
+`Dockerfile.cuda` builds on multi-arch CUDA bases, so it covers x86_64 and arm64 NVIDIA hosts (Grace-Blackwell, Grace Hopper, Jetson Thor) from the same file with no extra flags.
+
+The non-LLM modalities (forecast / vision / text-embed / segmentation / detection / ASR / video) run on ONNX Runtime and fall back to CPU under every GPU image; the `onnx-cuda`, `onnx-tensorrt`, and `onnx-coreml` features link the corresponding ONNX Runtime execution provider where available. ONNX Runtime publishes no aarch64 CUDA distribution, so on arm64 the ONNX modalities serve from CPU while the llama.cpp language path runs on the GPU.
 
 ---
 
