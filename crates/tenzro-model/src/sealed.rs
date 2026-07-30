@@ -641,6 +641,14 @@ mod tests {
                 provider_hint: None,
             })
         }
+
+        async fn publish_file(
+            &self,
+            path: &std::path::Path,
+        ) -> std::result::Result<TenzroUri, String> {
+            let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
+            self.publish(Bytes::from(bytes)).await
+        }
     }
 
     fn signed_manifest_roundtrip_input() -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {

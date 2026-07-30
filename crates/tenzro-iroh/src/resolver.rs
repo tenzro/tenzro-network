@@ -5,6 +5,7 @@
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::ops::Deref;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -18,9 +19,13 @@ use iroh::{
     Endpoint, EndpointId,
 };
 use iroh_blobs::{
-    api::{downloader::Downloader, Store as BlobStore},
+    api::{
+        blobs::{AddPathOptions, ImportMode},
+        downloader::Downloader,
+        Store as BlobStore,
+    },
     store::{fs::FsStore, mem::MemStore},
-    BlobsProtocol, Hash, ALPN,
+    BlobFormat, BlobsProtocol, Hash, ALPN,
 };
 use tokio::sync::Mutex;
 
@@ -58,6 +63,16 @@ pub trait IrohResolver: Send + Sync {
     /// — implementations are responsible for computing it (typically via
     /// `iroh_blobs::Hash::from_bytes`) rather than trusting the caller.
     async fn publish_bytes(&self, bytes: Bytes) -> IrohResult<TenzroUri>;
+
+    /// Publish a file already on disk, referencing it in place rather than
+    /// copying its bytes into the store.
+    ///
+    /// Model weights are multi-gigabyte, so the `publish_bytes` path costs a
+    /// full read into memory plus a second copy on disk. `ImportMode::TryReference`
+    /// avoids both when the file and the store share a filesystem. The caller
+    /// keeps ownership of the file and must not modify it afterwards — iroh
+    /// assumes referenced content is immutable.
+    async fn publish_path(&self, path: &Path) -> IrohResult<TenzroUri>;
 }
 
 /// Blob store backing for the resolver. Both variants deref to
@@ -570,6 +585,25 @@ impl IrohResolver for IrohBackedResolver {
             .add_bytes(bytes)
             .await
             .map_err(|e| IrohError::Backend(format!("add_bytes: {e}")))?;
+        Ok(TenzroUri::Blob {
+            hash: tag.hash.to_string(),
+            provider_hint: None,
+        })
+    }
+
+    async fn publish_path(&self, path: &Path) -> IrohResult<TenzroUri> {
+        let tag = self
+            .store
+            .blobs()
+            .add_path_with_opts(AddPathOptions {
+                path: path.to_path_buf(),
+                format: BlobFormat::Raw,
+                mode: ImportMode::TryReference,
+            })
+            .await
+            .map_err(|e| {
+                IrohError::Backend(format!("add_path {}: {e}", path.display()))
+            })?;
         Ok(TenzroUri::Blob {
             hash: tag.hash.to_string(),
             provider_hint: None,

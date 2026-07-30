@@ -379,7 +379,7 @@ The runtime loads it in-process rather than shelling out to a server binary. `Mo
 
 ### 4.2 Sharded (gguf-split) downloads
 
-Frontier-scale GGUFs (Kimi K2, DeepSeek V3, GLM 5, MiniMax M3, the largest Qwen 3.5 MoE quants) are published as `gguf-split` sets where the catalog `hf_filename` points at the first shard (`...-00001-of-000NN.gguf`). The downloader detects this pattern, enumerates all `NN` shards from the self-describing suffix, and downloads them into a per-model directory (`<models_dir>/<id>/`) preserving their original filenames — llama.cpp only auto-continues a split set when every shard sits in one directory under its split name. `model_path`/`is_downloaded`/`downloaded_size`/`delete_model` all recognize the per-model-directory layout; single-file models keep the flat `<id>.gguf` form.
+Frontier-scale GGUFs (Kimi K2, Kimi K3, DeepSeek V3, GLM 5, MiniMax M3, the largest Qwen 3.5 MoE quants) are published as `gguf-split` sets where the catalog `hf_filename` points at the first shard (`...-00001-of-000NN.gguf`). The downloader detects this pattern, enumerates all `NN` shards from the self-describing suffix, and downloads them into a per-model directory (`<models_dir>/<id>/`) preserving their original filenames — llama.cpp only auto-continues a split set when every shard sits in one directory under its split name. `model_path`/`is_downloaded`/`downloaded_size`/`delete_model` all recognize the per-model-directory layout; single-file models keep the flat `<id>.gguf` form.
 
 ---
 

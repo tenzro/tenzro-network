@@ -35,7 +35,7 @@
 //!
 //! When a download completes via the HF CDN path *and* a fetcher is
 //! wired, the downloader opportunistically publishes the bytes via
-//! [`BlobFetcher::publish`] so neighbour nodes can subsequently fetch by
+//! [`BlobFetcher::publish_file`] so neighbour nodes can subsequently fetch by
 //! content hash without re-pulling from HF — Phase B1's
 //! `IrohGradientStore` and Phase B2's `IrohSealedShardStore` follow the
 //! same pattern for gradients and sealed shards respectively.
@@ -209,6 +209,12 @@ pub trait BlobFetcher: Send + Sync {
     /// Publish `bytes` to the blob store, returning a content-addressed
     /// `tenzro://blob/<hash>` URI.
     async fn publish(&self, bytes: Bytes) -> std::result::Result<TenzroUri, String>;
+    /// Publish a file already on disk without reading it into memory or
+    /// copying its bytes. Model artifacts are multi-gigabyte, so this is the
+    /// path every download-side publish takes; `publish` remains for callers
+    /// that only hold bytes.
+    async fn publish_file(&self, path: &Path)
+        -> std::result::Result<TenzroUri, String>;
 }
 
 /// Generic artifact downloader for HuggingFace Hub.
@@ -222,7 +228,7 @@ pub trait BlobFetcher: Send + Sync {
 /// artifact whose spec carries a [`PeerHint`] is fetched over
 /// `tenzro://` first and only falls back to the HF CDN on failure.
 /// Successful HF downloads are opportunistically published via
-/// [`BlobFetcher::publish`] so neighbours can avoid re-pulling.
+/// [`BlobFetcher::publish_file`] so neighbours can avoid re-pulling.
 pub struct HfArtifactDownloader {
     storage_path: PathBuf,
     blob_fetcher: Option<Arc<dyn BlobFetcher>>,
@@ -461,25 +467,15 @@ impl HfDownloader {
 
         // Opportunistic publish so neighbours can fetch from us next time.
         if let Some(fetcher) = self.blob_fetcher.as_ref() {
-            match tokio::fs::read(&dest_path).await {
-                Ok(bytes) => {
-                    let bytes = Bytes::from(bytes);
-                    match fetcher.publish(bytes).await {
-                        Ok(uri) => debug!(
-                            target: "tenzro_model::peer_fetch",
-                            "{}: published to peer store as {}",
-                            entry.id, uri
-                        ),
-                        Err(e) => debug!(
-                            target: "tenzro_model::peer_fetch",
-                            "{}: opportunistic publish failed ({}), not fatal",
-                            entry.id, e
-                        ),
-                    }
-                }
+            match fetcher.publish_file(&dest_path).await {
+                Ok(uri) => debug!(
+                    target: "tenzro_model::peer_fetch",
+                    "{}: published to peer store as {}",
+                    entry.id, uri
+                ),
                 Err(e) => debug!(
                     target: "tenzro_model::peer_fetch",
-                    "{}: skipped publish (read failed: {})",
+                    "{}: opportunistic publish failed ({}), not fatal",
                     entry.id, e
                 ),
             }
@@ -1113,25 +1109,15 @@ impl HfArtifactDownloader {
 
         // Opportunistic publish so neighbours can fetch from us next time.
         if let Some(fetcher) = self.blob_fetcher.as_ref() {
-            match tokio::fs::read(dest_path).await {
-                Ok(bytes) => {
-                    let bytes = Bytes::from(bytes);
-                    match fetcher.publish(bytes.clone()).await {
-                        Ok(uri) => debug!(
-                            target: "tenzro_model::peer_fetch",
-                            "{}: published to peer store as {}",
-                            progress_label, uri
-                        ),
-                        Err(e) => debug!(
-                            target: "tenzro_model::peer_fetch",
-                            "{}: opportunistic publish failed ({}), not fatal",
-                            progress_label, e
-                        ),
-                    }
-                }
+            match fetcher.publish_file(dest_path).await {
+                Ok(uri) => debug!(
+                    target: "tenzro_model::peer_fetch",
+                    "{}: published to peer store as {}",
+                    progress_label, uri
+                ),
                 Err(e) => debug!(
                     target: "tenzro_model::peer_fetch",
-                    "{}: skipped publish (read failed: {})",
+                    "{}: opportunistic publish failed ({}), not fatal",
                     progress_label, e
                 ),
             }

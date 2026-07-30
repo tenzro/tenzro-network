@@ -21,6 +21,7 @@
 //! `IrohSealedShardStore` follow the same opportunistic-publish pattern
 //! for gradients and sealed shards respectively.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -62,6 +63,13 @@ impl BlobFetcher for IrohBlobFetcher {
     async fn publish(&self, bytes: Bytes) -> Result<TenzroUri, String> {
         self.resolver
             .publish_bytes(bytes)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn publish_file(&self, path: &Path) -> Result<TenzroUri, String> {
+        self.resolver
+            .publish_path(path)
             .await
             .map_err(|e| e.to_string())
     }
