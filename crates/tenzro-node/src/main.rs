@@ -12,8 +12,8 @@ use tenzro_node::error::{self, Result};
 use tenzro_node::node::TenzroNode;
 use tenzro_node::rpc::RpcServer;
 use tenzro_node::{
-    a2a, event_loop, genesis, infer, ingress, lifecycle_state_bridge, mcp, spending_policy_bridge,
-    spt_ceiling_bridge, web,
+    a2a, event_loop, genesis, infer, ingress, lifecycle_state_bridge, mcp, moe,
+    spending_policy_bridge, spt_ceiling_bridge, web,
 };
 use tenzro_storage::KvStore;
 
@@ -903,6 +903,11 @@ async fn main() -> Result<()> {
         info!("Ingress handler installed on iroh transport (ALPN tenzro/http)");
     }
 
+    // MoE replication repair. Each pass raises replication on the experts
+    // this node was rendezvous-selected to hold; nodes serving no experts
+    // return immediately, so this is spawned unconditionally.
+    moe::spawn_moe_repair_loop(node_arc.clone());
+
     let a2a_shutdown_rx = shutdown_tx.subscribe();
     let a2a_addr_https = a2a_addr.clone();
     let mut a2a_handle = tokio::spawn(async move {
@@ -1245,13 +1250,11 @@ async fn run_graceful_exit(
 
     // The RPC handler blocks for up to `max_wait_secs` waiting for
     // leader rotation, so the HTTP timeout must comfortably exceed it.
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(max_wait_secs.saturating_add(30)))
-        .build()
-        .map_err(|e| error::NodeError::Other(format!("reqwest client build: {}", e)))?;
-
-    let resp = client
+    let resp = tenzro_node::http_client::shared()
         .post(&rpc_url)
+        .timeout(std::time::Duration::from_secs(
+            max_wait_secs.saturating_add(30),
+        ))
         .json(&req)
         .send()
         .await

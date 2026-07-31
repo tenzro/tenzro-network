@@ -581,10 +581,7 @@ impl LayerZeroMcpServer {
     /// Create a new LayerZero MCP server.
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("Failed to create HTTP client"),
+            http: crate::http_client::shared().clone(),
             _tool_router: Self::tool_router(),
         }
     }

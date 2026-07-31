@@ -1751,6 +1751,74 @@ fn announce_signer_wallet_address(
     Address::from_bytes(hash.as_bytes())
 }
 
+/// Payee derived from this node's own announce key, when it has one.
+fn resolve_announce_payee(
+    announce_signer: Option<&Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>>,
+) -> Option<Address> {
+    announce_signer
+        .and_then(|s| announce_signer_wallet_address(s.as_ref()))
+        .filter(|a| *a != Address::default())
+}
+
+/// The (DID, wallet) pair this node earns as, both taken from the same
+/// identity so an announcement's DID and payee never disagree.
+///
+/// Free rather than a method so background tasks that outlive a `&self`
+/// borrow can re-derive it per tick — an identity provisioned after
+/// startup has to be picked up without a restart.
+fn resolve_operator_identity(
+    identity_registry: Option<&Arc<IdentityRegistry>>,
+    announce_signer: Option<&Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>>,
+) -> Option<(String, Address)> {
+    use tenzro_identity::{IdentityData, IdentityStatus};
+
+    let registry = identity_registry?;
+    let all = registry.list_all();
+    let usable = |identity: &tenzro_identity::TenzroIdentity| {
+        identity.status == IdentityStatus::Active && identity.wallet_address != Address::default()
+    };
+
+    if let Some(wallet) = resolve_announce_payee(announce_signer)
+        && let Some((did, _)) = all
+            .iter()
+            .filter(|(_, id)| usable(id) && id.wallet_address == wallet)
+            .min_by(|a, b| a.0.cmp(&b.0))
+    {
+        return Some((did.clone(), wallet));
+    }
+
+    // Lower rank wins; ties break on the DID string.
+    let rank = |data: &IdentityData| match data {
+        IdentityData::Human { .. } | IdentityData::Institution { .. } => 0u8,
+        IdentityData::Machine {
+            controller_did: None,
+            ..
+        } => 1,
+        IdentityData::Machine { .. } => 2,
+    };
+
+    all.iter()
+        .filter(|(_, id)| usable(id))
+        .min_by(|a, b| {
+            rank(&a.1.identity_data)
+                .cmp(&rank(&b.1.identity_data))
+                .then_with(|| a.0.cmp(&b.0))
+        })
+        .map(|(did, id)| (did.clone(), id.wallet_address))
+}
+
+/// The wallet this node is paid at. See [`TenzroNode::operator_payee`] for
+/// the resolution order.
+fn resolve_operator_payee(
+    identity_registry: Option<&Arc<IdentityRegistry>>,
+    announce_signer: Option<&Arc<dyn tenzro_crypto::signatures::Signer + Send + Sync>>,
+) -> Option<Address> {
+    match resolve_operator_identity(identity_registry, announce_signer) {
+        Some((_, wallet)) => Some(wallet),
+        None => resolve_announce_payee(announce_signer),
+    }
+}
+
 /// Main Tenzro Network node
 pub struct TenzroNode {
     config: NodeConfig,
@@ -7627,17 +7695,19 @@ impl TenzroNode {
                                     tenzro_network::MessagePayload::Custom { data, .. } => data,
                                     _ => continue,
                                 };
-                                let response: tenzro_model::SlaResponse =
-                                    match bincode::deserialize(&data) {
-                                        Ok(r) => r,
-                                        Err(e) => {
-                                            tracing::debug!(
-                                                error = %e,
-                                                "Ignoring non-SlaResponse payload on tenzro/sla"
-                                            );
-                                            continue;
-                                        }
-                                    };
+                                let response = match bincode::deserialize(&data) {
+                                    Ok(tenzro_model::SlaEnvelope::Response(r)) => r,
+                                    // Probes are another validator's traffic on
+                                    // the shared topic.
+                                    Ok(tenzro_model::SlaEnvelope::Probe(_)) => continue,
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            error = %e,
+                                            "Ignoring undecodable payload on tenzro/sla"
+                                        );
+                                        continue;
+                                    }
+                                };
                                 let nonce_hex = hex::encode(response.challenge_nonce);
                                 let probe = match outstanding.remove(&nonce_hex) {
                                     Some((_, p)) => p,
@@ -7684,9 +7754,172 @@ impl TenzroNode {
                     }
                 });
             }
+            // Silence is the common provider failure, so it has to be scored.
+            // Without this sweep a probe that is never answered sits in the map
+            // forever and the miss counter never advances, leaving the slash
+            // path reachable only by a provider that answers badly.
+            {
+                let outstanding = self.sla_outstanding_probes.clone();
+                let mgr = sla_manager.clone();
+                tokio::spawn(async move {
+                    let mut ticker =
+                        tokio::time::interval(std::time::Duration::from_secs(5));
+                    loop {
+                        ticker.tick().await;
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        let expired: Vec<String> = outstanding
+                            .iter()
+                            .filter(|kv| now_ms > kv.value().deadline_ms)
+                            .map(|kv| kv.key().clone())
+                            .collect();
+                        for nonce_hex in expired {
+                            // `remove` is the arbiter: a response landing in the
+                            // same instant either wins the entry and is scored
+                            // by the subscriber, or loses it and is dropped as
+                            // unknown. Either way the miss counts once.
+                            let Some((_, probe)) = outstanding.remove(&nonce_hex)
+                            else {
+                                continue;
+                            };
+                            match mgr.apply_response(&probe, None, now_ms).await {
+                                Ok(result) => {
+                                    tracing::info!(
+                                        provider = %probe.provider_did,
+                                        epoch = probe.epoch,
+                                        round = probe.round,
+                                        deadline_ms = probe.deadline_ms,
+                                        result = result.as_reason(),
+                                        "SLA probe expired without a response"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        provider = %probe.provider_did,
+                                        error = %e,
+                                        "SLA expiry scoring failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
             info!(
                 "SLA fault detector wired: VRF-stamped probes → ComputeBond slashing"
             );
+        }
+
+        // Responder half of the SLA exchange. Runs on every node holding a
+        // compute bond, not just providers by role, because the bond is what
+        // makes a DID slashable and a validator may also serve models. Without
+        // this the detector would score every bonded provider as silent and
+        // slash the whole set.
+        // A node with no service key cannot be probed at all, so a missing key
+        // skips the responder rather than aborting startup.
+        if let (Some(network), Some(bonds), Ok(keypair)) = (
+            self.network.clone(),
+            self.compute_bond_manager.clone(),
+            crate::keygen::load_validator_keypair(&self.config.data_dir),
+        ) {
+            let service_address = keypair.address();
+            let service_pubkey = keypair.public_key().clone();
+            let signer = tenzro_crypto::signatures::Ed25519SignerImpl::new(keypair)
+                .map_err(|e| NodeError::Other(format!("SLA responder signer: {e}")))?;
+            // Re-derived per probe rather than captured once: an identity
+            // provisioned after startup has to start answering without a
+            // restart.
+            let identity_registry = self.identity_registry.clone();
+            let announce_signer = self.announce_signer.clone();
+            tokio::spawn(async move {
+                let mut rx = match network.subscribe("tenzro/sla").await {
+                    Ok(rx) => rx,
+                    Err(e) => {
+                        warn!(error = %e, "SLA responder could not subscribe to tenzro/sla");
+                        return;
+                    }
+                };
+                while let Some(msg) = rx.recv().await {
+                    let MessagePayload::Custom { data, .. } = msg.payload else {
+                        continue;
+                    };
+                    let probe = match bincode::deserialize(&data) {
+                        Ok(tenzro_model::SlaEnvelope::Probe(p)) => p,
+                        Ok(tenzro_model::SlaEnvelope::Response(_)) => continue,
+                        Err(_) => continue,
+                    };
+
+                    // The bond is the authority on which DID this node answers
+                    // for: its `provider_address` is the wallet that funded it,
+                    // so a bond funded by another wallet is another operator's
+                    // to answer.
+                    let payee = resolve_operator_payee(
+                        identity_registry.as_ref(),
+                        announce_signer.as_ref(),
+                    );
+                    match (bonds.get(&probe.provider_did), payee) {
+                        (Some(bond), Some(payee)) if bond.provider_address == payee => {}
+                        _ => continue,
+                    }
+
+                    // Verify before signing: the nonce is the issuer's VRF
+                    // output, so an unverified probe is one an issuer could
+                    // have ground to land an unmeetable deadline.
+                    if let Err(e) = tenzro_model::SlaManager::verify_probe(&probe) {
+                        warn!(
+                            issuer = %hex::encode(probe.issuer.to_bytes()),
+                            error = %e,
+                            "Rejecting SLA probe with an invalid VRF proof"
+                        );
+                        continue;
+                    }
+
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    if now_ms > probe.deadline_ms {
+                        debug!(
+                            deadline_ms = probe.deadline_ms,
+                            now_ms, "SLA probe arrived past its deadline — not answering"
+                        );
+                        continue;
+                    }
+
+                    let response = match tenzro_model::SlaManager::build_response(
+                        &probe,
+                        service_address,
+                        &signer,
+                        service_pubkey.clone(),
+                        now_ms,
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(error = %e, "SLA response signing failed");
+                            continue;
+                        }
+                    };
+                    let payload =
+                        match bincode::serialize(&tenzro_model::SlaEnvelope::Response(response)) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!(error = %e, "SLA response serialize failed");
+                                continue;
+                            }
+                        };
+                    let out = NetworkMessage::new(MessagePayload::Custom {
+                        topic: "tenzro/sla".to_string(),
+                        data: payload,
+                    });
+                    if let Err(e) = network.broadcast("tenzro/sla", out).await {
+                        warn!(error = %e, "SLA response broadcast failed");
+                    } else {
+                        debug!(
+                            provider = %probe.provider_did,
+                            epoch = probe.epoch,
+                            round = probe.round,
+                            "Answered SLA probe"
+                        );
+                    }
+                }
+            });
         }
 
         // Tenzro Train protocol runtime — write-through to CF_TRAINING_RUNS /
@@ -12149,10 +12382,10 @@ impl TenzroNode {
     ///    that never provisioned an identity still has a self-custodial payee
     ///    instead of the zero address.
     pub fn operator_payee(&self) -> Option<Address> {
-        match self.operator_identity() {
-            Some((_, wallet)) => Some(wallet),
-            None => self.announce_signer_payee(),
-        }
+        resolve_operator_payee(
+            self.identity_registry.as_ref(),
+            self.announce_signer.as_ref(),
+        )
     }
 
     /// The DID that owns [`TenzroNode::operator_payee`]. `None` when this node
@@ -12161,56 +12394,11 @@ impl TenzroNode {
     /// provider announcement) can tell the difference instead of recording an
     /// empty string against a real wallet.
     pub fn operator_did(&self) -> Option<String> {
-        self.operator_identity().map(|(did, _)| did)
-    }
-
-    /// Payee derived from this node's own announce key, when it has one.
-    fn announce_signer_payee(&self) -> Option<Address> {
-        self.announce_signer
-            .as_ref()
-            .and_then(|s| announce_signer_wallet_address(s.as_ref()))
-            .filter(|a| *a != Address::default())
-    }
-
-    /// The (DID, wallet) pair this node earns as, both taken from the same
-    /// identity so an announcement's DID and payee never disagree.
-    fn operator_identity(&self) -> Option<(String, Address)> {
-        use tenzro_identity::{IdentityData, IdentityStatus};
-
-        let registry = self.identity_registry.as_ref()?;
-        let all = registry.list_all();
-        let usable = |identity: &tenzro_identity::TenzroIdentity| {
-            identity.status == IdentityStatus::Active
-                && identity.wallet_address != Address::default()
-        };
-
-        if let Some(wallet) = self.announce_signer_payee()
-            && let Some((did, _)) = all
-                .iter()
-                .filter(|(_, id)| usable(id) && id.wallet_address == wallet)
-                .min_by(|a, b| a.0.cmp(&b.0))
-        {
-            return Some((did.clone(), wallet));
-        }
-
-        // Lower rank wins; ties break on the DID string.
-        let rank = |data: &IdentityData| match data {
-            IdentityData::Human { .. } | IdentityData::Institution { .. } => 0u8,
-            IdentityData::Machine {
-                controller_did: None,
-                ..
-            } => 1,
-            IdentityData::Machine { .. } => 2,
-        };
-
-        all.iter()
-            .filter(|(_, id)| usable(id))
-            .min_by(|a, b| {
-                rank(&a.1.identity_data)
-                    .cmp(&rank(&b.1.identity_data))
-                    .then_with(|| a.0.cmp(&b.0))
-            })
-            .map(|(did, id)| (did.clone(), id.wallet_address))
+        resolve_operator_identity(
+            self.identity_registry.as_ref(),
+            self.announce_signer.as_ref(),
+        )
+        .map(|(did, _)| did)
     }
 
     /// Returns the validator-owned hybrid signer (Ed25519 + ML-DSA-65)

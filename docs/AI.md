@@ -164,7 +164,9 @@ Backends without a prebuilt image (SYCL, OpenVINO, OpenCL, MUSA, CANN, WebGPU, z
 
 `Dockerfile.cuda` builds on multi-arch CUDA bases, so it covers x86_64 and arm64 NVIDIA hosts (Grace-Blackwell, Grace Hopper, Jetson Thor) from the same file with no extra flags.
 
-The non-LLM modalities (forecast / vision / text-embed / segmentation / detection / ASR / video) run on ONNX Runtime and fall back to CPU under every GPU image; the `onnx-cuda`, `onnx-tensorrt`, and `onnx-coreml` features link the corresponding ONNX Runtime execution provider where available. ONNX Runtime publishes no aarch64 CUDA distribution, so on arm64 the ONNX modalities serve from CPU while the llama.cpp language path runs on the GPU.
+The non-LLM modalities (forecast / vision / text-embed / segmentation / detection / ASR / video) run on ONNX Runtime; the `onnx-cuda`, `onnx-tensorrt`, and `onnx-coreml` features link the corresponding ONNX Runtime execution provider, and each runtime falls back to CPU when no provider registers. `Dockerfile.cuda` enables `onnx-cuda` on both architectures, so every modality runs on the GPU alongside the llama.cpp language path.
+
+On x86_64 the ONNX Runtime GPU binary comes from the prebuilt distribution the `ort` crate downloads. No such distribution exists for aarch64 — the CPU build is served in its place without an error — so `Dockerfile.cuda` compiles ONNX Runtime with the CUDA execution provider from source in a separate stage on that architecture, targeting Grace Hopper (sm_90), Jetson Thor (sm_110), and Grace-Blackwell GB10 (sm_121). That stage needs CUDA 13.0 or newer and roughly an extra hour and 60 GB of RAM; trim `ORT_CUDA_ARCHITECTURES` to the single target when building for one machine.
 
 ---
 
@@ -210,6 +212,12 @@ MoE pipeline roles are typed on `ProviderCapacity.moe_roles: Vec<MoeProviderRole
 - `hot_threshold_tps: 1_000` — committed TPS above which an expert is considered hot
 
 The view exposes `under_replicated(policy)` and `hot_experts(policy)` so a scheduler or governance layer can act on under-served or over-loaded experts.
+
+Repair of an under-replicated expert is pull-based. `MoeShardView::plan_repair(policy, candidates)` returns a `RepairAssignment { expert, provider, blob_uri }` per missing replica, choosing the new holder by rendezvous hash over the candidate providers (domain tag `tenzro/moe/placement`, key `<model_id>/<layer>/<expert>`). Every node runs the same plan against its own membership view and acts only on the rows naming itself, so no node can make a peer allocate memory, and two nodes never race to cover the same replica slot. Membership-view skew produces mild over- or under-replication that heals as views converge.
+
+The `blob_uri` on each holder's declaration is what makes repair possible: it is the content-addressed `tenzro://blob/<hash>` the holder loaded the weights from, so a newly selected holder fetches the identical bytes over iroh-blobs. Experts whose holders declare no `blob_uri` — weights admitted from an inline payload — are skipped, since there is nowhere to fetch them from.
+
+Each node runs a repair pass every 120 seconds, scoped to the models it already holds experts for, and admits at most two experts per pass so one membership hiccup cannot pull a whole model onto a single node.
 
 ### 3.5 LAN clustering: layer-wise pipeline parallelism
 

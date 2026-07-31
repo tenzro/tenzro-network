@@ -36,7 +36,7 @@ impl QdrantEngine {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
-            http: Client::new(),
+            http: crate::http_client::shared().clone(),
         }
     }
 

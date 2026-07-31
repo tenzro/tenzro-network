@@ -426,10 +426,7 @@ impl McpPluginHost {
         Self {
             vault,
             supervisor: Arc::new(StdioSubprocessSupervisor::default()),
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .expect("reqwest client construction is infallible with these options"),
+            http: crate::http_client::shared().clone(),
             default_timeout: Duration::from_secs(30),
         }
     }

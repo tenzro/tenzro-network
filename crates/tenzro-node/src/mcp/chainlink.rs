@@ -724,10 +724,7 @@ fn build_ccip_send_calldata(
 impl ChainlinkMcpServer {
     pub fn new() -> Self {
         Self {
-            http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("Failed to build HTTP client"),
+            http_client: crate::http_client::shared().clone(),
             _tool_router: Self::tool_router(),
         }
     }

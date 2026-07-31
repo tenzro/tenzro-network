@@ -176,7 +176,7 @@ pub use routing::{
 };
 pub use pricing::{PriceEstimate, PricingEngine};
 pub use moe_shard::{
-    ExpertHolder, ExpertId, MoeShardView, ReplicationPolicy,
+    ExpertHolder, ExpertId, MoeShardView, RepairAssignment, ReplicationPolicy,
 };
 pub use moe_router::{
     plan_dispatch, DispatchPlan, ExpertBatch, HolderEndpoint, MoeDispatchError,
@@ -275,9 +275,9 @@ pub use jurisdiction::{
     Ed25519JurisdictionSigner, JurisdictionError, JurisdictionSigner, SharedJurisdictionSigner,
 };
 pub use sla::{
-    response_signing_payload as sla_response_signing_payload, ProviderSlashingCallback, SlaManager,
-    SlaProbe, SlaResponse, SlaResult, DEFAULT_SLA_SLASH_AMOUNT, DEFAULT_SLA_SLASH_THRESHOLD,
-    SLA_PROBE_DOMAIN, SLA_RESPONSE_DOMAIN,
+    response_signing_payload as sla_response_signing_payload, ProviderSlashingCallback,
+    SlaEnvelope, SlaManager, SlaProbe, SlaResponse, SlaResult, DEFAULT_SLA_SLASH_AMOUNT,
+    DEFAULT_SLA_SLASH_THRESHOLD, SLA_PROBE_DOMAIN, SLA_RESPONSE_DOMAIN,
 };
 
 #[cfg(test)]

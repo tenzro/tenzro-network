@@ -292,6 +292,11 @@ async fn spawn_in_background_inner(
         }
     });
 
+    // Mirror main.rs: raise replication on the experts this node was
+    // rendezvous-selected to hold. Returns immediately on nodes holding
+    // no experts.
+    crate::moe::spawn_moe_repair_loop(node.clone());
+
     let join = tokio::spawn(async move {
         info!("NodeHandle background task started");
         let mut ticker = tokio::time::interval(STATUS_POLL_INTERVAL);

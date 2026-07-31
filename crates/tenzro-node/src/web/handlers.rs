@@ -169,11 +169,16 @@ pub(crate) async fn verify_did_web_envelope(
         Some(u) => u,
         None => return fail(&envelope.did, "malformed did:web identifier".to_string()),
     };
-    let client = reqwest::Client::builder()
+    // Envelope verification is on the request path of a caller waiting on the
+    // answer, so the did.json fetch gets a much tighter budget than the shared
+    // default: an unresponsive DID host fails the verification, not the node.
+    let resp = match crate::http_client::shared()
+        .get(&url)
         .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let resp = match client.get(&url).send().await.and_then(|r| r.error_for_status()) {
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
         Ok(r) => r,
         Err(e) => return fail(&envelope.did, format!("did:web fetch failed: {e}")),
     };

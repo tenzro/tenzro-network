@@ -3012,8 +3012,8 @@ pub(crate) async fn handle_ccip_get_fee(
         params.get("gas_limit").and_then(|v| v.as_u64()).unwrap_or(200_000),
     )?;
 
-    let http = reqwest::Client::new();
-    let result = ccip_eth_call(&http, &rpc_url, router, &calldata).await?;
+    let http = crate::http_client::shared();
+    let result = ccip_eth_call(http, &rpc_url, router, &calldata).await?;
     if result.len() < 32 {
         return Err(JsonRpcError {
             code: -32603,
@@ -3094,8 +3094,8 @@ pub(crate) async fn handle_ccip_send(
         fee_token,
         gas_limit,
     )?;
-    let http = reqwest::Client::new();
-    let fee_result = ccip_eth_call(&http, &rpc_url, router, &fee_calldata).await?;
+    let http = crate::http_client::shared();
+    let fee_result = ccip_eth_call(http, &rpc_url, router, &fee_calldata).await?;
     let fee_wei = if fee_result.len() >= 32 {
         let mut arr = [0u8; 16];
         arr.copy_from_slice(&fee_result[16..32]);
@@ -3152,8 +3152,8 @@ pub(crate) async fn handle_ccip_track(
         hex::decode(CCIP_GET_EXECUTION_STATE_SELECTOR).expect("static selector hex");
     calldata.extend_from_slice(&pad32_left(&message_id_bytes));
 
-    let http = reqwest::Client::new();
-    let result = ccip_eth_call(&http, &rpc_url, offramp, &calldata).await?;
+    let http = crate::http_client::shared();
+    let result = ccip_eth_call(http, &rpc_url, offramp, &calldata).await?;
     let state = if result.len() >= 32 { result[31] } else { 0u8 };
     let (label, desc) = match state {
         0 => ("UNTOUCHED", "Message has not been processed yet"),
@@ -3188,7 +3188,7 @@ async fn ccip_api_get(
         url.push('=');
         url.push_str(v);
     }
-    let resp = reqwest::Client::new()
+    let resp = crate::http_client::shared()
         .get(&url)
         .send()
         .await
@@ -3357,8 +3357,8 @@ pub(crate) async fn handle_ccip_token_pool(
 
     // `getToken()` selector = 0x21df0da7
     let calldata = hex::decode("21df0da7").unwrap();
-    let http = reqwest::Client::new();
-    let result = ccip_eth_call(&http, &rpc_url, pool, &calldata).await?;
+    let http = crate::http_client::shared();
+    let result = ccip_eth_call(http, &rpc_url, pool, &calldata).await?;
     let token = if result.len() >= 32 {
         format!("0x{}", hex::encode(&result[12..32]))
     } else {
@@ -3407,7 +3407,7 @@ pub(crate) async fn handle_ccip_rate_limits(
     let mut call_out = hex::decode("6890c1c8").unwrap();
     call_out.extend_from_slice(&pad32_left(&remote.to_be_bytes()));
 
-    let http = reqwest::Client::new();
+    let http = crate::http_client::shared();
 
     // Best-effort: if a chain's pool is older v1.5 the selector still
     // matches; if the contract is upgraded both calls succeed. Report
@@ -3430,8 +3430,8 @@ pub(crate) async fn handle_ccip_rate_limits(
         })
     };
 
-    let inbound = ccip_eth_call(&http, &rpc_url, pool, &call_in).await.ok();
-    let outbound = ccip_eth_call(&http, &rpc_url, pool, &call_out).await.ok();
+    let inbound = ccip_eth_call(http, &rpc_url, pool, &call_in).await.ok();
+    let outbound = ccip_eth_call(http, &rpc_url, pool, &call_out).await.ok();
 
     Ok(json!({
         "chain": chain_name,
@@ -6434,6 +6434,7 @@ pub(crate) async fn handle_moe_shard_map(
                     "committed_tps": h.committed_tps,
                     "iroh_endpoint_id": h.iroh_endpoint_id,
                     "http_endpoint": h.http_endpoint,
+                    "blob_uri": h.blob_uri,
                 })).collect::<Vec<_>>(),
             })
         })

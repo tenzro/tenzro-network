@@ -98,6 +98,7 @@ pub mod event_loop;
 pub mod genesis;
 pub mod handle;
 pub mod health;
+pub mod http_client;
 pub mod mandate_store;
 pub mod identity_gossip;
 pub mod inference_challenge;

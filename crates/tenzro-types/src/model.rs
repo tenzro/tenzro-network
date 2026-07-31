@@ -1577,6 +1577,13 @@ pub struct MoeExpertHolding {
     /// Maximum tokens per second this provider commits to for this
     /// expert post-batch. `0` means "best effort" with no SLA.
     pub committed_tps: u32,
+    /// Content-addressed `tenzro://blob/<hash>` URI the weights were loaded
+    /// from. Carrying it on the announcement is what makes replication
+    /// repair possible: a node that self-selects to hold an
+    /// under-replicated expert reads the URI off any existing holder's
+    /// declaration and fetches the bytes itself. `None` for experts loaded
+    /// from an inline payload, which are unrepairable by other nodes.
+    pub blob_uri: Option<String>,
 }
 
 /// A provider-owned cluster of machines on one local network that jointly

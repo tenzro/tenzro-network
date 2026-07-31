@@ -474,10 +474,7 @@ impl CantonMcpServer {
             endpoints: std::collections::BTreeMap::new(),
             default_network: crate::config::CantonNetwork::default(),
             analytics: None,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("Failed to create HTTP client"),
+            http: crate::http_client::shared().clone(),
             _tool_router: Self::tool_router(),
         }
     }

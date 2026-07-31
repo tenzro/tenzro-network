@@ -24,14 +24,19 @@
 //!
 //! 1. **Admit** — pull waiting requests into any free slots and tokenize their
 //!    prompt onto the slot as a pending prefill.
-//! 2. **Prefill** — for each slot with a pending prompt, add the whole prompt to
-//!    the batch requesting logits only at the prompt's last position.
-//! 3. **Extend** — for every already-running sequence, add its last sampled token
+//! 2. **Extend** — for every already-running sequence, add its last sampled token
 //!    at its next position, requesting logits there.
+//! 3. **Prefill** — spend the batch capacity left over from step 2 on the slots
+//!    that still owe prompt tokens, at most `PREFILL_CHUNK` tokens per slot per
+//!    step, requesting logits only at a prompt's true last position.
 //! 4. **Decode** — one `llama_decode` over the interleaved batch.
 //! 5. **Sample** — for each sequence, sample from its own logits index with its
 //!    own `LlamaSampler` (so repetition/penalty state is per-request), stream the
 //!    decoded piece, and advance or finish the sequence.
+//!
+//! Extension runs before prefill so an arriving long prompt cannot stall the
+//! sequences already generating, and a prompt is spread across as many steps as
+//! it needs rather than having to fit one batch whole.
 //!
 //! A sequence finishes on an end-of-generation token, on one of its configured
 //! stop sequences, on reaching its position ceiling, or when a streaming caller
@@ -62,10 +67,15 @@ use crate::runtime::{ChatMessage, GenerationConfig, InferenceResult, StopReason,
 /// memory a single loaded model already reserves.
 const MAX_SLOTS: usize = 32;
 
-/// Physical batch capacity for a single `llama_decode`. Must cover the worst
-/// case of one full prompt prefill plus one extension token for every other
-/// active slot. Prompts larger than this are prefilled in chunks.
+/// Physical batch capacity for a single `llama_decode`. Prompts are prefilled in
+/// chunks, so this bounds the work per step rather than the prompt length a
+/// request may carry.
 const PHYSICAL_BATCH: usize = 2048;
+
+/// Prompt tokens one slot may contribute to a single batch. Bounding the
+/// per-slot share lets several prefills advance together instead of one long
+/// prompt consuming every step's spare capacity until it is done.
+const PREFILL_CHUNK: usize = 512;
 
 /// How long the scheduler parks waiting for the first request before looping to
 /// re-check the shutdown signal. Bounds shutdown latency when the engine is idle
@@ -197,8 +207,11 @@ struct Sequence {
     result_tx: Option<tokio::sync::oneshot::Sender<Result<InferenceResult>>>,
     decoder: encoding_rs::Decoder,
     /// Prompt tokens staged by `admit`, waiting for the scheduler to prefill
-    /// them. `None` once prefill has run.
+    /// them. `None` once the whole prompt has been committed to the KV cache.
     pending_prompt: Option<Vec<LlamaToken>>,
+    /// How many tokens of `pending_prompt` are already committed. Non-zero when
+    /// a prompt is spread over several batches.
+    prefill_cursor: usize,
     /// Next KV position for this sequence.
     n_past: i32,
     input_tokens: u32,
@@ -327,65 +340,72 @@ fn scheduler_loop(
             }
         }
 
-        // Build the interleaved batch: whole-prompt prefill for freshly-admitted
-        // sequences, one extension token for already-running ones. `logits_slot`
-        // maps a batch logits index back to the slot that owns it.
+        // Build the interleaved batch. `logits_slot` maps a batch logits index
+        // back to the slot that owns it.
         batch.clear();
         let mut logits_slot: Vec<(i32, usize)> = Vec::with_capacity(MAX_SLOTS);
-        let mut batch_full = false;
 
+        // Extension first: every running sequence contributes exactly one token,
+        // so a slot mid-prefill can never hold back the slots already generating.
         for (slot_idx, maybe_seq) in slots.iter_mut().enumerate() {
             let Some(seq) = maybe_seq.as_mut() else {
                 continue;
             };
+            let Some(tok) = seq.pending_token.take() else {
+                continue;
+            };
+            // n_past advances only after the token is committed here, mirroring
+            // prefill, so KV positions stay consecutive.
+            if batch.add(tok, seq.n_past, &[seq.seq_id], true).is_err() {
+                seq.pending_token = Some(tok);
+                continue;
+            }
+            seq.n_past += 1;
+            logits_slot.push((batch.n_tokens() - 1, slot_idx));
+        }
 
-            if let Some(prompt) = seq.pending_prompt.take() {
-                // Prefill: add the whole prompt, logits only on the last token.
-                let last = prompt.len() - 1;
-                let mut overflowed = false;
-                for (i, tok) in prompt.iter().enumerate() {
-                    let want_logits = i == last;
-                    if batch
-                        .add(*tok, seq.n_past + i as i32, &[seq.seq_id], want_logits)
-                        .is_err()
-                    {
-                        // Batch can't hold this whole prompt this step. Restore
-                        // the prompt and try again next step (with a fresh batch).
-                        seq.pending_prompt = Some(prompt.clone());
-                        overflowed = true;
-                        batch_full = true;
-                        break;
-                    }
-                }
-                if overflowed {
-                    continue;
-                }
-                seq.n_past += prompt.len() as i32;
-                let idx = batch.n_tokens() - 1;
-                logits_slot.push((idx, slot_idx));
-            } else if let Some(tok) = seq.pending_token.take() {
-                // Running sequence: add its just-sampled token at n_past (the next
-                // free KV position). n_past advances only after the token is
-                // committed here, mirroring prefill — so the KV cache and the
-                // batch positions stay consecutive (Y = X + 1).
-                if batch.add(tok, seq.n_past, &[seq.seq_id], true).is_err() {
-                    // Batch full — leave this token pending for the next step.
-                    seq.pending_token = Some(tok);
-                    batch_full = true;
-                    continue;
+        // Prefill with what capacity is left, capped per slot.
+        for (slot_idx, maybe_seq) in slots.iter_mut().enumerate() {
+            let Some(seq) = maybe_seq.as_mut() else {
+                continue;
+            };
+            let Some(prompt) = seq.pending_prompt.take() else {
+                continue;
+            };
+
+            let room = PHYSICAL_BATCH
+                .saturating_sub(batch.n_tokens() as usize)
+                .min(PREFILL_CHUNK);
+            let start = seq.prefill_cursor;
+            let end = prompt.len().min(start + room);
+            let last = prompt.len() - 1;
+
+            let mut cursor = start;
+            while cursor < end {
+                if batch
+                    .add(prompt[cursor], seq.n_past, &[seq.seq_id], cursor == last)
+                    .is_err()
+                {
+                    break;
                 }
                 seq.n_past += 1;
-                let idx = batch.n_tokens() - 1;
-                logits_slot.push((idx, slot_idx));
+                cursor += 1;
+            }
+
+            if cursor > last {
+                // Whole prompt committed; its tail carries this slot's logits.
+                seq.prefill_cursor = 0;
+                logits_slot.push((batch.n_tokens() - 1, slot_idx));
+            } else {
+                // More prompt to go — no logits from this slot this step.
+                seq.prefill_cursor = cursor;
+                seq.pending_prompt = Some(prompt);
             }
         }
 
         if batch.n_tokens() == 0 {
-            // Nothing to decode. Either every slot is free (loop back to admit)
-            // or the batch overflowed with everything deferred (spin once).
-            if !batch_full {
-                continue;
-            }
+            // Every slot is free, or the batch could not accept a single token
+            // this step. Either way there is nothing to decode.
             continue;
         }
 
@@ -531,6 +551,7 @@ fn admit(model: &LlamaModel, ctx_size: i32, slots: &mut [Option<Sequence>], req:
         result_tx: Some(req.result_tx),
         decoder: encoding_rs::UTF_8.new_decoder(),
         pending_prompt: Some(tokens),
+        prefill_cursor: 0,
         n_past: 0,
         input_tokens,
         output_tokens: 0,

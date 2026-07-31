@@ -242,7 +242,7 @@ async fn web_search(
         .ok_or_else(|| invalid_params("Missing 'query'"))?;
 
     let url = format!("{}/search", base.trim_end_matches('/'));
-    let mut req = reqwest::Client::new()
+    let mut req = crate::http_client::shared()
         .get(&url)
         .query(&[("q", query), ("format", "json")]);
     for key in ["categories", "language", "time_range"] {
@@ -321,7 +321,7 @@ async fn url_fetch(params: &Value) -> std::result::Result<Value, JsonRpcError> {
         .unwrap_or(262_144)
         .clamp(1, 4_194_304) as usize;
 
-    let resp = reqwest::Client::new()
+    let resp = crate::http_client::shared()
         .get(url)
         .send()
         .await
@@ -428,7 +428,7 @@ async fn oneinch(
     };
 
     let url = format!("{ONEINCH_SWAP_BASE}/{chain_id}/{path}");
-    let mut req = reqwest::Client::new().get(&url).bearer_auth(api_key);
+    let mut req = crate::http_client::shared().get(&url).bearer_auth(api_key);
     for key in [
         "src",
         "dst",

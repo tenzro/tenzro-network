@@ -3127,7 +3127,7 @@ pub struct CctGetPoolParams {
 
 /// Call a tool on the official deBridge MCP server at agents.debridge.com/mcp
 async fn debridge_mcp_call(tool_name: &str, arguments: serde_json::Value) -> std::result::Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
+    let client = crate::http_client::shared();
     let debridge_url = std::env::var("DEBRIDGE_MCP_URL")
         .unwrap_or_else(|_| "https://agents.debridge.com/mcp".to_string());
 
@@ -7278,7 +7278,6 @@ impl TenzroMcpServer {
                 });
             }
             let remote_url = format!("{}/chat/completions", svc.api_endpoint);
-            let client = reqwest::Client::new();
 
             let forward_body = serde_json::json!({
                 "model": svc.model_id,
@@ -7289,7 +7288,16 @@ impl TenzroMcpServer {
                 "jurisdiction_receipt": jurisdiction_receipt_required.then_some("required"),
             });
 
-            match client.post(&remote_url).json(&forward_body).send().await {
+            // The whole completion is buffered rather than streamed, so the
+            // budget has to cover generating every requested token on the
+            // remote provider, not just the first byte.
+            match crate::http_client::shared()
+                .post(&remote_url)
+                .json(&forward_body)
+                .timeout(std::time::Duration::from_secs(300))
+                .send()
+                .await
+            {
                 Ok(resp) => {
                     let status = resp.status();
                     match resp.json::<serde_json::Value>().await {

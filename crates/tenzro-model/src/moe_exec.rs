@@ -976,6 +976,12 @@ pub struct MoeLoadedExpert {
     /// `q8_0`), or `None` when the expert is fully dense `f32`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub quant: Option<String>,
+    /// Content-addressed `tenzro://blob/<hash>` URI these weights came from.
+    /// `None` for experts admitted from an inline payload. Carried into the
+    /// provider declaration so peers can fetch the same bytes when they
+    /// self-select to repair an under-replicated expert.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_uri: Option<String>,
 }
 
 /// Status row for one loaded gating network.
@@ -1133,6 +1139,10 @@ pub struct MoeExpertRuntime {
     mem: DashMap<ExpertKey, MemEntry>,
     /// Disk-tier experts (evicted from memory, blob retained on disk).
     disk: DashMap<ExpertKey, DiskEntry>,
+    /// Content-addressed URI each expert's blob was fetched from. Keyed
+    /// independently of the residency tiers so an eviction or promotion
+    /// never loses the provenance the repair path needs.
+    sources: DashMap<ExpertKey, String>,
     gates: DashMap<GateKey, Arc<GatingNetwork>>,
     /// Sum of `MemEntry::bytes` over `mem`.
     mem_bytes: AtomicU64,
@@ -1198,6 +1208,7 @@ impl MoeExpertRuntime {
         Self {
             mem: DashMap::new(),
             disk: DashMap::new(),
+            sources: DashMap::new(),
             gates: DashMap::new(),
             mem_bytes: AtomicU64::new(0),
             tick: AtomicU64::new(0),
@@ -1249,12 +1260,18 @@ impl MoeExpertRuntime {
     /// memory tier, evicting the coldest experts to the disk tier (or
     /// dropping them when no disk tier is set) to stay within budget.
     /// Returns the status row for the freshly loaded expert.
+    ///
+    /// `source_uri` is the content-addressed `tenzro://blob/<hash>` the
+    /// bytes were fetched from, or `None` when they arrived inline. It is
+    /// recorded verbatim and re-advertised so peers repairing this expert
+    /// can fetch the identical blob.
     pub fn load_expert(
         &self,
         model_id: impl Into<String>,
         layer: u32,
         expert: u32,
         blob: &[u8],
+        source_uri: Option<String>,
     ) -> MoeExecResult<MoeLoadedExpert> {
         let model_id = model_id.into();
         let ffn = ExpertFfn::from_safetensors(blob)?;
@@ -1268,6 +1285,14 @@ impl MoeExpertRuntime {
         if let Some(path) = self.disk_path(&key) {
             write_blob_atomic(&path, blob)?;
         }
+        match &source_uri {
+            Some(uri) => {
+                self.sources.insert(key.clone(), uri.clone());
+            }
+            None => {
+                self.sources.remove(&key);
+            }
+        }
         let bytes = ffn.approx_bytes();
         let row = MoeLoadedExpert {
             model_id,
@@ -1278,6 +1303,7 @@ impl MoeExpertRuntime {
             approx_bytes: bytes,
             tier: ExpertTier::Memory,
             quant: ffn.quant_tag().map(str::to_string),
+            source_uri,
         };
         self.admit_memory(key, Arc::new(ffn), bytes);
         Ok(row)
@@ -1435,6 +1461,7 @@ impl MoeExpertRuntime {
             // load time); clean it up.
             let _ = std::fs::remove_file(&path);
         }
+        self.sources.remove(&key);
         hit
     }
 
@@ -1600,6 +1627,7 @@ impl MoeExpertRuntime {
                 approx_bytes: e.value().bytes,
                 tier: ExpertTier::Memory,
                 quant: e.value().ffn.quant_tag().map(str::to_string),
+                source_uri: self.sources.get(e.key()).map(|u| u.clone()),
             })
             .collect();
         experts.extend(self.disk.iter().map(|e| MoeLoadedExpert {
@@ -1611,6 +1639,7 @@ impl MoeExpertRuntime {
             approx_bytes: e.value().approx_bytes,
             tier: ExpertTier::Disk,
             quant: e.value().quant.clone(),
+            source_uri: self.sources.get(e.key()).map(|u| u.clone()),
         }));
         experts.sort_by(|a, b| {
             (a.model_id.as_str(), a.layer, a.expert).cmp(&(b.model_id.as_str(), b.layer, b.expert))
@@ -2434,7 +2463,7 @@ mod tests {
     #[test]
     fn runtime_load_execute_unload_cycle() {
         let rt = MoeExpertRuntime::new();
-        let row = rt.load_expert("qwen", 0, 1, &identity_expert_blob(1.0)).unwrap();
+        let row = rt.load_expert("qwen", 0, 1, &identity_expert_blob(1.0), None).unwrap();
         assert_eq!(row.d_model, 2);
         assert!(rt.has_expert("qwen", 0, 1));
 
@@ -2460,7 +2489,7 @@ mod tests {
     #[test]
     fn execute_rejects_bad_dimensions() {
         let rt = MoeExpertRuntime::new();
-        rt.load_expert("qwen", 0, 1, &identity_expert_blob(1.0)).unwrap();
+        rt.load_expert("qwen", 0, 1, &identity_expert_blob(1.0), None).unwrap();
 
         // d_model mismatch vs loaded expert.
         let err = rt
@@ -2524,8 +2553,8 @@ mod tests {
     #[test]
     fn status_reports_resident_state() {
         let rt = MoeExpertRuntime::new();
-        rt.load_expert("qwen", 0, 1, &identity_expert_blob(1.0)).unwrap();
-        rt.load_expert("qwen", 0, 2, &identity_expert_blob(2.0)).unwrap();
+        rt.load_expert("qwen", 0, 1, &identity_expert_blob(1.0), None).unwrap();
+        rt.load_expert("qwen", 0, 2, &identity_expert_blob(2.0), None).unwrap();
         rt.load_gate("qwen", 0, &router_blob(2, 2, &[1.0, 0.0, 0.0, 1.0]))
             .unwrap();
 
@@ -2797,7 +2826,7 @@ mod tests {
     #[test]
     fn throughput_meter_counts_served_tokens() {
         let rt = MoeExpertRuntime::new();
-        rt.load_expert("qwen", 0, 0, &identity_expert_blob(1.0)).unwrap();
+        rt.load_expert("qwen", 0, 0, &identity_expert_blob(1.0), None).unwrap();
         let req = ExpertExecuteRequest {
             model_id: "qwen".into(),
             layer: 0,
@@ -2844,8 +2873,8 @@ mod tests {
     fn end_to_end_route_dispatch_execute_combine() {
         // Two experts on layer 0; gate picks both (top-2) for one token.
         let rt = MoeExpertRuntime::new();
-        rt.load_expert("qwen", 0, 0, &identity_expert_blob(1.0)).unwrap();
-        rt.load_expert("qwen", 0, 1, &identity_expert_blob(2.0)).unwrap();
+        rt.load_expert("qwen", 0, 0, &identity_expert_blob(1.0), None).unwrap();
+        rt.load_expert("qwen", 0, 1, &identity_expert_blob(2.0), None).unwrap();
         rt.load_gate("qwen", 0, &router_blob(2, 2, &[1.0, 0.0, 0.5, 0.0]))
             .unwrap();
 
@@ -2937,7 +2966,7 @@ mod tests {
         }
         let blob = expert_blob(d, d, &gate, &up, &down);
         let rt = MoeExpertRuntime::new();
-        rt.load_expert("qwen", 0, 1, &blob).unwrap();
+        rt.load_expert("qwen", 0, 1, &blob, None).unwrap();
 
         // Two token rows of arbitrary magnitude.
         let mut rows = vec![0.0f32; 2 * d];
@@ -3000,11 +3029,11 @@ mod tests {
         let rt = MoeExpertRuntime::with_config(
             ResidencyConfig::auto().with_memory_budget(EXPERT_BYTES * 2),
         );
-        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0)).unwrap();
-        rt.load_expert("m", 0, 1, &identity_expert_blob(1.0)).unwrap();
+        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0), None).unwrap();
+        rt.load_expert("m", 0, 1, &identity_expert_blob(1.0), None).unwrap();
         // Touch expert 0 so expert 1 becomes the LRU victim.
         rt.execute(&exec_req("m", 0, 0)).unwrap();
-        rt.load_expert("m", 0, 2, &identity_expert_blob(1.0)).unwrap();
+        rt.load_expert("m", 0, 2, &identity_expert_blob(1.0), None).unwrap();
 
         let status = rt.status();
         assert_eq!(status.memory_experts, 2);
@@ -3028,9 +3057,9 @@ mod tests {
                 .with_memory_budget(EXPERT_BYTES)
                 .with_disk_dir(&dir),
         );
-        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0)).unwrap();
+        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0), None).unwrap();
         // Second load evicts expert 0 to disk (budget holds one).
-        rt.load_expert("m", 0, 1, &identity_expert_blob(1.0)).unwrap();
+        rt.load_expert("m", 0, 1, &identity_expert_blob(1.0), None).unwrap();
 
         let status = rt.status();
         assert_eq!(status.memory_experts, 1);
@@ -3062,8 +3091,8 @@ mod tests {
                 .with_memory_budget(EXPERT_BYTES)
                 .with_disk_dir(&dir),
         );
-        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0)).unwrap();
-        rt.load_expert("m", 0, 1, &identity_expert_blob(1.0)).unwrap();
+        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0), None).unwrap();
+        rt.load_expert("m", 0, 1, &identity_expert_blob(1.0), None).unwrap();
         // Expert 0 is now on disk. Readahead of [0] promotes exactly one.
         let promoted = rt.readahead("m", &[ExpertId::new(0, 0), ExpertId::new(0, 1)]);
         assert_eq!(promoted, 1, "only the disk-tier member is promoted");
@@ -3080,8 +3109,8 @@ mod tests {
                 .with_memory_budget(EXPERT_BYTES)
                 .with_disk_dir(&dir),
         );
-        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0)).unwrap();
-        rt.load_expert("m", 0, 1, &identity_expert_blob(1.0)).unwrap();
+        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0), None).unwrap();
+        rt.load_expert("m", 0, 1, &identity_expert_blob(1.0), None).unwrap();
         assert!(rt.unload_expert("m", 0, 0), "disk-tier expert unloads");
         assert!(!rt.has_expert("m", 0, 0));
         assert!(rt.unload_expert("m", 0, 1), "memory-tier expert unloads");
@@ -3095,7 +3124,7 @@ mod tests {
     fn oversized_single_expert_stays_servable() {
         // Budget below a single expert: it must still load and execute.
         let rt = MoeExpertRuntime::with_config(ResidencyConfig::auto().with_memory_budget(1));
-        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0)).unwrap();
+        rt.load_expert("m", 0, 0, &identity_expert_blob(1.0), None).unwrap();
         assert!(rt.has_expert("m", 0, 0));
         assert!(rt.execute(&exec_req("m", 0, 0)).is_ok());
         let status = rt.status();

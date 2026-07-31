@@ -45,11 +45,6 @@ impl RemoteDidResolutionBackend {
         timeout: Duration,
         did: String,
     ) -> Result<Option<TenzroIdentity>, IdentityError> {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|e| IdentityError::ResolutionError(format!("http client build: {}", e)))?;
-
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -57,8 +52,9 @@ impl RemoteDidResolutionBackend {
             "params": { "did": did, "include_record": true },
         });
 
-        let response = client
+        let response = crate::http_client::shared()
             .post(&endpoint)
+            .timeout(timeout)
             .json(&body)
             .send()
             .await

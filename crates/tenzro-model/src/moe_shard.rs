@@ -79,6 +79,30 @@ pub struct ExpertHolder {
     /// grouped-GEMM throughput dominates there; CPU holders remain valid
     /// standbys.
     pub gpu: bool,
+    /// Content-addressed `tenzro://blob/<hash>` the holder loaded these
+    /// weights from. This is the discovery channel for repair: a provider
+    /// that self-selects to raise an expert's replication reads the URI
+    /// off an existing holder and fetches the identical bytes.
+    pub blob_uri: Option<String>,
+}
+
+/// Rendezvous-hash domain tag for expert placement. Distinct from the
+/// storage and database placement domains so the three problems rank
+/// independently over the shared provider id space.
+const PLACEMENT_DOMAIN: &[u8] = b"tenzro/moe/placement";
+
+/// One expert a named provider should take on to restore the replication
+/// floor. Produced by [`MoeShardView::plan_repair`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairAssignment {
+    /// Expert to be replicated.
+    pub expert: ExpertId,
+    /// Provider the rendezvous hash selected. Only that provider acts on
+    /// the row.
+    pub provider: Address,
+    /// Content-addressed URI to fetch the weights from, read off an
+    /// existing holder's declaration.
+    pub blob_uri: String,
 }
 
 /// Governance policy for expert replication.
@@ -147,6 +171,7 @@ impl MoeShardView {
                     iroh_endpoint_id: p.capacity.iroh_endpoint_id.clone(),
                     http_endpoint: p.endpoint_url.clone(),
                     gpu: p.capacity.moe_gpu,
+                    blob_uri: h.blob_uri.clone(),
                 });
             }
         }
@@ -261,6 +286,61 @@ impl MoeShardView {
         out
     }
 
+    /// Assign new holders to every expert sitting below the replication
+    /// floor.
+    ///
+    /// Placement is rendezvous-hashed, not coordinated: each node runs
+    /// this against its own membership view and acts only on the rows
+    /// naming itself, so no node can make another node allocate VRAM.
+    /// Determinism is what keeps the pool from converging on the same
+    /// expert all at once — without it every idle provider would load the
+    /// first under-replicated expert simultaneously.
+    ///
+    /// Experts whose holders declare no `blob_uri` are skipped: their
+    /// weights arrived inline on some other node and there is nowhere for
+    /// a new holder to fetch them from.
+    pub fn plan_repair(
+        &self,
+        policy: ReplicationPolicy,
+        candidates: &[Address],
+    ) -> Vec<RepairAssignment> {
+        let mut out = Vec::new();
+        for expert in self.under_replicated(policy) {
+            let holders = self.by_expert.get(&expert).map(Vec::as_slice).unwrap_or(&[]);
+            let Some(blob_uri) = holders.iter().find_map(|h| h.blob_uri.clone()) else {
+                continue;
+            };
+            let missing = policy
+                .min_replication
+                .saturating_sub(holders.len() as u32) as usize;
+            if missing == 0 {
+                continue;
+            }
+            let held: std::collections::HashSet<[u8; 32]> =
+                holders.iter().map(|h| h.provider.0).collect();
+            let pool: Vec<String> = candidates
+                .iter()
+                .filter(|a| !held.contains(&a.0))
+                .map(Address::to_base58)
+                .collect();
+            if pool.is_empty() {
+                continue;
+            }
+            let key = format!("{}/{}/{}", self.model_id, expert.layer, expert.expert);
+            for id in tenzro_cluster::select_holders(PLACEMENT_DOMAIN, &key, &pool, missing) {
+                let Ok(provider) = Address::from_base58(&id) else {
+                    continue;
+                };
+                out.push(RepairAssignment {
+                    expert,
+                    provider,
+                    blob_uri: blob_uri.clone(),
+                });
+            }
+        }
+        out
+    }
+
     /// True when every expert in `expected_experts` has at least
     /// `min_replication` holders. Used by admission control before a
     /// model is marked servable on the network.
@@ -316,6 +396,7 @@ mod tests {
                 expert,
                 residency,
                 committed_tps: tps,
+                blob_uri: Some(format!("tenzro://blob/l{layer}e{expert}")),
             });
         }
         p.capacity = capacity;
@@ -399,6 +480,63 @@ mod tests {
         let v = MoeShardView::build("qwen", [&alice, &bob]);
         assert!(v.covers(&[ExpertId::new(0, 1), ExpertId::new(0, 2)], 2));
         assert!(!v.covers(&[ExpertId::new(0, 1), ExpertId::new(0, 2)], 3));
+    }
+
+    #[test]
+    fn plan_repair_fills_the_gap_to_the_floor() {
+        let alice = provider(1, "qwen", &[(0, 1, MoeExpertResidency::Warm, 500)]);
+        let v = MoeShardView::build("qwen", [&alice]);
+        let candidates = [
+            Address::new([1; 32]),
+            Address::new([2; 32]),
+            Address::new([3; 32]),
+        ];
+        let plan = v.plan_repair(
+            ReplicationPolicy {
+                min_replication: 3,
+                max_replication: 8,
+                hot_threshold_tps: 1000,
+            },
+            &candidates,
+        );
+        assert_eq!(plan.len(), 2);
+        // The existing holder is never re-assigned to an expert it holds.
+        assert!(plan.iter().all(|r| r.provider.as_bytes()[0] != 1));
+        assert!(plan.iter().all(|r| r.blob_uri == "tenzro://blob/l0e1"));
+    }
+
+    #[test]
+    fn plan_repair_is_deterministic_across_views() {
+        let alice = provider(1, "qwen", &[(0, 1, MoeExpertResidency::Warm, 500)]);
+        let candidates: Vec<Address> = (1u8..=6).map(|i| Address::new([i; 32])).collect();
+        let policy = ReplicationPolicy::default();
+        let a = MoeShardView::build("qwen", [&alice]).plan_repair(policy, &candidates);
+        let mut reordered = candidates.clone();
+        reordered.reverse();
+        let b = MoeShardView::build("qwen", [&alice]).plan_repair(policy, &reordered);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn plan_repair_skips_experts_with_no_fetchable_source() {
+        let mut alice = provider(1, "qwen", &[(0, 1, MoeExpertResidency::Warm, 500)]);
+        alice.capacity.moe_holdings[0].blob_uri = None;
+        let v = MoeShardView::build("qwen", [&alice]);
+        let candidates = [Address::new([1; 32]), Address::new([2; 32])];
+        assert!(v.plan_repair(ReplicationPolicy::default(), &candidates).is_empty());
+    }
+
+    #[test]
+    fn plan_repair_is_empty_when_floor_is_met() {
+        let alice = provider(1, "qwen", &[(0, 1, MoeExpertResidency::Warm, 500)]);
+        let bob = provider(2, "qwen", &[(0, 1, MoeExpertResidency::Warm, 500)]);
+        let v = MoeShardView::build("qwen", [&alice, &bob]);
+        let candidates = [
+            Address::new([1; 32]),
+            Address::new([2; 32]),
+            Address::new([3; 32]),
+        ];
+        assert!(v.plan_repair(ReplicationPolicy::default(), &candidates).is_empty());
     }
 
     #[test]

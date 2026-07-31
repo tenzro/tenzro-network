@@ -149,7 +149,7 @@ fn text_result(text: impl Into<String>) -> std::result::Result<Json<RpcPassthrou
 impl SolanaMcpServer {
     pub fn new(rpc_url: String) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::http_client::shared().clone(),
             rpc_url,
             _tool_router: Self::tool_router(),
         }

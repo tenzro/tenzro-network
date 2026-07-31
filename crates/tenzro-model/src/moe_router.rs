@@ -280,6 +280,7 @@ mod tests {
                 expert,
                 residency,
                 committed_tps: tps,
+                blob_uri: None,
             });
         }
         p.capacity = capacity;

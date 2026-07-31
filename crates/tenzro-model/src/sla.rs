@@ -97,6 +97,16 @@ pub struct SlaResponse {
     pub public_key: PublicKey,
 }
 
+/// What travels on the `tenzro/sla` topic. Probes and responses share the
+/// topic and bincode carries no type information, so without the variant tag
+/// a probe would be handed to the response decoder and misparse into a
+/// length prefix large enough to attempt a multi-gigabyte allocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SlaEnvelope {
+    Probe(SlaProbe),
+    Response(SlaResponse),
+}
+
 /// Outcome of applying one probe response. Drives the fault-detector state
 /// machine: clean → reset counter; faulty → increment counter, possibly slash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

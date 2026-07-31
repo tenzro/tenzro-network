@@ -11388,11 +11388,12 @@ async fn handle_sla_issue_probe(
     // TeeProvider nodes subscribed to the same topic will surface the probe
     // to their local provider runtime via the gossipsub receiver.
     if let Some(network) = node.network() {
-        let payload = bincode::serialize(&probe).map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("bincode serialize SlaProbe: {}", e),
-            data: None,
-        })?;
+        let payload = bincode::serialize(&tenzro_model::SlaEnvelope::Probe(probe.clone()))
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("bincode serialize SlaProbe: {}", e),
+                data: None,
+            })?;
         let msg = tenzro_network::NetworkMessage::new(
             tenzro_network::MessagePayload::Custom {
                 topic: "tenzro/sla".to_string(),
@@ -29293,16 +29294,10 @@ async fn forward_network_chat(
     }
 
     // HTTP fallback. A loopback `rpc_endpoint` will refuse the connection
-    // fast; a wrong public address is bounded by the connect timeout rather
-    // than the (long) total-request timeout, so the caller is never pinned
-    // for two minutes on an unreachable peer.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let resp = client
+    // fast; a wrong public address is bounded by the shared client's connect
+    // timeout rather than its total-request timeout, so the caller is never
+    // pinned for a full minute on an unreachable peer.
+    let resp = crate::http_client::shared()
         .post(http_endpoint)
         .json(forward_body)
         .send()
@@ -34885,15 +34880,11 @@ async fn handle_openai_chat_completions(
                 "model_not_found",
             );
         };
-        // A fast connect timeout means a loopback/unreachable `rpc_endpoint`
-        // fails within seconds rather than pinning the caller on the default
-        // (long) request timeout. No total-request timeout is set — a
-        // legitimate SSE stream may run for minutes.
+        // The streaming client carries no total-request timeout — a legitimate
+        // SSE stream may run for minutes — while its connect timeout still
+        // fails a loopback/unreachable `rpc_endpoint` within seconds.
         let remote_url = format!("{}/chat/completions", svc.api_endpoint);
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = crate::http_client::streaming();
 
         // Sampling seed pins the generator so a streaming completion can be
         // deterministically re-prefilled by a different provider on drop.
@@ -35257,10 +35248,7 @@ async fn handle_openai_chat_completions(
                                         failover_prefs.as_ref(),
                                     )
                             {
-                                let cont_client = reqwest::Client::builder()
-                                    .connect_timeout(std::time::Duration::from_secs(5))
-                                    .build()
-                                    .unwrap_or_else(|_| reqwest::Client::new());
+                                let cont_client = crate::http_client::streaming();
                                 let cont_body = failover_state.continuation_body();
                                 warn!(
                                     "Re-prefill failover: continuing {} on {} after {} dropped",
@@ -46073,8 +46061,8 @@ pub(crate) async fn handle_use_skill(
             crate::builtin_dispatch::dispatch_skill(&node, &name, &input).await?
         }
         Target::Http(endpoint) => {
-            let client = reqwest::Client::new();
-            let resp = client.post(&endpoint)
+            let resp = crate::http_client::shared()
+                .post(&endpoint)
                 .json(&input)
                 .send()
                 .await
@@ -47422,8 +47410,7 @@ async fn handle_use_knowledge(
                 data: None,
             })?
     } else {
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = crate::http_client::shared()
             .post(&rec.endpoint)
             .header("Content-Type", "application/json")
             .json(&query_params)
@@ -51736,7 +51723,7 @@ async fn handle_bridge_with_hook(
 
 /// Proxy a tool call to the official deBridge MCP server at agents.debridge.com/mcp
 async fn debridge_mcp_proxy(tool_name: &str, arguments: serde_json::Value) -> std::result::Result<Value, JsonRpcError> {
-    let client = reqwest::Client::new();
+    let client = crate::http_client::shared();
     let debridge_url = std::env::var("DEBRIDGE_MCP_URL")
         .unwrap_or_else(|_| "https://agents.debridge.com/mcp".to_string());
 

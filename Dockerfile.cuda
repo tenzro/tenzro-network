@@ -2,17 +2,85 @@
 #   - llama.cpp CUDA backend for LLM inference (feature `tenzro-node/cuda`)
 #   - ONNX Runtime CUDA execution provider for the non-LLM modalities
 #     (feature `tenzro-node/onnx-cuda`; forecast / vision / text-embedding /
-#     segmentation / detection / audio runtimes) — x86_64 only, see below
+#     segmentation / detection / audio runtimes)
 #
 # Builds on both x86_64 and aarch64 (Grace-Blackwell GB10 / DGX Spark, Grace
 # Hopper GH200, Jetson Thor). The base images are multi-arch, so `docker build`
 # on the target machine picks the matching one with no extra flags.
+#
+# On aarch64 the ONNX Runtime CUDA build is compiled from source in a separate
+# stage — neither Microsoft nor pyke publishes a GPU distribution for that
+# architecture. Expect roughly an extra hour and ~60 GB of RAM for that stage;
+# see the ort-cuda stage below.
 #
 # Run with the NVIDIA container runtime: `docker run --gpus all ...`
 # The CPU image is built from ./Dockerfile and is unchanged by this file.
 
 ARG CUDA_VERSION=13.0.3
 ARG UBUNTU_VERSION=ubuntu24.04
+
+# Stage 0: ONNX Runtime with the CUDA execution provider, aarch64 only.
+#
+# pyke's `ort` binary distribution carries a `cu12` feature set for
+# x86_64-unknown-linux-gnu only; for aarch64 it publishes a CPU-only build.
+# ort-sys does not treat that as an error — it logs that the requested feature
+# set is unavailable and downloads the CPU build instead, so enabling
+# `ort/cuda` on aarch64 without this stage yields a binary that compiles,
+# advertises CUDA, and silently executes on the CPU. Microsoft publishes no
+# aarch64 GPU tarball or `onnxruntime-gpu` wheel either, so the runtime is
+# compiled here and handed to ort-sys via ORT_LIB_LOCATION.
+#
+# On x86_64 the stage produces an empty prefix and exits immediately; the
+# pyke cu12 distribution is used there as before.
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-${UBUNTU_VERSION} AS ort-cuda
+
+# CUDA 13.0 is the first toolkit to carry sm_121 (GB10). 90 = Grace Hopper
+# GH200, 110 = Jetson Thor (renumbered from SM101 in CUDA 13.0), 121 = GB10 /
+# DGX Spark. Jetson Orin (sm_87) is deliberately absent: NVIDIA keeps Orin on
+# the CUDA 12.x JetPack line rather than the unified CUDA 13 Arm target.
+# Every additional architecture costs build time, so trim this for a
+# single-target machine.
+ARG ORT_CUDA_ARCHITECTURES="90;110;121"
+# Pinned to the release NVIDIA's own DGX Spark build guide validates against
+# CUDA 13.0 + cuDNN 9 on Ubuntu 24.04. ONNX Runtime below 1.24.4 does not
+# compile against CUDA 13 at all.
+ARG ONNXRUNTIME_VERSION=v1.24.4
+
+# --parallel is 4 rather than $(nproc) on purpose: the CUDA kernel and
+# flash-attention translation units each hold tens of GB, and compiling them
+# at full width exhausts memory on a 128 GB machine.
+RUN set -eux; \
+    mkdir -p /opt/onnxruntime/lib; \
+    if [ "$(uname -m)" != "aarch64" ]; then exit 0; fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates git wget ninja-build g++ gcc make \
+      python3 python3-pip python3-dev; \
+    rm -rf /var/lib/apt/lists/*; \
+    pip3 install --break-system-packages --no-cache-dir \
+      cmake psutil setuptools wheel packaging; \
+    git clone --depth 1 --branch "$ONNXRUNTIME_VERSION" --recursive \
+      https://github.com/microsoft/onnxruntime /src/onnxruntime; \
+    cd /src/onnxruntime; \
+    ./build.sh \
+      --config Release \
+      --use_cuda \
+      --cuda_home /usr/local/cuda \
+      --cudnn_home /usr \
+      --build_shared_lib \
+      --skip_tests \
+      --allow_running_as_root \
+      --parallel 4 \
+      --cmake_extra_defines \
+        "CMAKE_CUDA_ARCHITECTURES=${ORT_CUDA_ARCHITECTURES}" \
+        CMAKE_INSTALL_LIBDIR=lib; \
+    cmake --install build/Linux/Release --prefix /opt/onnxruntime; \
+    cp build/Linux/Release/libonnxruntime_providers_shared.so /opt/onnxruntime/lib/; \
+    ls -l /opt/onnxruntime/lib; \
+    test -f /opt/onnxruntime/lib/libonnxruntime.so; \
+    test -f /opt/onnxruntime/lib/libonnxruntime_providers_cuda.so; \
+    test -f /opt/onnxruntime/lib/libonnxruntime_providers_shared.so; \
+    rm -rf /src/onnxruntime
 
 # Stage 1: Build
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-${UBUNTU_VERSION} AS builder
@@ -34,6 +102,9 @@ RUN apt-get update && apt-get install -y \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain stable --profile minimal
 ENV PATH=/root/.cargo/bin:$PATH
+
+# Empty on x86_64, a full CUDA-enabled ONNX Runtime prefix on aarch64.
+COPY --from=ort-cuda /opt/onnxruntime /opt/onnxruntime
 
 WORKDIR /build
 
@@ -104,20 +175,25 @@ RUN mkdir -p apps/tenzro-desktop/src-tauri/src && \
       > apps/tenzro-desktop/src-tauri/Cargo.toml
 
 # Build tenzro-node (llama.cpp CUDA + ONNX Runtime CUDA EP) and tenzro-cli.
-# ort-sys with the `cuda` feature downloads the cu12 ONNX Runtime dist at
-# build time (network required, same as the CPU image's download-binaries).
 #
-# That dist is published for x86_64 only, so `onnx-cuda` is added on x86_64
-# alone. On aarch64 the ONNX runtimes are still compiled — `ort` is an
-# unconditional dependency and its aarch64 dist is CPU-only — so forecast /
-# vision / text-embedding / segmentation / detection / audio serve from the
-# CPU execution provider while LLM inference runs on the GPU.
+# On x86_64, ort-sys with the `cuda` feature downloads the cu12 ONNX Runtime
+# dist at build time (network required, same as the CPU image's
+# download-binaries). On aarch64, ORT_LIB_LOCATION points ort-sys at the
+# prefix the ort-cuda stage compiled; ort-sys checks that variable before the
+# download path, and ORT_SKIP_DOWNLOAD makes the precedence explicit rather
+# than incidental. That link is dynamic and ort-sys emits no rpath of its own,
+# so one is set here pointing at where the runtime stage lands the libraries.
+# Either way the CUDA execution provider is compiled in, so forecast / vision /
+# text-embedding / segmentation / detection / audio run on the GPU alongside
+# LLM inference.
 RUN set -eux; \
-    features="tenzro-node/cuda"; \
-    if [ "$(uname -m)" = "x86_64" ]; then \
-      features="$features,tenzro-node/onnx-cuda"; \
+    if [ "$(uname -m)" = "aarch64" ]; then \
+      export ORT_LIB_LOCATION=/opt/onnxruntime; \
+      export ORT_SKIP_DOWNLOAD=1; \
+      export RUSTFLAGS="-C link-arg=-Wl,-rpath,/usr/local/lib/onnxruntime"; \
     fi; \
-    cargo build --release -p tenzro-node -p tenzro-cli --features "$features"
+    cargo build --release -p tenzro-node -p tenzro-cli \
+      --features "tenzro-node/cuda,tenzro-node/onnx-cuda"
 
 # The `rpc` feature (on by default via cluster-serving) builds the standalone
 # ggml `rpc-server` binary into llama-cpp-sys-2's cargo OUT_DIR. That path does
@@ -157,6 +233,15 @@ COPY --from=builder /build/target/release/tenzro /usr/local/bin/tenzro-cli
 # multi-stage build discards).
 COPY --from=builder /build/rpc-server /usr/local/bin/rpc-server
 ENV TENZRO_RPC_SERVER_BIN=/usr/local/bin/rpc-server
+
+# aarch64 links ONNX Runtime dynamically against the prefix built in the
+# ort-cuda stage, resolved through the rpath baked in during the build. The
+# CUDA and shared-provider objects must sit in the same directory as
+# libonnxruntime.so — ONNX Runtime dlopens them relative to its own load path,
+# and its docs advise against putting them on a library search path. The
+# directory is empty on x86_64, where ONNX Runtime is linked statically out of
+# the pyke distribution.
+COPY --from=ort-cuda /opt/onnxruntime/lib /usr/local/lib/onnxruntime
 
 # Create data directories
 RUN mkdir -p /data/tenzro /config /home/tenzro/.tenzro/models && chown -R tenzro:tenzro /data /config /home/tenzro/.tenzro

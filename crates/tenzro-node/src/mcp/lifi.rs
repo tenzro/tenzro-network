@@ -138,7 +138,7 @@ fn json_result(value: serde_json::Value) -> std::result::Result<Json<RpcPassthro
 impl LifiMcpServer {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::http_client::shared().clone(),
             _tool_router: Self::tool_router(),
         }
     }

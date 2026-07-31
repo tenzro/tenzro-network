@@ -30,7 +30,7 @@
 //! Hidden-state tensors ride as base64 of little-endian `f32` bytes in
 //! every JSON surface (see `tenzro_model::moe_exec::f32_base64`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use bytes::Bytes;
 use serde_json::{json, Value};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use tenzro_iroh::{
     jsonrpc_call, EndpointId, IrohError, IrohResolver, IrohResult, JsonRpcDispatcher, ALPN_MOE,
@@ -47,7 +47,8 @@ use tenzro_model::{
     build_expert_receipt, quantize_expert_blob, to_token_routing, verify_expert_receipt,
     ExpertActivationCommitment, ExpertBatch, ExpertExecuteRequest, ExpertExecuteResponse,
     ExpertExecutionReceipt, ExpertId, ExpertQuantPlan, MoeCombiner, MoeExpertRuntime, MoeExtractor,
-    MoeTensorNaming, QuantKind, RoutedToken, TokenRouting, DEFAULT_ACTIVATION_K,
+    MoeShardView, MoeTensorNaming, QuantKind, ReplicationPolicy, RoutedToken, TokenRouting,
+    DEFAULT_ACTIVATION_K,
 };
 use tenzro_storage::{CF_SETTLEMENTS, KvStore};
 use tenzro_types::tenzro_uri::TenzroUri;
@@ -404,6 +405,7 @@ fn sync_moe_declaration(node: &Arc<TenzroNode>) {
             // Host-level measured throughput stamped onto every holding —
             // the runtime meters aggregate tokens/s, not per-expert rates.
             committed_tps: status.measured_tps,
+            blob_uri: e.source_uri.clone(),
         })
         .collect();
     let is_router = !status.gates.is_empty();
@@ -426,6 +428,145 @@ fn sync_moe_declaration(node: &Arc<TenzroNode>) {
     );
 }
 
+/// Seconds between MoE replication repair passes.
+pub(crate) const MOE_REPAIR_INTERVAL_SECS: u64 = 120;
+
+/// Most experts one node admits in a single repair pass. Repair fetches
+/// full expert weights, so an unbounded pass would let one membership
+/// hiccup pull a whole model onto a single node.
+const MOE_REPAIR_MAX_PER_PASS: usize = 2;
+
+/// Raise replication on under-replicated experts this node was
+/// rendezvous-selected to hold.
+///
+/// Pull-based by construction: the plan is computed locally and every row
+/// naming another provider is discarded unread. Nothing here can make a
+/// peer allocate memory — a command-based repair would hand any node a
+/// way to exhaust any other node's VRAM.
+///
+/// Scope is the set of models this node already holds experts for. A node
+/// serving no experts of a model is never conscripted into it, and the
+/// scoping is also what puts this node in its own candidate pool: the
+/// pool is `distinct_providers()`, which is exactly the providers already
+/// declaring holdings for that model.
+///
+/// Returns the number of experts admitted.
+pub(crate) async fn run_moe_repair_pass(node: &Arc<TenzroNode>) -> usize {
+    let (Some(me), Some(pm)) = (node.self_provider_address(), node.provider_manager()) else {
+        return 0;
+    };
+    let Some(resolver) = node.iroh_resolver.as_ref() else {
+        return 0;
+    };
+
+    let status = node.moe_runtime.status();
+    let models: BTreeSet<String> = status.experts.iter().map(|e| e.model_id.clone()).collect();
+    if models.is_empty() {
+        return 0;
+    }
+
+    let providers = pm.list_providers();
+    let policy = ReplicationPolicy::default();
+    let mut admitted = 0usize;
+
+    for model_id in &models {
+        if admitted >= MOE_REPAIR_MAX_PER_PASS {
+            break;
+        }
+        let view = MoeShardView::build(model_id.clone(), providers.iter());
+        let candidates = view.distinct_providers();
+        for row in view.plan_repair(policy, &candidates) {
+            if admitted >= MOE_REPAIR_MAX_PER_PASS {
+                break;
+            }
+            if row.provider != me {
+                continue;
+            }
+            let uri = match TenzroUri::parse(&row.blob_uri) {
+                Ok(u) => u,
+                Err(e) => {
+                    warn!(
+                        model_id = %model_id,
+                        layer = row.expert.layer,
+                        expert = row.expert.expert,
+                        uri = %row.blob_uri,
+                        "MoE repair skipped: unparseable holder uri: {e}"
+                    );
+                    continue;
+                }
+            };
+            let blob = match resolver.fetch_bytes(&uri).await {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(
+                        model_id = %model_id,
+                        layer = row.expert.layer,
+                        expert = row.expert.expert,
+                        "MoE repair fetch failed: {e}"
+                    );
+                    continue;
+                }
+            };
+            let runtime = Arc::clone(&node.moe_runtime);
+            let (mid, layer, expert, source) = (
+                model_id.clone(),
+                row.expert.layer,
+                row.expert.expert,
+                row.blob_uri.clone(),
+            );
+            let loaded = tokio::task::spawn_blocking(move || {
+                runtime.load_expert(mid, layer, expert, &blob, Some(source))
+            })
+            .await;
+            match loaded {
+                Ok(Ok(_)) => {
+                    admitted += 1;
+                    info!(
+                        model_id = %model_id,
+                        layer = row.expert.layer,
+                        expert = row.expert.expert,
+                        "MoE repair admitted under-replicated expert"
+                    );
+                }
+                Ok(Err(e)) => warn!(
+                    model_id = %model_id,
+                    layer = row.expert.layer,
+                    expert = row.expert.expert,
+                    "MoE repair load failed: {e}"
+                ),
+                Err(e) => warn!("MoE repair load join failed: {e}"),
+            }
+        }
+    }
+
+    if admitted > 0 {
+        sync_moe_declaration(node);
+    }
+    admitted
+}
+
+/// Drive [`run_moe_repair_pass`] on a timer.
+///
+/// No leader gate and no role gate: every node runs the same plan against
+/// its own membership view and acts only on its own rows, so concurrent
+/// passes on different nodes converge instead of colliding. Nodes holding
+/// no experts return immediately.
+pub fn spawn_moe_repair_loop(node: Arc<TenzroNode>) {
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(MOE_REPAIR_INTERVAL_SECS));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Skip the immediate first tick — declarations have not propagated
+        // at boot, so an early pass would read a view that under-reports
+        // replication and repair experts that are in fact covered.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            run_moe_repair_pass(&node).await;
+        }
+    });
+}
+
 /// `tenzro_moeExpertLoad` — decode a per-expert safetensors blob
 /// (gate/up/down projections) and admit it into the local expert runtime.
 /// Blob source: inline `blob_base64` or content-addressed `uri`.
@@ -438,9 +579,15 @@ pub(crate) async fn handle_moe_expert_load(
     let layer = req_u32(&p, "layer")?;
     let expert = req_u32(&p, "expert")?;
     let blob = resolve_blob(node, &p).await?;
+    let source_uri = p
+        .get("uri")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     let runtime = Arc::clone(&node.moe_runtime);
-    let row = tokio::task::spawn_blocking(move || runtime.load_expert(model_id, layer, expert, &blob))
+    let row = tokio::task::spawn_blocking(move || {
+        runtime.load_expert(model_id, layer, expert, &blob, source_uri)
+    })
         .await
         .map_err(|e| JsonRpcError {
             code: -32603,
@@ -1445,14 +1592,7 @@ async fn dispatch_to_holder(
         ),
         data: None,
     })?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| JsonRpcError {
-            code: -32603,
-            message: format!("http client: {e}"),
-            data: None,
-        })?;
+    let client = crate::http_client::shared();
     let resp = client
         .post(http_endpoint)
         .json(&json!({

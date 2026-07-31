@@ -740,10 +740,7 @@ pub async fn bootstrap_from_peer(
             .to_string(),
     ))?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| NodeError::Other(format!("build http client: {}", e)))?;
+    let client = crate::http_client::shared();
 
     // 1. List remote snapshots.
     let list_req = serde_json::json!({
